@@ -1,0 +1,17 @@
+{
+  "name": "crosschainescrow-deploy",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "node deploy.js",
+    "setup": "node setup.js",
+    "verify": "node verify.js",
+    "full": "node deploy.js && node setup.js && node verify.js"
+  },
+  "dependencies": {
+    "@circle-fin/developer-controlled-wallets": "^10.3.1",
+    "@circle-fin/smart-contract-platform": "^10.3.1",
+    "dotenv": "^16.0.0",
+    "viem": "^2.0.0"
+  }
+}

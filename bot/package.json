@@ -1,0 +1,22 @@
+{
+  "name": "crosschain-escrow-bot",
+  "version": "1.0.0",
+  "description": "Telegram notification bot for the CrossChainEscrow contract on Arc testnet",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.67.0",
+    "viem": "^2.48.8"
+  }
+}
