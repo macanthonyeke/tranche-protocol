@@ -178,8 +178,7 @@ contract CrossChainEscrowAdversarialTest is Base {
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
 
         // Re-enter releaseAfterWindow from inside CCTP burn
-        bytes memory payload =
-            abi.encodeWithSelector(escrow.releaseAfterWindow.selector, id, uint256(0), uint256(0));
+        bytes memory payload = abi.encodeWithSelector(escrow.releaseAfterWindow.selector, id, uint256(0), uint256(0));
         attacker.arm(payload);
         tokenMessenger.setReentrancy(address(attacker), abi.encodeWithSelector(ReentrancyAttacker.fire.selector));
 

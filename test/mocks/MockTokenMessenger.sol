@@ -53,7 +53,14 @@ contract MockTokenMessenger is ITokenMessenger {
         minFeeAmount = v;
     }
 
-    function getMinFeeAmount(uint256 /* amount */) external view override returns (uint256) {
+    function getMinFeeAmount(
+        uint256 /* amount */
+    )
+        external
+        view
+        override
+        returns (uint256)
+    {
         return minFeeAmount;
     }
 

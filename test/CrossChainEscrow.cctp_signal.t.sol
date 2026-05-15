@@ -69,40 +69,44 @@ contract CrossChainEscrowCctpSignalTest is Base {
         assertEq(burnAmount, 100e6);
     }
 
-    function test_CCTP_CrossChainRelease_UsesCctpForwardFeeAsMaxFee() public {
+    function test_CCTP_CrossChainRelease_UsesCallerSuppliedMaxFee() public {
+        uint256 liveForwardFee = 123_456;
         uint256 id = _depositSingle(100e6); // DEST_DOMAIN = 6 (cross-chain)
+        _fulfill(id, 0);
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        escrow.releaseAfterWindow(id, 0, liveForwardFee);
+
+        (,,,,,, uint256 maxFee,,,) = _readBurnCall();
+        assertEq(maxFee, liveForwardFee);
+    }
+
+    function test_CCTP_CrossChainRelease_DoesNotUseStoredForwardFee() public {
+        // The stored admin value is informational/configuration state. The
+        // release path uses the live fee supplied by the caller.
+        vm.prank(deployer);
+        escrow.setCctpForwardFee(777_777);
+
+        uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
         escrow.releaseAfterWindow(id, 0, 0);
 
         (,,,,,, uint256 maxFee,,,) = _readBurnCall();
-        assertEq(maxFee, CCTP_FORWARD_FEE);
-    }
-
-    function test_CCTP_CrossChainRelease_RevertsIfForwardFeeUnset() public {
-        // Reset the forwarding fee to 0.
-        vm.prank(deployer);
-        escrow.setCctpForwardFee(0);
-
-        uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        vm.expectRevert(ForwardFeeNotSet.selector);
-        escrow.releaseAfterWindow(id, 0, 0);
+        assertEq(maxFee, 0);
     }
 
     function test_CCTP_CrossChainBurnAmount_EqualsRecipientAmountPlusForwardFee() public {
-        // Cross-chain burn: burnAmount = recipientAmount + cctpForwardFee.
-        // With protocol fee = 0 and milestone = 100e6, the recipient nets
-        // 100e6 - cctpForwardFee and the contract burns the full 100e6.
+        // Cross-chain burn: burnAmount is the milestone amount after protocol
+        // fee. Circle deducts the supplied forwarding maxFee from the minted
+        // amount on the destination chain.
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
 
         (, uint256 burnAmount,,,,, uint256 maxFee,,,) = _readBurnCall();
         assertEq(maxFee, CCTP_FORWARD_FEE);
-        // recipientAmount = burnAmount - cctpForwardFee
+        // Destination-chain recipient preview = burnAmount - maxFee.
         uint256 recipientAmount = burnAmount - maxFee;
         assertEq(burnAmount, recipientAmount + CCTP_FORWARD_FEE);
         assertEq(burnAmount, 100e6);
@@ -311,6 +315,112 @@ contract CrossChainEscrowCctpSignalTest is Base {
             new SplitRecipient[](0)
         );
         vm.stopPrank();
+    }
+
+    // -------------------------------------------------------------------------
+    // Halved dispute window when recipient pre-signals delivery
+    // -------------------------------------------------------------------------
+
+    function test_halfDisputeWindow_whenDeliveryPreSignalled() public {
+        uint256 threeDays = 3 days;
+        uint256 id = _depositCustom(depositor, recipient, refundTo, 100e6, _singleMilestone(100e6), threeDays);
+
+        vm.prank(recipient);
+        escrow.signalDelivery(id, 0);
+
+        _fulfill(id, 0);
+
+        // Halved window = 1.5 days. Release at 1.5 days exactly satisfies the
+        // >= check used by releaseAfterWindow.
+        vm.warp(block.timestamp + (threeDays / 2));
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
+
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_fullDisputeWindow_whenNoPreSignal() public {
+        uint256 threeDays = 3 days;
+        uint256 id = _depositCustom(depositor, recipient, refundTo, 100e6, _singleMilestone(100e6), threeDays);
+
+        // Depositor approves without recipient signalling first.
+        _fulfill(id, 0);
+
+        // At 1.5 days the full 3-day window has NOT expired yet.
+        vm.warp(block.timestamp + (threeDays / 2));
+        vm.expectRevert(DisputeWindowNotExpired.selector);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
+
+        // After the full 3-day window, release succeeds.
+        vm.warp(block.timestamp + threeDays);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_raiseDispute_respectsHalvedWindow() public {
+        uint256 threeDays = 3 days;
+        uint256 id = _depositCustom(depositor, recipient, refundTo, 100e6, _singleMilestone(100e6), threeDays);
+
+        vm.prank(recipient);
+        escrow.signalDelivery(id, 0);
+        _fulfill(id, 0);
+
+        // Halved window expired (1.5 days + 1 second): raiseDispute must revert.
+        vm.warp(block.timestamp + (threeDays / 2) + 1);
+        vm.prank(depositor);
+        vm.expectRevert(DisputeWindowExpired.selector);
+        escrow.raiseDispute(id, 0, "reason", keccak256("ev"), "ipfs://ev");
+    }
+
+    function test_raiseDispute_halvedWindow_succeedsBeforeExpiry() public {
+        uint256 threeDays = 3 days;
+        uint256 id = _depositCustom(depositor, recipient, refundTo, 100e6, _singleMilestone(100e6), threeDays);
+
+        vm.prank(recipient);
+        escrow.signalDelivery(id, 0);
+        _fulfill(id, 0);
+
+        // Just before halved window expires: 1.5 days - 1 second.
+        vm.warp(block.timestamp + (threeDays / 2) - 1);
+        _raiseDisputeAs(depositor, id, 0);
+
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
+    }
+
+    function test_raiseDispute_fullWindow_noPreSignal() public {
+        uint256 threeDays = 3 days;
+        uint256 id = _depositCustom(depositor, recipient, refundTo, 100e6, _singleMilestone(100e6), threeDays);
+
+        // No signalDelivery: full window applies.
+        _fulfill(id, 0);
+
+        // 2.9 days < 3 days: still within window.
+        vm.warp(block.timestamp + (29 * threeDays) / 30);
+        _raiseDisputeAs(depositor, id, 0);
+
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
+    }
+
+    // -------------------------------------------------------------------------
+    // claimSilentApproval uses cctpForwardFee for cross-chain release
+    // -------------------------------------------------------------------------
+
+    function test_ClaimSilentApproval_CrossChain_UsesCorrectFee() public {
+        // Set a distinct fee value so we can assert it propagates.
+        vm.prank(deployer);
+        escrow.setCctpForwardFee(1);
+
+        // DEST_DOMAIN = 6 (cross-chain).
+        uint256 id = _depositSingle(100e6);
+        vm.prank(recipient);
+        escrow.signalDelivery(id, 0);
+
+        vm.warp(block.timestamp + DELIVERY_NOTICE_WINDOW + 1);
+        // Must NOT revert with any fee-related error.
+        escrow.claimSilentApproval(id, 0);
+
+        (,,,,,, uint256 maxFee,,,) = _readBurnCall();
+        assertEq(maxFee, 1, "claimSilentApproval must forward cctpForwardFee");
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
     }
 
     // -------------------------------------------------------------------------

@@ -35,8 +35,9 @@ abstract contract Base is Test, ICrossChainEscrow {
         usdc = new MockUSDC();
         tokenMessenger = new MockTokenMessenger();
         vm.prank(deployer);
-        escrow =
-            new CrossChainEscrow(address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury);
+        escrow = new CrossChainEscrow(
+            address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury
+        );
 
         // Existing tests pre-date the protocol fee, so disable it here. Tests
         // that exercise the fee logic explicitly re-enable it.

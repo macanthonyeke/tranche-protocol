@@ -628,8 +628,8 @@ contract CrossChainEscrowUnitTest is Base {
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
         assertEq(uint256(_getEscrowState(id)), uint256(EscrowState.COMPLETED));
 
-        // CCTP burn was invoked with milestone amount; cross-chain so the
-        // forwarding fee is the messenger's maxFee.
+        // CCTP burn was invoked with milestone amount. The helper passes
+        // maxFee = 0, so the burn records a zero forwarding cap.
         assertEq(tokenMessenger.callsLength(), 1);
         MockTokenMessengerCall memory c = _lastCall();
         assertEq(c.caller, address(escrow));
@@ -637,7 +637,7 @@ contract CrossChainEscrowUnitTest is Base {
         assertEq(uint256(c.destinationDomain), uint256(DEST_DOMAIN));
         assertEq(c.mintRecipient, MINT_RECIPIENT);
         assertEq(c.burnToken, address(usdc));
-        assertEq(c.maxFee, CCTP_FORWARD_FEE);
+        assertEq(c.maxFee, 0);
         assertEq(uint256(c.minFinalityThreshold), 2000);
         assertTrue(c.withHook, "release should use depositForBurnWithHook");
         // Hook data is the 32-byte ASCII tag "cctp-forward".
@@ -748,8 +748,7 @@ contract CrossChainEscrowUnitTest is Base {
         // is withheld. Compute expected values from the live fee bps so this
         // assertion stays correct if the base is later changed to leave the fee on.
         uint256 feeBps = escrow.protocolFeeBps();
-        uint256 totalFee =
-            (100e6 * feeBps) / 10_000 + (200e6 * feeBps) / 10_000 + (300e6 * feeBps) / 10_000;
+        uint256 totalFee = (100e6 * feeBps) / 10_000 + (200e6 * feeBps) / 10_000 + (300e6 * feeBps) / 10_000;
         assertEq(usdc.balanceOf(address(escrow)), 0);
         assertEq(usdc.balanceOf(address(tokenMessenger)), 600e6 - totalFee);
         assertEq(usdc.balanceOf(escrow.protocolTreasury()), totalFee);

@@ -260,8 +260,9 @@ contract CrossChainEscrowInvariantTest is StdInvariant, Test, ICrossChainEscrow 
     function setUp() public {
         usdc = new MockUSDC();
         tokenMessenger = new MockTokenMessenger();
-        escrow =
-            new CrossChainEscrow(address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury);
+        escrow = new CrossChainEscrow(
+            address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury
+        );
         // Disable fee + register the domain used by the handler so deposits succeed.
         escrow.setProtocolFee(0);
         vm.prank(domainManager);
