@@ -75,34 +75,36 @@ contract CrossChainEscrowAuditFixesTest is Base {
     // are blocked — funds are already gone or the escrow is dead.
     // -----------------------------------------------------------------------
 
-    function test_UpdateMintRecipient_AllowedDuringDisputedMilestone() public {
+    function test_UpdateReceivingAddress_AllowedDuringDisputedMilestone_CrossChain() public {
         uint256 id = _depositMulti();
         _fulfill(id, 0);
         _raiseDisputeAs(recipient, id, 0);
 
         bytes32 newAddr = bytes32(uint256(uint160(makeAddr("freshWallet"))));
         vm.prank(recipient);
-        escrow.updateMintRecipient(id, newAddr, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, newAddr, DEST_DOMAIN);
 
-        (,,,,, bytes32 mr,,,,,,,,,) = escrow.escrows(id);
+        (,,,, uint32 destAfter, bytes32 mr,,,,,,,,,) = escrow.escrows(id);
         assertEq(mr, newAddr, "redirect must apply even while a milestone is DISPUTED");
+        assertEq(destAfter, DEST_DOMAIN);
     }
 
-    function test_UpdateReceivingAddress_AllowedDuringDisputedMilestone() public {
+    function test_UpdateReceivingAddress_AllowedDuringDisputedMilestone_SameChain() public {
         uint256 id = _depositMulti();
         _fulfill(id, 0);
         _raiseDisputeAs(recipient, id, 0);
 
-        address newAddr = makeAddr("freshWallet");
+        bytes32 newAddr = bytes32(uint256(uint160(makeAddr("freshWallet"))));
+        uint32 arc = escrow.ARC_DOMAIN();
         vm.prank(recipient);
-        escrow.updateReceivingAddress(id, newAddr);
+        escrow.updateReceivingAddress(id, newAddr, arc);
 
         (,,,, uint32 destAfter, bytes32 mrAfter,,,,,,,,,) = escrow.escrows(id);
-        assertEq(destAfter, escrow.ARC_DOMAIN());
-        assertEq(mrAfter, bytes32(uint256(uint160(newAddr))));
+        assertEq(destAfter, arc);
+        assertEq(mrAfter, newAddr);
     }
 
-    function test_UpdateMintRecipient_RevertOn_CancelledEscrow() public {
+    function test_UpdateReceivingAddress_RevertOn_CancelledEscrow() public {
         uint256 id = _depositSingle(100e6);
         vm.prank(depositor);
         escrow.mutualCancel(id);
@@ -111,7 +113,7 @@ contract CrossChainEscrowAuditFixesTest is Base {
         // Escrow is now CANCELLED; redirects must revert.
         vm.prank(recipient);
         vm.expectRevert(InvalidState.selector);
-        escrow.updateMintRecipient(id, bytes32(uint256(uint160(makeAddr("x")))), DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, bytes32(uint256(uint160(makeAddr("x")))), DEST_DOMAIN);
     }
 
     // -----------------------------------------------------------------------
@@ -193,16 +195,18 @@ contract CrossChainEscrowAuditFixesTest is Base {
 
     function test_M04_UpdateReceivingAddress_WorksEvenIfArcDomainNotSupported() public {
         uint256 id = _depositSingle(100e6);
+        uint32 arc = escrow.ARC_DOMAIN();
         // ARC was never added in the base setUp; confirm and try the redirect.
-        assertFalse(escrow.supportedDomains(escrow.ARC_DOMAIN()));
+        assertFalse(escrow.supportedDomains(arc));
 
         address freshAddr = makeAddr("fresh");
+        bytes32 freshB32 = bytes32(uint256(uint160(freshAddr)));
         vm.prank(recipient);
-        escrow.updateReceivingAddress(id, freshAddr);
+        escrow.updateReceivingAddress(id, freshB32, arc);
 
         (,,,, uint32 destAfter, bytes32 mrAfter,,,,,,,,,) = escrow.escrows(id);
-        assertEq(destAfter, escrow.ARC_DOMAIN());
-        assertEq(mrAfter, bytes32(uint256(uint160(freshAddr))));
+        assertEq(destAfter, arc);
+        assertEq(mrAfter, freshB32);
     }
 
     // -----------------------------------------------------------------------

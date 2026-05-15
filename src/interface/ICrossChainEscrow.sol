@@ -162,23 +162,15 @@ interface ICrossChainEscrow {
     event ProtocolFeeUpdated(uint256 oldFeeBps, uint256 newFeeBps);
     event ProtocolTreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event ProtocolFeeCollected(uint256 indexed escrowId, uint256 milestoneIndex, uint256 fee);
-    event MintRecipientUpdated(
-        uint256 indexed escrowId,
-        bytes32 oldMintRecipient,
-        uint32 oldDestinationDomain,
-        bytes32 newMintRecipient,
-        uint32 newDestinationDomain,
-        address updatedBy
-    );
     event CctpForwardFeeUpdated(uint256 newFee);
     event DeliverySignaled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 deliveredAt);
     event SilentApprovalClaimed(uint256 indexed escrowId, uint256 milestoneIndex, address claimedBy);
     event ReceivingAddressUpdated(
         uint256 indexed escrowId,
-        bytes32 oldMintRecipient,
-        uint32 oldDestinationDomain,
-        address newReceivingAddress,
-        address updatedBy
+        bytes32 oldAddress,
+        bytes32 newAddress,
+        uint32 oldDomain,
+        uint32 newDomain
     );
     /// @notice Per-split configuration emitted at deposit so indexers can
     ///         reconstruct splits without an on-chain read (M-05).

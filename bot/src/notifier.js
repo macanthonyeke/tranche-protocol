@@ -517,14 +517,14 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     await notifyWallet(recipient, message);
   }
 
-  async function onMintRecipientUpdated({ args }) {
-    const { escrowId, newMintRecipient, newDestinationDomain } = args;
+  async function onReceivingAddressUpdated({ args }) {
+    const { escrowId, newAddress: newAddressBytes32, newDomain } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
-    const newAddress = bytes32ToAddress(newMintRecipient);
+    const newAddress = bytes32ToAddress(newAddressBytes32);
     // Prefer the event's domain; fall back to the freshly-read escrow state.
-    const destinationDomain = newDestinationDomain ?? escrow.destinationDomain;
+    const destinationDomain = newDomain ?? escrow.destinationDomain;
     const destinationChain = chainName(destinationDomain);
 
     const depositorMessage = [
@@ -607,7 +607,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       EscrowRefundedViaMutualCancel: onEscrowRefundedViaMutualCancel,
       EscalatedAfterDeadline: onEscalatedAfterDeadline,
       RefundWithdrawn: onRefundWithdrawn,
-      MintRecipientUpdated: onMintRecipientUpdated,
+      ReceivingAddressUpdated: onReceivingAddressUpdated,
     },
   };
 }

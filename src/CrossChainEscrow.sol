@@ -560,72 +560,33 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         emit RefundCreditTransferred(msg.sender, newOwner, amount);
     }
 
-    /// @notice Allow the recipient of an active escrow to redirect future
-    ///         milestone settlements to a different mint recipient and/or
-    ///         destination domain. This protects against scenarios where the
-    ///         original mint address becomes unusable (e.g. a Circle freeze)
-    ///         or the recipient simply wants their payment on another chain.
-    /// @dev    Only the escrow's recipient can call. The escrow must be
-    ///         ACTIVE (no per-milestone gating: pending milestones haven't
-    ///         settled yet, and any already-RELEASED ones are in CCTP-land).
-    function updateMintRecipient(uint256 escrowId, bytes32 newMintRecipient, uint32 newDestinationDomain) external {
+    /// @notice Recipient-only redirect for future milestone settlements. Updates
+    ///         both the bytes32 receiving address and the CCTP destination
+    ///         domain. Permitted during the entire ACTIVE lifecycle including
+    ///         while milestones are DISPUTED; only COMPLETED / CANCELLED
+    ///         escrows are blocked because their funds are gone or the escrow
+    ///         is dead.
+    function updateReceivingAddress(uint256 escrowId, bytes32 newAddress, uint32 newDestinationDomain) external {
         Escrow storage e = escrows[escrowId];
 
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        // Updates are allowed for the entire ACTIVE lifecycle (including
-        // while a milestone is DISPUTED). COMPLETED / CANCELLED escrows are
-        // blocked by the ACTIVE check: funds are gone or the escrow is dead.
-        if (e.state != EscrowState.ACTIVE) revert InvalidState();
+        if (e.state == EscrowState.COMPLETED) revert InvalidState();
+        if (e.state == EscrowState.CANCELLED) revert InvalidState();
         if (msg.sender != e.recipient) revert NotRecipient();
-        if (newMintRecipient == bytes32(0)) revert ZeroAddress();
-        if (address(uint160(uint256(newMintRecipient))) == address(0)) revert ZeroAddress();
-        if (!supportedDomains[newDestinationDomain]) revert UnsupportedDomain();
+        if (newAddress == bytes32(0)) revert ZeroAddress();
+        if (address(uint160(uint256(newAddress))) == address(0)) revert ZeroAddress();
+        // ARC_DOMAIN is the home chain — same-chain transfer is always
+        // available even if the domain manager removed it from
+        // supportedDomains. Other domains must be on the allow-list.
+        if (newDestinationDomain != ARC_DOMAIN && !supportedDomains[newDestinationDomain]) revert UnsupportedDomain();
 
-        bytes32 oldMintRecipient = e.mintRecipient;
-        uint32 oldDestinationDomain = e.destinationDomain;
+        bytes32 oldAddress = e.mintRecipient;
+        uint32 oldDomain = e.destinationDomain;
 
-        e.mintRecipient = newMintRecipient;
+        e.mintRecipient = newAddress;
         e.destinationDomain = newDestinationDomain;
 
-        // L-03: emit old + new so forensic reconstruction is possible.
-        emit MintRecipientUpdated(
-            escrowId, oldMintRecipient, oldDestinationDomain, newMintRecipient, newDestinationDomain, msg.sender
-        );
-    }
-
-    /// @notice Recipient-only same-chain redirect for the simplified one-address flow:
-    ///         takes a plain EVM address and stores the bytes32 form CCTP expects.
-    function updateReceivingAddress(uint256 escrowId, address newReceivingAddress) external {
-        Escrow storage e = escrows[escrowId];
-
-        if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        // Updates are allowed for the entire ACTIVE lifecycle (including
-        // while a milestone is DISPUTED). COMPLETED / CANCELLED escrows are
-        // blocked by the ACTIVE check: funds are gone or the escrow is dead.
-        if (e.state != EscrowState.ACTIVE) revert InvalidState();
-        if (msg.sender != e.recipient) revert NotRecipient();
-        if (newReceivingAddress == address(0)) revert ZeroAddress();
-        // M-04: ARC_DOMAIN is the home chain — same-chain transfer is
-        // always available. Skipping the supported-domain check prevents
-        // the function from being bricked by a domain manager who removes
-        // entry 26 from `supportedDomains`.
-
-        bytes32 oldMintRecipient = e.mintRecipient;
-        uint32 oldDestinationDomain = e.destinationDomain;
-
-        e.mintRecipient = addressToBytes32(newReceivingAddress);
-        e.destinationDomain = ARC_DOMAIN;
-
-        // L-03: emit old + new mint recipient and destination domain.
-        emit ReceivingAddressUpdated(
-            escrowId, oldMintRecipient, oldDestinationDomain, newReceivingAddress, msg.sender
-        );
-    }
-
-    /// @dev Left-pads an EVM address into the bytes32 layout CCTP's TokenMessenger
-    ///      expects for `mintRecipient`. Pure & deterministic — no storage reads.
-    function addressToBytes32(address addr) internal pure returns (bytes32) {
-        return bytes32(uint256(uint160(addr)));
+        emit ReceivingAddressUpdated(escrowId, oldAddress, newAddress, oldDomain, newDestinationDomain);
     }
 
     /// @notice Recipient flags a milestone as delivered. If the depositor

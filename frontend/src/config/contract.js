@@ -367,8 +367,7 @@ export const ESCROW_ABI = [
   { type: 'function', name: 'escalateAfterDeadline', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint256' }, { name: '_reason', type: 'string' }, { name: '_evidenceHash', type: 'bytes32' }, { name: '_evidenceURI', type: 'string' }], outputs: [] },
   { type: 'function', name: 'mutualCancel', stateMutability: 'nonpayable', inputs: [{ name: 'escrowId', type: 'uint256' }], outputs: [] },
   { type: 'function', name: 'withdrawRefund', stateMutability: 'nonpayable', inputs: [{ name: 'recipient', type: 'address' }], outputs: [] },
-  { type: 'function', name: 'updateMintRecipient', stateMutability: 'nonpayable', inputs: [{ name: 'escrowId', type: 'uint256' }, { name: 'newMintRecipient', type: 'bytes32' }, { name: 'newDestinationDomain', type: 'uint32' }], outputs: [] },
-  { type: 'function', name: 'updateReceivingAddress', stateMutability: 'nonpayable', inputs: [{ name: 'escrowId', type: 'uint256' }, { name: 'newReceivingAddress', type: 'address' }], outputs: [] },
+  { type: 'function', name: 'updateReceivingAddress', stateMutability: 'nonpayable', inputs: [{ name: 'escrowId', type: 'uint256' }, { name: 'newAddress', type: 'bytes32' }, { name: 'newDestinationDomain', type: 'uint32' }], outputs: [] },
   { type: 'function', name: 'signalDelivery', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint256' }], outputs: [] },
   { type: 'function', name: 'claimSilentApproval', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint256' }], outputs: [] },
   { type: 'function', name: 'addSupportedDomain', stateMutability: 'nonpayable', inputs: [{ type: 'uint32' }], outputs: [] },
@@ -394,8 +393,10 @@ export const ESCROW_ABI = [
     type: 'event', name: 'ReceivingAddressUpdated',
     inputs: [
       { name: 'escrowId', type: 'uint256', indexed: true },
-      { name: 'newReceivingAddress', type: 'address', indexed: false },
-      { name: 'updatedBy', type: 'address', indexed: false }
+      { name: 'oldAddress', type: 'bytes32', indexed: false },
+      { name: 'newAddress', type: 'bytes32', indexed: false },
+      { name: 'oldDomain', type: 'uint32', indexed: false },
+      { name: 'newDomain', type: 'uint32', indexed: false }
     ]
   }
 ]

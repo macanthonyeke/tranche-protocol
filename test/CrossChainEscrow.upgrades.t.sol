@@ -8,7 +8,7 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 
 /// @notice Tests for the upgrades introduced in this contract revision:
 ///         mandatory deadline, dispute-window cap, blacklist-recovery via
-///         updateMintRecipient + parameterised withdrawRefund, refundTo
+///         updateReceivingAddress + parameterised withdrawRefund, refundTo
 ///         default, deposit input validation, DOMAIN_MANAGER_ROLE, and the
 ///         AccessControlEnumerable role helpers.
 contract CrossChainEscrowUpgradesTest is Base {
@@ -247,42 +247,42 @@ contract CrossChainEscrowUpgradesTest is Base {
     }
 
     // -------------------------------------------------------------------------
-    // 9-13. updateMintRecipient
+    // 9-13. updateReceivingAddress
     // -------------------------------------------------------------------------
 
-    function test_UpdateMintRecipient_RecipientCanUpdate_WhileActive() public {
+    function test_UpdateReceivingAddress_RecipientCanUpdate_WhileActive() public {
         uint256 id = _depositSingle(100e6);
         bytes32 newDest = bytes32(uint256(uint160(0xC0FFEE)));
 
-        // L-03: event now carries old + new (mintRecipient, destinationDomain).
+        // L-03: event now carries (oldAddress, newAddress, oldDomain, newDomain).
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit MintRecipientUpdated(id, MINT_RECIPIENT, DEST_DOMAIN, newDest, DEST_DOMAIN, recipient);
+        emit ReceivingAddressUpdated(id, MINT_RECIPIENT, newDest, DEST_DOMAIN, DEST_DOMAIN);
 
         vm.prank(recipient);
-        escrow.updateMintRecipient(id, newDest, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, newDest, DEST_DOMAIN);
 
         (,,,, uint32 destDomain, bytes32 mr,,,,,,,,,) = escrow.escrows(id);
         assertEq(mr, newDest);
         assertEq(uint256(destDomain), uint256(DEST_DOMAIN));
     }
 
-    function test_UpdateMintRecipient_RevertOn_DepositorCaller() public {
+    function test_UpdateReceivingAddress_RevertOn_DepositorCaller() public {
         uint256 id = _depositSingle(100e6);
         bytes32 newDest = bytes32(uint256(uint160(0xC0FFEE)));
         vm.prank(depositor);
         vm.expectRevert(NotRecipient.selector);
-        escrow.updateMintRecipient(id, newDest, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, newDest, DEST_DOMAIN);
     }
 
-    function test_UpdateMintRecipient_RevertOn_StrangerCaller() public {
+    function test_UpdateReceivingAddress_RevertOn_StrangerCaller() public {
         uint256 id = _depositSingle(100e6);
         bytes32 newDest = bytes32(uint256(uint160(0xC0FFEE)));
         vm.prank(stranger);
         vm.expectRevert(NotRecipient.selector);
-        escrow.updateMintRecipient(id, newDest, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, newDest, DEST_DOMAIN);
     }
 
-    function test_UpdateMintRecipient_RevertOn_NotActive_Completed() public {
+    function test_UpdateReceivingAddress_RevertOn_NotActive_Completed() public {
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
@@ -290,36 +290,36 @@ contract CrossChainEscrowUpgradesTest is Base {
         // escrow is now COMPLETED
         vm.prank(recipient);
         vm.expectRevert(InvalidState.selector);
-        escrow.updateMintRecipient(id, bytes32(uint256(uint160(0xC0FFEE))), DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, bytes32(uint256(uint160(0xC0FFEE))), DEST_DOMAIN);
     }
 
-    function test_UpdateMintRecipient_RevertOn_ZeroBytes32() public {
+    function test_UpdateReceivingAddress_RevertOn_ZeroBytes32() public {
         uint256 id = _depositSingle(100e6);
         vm.prank(recipient);
         vm.expectRevert(ZeroAddress.selector);
-        escrow.updateMintRecipient(id, bytes32(0), DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, bytes32(0), DEST_DOMAIN);
     }
 
-    function test_UpdateMintRecipient_RevertOn_ZeroAddressIn_NonZeroBytes32() public {
+    function test_UpdateReceivingAddress_RevertOn_ZeroAddressIn_NonZeroBytes32() public {
         uint256 id = _depositSingle(100e6);
         bytes32 weird = bytes32(uint256(1) << 200);
         vm.prank(recipient);
         vm.expectRevert(ZeroAddress.selector);
-        escrow.updateMintRecipient(id, weird, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, weird, DEST_DOMAIN);
     }
 
-    function test_UpdateMintRecipient_RevertOn_UnsupportedDomain() public {
+    function test_UpdateReceivingAddress_RevertOn_UnsupportedDomain() public {
         uint256 id = _depositSingle(100e6);
         vm.prank(recipient);
         vm.expectRevert(UnsupportedDomain.selector);
-        escrow.updateMintRecipient(id, bytes32(uint256(uint160(0xC0FFEE))), 42);
+        escrow.updateReceivingAddress(id, bytes32(uint256(uint160(0xC0FFEE))), 42);
     }
 
-    function test_UpdateMintRecipient_AppliesToFutureRelease() public {
+    function test_UpdateReceivingAddress_AppliesToFutureRelease() public {
         uint256 id = _depositMulti();
         bytes32 newDest = bytes32(uint256(uint160(0xC0FFEE)));
         vm.prank(recipient);
-        escrow.updateMintRecipient(id, newDest, DEST_DOMAIN);
+        escrow.updateReceivingAddress(id, newDest, DEST_DOMAIN);
 
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);

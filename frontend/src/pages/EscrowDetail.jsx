@@ -5,13 +5,17 @@ import { keccak256, toBytes } from 'viem'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
+import CustomSelect from '../components/CustomSelect.jsx'
 import { MilestoneBadge, EscrowBadge, RoleBadge } from '../components/StatusBadge.jsx'
 import TxModal from '../components/TxModal.jsx'
 import { useEscrowDetail, useTick } from '../hooks/useEscrows.js'
+import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { isValidBytes32, bytes32ToAddress } from '../utils/encode.js'
 import { isValidAddress, formatUSDC, formatDeadline, formatTimestamp, formatWindow, countdown, truncateAddr } from '../utils/format.js'
-import { getDomainName } from '../config/chains.js'
+import { getDomainName, ARC_DOMAIN, isEvmDomain } from '../config/chains.js'
+
+const addressToBytes32 = (addr) => '0x' + addr.slice(2).padStart(64, '0')
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -54,7 +58,7 @@ function DetailInner() {
       <aside className="lg:w-1/3 lg:sticky lg:top-24 self-start flex flex-col gap-4 w-full">
         <SpecsCard escrow={escrow} role={role} inv={inv} />
         {role && escrow.state === 0 && <CancelCard escrow={escrow} role={role} onChange={refetch} />}
-        {isFreelancer && escrow.state === 0 && <UpdateMintRecipientCard escrow={escrow} onChange={refetch} />}
+        {isFreelancer && escrow.state === 0 && <UpdateReceivingAddressCard escrow={escrow} onChange={refetch} />}
       </aside>
 
       {/* Timeline */}
@@ -200,20 +204,33 @@ function CancelCard({ escrow, role, onChange }) {
   )
 }
 
-function UpdateMintRecipientCard({ escrow, onChange }) {
+function UpdateReceivingAddressCard({ escrow, onChange }) {
   const [editing, setEditing] = useState(false)
   const [addr, setAddr] = useState('')
+  const [domain, setDomain] = useState(() => Number(escrow.destinationDomain ?? ARC_DOMAIN))
+  const [successInfo, setSuccessInfo] = useState(null)
   const { writeContractAsync } = useWriteContract()
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
   const [txError, setTxError] = useState(null)
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+  const { supported } = useSupportedDomains()
 
   const currentAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : null
+  const currentDomain = Number(escrow.destinationDomain)
+
+  // ARC is always supported by the contract for receiving updates; ensure it
+  // appears in the dropdown even if the on-chain allow-list omitted it.
+  const domainOptions = (() => {
+    const set = new Set(supported.filter(isEvmDomain))
+    set.add(ARC_DOMAIN)
+    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
+  })()
 
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success')
+    setSuccessInfo({ address: addr, domain })
     setEditing(false)
     setAddr('')
     onChange?.()
@@ -223,12 +240,11 @@ function UpdateMintRecipientCard({ escrow, onChange }) {
     try {
       if (!isValidAddress(addr)) throw new Error('Invalid address')
       setTxError(null); setTxStatus('confirming')
-      // Contract performs the bytes32 conversion via addressToBytes32 — frontend
-      // only sends the plain address.
+      const bytes32Addr = addressToBytes32(addr)
       const hash = await writeContractAsync({
         address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
         functionName: 'updateReceivingAddress',
-        args: [BigInt(escrow.id), addr]
+        args: [BigInt(escrow.id), bytes32Addr, Number(domain)]
       })
       setTxHash(hash); setTxStatus('pending')
     } catch (err) { setTxError(err); setTxStatus('error') }
@@ -240,21 +256,36 @@ function UpdateMintRecipientCard({ escrow, onChange }) {
       <div className="flex flex-col gap-1">
         <span className="text-xs text-text-tertiary">Where future milestone payouts are sent.</span>
         {currentAddress && <AddressDisplay address={currentAddress} />}
+        <span className="text-xs text-text-tertiary mt-1">Chain: {getDomainName(currentDomain)}</span>
       </div>
 
+      {successInfo && !editing && (
+        <div className="rounded-md border border-status-success/40 bg-status-success/10 px-3 py-2 text-xs text-status-success">
+          Updated. New address {truncateAddr(successInfo.address)} on {getDomainName(successInfo.domain)}.
+        </div>
+      )}
+
       {!editing && (
-        <button className="btn-secondary text-sm py-2" onClick={() => setEditing(true)}>
+        <button className="btn-secondary text-sm py-2" onClick={() => { setEditing(true); setSuccessInfo(null); setDomain(currentDomain || ARC_DOMAIN) }}>
           Update receiving address
         </button>
       )}
 
       {editing && (
         <>
+          <label className="text-xs text-text-secondary">Receiving address</label>
           <input className="input-field font-mono text-sm" placeholder="0x…"
             value={addr} onChange={(e) => setAddr(e.target.value.trim())} />
+          <label className="text-xs text-text-secondary">Receiving chain</label>
+          <CustomSelect
+            value={Number(domain)}
+            onChange={(v) => setDomain(Number(v))}
+            options={domainOptions}
+            placeholder="Select chain"
+          />
           <div className="flex gap-2">
             <button className="btn-primary text-sm py-2 flex-1" onClick={submit}
-              disabled={!isValidAddress(addr) || txStatus === 'confirming' || txStatus === 'pending'}>
+              disabled={!isValidAddress(addr) || !domainOptions.some((o) => o.value === Number(domain)) || txStatus === 'confirming' || txStatus === 'pending'}>
               Confirm
             </button>
             <button className="btn-secondary text-sm py-2"
