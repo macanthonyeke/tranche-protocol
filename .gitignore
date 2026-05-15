@@ -36,3 +36,9 @@ docs/
 !.env.example
 !**/.env.example
 deploy/.env
+
+# Local agent state
+.claude/
+
+# Vite dep cache
+frontend/.vite/
