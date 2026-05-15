@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.24;
 
 interface ICrossChainEscrow {
     enum EscrowState {
@@ -65,6 +65,71 @@ interface ICrossChainEscrow {
         uint256 bps;
     }
 
+    // ---------- view return types ----------
+
+    /// @notice Slim card-friendly summary used by dashboard / arbiter lists.
+    struct EscrowSummary {
+        uint256 escrowId;
+        address depositor;
+        address recipient;
+        uint256 totalAmount;
+        EscrowState state;
+        uint256 deadline;
+        uint256 milestoneCount;
+        uint256 releasedMilestoneCount;
+        uint256 disputedMilestoneCount;
+        bytes32 invoiceHash;
+        string invoiceURI;
+    }
+
+    /// @notice Everything the escrow detail page needs in one call.
+    struct EscrowDetail {
+        uint256 escrowId;
+        Escrow escrow;
+        Milestone[] milestones;
+        DisputeData[] disputes;
+        SplitRecipient[] splits;
+        bool[] disputeWindowExpired;
+        bool[] deliverySignaled;
+        uint256[] effectiveDisputeDeadlines;
+        bool isPayer;
+        bool isFreelancer;
+        bool isArbiter;
+    }
+
+    /// @notice Everything the dashboard needs in one call per wallet.
+    struct DashboardData {
+        EscrowSummary[] asPayer;
+        EscrowSummary[] asFreelancer;
+        uint256 activeEscrowCount;
+        uint256 openDisputeCount;
+        uint256 refundBalance;
+    }
+
+    /// @notice All four protocol-level role memberships for a single account in
+    ///         one call, so the frontend can decide which admin/arbiter/pauser/
+    ///         domain-manager UI to render without four separate hasRole reads.
+    struct CallerRoles {
+        bool isDefaultAdmin;
+        bool isArbiter;
+        bool isPauser;
+        bool isDomainManager;
+    }
+
+    /// @notice Snapshot of every protocol-wide setting an admin/settings page
+    ///         displays, returned in one call.
+    struct ProtocolConfig {
+        address usdc;
+        address tokenMessenger;
+        address protocolTreasury;
+        uint256 protocolFeeBps;
+        uint256 maxProtocolFeeBps;
+        uint256 cctpForwardFee;
+        uint32 arcDomain;
+        uint256 escrowCount;
+        bool paused;
+    }
+
     // ---------- events ----------
 
     event EscrowCreated(
@@ -98,11 +163,44 @@ interface ICrossChainEscrow {
     event ProtocolTreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event ProtocolFeeCollected(uint256 indexed escrowId, uint256 milestoneIndex, uint256 fee);
     event MintRecipientUpdated(
-        uint256 indexed escrowId, bytes32 newMintRecipient, uint32 newDestinationDomain, address updatedBy
+        uint256 indexed escrowId,
+        bytes32 oldMintRecipient,
+        uint32 oldDestinationDomain,
+        bytes32 newMintRecipient,
+        uint32 newDestinationDomain,
+        address updatedBy
     );
     event CctpForwardFeeUpdated(uint256 newFee);
     event DeliverySignaled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 deliveredAt);
     event SilentApprovalClaimed(uint256 indexed escrowId, uint256 milestoneIndex, address claimedBy);
+    event ReceivingAddressUpdated(
+        uint256 indexed escrowId,
+        bytes32 oldMintRecipient,
+        uint32 oldDestinationDomain,
+        address newReceivingAddress,
+        address updatedBy
+    );
+    /// @notice Per-split configuration emitted at deposit so indexers can
+    ///         reconstruct splits without an on-chain read (M-05).
+    event SplitConfigured(
+        uint256 indexed escrowId,
+        uint256 index,
+        bytes32 mintRecipient,
+        uint32 destinationDomain,
+        uint256 bps
+    );
+    /// @notice Snapshot of fee/treasury captured at deposit (H-05) so
+    ///         indexers see the exact terms an escrow was created under.
+    event EscrowTermsSnapshotted(
+        uint256 indexed escrowId,
+        uint256 protocolFeeBps,
+        address protocolTreasury
+    );
+    /// @notice Emitted when a refund credit is moved between owners (M-06).
+    event RefundCreditTransferred(address indexed from, address indexed to, uint256 amount);
+    /// @notice Emitted when a stuck dispute is force-resolved by the
+    ///         arbiter-inaction timeout (H-02).
+    event DisputeTimedOutRefunded(uint256 indexed escrowId, uint256 milestoneIndex);
 
     // ---------- errors ----------
 
@@ -153,4 +251,14 @@ interface ICrossChainEscrow {
     error SignalTooCloseToDeadline();
     error NoticeWindowNotExpired();
     error NotSignaled();
+
+    // ---- New errors introduced by audit fixes ----
+    /// @notice `maxFee` parameter would let the CCTP forwarder take the
+    ///         entire (or more than entire) burn amount (H-04).
+    error MaxFeeExceedsBurnAmount();
+    /// @notice The arbiter-inaction timeout has not yet elapsed since the
+    ///         dispute was raised (H-02).
+    error ArbiterTimeoutNotReached();
+    /// @notice The low-level USDC `approve` call did not return success (L-02).
+    error UsdcApproveFailed();
 }

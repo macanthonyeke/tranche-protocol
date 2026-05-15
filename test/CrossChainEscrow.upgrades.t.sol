@@ -254,13 +254,14 @@ contract CrossChainEscrowUpgradesTest is Base {
         uint256 id = _depositSingle(100e6);
         bytes32 newDest = bytes32(uint256(uint160(0xC0FFEE)));
 
+        // L-03: event now carries old + new (mintRecipient, destinationDomain).
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit MintRecipientUpdated(id, newDest, DEST_DOMAIN, recipient);
+        emit MintRecipientUpdated(id, MINT_RECIPIENT, DEST_DOMAIN, newDest, DEST_DOMAIN, recipient);
 
         vm.prank(recipient);
         escrow.updateMintRecipient(id, newDest, DEST_DOMAIN);
 
-        (,,,,uint32 destDomain, bytes32 mr,,,,,,,,,) = escrow.escrows(id);
+        (,,,, uint32 destDomain, bytes32 mr,,,,,,,,,) = escrow.escrows(id);
         assertEq(mr, newDest);
         assertEq(uint256(destDomain), uint256(DEST_DOMAIN));
     }
@@ -498,17 +499,15 @@ contract CrossChainEscrowUpgradesTest is Base {
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        // Pass a non-zero `maxFee` on purpose -- the public API ignores it
-        // (the value sent to CCTP comes from cctpForwardFee).
+        // Pass a non-zero live forwarding fee; the public API forwards it
+        // directly to CCTP.
         escrow.releaseAfterWindow(id, 0, 12345);
 
         (,,,,,, uint256 maxFee, uint32 minFinality,,) = _readBurnCall();
-        assertEq(maxFee, CCTP_FORWARD_FEE, "cross-chain maxFee must equal cctpForwardFee");
+        assertEq(maxFee, 12345, "cross-chain maxFee must equal the caller-supplied fee");
         assertEq(uint256(minFinality), 2000, "minFinalityThreshold must be 2000 (Standard Transfer)");
         assertEq(uint256(escrow.CCTP_MIN_FINALITY_THRESHOLD()), 2000);
     }
-
-
 
     function test_RaiseDispute_StoresRaisedAtTimestamp() public {
         uint256 id = _depositSingle(100e6);

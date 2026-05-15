@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.24;
 
 /// @title ITokenMessenger (CCTP V2)
 /// @notice Minimal interface for Circle's CCTP V2 TokenMessenger.
