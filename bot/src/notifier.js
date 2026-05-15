@@ -8,13 +8,43 @@ import { logger } from './logger.js';
 
 const ARCSCAN_BASE = 'https://testnet.arcscan.app';
 
+const CCTP_CHAIN_NAMES = {
+  0: 'Ethereum Sepolia',
+  1: 'Avalanche Fuji',
+  2: 'OP Sepolia',
+  3: 'Arbitrum Sepolia',
+  6: 'Base Sepolia',
+  7: 'Polygon Amoy',
+  11: 'Linea Sepolia',
+  19: 'Scroll Sepolia',
+  21: 'Sui Testnet',
+  22: 'Aptos Testnet',
+  23: 'Unichain Sepolia',
+  24: 'Sonic Blaze',
+  25: 'Ink Sepolia',
+  26: 'Arc Testnet',
+  27: 'World Chain Sepolia',
+  28: 'ZKSync Sepolia',
+  29: 'Berachain bArtio',
+  30: 'Corn Testnet',
+  31: 'Codex Testnet',
+};
+
+function chainName(domain) {
+  if (domain === undefined || domain === null) return 'Unknown chain';
+  return CCTP_CHAIN_NAMES[Number(domain)] || `Domain ${Number(domain)}`;
+}
+
 export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId }) {
   // ---------- low-level send helpers ----------
 
   async function sendToTelegramId(chatId, text) {
     if (!chatId) return;
     try {
-      await bot.sendMessage(chatId, text, { disable_web_page_preview: true });
+      await bot.sendMessage(chatId, text, {
+        disable_web_page_preview: true,
+        parse_mode: 'Markdown',
+      });
     } catch (err) {
       logger.warn('telegram sendMessage failed', { chatId, message: err.message });
     }
@@ -57,7 +87,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const depositorMessage = [
       `You just locked ${formatUSDC(amount)} USDC into escrow.`,
       '',
-      `Recipient: ${truncateAddress(recipient)}`,
+      `Recipient: ${addr(recipient)}`,
       `Milestones: ${milestoneCount}`,
       `Deadline: ${formatDate(deadline)}`,
       `Review period: ${reviewHours} hours per milestone`,
@@ -69,7 +99,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const recipientMessage = [
       'You have a new escrow payment waiting for you.',
       '',
-      `From: ${truncateAddress(depositor)}`,
+      `From: ${addr(depositor)}`,
       `Total: ${formatUSDC(amount)} USDC across ${milestoneCount} milestone(s)`,
       `Deadline: ${formatDate(deadline)}`,
       `Review period per milestone: ${reviewHours} hours`,
@@ -179,13 +209,13 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
 
     const human = ordinal(milestoneIndex);
     const disputedBy = getAddress(raisedBy);
-    const reasonLine = reason && reason.trim() ? reason.trim() : 'No reason provided';
+    const reasonLine = md(reason && reason.trim() ? reason.trim() : 'No reason provided');
 
     const depositorMessage = [
       `A dispute has been opened on the ${human} milestone.`,
       '',
       `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${truncateAddress(disputedBy)}`,
+      `Raised by: ${addr(disputedBy)}`,
       `Reason: ${reasonLine}`,
       '',
       'An arbiter will review the evidence. If you have documents or context that support your position, submit counter-evidence in the app now.',
@@ -195,7 +225,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `A dispute has been opened on the ${human} milestone.`,
       '',
       `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${truncateAddress(disputedBy)}`,
+      `Raised by: ${addr(disputedBy)}`,
       `Reason: ${reasonLine}`,
       '',
       'An arbiter has been notified. Submit your response in the app now if you have not already. Your evidence will be reviewed before the arbiter decides.',
@@ -204,10 +234,10 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const arbiterMessage = [
       'New dispute needs your attention.',
       '',
-      `Parties: ${truncateAddress(escrow.depositor)} (depositor) and ${truncateAddress(escrow.recipient)} (recipient)`,
+      `Parties: ${addr(escrow.depositor)} (depositor) and ${addr(escrow.recipient)} (recipient)`,
       `Milestone: ${human} ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${truncateAddress(disputedBy)}`,
-      `Evidence hash: ${evidenceHash}`,
+      `Raised by: ${addr(disputedBy)}`,
+      `Evidence hash: ${code(evidenceHash)}`,
       `Reason: ${reasonLine}`,
       '',
       'Open the arbiter panel to review and resolve.',
@@ -235,7 +265,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       ? [
           `The recipient has submitted their response to the dispute on the ${human} milestone.`,
           '',
-          `Counter-evidence hash: ${counterEvidenceHash}`,
+          `Counter-evidence hash: ${code(counterEvidenceHash)}`,
           '',
           'The arbiter now has both sides and will make a decision. You will be notified when the dispute is resolved.',
         ].join('\n')
@@ -245,7 +275,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       ? [
           `The depositor has submitted their response to the dispute on the ${human} milestone.`,
           '',
-          `Counter-evidence hash: ${counterEvidenceHash}`,
+          `Counter-evidence hash: ${code(counterEvidenceHash)}`,
           '',
           'The arbiter now has both sides and will make a decision. You will be notified when the dispute is resolved.',
         ].join('\n')
@@ -254,8 +284,8 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const arbiterMessage = [
       `Counter-evidence submitted for the dispute on the ${human} milestone.`,
       '',
-      `Escrow: ${truncateAddress(escrow.depositor)} and ${truncateAddress(escrow.recipient)}`,
-      `Counter-evidence hash: ${counterEvidenceHash}`,
+      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
+      `Counter-evidence hash: ${code(counterEvidenceHash)}`,
       '',
       'Both parties have submitted evidence. This dispute is ready for your resolution.',
     ].join('\n');
@@ -328,7 +358,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `The arbiter reviewed the dispute on the ${human} milestone and ruled in favor of the recipient.`,
       '',
       `Amount released: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${resolutionHash}`,
+      `Resolution hash: ${code(resolutionHash)}`,
       '',
       'This decision is final and recorded on chain.',
     ].join('\n');
@@ -338,15 +368,15 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       '',
       `Amount: ${formatUSDCAfterFee(milestone.amount)} USDC (after 1.99% protocol fee)`,
       'The payment is on its way to your wallet.',
-      `Resolution hash: ${resolutionHash}`,
+      `Resolution hash: ${code(resolutionHash)}`,
     ].join('\n');
 
     const arbiterMessage = [
       `You resolved the dispute on the ${human} milestone in favor of the recipient.`,
       '',
       `Amount released: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${resolutionHash}`,
-      `Escrow: ${truncateAddress(escrow.depositor)} and ${truncateAddress(escrow.recipient)}`,
+      `Resolution hash: ${code(resolutionHash)}`,
+      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
     ].join('\n');
 
     await Promise.all([
@@ -370,7 +400,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `The arbiter ruled in your favor on the ${human} milestone.`,
       '',
       `Amount: ${formatUSDC(milestone.amount)} USDC added to your refund balance.`,
-      `Resolution hash: ${resolutionHash}`,
+      `Resolution hash: ${code(resolutionHash)}`,
       '',
       'Open the app and go to Withdraw to claim your funds.',
     ].join('\n');
@@ -379,7 +409,7 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `The arbiter reviewed the dispute on the ${human} milestone and ruled in favor of the depositor.`,
       '',
       `Amount: ${formatUSDC(milestone.amount)} USDC has been refunded.`,
-      `Resolution hash: ${resolutionHash}`,
+      `Resolution hash: ${code(resolutionHash)}`,
       '',
       'Keep the resolution hash as a reference if you need it.',
     ].join('\n');
@@ -388,8 +418,8 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `You resolved the dispute on the ${human} milestone in favor of the depositor.`,
       '',
       `Amount refunded: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${resolutionHash}`,
-      `Escrow: ${truncateAddress(escrow.depositor)} and ${truncateAddress(escrow.recipient)}`,
+      `Resolution hash: ${code(resolutionHash)}`,
+      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
     ].join('\n');
 
     await Promise.all([
@@ -450,10 +480,10 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const arbiterMessage = [
       'A deadline escalation needs your attention.',
       '',
-      `Parties: ${truncateAddress(escrow.depositor)} (depositor) and ${truncateAddress(escrow.recipient)} (recipient)`,
+      `Parties: ${addr(escrow.depositor)} (depositor) and ${addr(escrow.recipient)} (recipient)`,
       `Milestone: ${human} ${formatUSDC(milestone.amount)} USDC`,
       'The project deadline passed and the depositor never approved this milestone.',
-      `Evidence hash: ${evidenceHash}`,
+      `Evidence hash: ${code(evidenceHash)}`,
       '',
       'Open the arbiter panel to review and resolve.',
     ].join('\n');
@@ -476,8 +506,8 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const message = [
       'Your withdrawal was successful.',
       '',
-      `Amount: ${formatUSDC(amount)} USDC sent to ${truncateAddress(recipient)}`,
-      `Transaction: ${transactionHash}`,
+      `Amount: ${formatUSDC(amount)} USDC sent to ${addr(recipient)}`,
+      `Transaction: ${code(transactionHash)}`,
       transactionHash ? `${ARCSCAN_BASE}/tx/${transactionHash}` : '',
     ]
       .filter(Boolean)
@@ -488,16 +518,20 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
   }
 
   async function onMintRecipientUpdated({ args }) {
-    const { escrowId, newMintRecipient } = args;
+    const { escrowId, newMintRecipient, newDestinationDomain } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
     const newAddress = bytes32ToAddress(newMintRecipient);
+    // Prefer the event's domain; fall back to the freshly-read escrow state.
+    const destinationDomain = newDestinationDomain ?? escrow.destinationDomain;
+    const destinationChain = chainName(destinationDomain);
 
     const depositorMessage = [
       'The recipient has updated their payment destination for this escrow.',
       '',
-      `New address: ${truncateAddress(newAddress)}`,
+      `New address: ${addr(newAddress)}`,
+      `Destination chain: ${destinationChain}`,
       '',
       'Future milestone payments will now be sent to this address. If you did not expect this change, contact the recipient directly.',
     ].join('\n');
@@ -505,7 +539,9 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const recipientMessage = [
       'Your payment destination has been updated successfully.',
       '',
-      `New address: ${truncateAddress(newAddress)}`,
+      `New address: ${addr(newAddress)}`,
+      `Destination chain: ${destinationChain}`,
+      '',
       'All future milestone payments from this escrow will go to this address.',
     ].join('\n');
 
@@ -578,10 +614,27 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
 
 // ---------- formatting (per spec) ----------
 
-function truncateAddress(address) {
-  if (!address || String(address).length < 10) return String(address ?? 'unknown');
-  const a = String(address);
-  return `${a.slice(0, 6)}...${a.slice(-4)}`;
+// Inline-code (backtick) wrap for full addresses so Telegram renders them as
+// tap-to-copy on mobile. Falls back to the raw string if checksumming fails.
+function addr(address) {
+  if (!address) return '`unknown`';
+  try {
+    return `\`${getAddress(String(address))}\``;
+  } catch {
+    return `\`${String(address)}\``;
+  }
+}
+
+// Inline-code wrap for arbitrary hex strings (hashes, tx hashes).
+function code(value) {
+  if (value === undefined || value === null) return '`unknown`';
+  return `\`${String(value)}\``;
+}
+
+// Escape Markdown-special characters in untrusted user content (dispute
+// reasons, evidence URIs) so it cannot break the message parsing.
+function md(text) {
+  return String(text ?? '').replace(/[_*`\[\]]/g, '\\$&');
 }
 
 function formatUSDC(rawAmount) {
