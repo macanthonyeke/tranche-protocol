@@ -103,8 +103,6 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         if (_domainManager == address(0)) revert ZeroAddress();
         if (_tokenMessenger == address(0)) revert ZeroAddress();
         if (_protocolTreasury == address(0)) revert ZeroAddress();
-        if (_arbiter == address(0)) revert ZeroAddress();
-        if (_pauser == address(0)) revert ZeroAddress();
 
         usdc = IERC20(_usdc);
         tokenMessenger = ITokenMessenger(_tokenMessenger);
@@ -1097,6 +1095,7 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
             SplitRecipient calldata sr = _splits[i];
             if (sr.bps == 0) revert InvalidBps();
             if (sr.mintRecipient == bytes32(0)) revert ZeroAddress();
+            if (address(uint160(uint256(sr.mintRecipient))) == address(0)) revert ZeroAddress();
             if (!supportedDomains[sr.destinationDomain]) revert UnsupportedDomain();
             sumBps += sr.bps;
         }

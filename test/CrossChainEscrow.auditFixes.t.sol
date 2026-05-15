@@ -283,6 +283,108 @@ contract CrossChainEscrowAuditFixesTest is Base {
         assertEq(p3[0].escrowId, 5);
     }
 
+    function test_M02_GetEscrowsForFreelancerPaginated_RespectsBounds() public {
+        // Create 5 escrows; depositor is the payer, `recipient` is the freelancer.
+        for (uint256 i = 0; i < 5; i++) {
+            _depositSingle(10e6);
+        }
+
+        // First page (offset 0, limit 2) -> ids 1,2.
+        EscrowSummary[] memory p1 = escrow.getEscrowsForFreelancerPaginated(recipient, 0, 2);
+        assertEq(p1.length, 2);
+        assertEq(p1[0].escrowId, 1);
+        assertEq(p1[1].escrowId, 2);
+
+        // Second page (offset 2, limit 2) -> ids 3,4.
+        EscrowSummary[] memory p2 = escrow.getEscrowsForFreelancerPaginated(recipient, 2, 2);
+        assertEq(p2.length, 2);
+        assertEq(p2[0].escrowId, 3);
+        assertEq(p2[1].escrowId, 4);
+
+        // Tail page (offset 4, limit 10) -> id 5 only (truncates).
+        EscrowSummary[] memory p3 = escrow.getEscrowsForFreelancerPaginated(recipient, 4, 10);
+        assertEq(p3.length, 1);
+        assertEq(p3[0].escrowId, 5);
+
+        // A stranger gets nothing.
+        EscrowSummary[] memory none = escrow.getEscrowsForFreelancerPaginated(stranger, 0, 10);
+        assertEq(none.length, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // H-04 multi-split boundary: per-share maxFee must be < per-share burn.
+    // The contract scales `cctpMaxFee` by each split's bps before comparing
+    // against that split's burn share, so the boundary lives at the share.
+    // -----------------------------------------------------------------------
+
+    function _depositWithSplits(uint256 amount, SplitRecipient[] memory splits) internal returns (uint256 id) {
+        uint256[] memory ms = _singleMilestone(amount);
+        vm.startPrank(depositor);
+        usdc.approve(address(escrow), amount);
+        id = escrow.deposit(
+            recipient,
+            refundTo,
+            amount,
+            DEST_DOMAIN,
+            MINT_RECIPIENT,
+            DISPUTE_WINDOW,
+            DELIVERY_NOTICE_WINDOW,
+            INVOICE_HASH,
+            INVOICE_URI,
+            ms,
+            block.timestamp + 30 days,
+            splits
+        );
+        vm.stopPrank();
+    }
+
+    function test_H04_MultiSplit_RevertOn_PerShareMaxFeeEqualsShare() public {
+        // 70/30 split, total = 100e6 -> shares = 70e6 / 30e6.
+        SplitRecipient[] memory splits = new SplitRecipient[](2);
+        splits[0] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))),
+            destinationDomain: DEST_DOMAIN,
+            bps: 7000
+        });
+        splits[1] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))),
+            destinationDomain: DEST_DOMAIN,
+            bps: 3000
+        });
+
+        uint256 id = _depositWithSplits(100e6, splits);
+        _fulfill(id, 0);
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+
+        // perShareMaxFee for split0 = cctpMaxFee * 7000 / 10000.
+        // Pick cctpMaxFee = 100e6 so split0's share == its perShareMaxFee == 70e6.
+        vm.expectRevert(MaxFeeExceedsBurnAmount.selector);
+        escrow.releaseAfterWindow(id, 0, 100e6);
+    }
+
+    function test_H04_MultiSplit_PerShareMaxFeeJustBelowShare_Succeeds() public {
+        SplitRecipient[] memory splits = new SplitRecipient[](2);
+        splits[0] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))),
+            destinationDomain: DEST_DOMAIN,
+            bps: 7000
+        });
+        splits[1] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))),
+            destinationDomain: DEST_DOMAIN,
+            bps: 3000
+        });
+
+        uint256 id = _depositWithSplits(100e6, splits);
+        _fulfill(id, 0);
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+
+        // cctpMaxFee = 100e6 - 10 -> perShareMaxFee0 = 70e6 - 7 (< 70e6 share)
+        //                            perShareMaxFee1 = 30e6 - 3 (< 30e6 share).
+        escrow.releaseAfterWindow(id, 0, 100e6 - 10);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
     function test_M02_GetDisputedEscrowsPaginated_FiltersDisputed() public {
         uint256 a = _depositSingle(10e6);
         uint256 b = _depositSingle(20e6);
