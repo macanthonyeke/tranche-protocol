@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   CROSSCHAINESCROW — DESIGN TOKENS
+   ============================================================ */
+
+@layer base {
+  :root {
+    /* Surfaces */
+    --bg-primary: #F9FAFB;
+    --bg-secondary: #FFFFFF;
+    --bg-tertiary: #F3F4F6;
+
+    /* Text */
+    --text-primary: #111827;
+    --text-secondary: #4B5563;
+    --text-tertiary: #6B7280;
+
+    /* Borders */
+    --border-subtle: #E5E7EB;
+    --border-medium: #D1D5DB;
+    --border-focused: #0055FF;
+
+    /* Accent */
+    --accent-blue: #0055FF;
+    --accent-hover: #0044CC;
+    --accent-muted: #E6EFFF;
+
+    /* Status */
+    --status-success: #059669;
+    --status-warning: #EA580C;
+    --status-error: #DC2626;
+
+    color-scheme: light;
+  }
+
+  .dark {
+    --bg-primary: #0A0A0C;
+    --bg-secondary: #141417;
+    --bg-tertiary: #1E1E24;
+
+    --text-primary: #F3F4F6;
+    --text-secondary: #9CA3AF;
+    --text-tertiary: #6B7280;
+
+    --border-subtle: #27272A;
+    --border-medium: #3F3F46;
+    --border-focused: #3377FF;
+
+    --accent-blue: #3377FF;
+    --accent-hover: #558FFF;
+    --accent-muted: #1A2B4C;
+
+    --status-success: #10B981;
+    --status-warning: #F97316;
+    --status-error: #EF4444;
+
+    color-scheme: dark;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background-primary text-text-primary font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-background-primary;
+  }
+
+  ::selection {
+    background-color: var(--accent-muted);
+    color: var(--text-primary);
+  }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-medium);
+    border-radius: 9999px;
+    border: 2px solid var(--bg-primary);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-tertiary);
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-accent text-white hover:bg-accent-hover rounded-lg font-medium px-6 py-3 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-background-tertiary text-text-primary hover:bg-border-subtle rounded-lg px-6 py-3 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-danger {
+    @apply bg-status-error text-white hover:opacity-90 rounded-lg font-medium px-6 py-3 transition-colors;
+  }
+
+  .card-surface {
+    @apply bg-background-secondary border border-border-subtle rounded-xl shadow-sm;
+  }
+
+  .input-field {
+    @apply bg-background-tertiary border border-border-medium focus:border-border-focused text-text-primary placeholder:text-text-tertiary rounded-lg px-4 py-3 w-full transition-colors outline-none;
+  }
+
+  .hash {
+    @apply font-mono text-text-secondary bg-background-tertiary rounded-md px-2 py-1 text-sm;
+  }
+
+  .label-muted {
+    @apply text-text-secondary text-sm;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+}
