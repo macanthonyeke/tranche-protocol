@@ -1,6 +1,8 @@
-// Translates contract events into rich Telegram notifications.
-// Every event emits separate messages tailored to each party (depositor,
-// recipient, arbiter). No two parties receive the same text.
+// Translates contract events into plain-English Telegram notifications.
+// Every event emits separate messages tailored to each party. Each message:
+//   1. Says what happened in human language.
+//   2. Names whose escrow it is (escrow id always present).
+//   3. Ends with a clear next step when one is needed.
 
 import { getAddress } from 'viem';
 import * as db from './db.js';
@@ -31,8 +33,8 @@ const CCTP_CHAIN_NAMES = {
 };
 
 function chainName(domain) {
-  if (domain === undefined || domain === null) return 'Unknown chain';
-  return CCTP_CHAIN_NAMES[Number(domain)] || `Domain ${Number(domain)}`;
+  if (domain === undefined || domain === null) return 'unknown chain';
+  return CCTP_CHAIN_NAMES[Number(domain)] || `domain ${Number(domain)}`;
 }
 
 export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId }) {
@@ -73,39 +75,24 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
 
   // ---------- event handlers ----------
 
-  async function onEscrowCreated({ args }) {
+  async function onEscrowCreated({ args, transactionHash }) {
     const { escrowId, depositor, recipient, amount, deadline } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
-    const milestoneCount = Number(escrow.milestoneCount);
-    const disputeWindow = Number(escrow.disputeWindow);
-    const deliveryNoticeWindow = Number(escrow.deliveryNoticeWindow ?? 0);
-    const reviewHours = Math.round(disputeWindow / 3600);
-    const noticeDays = Math.round(deliveryNoticeWindow / 86400);
+    const noticeDays = Math.round(Number(escrow.deliveryNoticeWindow ?? 0) / 86400);
+    const milestones = Number(escrow.milestoneCount);
 
     const depositorMessage = [
-      `You just locked ${formatUSDC(amount)} USDC into escrow.`,
-      '',
-      `Recipient: ${addr(recipient)}`,
-      `Milestones: ${milestoneCount}`,
-      `Deadline: ${formatDate(deadline)}`,
-      `Review period: ${reviewHours} hours per milestone`,
-      `Delivery window: ${noticeDays} days`,
-      '',
-      `Everything is set. When the recipient signals that work is ready, you will get a notification. You then have ${noticeDays} days to approve or raise a dispute. If you take no action, the payment releases automatically.`,
-    ].join('\n');
+      `Escrow #${escrowId}: you locked ${formatUSDC(amount)} USDC for ${addr(recipient)} across ${milestones} milestone(s), due ${formatDate(deadline)}.`,
+      `When the freelancer signals delivery you have ${noticeDays} days to approve or dispute, otherwise the milestone releases automatically.`,
+      txLink(transactionHash),
+    ].filter(Boolean).join('\n\n');
 
     const recipientMessage = [
-      'You have a new escrow payment waiting for you.',
-      '',
-      `From: ${addr(depositor)}`,
-      `Total: ${formatUSDC(amount)} USDC across ${milestoneCount} milestone(s)`,
-      `Deadline: ${formatDate(deadline)}`,
-      `Review period per milestone: ${reviewHours} hours`,
-      '',
-      `The money is already locked. Start the work, and when you are ready for review, signal delivery in the app. The depositor has ${noticeDays} days to respond before the payment releases automatically.`,
-    ].join('\n');
+      `Escrow #${escrowId}: ${addr(depositor)} has locked ${formatUSDC(amount)} USDC for you across ${milestones} milestone(s), due ${formatDate(deadline)}.`,
+      `Start the work. When a milestone is ready, signal delivery in the app so the ${noticeDays}-day review window can begin.`,
+    ].join('\n\n');
 
     await Promise.all([
       notifyWallet(depositor, depositorMessage),
@@ -117,23 +104,16 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const { escrowId, milestoneIndex } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
-
     const noticeDays = Math.round(Number(escrow.deliveryNoticeWindow ?? 0) / 86400);
-    const human = ordinal(milestoneIndex);
 
-    const depositorMessage = [
-      'The recipient has marked work as ready for your review.',
-      '',
-      `Milestone: ${human}`,
-      '',
-      `You have ${noticeDays} days to respond. Open the app and either approve the milestone or raise a dispute. If you do not respond in time, the payment will release automatically.`,
-    ].join('\n');
+    const depositorMessage =
+      `Escrow #${escrowId}: the freelancer says the ${ordinal(milestoneIndex)} milestone is ready. ` +
+      `You have ${noticeDays} days to approve or dispute it in the app. ` +
+      `If you do nothing, the milestone releases automatically.`;
 
-    const recipientMessage = [
-      `You have signaled delivery on the ${human} milestone.`,
-      '',
-      `The depositor has ${noticeDays} days to review and respond. If they approve, the review period starts. If they raise a dispute, an arbiter steps in. If they take no action, the payment releases automatically when the window closes.`,
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: your delivery signal for the ${ordinal(milestoneIndex)} milestone is in. ` +
+      `The payer now has ${noticeDays} days to approve or dispute. No action needed from you right now.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -147,23 +127,15 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
-
-    const human = ordinal(milestoneIndex);
     const reviewHours = Math.round(Number(escrow.disputeWindow) / 3600);
 
-    const depositorMessage = [
-      `You approved the ${human} milestone.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC`,
-      `The ${reviewHours}-hour review period has started. If no dispute is raised, the payment releases automatically. No further action needed from you.`,
-    ].join('\n');
+    const depositorMessage =
+      `Escrow #${escrowId}: you approved the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
+      `The ${reviewHours}-hour review window has started and the payment releases automatically when it ends. No further action needed.`;
 
-    const recipientMessage = [
-      `The depositor has approved your ${human} milestone.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC`,
-      `You have ${reviewHours} hours to raise a dispute if there is an issue. If everything is correct, the payment releases automatically when the review period ends.`,
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: the payer approved your ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
+      `Payment releases automatically in ${reviewHours} hours. No action needed unless you spot an issue.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -178,21 +150,13 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
 
-    const human = ordinal(milestoneIndex);
+    const depositorMessage =
+      `Escrow #${escrowId}: the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) was auto-released because the delivery review window passed without a response from you. ` +
+      `If you believe the work wasn't done, you can still raise a dispute before the dispute window closes.`;
 
-    const depositorMessage = [
-      `The ${human} milestone payment was released automatically because the delivery notice window expired without a response from you.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC`,
-      'The review period is now active. If you believe the deliverable was not completed correctly, you can still raise a dispute in the app before the review period ends.',
-    ].join('\n');
-
-    const recipientMessage = [
-      `Your ${human} milestone payment was released automatically.`,
-      '',
-      `Amount: ${formatUSDCAfterFee(milestone.amount)} USDC (after 1.99% protocol fee)`,
-      'The depositor did not respond within the delivery window. The payment was triggered automatically and is on its way to your wallet via the Circle Forwarding Service.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: your ${ordinal(milestoneIndex)} milestone was auto-released. ` +
+      `${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is on its way to your wallet via Circle.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -206,42 +170,22 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
+    const reasonText = reason && reason.trim() ? md(reason.trim()) : 'no reason given';
 
-    const human = ordinal(milestoneIndex);
-    const disputedBy = getAddress(raisedBy);
-    const reasonLine = md(reason && reason.trim() ? reason.trim() : 'No reason provided');
+    const depositorMessage =
+      `Escrow #${escrowId}: a dispute was opened on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC at stake). ` +
+      `Reason: ${reasonText}. ` +
+      `Submit any counter-evidence in the app now so the arbiter can see your side.`;
 
-    const depositorMessage = [
-      `A dispute has been opened on the ${human} milestone.`,
-      '',
-      `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${addr(disputedBy)}`,
-      `Reason: ${reasonLine}`,
-      '',
-      'An arbiter will review the evidence. If you have documents or context that support your position, submit counter-evidence in the app now.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: a dispute was opened on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC at stake). ` +
+      `Reason: ${reasonText}. ` +
+      `If you have anything to add, submit it in the app — the arbiter will review both sides.`;
 
-    const recipientMessage = [
-      `A dispute has been opened on the ${human} milestone.`,
-      '',
-      `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${addr(disputedBy)}`,
-      `Reason: ${reasonLine}`,
-      '',
-      'An arbiter has been notified. Submit your response in the app now if you have not already. Your evidence will be reviewed before the arbiter decides.',
-    ].join('\n');
-
-    const arbiterMessage = [
-      'New dispute needs your attention.',
-      '',
-      `Parties: ${addr(escrow.depositor)} (depositor) and ${addr(escrow.recipient)} (recipient)`,
-      `Milestone: ${human} ${formatUSDC(milestone.amount)} USDC`,
-      `Raised by: ${addr(disputedBy)}`,
-      `Evidence hash: ${code(evidenceHash)}`,
-      `Reason: ${reasonLine}`,
-      '',
-      'Open the arbiter panel to review and resolve.',
-    ].join('\n');
+    const arbiterMessage =
+      `Escrow #${escrowId}: new dispute on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
+      `Raised by ${addr(getAddress(raisedBy))}; evidence ${code(evidenceHash)}. ` +
+      `Open the arbiter panel to review.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -254,46 +198,23 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const { escrowId, counteredBy, milestoneIndex, counterEvidenceHash } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
-
-    const human = ordinal(milestoneIndex);
     const submitter = getAddress(counteredBy);
-    const submitterIsRecipient =
-      submitter.toLowerCase() === escrow.recipient.toLowerCase();
+    const submitterIsRecipient = submitter.toLowerCase() === escrow.recipient.toLowerCase();
 
-    // The party who DID NOT submit gets the "the other side responded" note.
-    const depositorMessage = submitterIsRecipient
-      ? [
-          `The recipient has submitted their response to the dispute on the ${human} milestone.`,
-          '',
-          `Counter-evidence hash: ${code(counterEvidenceHash)}`,
-          '',
-          'The arbiter now has both sides and will make a decision. You will be notified when the dispute is resolved.',
-        ].join('\n')
-      : null;
+    const otherPartyMessage =
+      `Escrow #${escrowId}: the other side has submitted their response to the dispute on the ${ordinal(milestoneIndex)} milestone. ` +
+      `The arbiter now has both sides and will make a decision. No action needed from you.`;
 
-    const recipientMessage = !submitterIsRecipient
-      ? [
-          `The depositor has submitted their response to the dispute on the ${human} milestone.`,
-          '',
-          `Counter-evidence hash: ${code(counterEvidenceHash)}`,
-          '',
-          'The arbiter now has both sides and will make a decision. You will be notified when the dispute is resolved.',
-        ].join('\n')
-      : null;
+    const arbiterMessage =
+      `Escrow #${escrowId}: counter-evidence is in for the dispute on the ${ordinal(milestoneIndex)} milestone (${code(counterEvidenceHash)}). ` +
+      `Both sides are now on record. Ready for your decision.`;
 
-    const arbiterMessage = [
-      `Counter-evidence submitted for the dispute on the ${human} milestone.`,
-      '',
-      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
-      `Counter-evidence hash: ${code(counterEvidenceHash)}`,
-      '',
-      'Both parties have submitted evidence. This dispute is ready for your resolution.',
-    ].join('\n');
-
-    const sends = [];
-    if (depositorMessage) sends.push(notifyWallet(escrow.depositor, depositorMessage));
-    if (recipientMessage) sends.push(notifyWallet(escrow.recipient, recipientMessage));
-    sends.push(notifyArbiter(arbiterMessage));
+    const sends = [notifyArbiter(arbiterMessage)];
+    if (submitterIsRecipient) {
+      sends.push(notifyWallet(escrow.depositor, otherPartyMessage));
+    } else {
+      sends.push(notifyWallet(escrow.recipient, otherPartyMessage));
+    }
     await Promise.all(sends);
   }
 
@@ -303,40 +224,19 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
-
-    const human = ordinal(milestoneIndex);
-    const totalMilestones = Number(escrow.milestoneCount);
     const progress = await summarizeProgress(escrowId, escrow);
-    const completedMilestones = progress.completed;
-    const remainingMilestones = totalMilestones - completedMilestones;
+    const tail =
+      progress.completed >= progress.total
+        ? `All ${progress.total} milestones are now done — this escrow is complete.`
+        : `Progress: ${progress.completed} of ${progress.total} milestones done.`;
 
-    const depositorTail =
-      remainingMilestones > 0
-        ? `${completedMilestones} of ${totalMilestones} milestones complete.`
-        : 'All milestones are complete. This escrow is now finished.';
+    const depositorMessage =
+      `Escrow #${escrowId}: the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) has been released to the freelancer after the review window closed with no dispute. ` +
+      `${tail}`;
 
-    const recipientTail =
-      remainingMilestones > 0
-        ? `${completedMilestones} of ${totalMilestones} milestones done. Keep going.`
-        : 'All milestones complete. Well done.';
-
-    const depositorMessage = [
-      `The ${human} milestone payment has been released to the recipient.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC`,
-      'The review period ended with no dispute raised.',
-      '',
-      depositorTail,
-    ].join('\n');
-
-    const recipientMessage = [
-      `Your ${human} milestone payment has been released.`,
-      '',
-      `Amount: ${formatUSDCAfterFee(milestone.amount)} USDC (after 1.99% protocol fee)`,
-      'The review period ended with no dispute and the payment went through automatically.',
-      '',
-      recipientTail,
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: your ${ordinal(milestoneIndex)} milestone has been released — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is heading to your wallet. ` +
+      `${tail}`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -352,32 +252,17 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
 
-    const human = ordinal(milestoneIndex);
+    const depositorMessage =
+      `Escrow #${escrowId}: the arbiter ruled for the freelancer on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been released. ` +
+      `Resolution ${code(resolutionHash)}. This decision is final.`;
 
-    const depositorMessage = [
-      `The arbiter reviewed the dispute on the ${human} milestone and ruled in favor of the recipient.`,
-      '',
-      `Amount released: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${code(resolutionHash)}`,
-      '',
-      'This decision is final and recorded on chain.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: the arbiter ruled in your favor on the ${ordinal(milestoneIndex)} milestone — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is on its way to you. ` +
+      `Resolution ${code(resolutionHash)}.`;
 
-    const recipientMessage = [
-      `The arbiter ruled in your favor on the ${human} milestone.`,
-      '',
-      `Amount: ${formatUSDCAfterFee(milestone.amount)} USDC (after 1.99% protocol fee)`,
-      'The payment is on its way to your wallet.',
-      `Resolution hash: ${code(resolutionHash)}`,
-    ].join('\n');
-
-    const arbiterMessage = [
-      `You resolved the dispute on the ${human} milestone in favor of the recipient.`,
-      '',
-      `Amount released: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${code(resolutionHash)}`,
-      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
-    ].join('\n');
+    const arbiterMessage =
+      `Escrow #${escrowId}: you resolved the ${ordinal(milestoneIndex)} milestone in favor of the freelancer — ${formatUSDC(milestone.amount)} USDC released. ` +
+      `Resolution ${code(resolutionHash)}.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -394,33 +279,17 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
 
-    const human = ordinal(milestoneIndex);
+    const depositorMessage =
+      `Escrow #${escrowId}: the arbiter ruled in your favor on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been added to your refund balance. ` +
+      `Resolution ${code(resolutionHash)}. Open the app and go to Withdraw to claim it.`;
 
-    const depositorMessage = [
-      `The arbiter ruled in your favor on the ${human} milestone.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC added to your refund balance.`,
-      `Resolution hash: ${code(resolutionHash)}`,
-      '',
-      'Open the app and go to Withdraw to claim your funds.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: the arbiter ruled for the payer on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been refunded. ` +
+      `Resolution ${code(resolutionHash)}.`;
 
-    const recipientMessage = [
-      `The arbiter reviewed the dispute on the ${human} milestone and ruled in favor of the depositor.`,
-      '',
-      `Amount: ${formatUSDC(milestone.amount)} USDC has been refunded.`,
-      `Resolution hash: ${code(resolutionHash)}`,
-      '',
-      'Keep the resolution hash as a reference if you need it.',
-    ].join('\n');
-
-    const arbiterMessage = [
-      `You resolved the dispute on the ${human} milestone in favor of the depositor.`,
-      '',
-      `Amount refunded: ${formatUSDC(milestone.amount)} USDC`,
-      `Resolution hash: ${code(resolutionHash)}`,
-      `Escrow: ${addr(escrow.depositor)} and ${addr(escrow.recipient)}`,
-    ].join('\n');
+    const arbiterMessage =
+      `Escrow #${escrowId}: you resolved the ${ordinal(milestoneIndex)} milestone in favor of the payer — ${formatUSDC(milestone.amount)} USDC refunded. ` +
+      `Resolution ${code(resolutionHash)}.`;
 
     await Promise.all([
       notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
@@ -434,17 +303,13 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
-    const depositorMessage = [
-      'The escrow has been cancelled by mutual agreement.',
-      '',
-      'Your refund balance has been updated with the remaining milestone amounts. Open the app and go to Withdraw to claim your funds.',
-    ].join('\n');
+    const depositorMessage =
+      `Escrow #${escrowId}: cancelled by mutual agreement. ` +
+      `Any unspent milestone amounts are now in your refund balance — open the app and go to Withdraw to claim them.`;
 
-    const recipientMessage = [
-      'The escrow has been cancelled by mutual agreement.',
-      '',
-      'Any milestone payments that were already released have been sent to your wallet. No further payments will come from this escrow.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: cancelled by mutual agreement. ` +
+      `Any milestones already released to you are unaffected. No further payments will come from this escrow.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -459,34 +324,17 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
 
-    const human = ordinal(milestoneIndex);
+    const depositorMessage =
+      `Escrow #${escrowId}: the freelancer escalated the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) to the arbiter because the project deadline passed without your approval. ` +
+      `Submit counter-evidence in the app now if you have a reason for not approving.`;
 
-    const depositorMessage = [
-      `The ${human} milestone has been escalated to the arbiter by the recipient.`,
-      '',
-      `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      'The project deadline passed without you approving this milestone.',
-      '',
-      'An arbiter will review the evidence. Submit your counter-evidence in the app now if you have a reason for not approving.',
-    ].join('\n');
+    const recipientMessage =
+      `Escrow #${escrowId}: your escalation of the ${ordinal(milestoneIndex)} milestone is in front of the arbiter. ` +
+      `You'll get a notification when a decision is made.`;
 
-    const recipientMessage = [
-      `You have escalated the ${human} milestone to the arbiter.`,
-      '',
-      `Amount at stake: ${formatUSDC(milestone.amount)} USDC`,
-      'The arbiter has been notified and will review your evidence. You will be notified when a decision is made.',
-    ].join('\n');
-
-    const arbiterMessage = [
-      'A deadline escalation needs your attention.',
-      '',
-      `Parties: ${addr(escrow.depositor)} (depositor) and ${addr(escrow.recipient)} (recipient)`,
-      `Milestone: ${human} ${formatUSDC(milestone.amount)} USDC`,
-      'The project deadline passed and the depositor never approved this milestone.',
-      `Evidence hash: ${code(evidenceHash)}`,
-      '',
-      'Open the arbiter panel to review and resolve.',
-    ].join('\n');
+    const arbiterMessage =
+      `Escrow #${escrowId}: deadline escalation on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
+      `Evidence ${code(evidenceHash)}. Open the arbiter panel to review.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -496,59 +344,107 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
   }
 
   async function onRefundWithdrawn({ args, transactionHash }) {
-    // Event signature: RefundWithdrawn(address indexed depositor, uint256 amount)
-    // The first arg is the destination address (named `recipient` in the new
-    // contract, but the indexed slot is still where the wallet that received
-    // the funds shows up).
     const recipient = args.recipient ?? args.depositor;
     const amount = args.amount;
-
-    const message = [
-      'Your withdrawal was successful.',
-      '',
-      `Amount: ${formatUSDC(amount)} USDC sent to ${addr(recipient)}`,
-      `Transaction: ${code(transactionHash)}`,
-      transactionHash ? `${ARCSCAN_BASE}/tx/${transactionHash}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    // Goes to whichever wallet actually received the funds.
+    const message =
+      `Your withdrawal went through — ${formatUSDC(amount)} USDC sent to ${addr(recipient)}. ` +
+      `${txLink(transactionHash)}`;
     await notifyWallet(recipient, message);
   }
 
   async function onReceivingAddressUpdated({ args }) {
-    const { escrowId, newAddress: newAddressBytes32, newDomain } = args;
+    const { escrowId, oldAddress, newAddress, oldDomain, newDomain } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
-    const newAddress = bytes32ToAddress(newAddressBytes32);
-    // Prefer the event's domain; fall back to the freshly-read escrow state.
-    const destinationDomain = newDomain ?? escrow.destinationDomain;
-    const destinationChain = chainName(destinationDomain);
+    const newAddr = bytes32ToAddress(newAddress);
+    const oldAddr = oldAddress ? bytes32ToAddress(oldAddress) : null;
+    const changedAddr = oldAddr && oldAddr.toLowerCase() !== newAddr.toLowerCase();
+    const changedDomain = oldDomain !== undefined && Number(oldDomain) !== Number(newDomain);
 
-    const depositorMessage = [
-      'The recipient has updated their payment destination for this escrow.',
-      '',
-      `New address: ${addr(newAddress)}`,
-      `Destination chain: ${destinationChain}`,
-      '',
-      'Future milestone payments will now be sent to this address. If you did not expect this change, contact the recipient directly.',
-    ].join('\n');
+    const change =
+      changedAddr && changedDomain
+        ? `address and destination chain (now ${chainName(newDomain)})`
+        : changedDomain
+          ? `destination chain (now ${chainName(newDomain)})`
+          : 'address';
 
-    const recipientMessage = [
-      'Your payment destination has been updated successfully.',
-      '',
-      `New address: ${addr(newAddress)}`,
-      `Destination chain: ${destinationChain}`,
-      '',
-      'All future milestone payments from this escrow will go to this address.',
-    ].join('\n');
+    const depositorMessage =
+      `Escrow #${escrowId}: the freelancer updated their receiving ${change}. ` +
+      `Future milestone payments will go to ${addr(newAddr)} on ${chainName(newDomain)}. ` +
+      `If you didn't expect this, contact the freelancer directly.`;
+
+    const recipientMessage =
+      `Escrow #${escrowId}: your receiving ${change} has been updated successfully. ` +
+      `Future milestone payments will land at ${addr(newAddr)} on ${chainName(newDomain)}.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
       notifyWallet(escrow.recipient, recipientMessage),
     ]);
+  }
+
+  async function onDisputeTimedOutRefunded({ args }) {
+    const { escrowId, milestoneIndex } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+    const milestone = await safeGetMilestone(escrowId, milestoneIndex);
+    const amountLine = milestone ? ` (${formatUSDC(milestone.amount)} USDC)` : '';
+
+    const depositorMessage =
+      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — the arbiter didn't act within 30 days. ` +
+      `The funds have been refunded to your refund balance. Open the app and go to Withdraw to claim them.`;
+
+    const recipientMessage =
+      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — the arbiter didn't act within 30 days, so the funds have been refunded to the payer. ` +
+      `No further action on this milestone.`;
+
+    await Promise.all([
+      notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
+      notifyWallet(escrow.recipient, recipientMessage),
+    ]);
+  }
+
+  async function onRefundCreditTransferred({ args }) {
+    const { from, to, amount } = args;
+    const oldOwnerMessage =
+      `Your refund credit of ${formatUSDC(amount)} USDC has been transferred to ${addr(to)}. ` +
+      `Your balance on that escrow is now zero. If you didn't request this, contact support.`;
+
+    const newOwnerMessage =
+      `You've received a refund credit of ${formatUSDC(amount)} USDC from ${addr(from)}. ` +
+      `Call withdrawRefund in the app to claim it as USDC in your wallet.`;
+
+    await Promise.all([
+      notifyWallet(from, oldOwnerMessage),
+      notifyWallet(to, newOwnerMessage),
+    ]);
+  }
+
+  async function onEscrowTermsSnapshotted({ args }) {
+    const { escrowId, protocolFeeBps, protocolTreasury } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+    const feePct = (Number(protocolFeeBps) / 100).toFixed(2);
+
+    const depositorMessage =
+      `Escrow #${escrowId}: terms locked in. ` +
+      `The protocol fee for this escrow is fixed at ${feePct}% and the treasury is ${addr(protocolTreasury)} — these won't change even if the protocol updates them later. No action needed.`;
+
+    await notifyWallet(escrow.depositor, depositorMessage);
+  }
+
+  async function onSplitConfigured({ args }) {
+    const { escrowId, index, mintRecipient, destinationDomain, bps } = args;
+    const sharePct = (Number(bps) / 100).toFixed(2);
+    const recipient = bytes32ToAddress(mintRecipient);
+
+    const message =
+      `Escrow #${escrowId}: you've been added as payment recipient #${Number(index) + 1}. ` +
+      `Your share is ${sharePct}% and payments will land at ${addr(recipient)} on ${chainName(destinationDomain)}. ` +
+      `No action needed — you'll be notified when funds are released.`;
+
+    await notifyWallet(recipient, message);
   }
 
   // ---------- helpers ----------
@@ -584,7 +480,6 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     for (let i = 0; i < total; i++) {
       const m = await safeGetMilestone(escrowId, i);
       if (!m) continue;
-      // RELEASED=3, REFUNDED=4 both count as "complete"
       if (Number(m.state) === 3 || Number(m.state) === 4) completed += 1;
     }
     return { completed, total };
@@ -608,14 +503,16 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       EscalatedAfterDeadline: onEscalatedAfterDeadline,
       RefundWithdrawn: onRefundWithdrawn,
       ReceivingAddressUpdated: onReceivingAddressUpdated,
+      DisputeTimedOutRefunded: onDisputeTimedOutRefunded,
+      RefundCreditTransferred: onRefundCreditTransferred,
+      EscrowTermsSnapshotted: onEscrowTermsSnapshotted,
+      SplitConfigured: onSplitConfigured,
     },
   };
 }
 
-// ---------- formatting (per spec) ----------
+// ---------- formatting ----------
 
-// Inline-code (backtick) wrap for full addresses so Telegram renders them as
-// tap-to-copy on mobile. Falls back to the raw string if checksumming fails.
 function addr(address) {
   if (!address) return '`unknown`';
   try {
@@ -625,16 +522,18 @@ function addr(address) {
   }
 }
 
-// Inline-code wrap for arbitrary hex strings (hashes, tx hashes).
 function code(value) {
   if (value === undefined || value === null) return '`unknown`';
   return `\`${String(value)}\``;
 }
 
-// Escape Markdown-special characters in untrusted user content (dispute
-// reasons, evidence URIs) so it cannot break the message parsing.
 function md(text) {
   return String(text ?? '').replace(/[_*`\[\]]/g, '\\$&');
+}
+
+function txLink(hash) {
+  if (!hash) return '';
+  return `${ARCSCAN_BASE}/tx/${hash}`;
 }
 
 function formatUSDC(rawAmount) {
@@ -672,7 +571,6 @@ function ordinal(n) {
 function bytes32ToAddress(b32) {
   if (!b32) return '0x';
   const hex = String(b32).toLowerCase();
-  // bytes32 mintRecipient packs an EVM address in the low-order 20 bytes.
   if (hex.length === 66) return '0x' + hex.slice(-40);
   return hex;
 }

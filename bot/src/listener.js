@@ -118,6 +118,49 @@ export function createListener({
     });
   }
 
+  async function getDispute(escrowId, milestoneIndex) {
+    const r = await client.readContract({
+      address: contractAddress,
+      abi,
+      functionName: 'disputes',
+      args: [BigInt(escrowId), BigInt(milestoneIndex)],
+    });
+    // Tuple order: disputedBy, evidenceHash, evidenceURI, reason,
+    // counterEvidenceHash, counterEvidenceURI, resolutionHash, raisedAt.
+    return {
+      disputedBy: r[0],
+      evidenceHash: r[1],
+      evidenceURI: r[2],
+      reason: r[3],
+      counterEvidenceHash: r[4],
+      counterEvidenceURI: r[5],
+      resolutionHash: r[6],
+      raisedAt: r[7],
+    };
+  }
+
+  async function getRefundBalance(wallet) {
+    return await client.readContract({
+      address: contractAddress,
+      abi,
+      functionName: 'refundBalances',
+      args: [wallet],
+    });
+  }
+
+  let cachedArbiterTimeout = null;
+  async function getArbiterInactionTimeout() {
+    if (cachedArbiterTimeout !== null) return cachedArbiterTimeout;
+    const v = await client.readContract({
+      address: contractAddress,
+      abi,
+      functionName: 'ARBITER_INACTION_TIMEOUT',
+      args: [],
+    });
+    cachedArbiterTimeout = v;
+    return v;
+  }
+
   // ---------- event watching with reconnect ----------
 
   let handlersRef = notifier.handlers;
@@ -213,5 +256,8 @@ export function createListener({
     getEscrow,
     getMilestone,
     getEscrowCount,
+    getDispute,
+    getRefundBalance,
+    getArbiterInactionTimeout,
   };
 }

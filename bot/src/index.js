@@ -43,7 +43,7 @@ async function main() {
 
   const bot = createBot({
     token: TELEGRAM_BOT_TOKEN,
-    getListenerStatus: () => listener.getStatus(),
+    listener,
   });
 
   const notifier = createNotifier({
