@@ -52,7 +52,7 @@ export default function WalletButton() {
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center gap-2 rounded-lg border border-border-subtle bg-background-secondary px-3 py-2 hover:bg-background-tertiary transition-colors"
+        className="inline-flex items-center gap-2 rounded-xl border border-border-subtle bg-background-secondary px-3 py-2 hover:bg-background-tertiary transition-all duration-200 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
       >
         <span className="h-2 w-2 rounded-full bg-status-success" />
         <span className="font-mono text-sm">{truncateAddr(address)}</span>

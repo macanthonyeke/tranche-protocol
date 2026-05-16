@@ -1,3 +1,8 @@
+// WARNING: Deployer holds DEFAULT_ADMIN_ROLE,
+// FEE_MANAGER_ROLE, and RECOVERY_MANAGER_ROLE.
+// For mainnet, distribute these roles to separate
+// multisig wallets before announcing deployment.
+
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -123,6 +128,7 @@ console.log('TokenMessenger:', TOKEN_MESSENGER);
 console.log('Treasury:', process.env.PROTOCOL_TREASURY);
 console.log('Deployer wallet ID:', process.env.DEPLOYER_WALLET_ID);
 console.log('Deployer address:', process.env.DEPLOYER_ADDRESS);
+console.log('Deployer will receive DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE, RECOVERY_MANAGER_ROLE.');
 
 const deployResponse = await contractClient.deployContract({
   idempotencyKey: randomUUID(),

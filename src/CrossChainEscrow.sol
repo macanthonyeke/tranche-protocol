@@ -16,6 +16,8 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
     bytes32 public constant ARBITER_ROLE = keccak256("ARBITER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant DOMAIN_MANAGER_ROLE = keccak256("DOMAIN_MANAGER_ROLE");
+    bytes32 public constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
+    bytes32 public constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant MAX_PROTOCOL_FEE = 500; // 5%
@@ -49,8 +51,8 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
     ///         arbiter ample opportunity to act under any plausible workflow.
     uint256 public constant ARBITER_INACTION_TIMEOUT = 30 days;
 
-    IERC20 public usdc;
-    ITokenMessenger public tokenMessenger;
+    IERC20 public immutable usdc;
+    ITokenMessenger public immutable tokenMessenger;
 
     uint256 public escrowCount;
 
@@ -113,6 +115,8 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         _grantRole(ARBITER_ROLE, _arbiter);
         _grantRole(PAUSER_ROLE, _pauser);
         _grantRole(DOMAIN_MANAGER_ROLE, _domainManager);
+        _grantRole(FEE_MANAGER_ROLE, msg.sender);
+        _grantRole(RECOVERY_MANAGER_ROLE, msg.sender);
     }
 
     // =========================================================================
@@ -129,13 +133,13 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         emit SupportedDomainUpdated(destinationDomain, false);
     }
 
-    function setProtocolFee(uint256 _newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setProtocolFee(uint256 _newFeeBps) external onlyRole(FEE_MANAGER_ROLE) {
         if (_newFeeBps > MAX_PROTOCOL_FEE) revert FeeTooHigh();
         emit ProtocolFeeUpdated(protocolFeeBps, _newFeeBps);
         protocolFeeBps = _newFeeBps;
     }
 
-    function setProtocolTreasury(address _newTreasury) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setProtocolTreasury(address _newTreasury) external onlyRole(FEE_MANAGER_ROLE) {
         if (_newTreasury == address(0)) revert ZeroAddress();
         emit ProtocolTreasuryUpdated(protocolTreasury, _newTreasury);
         protocolTreasury = _newTreasury;
@@ -144,7 +148,7 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
     /// @notice Update the maxFee used for cross-chain CCTP forwarding. Admin
     ///         tracks Circle's published gas-based fee and bumps this value
     ///         to keep auto-delivery working without under-fee reverts.
-    function setCctpForwardFee(uint256 fee) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setCctpForwardFee(uint256 fee) external onlyRole(FEE_MANAGER_ROLE) {
         cctpForwardFee = fee;
         emit CctpForwardFeeUpdated(fee);
     }
@@ -413,6 +417,17 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         emit DisputeTimedOutRefunded(escrowId, milestoneIndex);
     }
 
+    /// @notice Permissionless release of a FULFILLED milestone after its
+    ///         dispute window has expired. The caller supplies `maxFee` so the
+    ///         frontend can quote Circle's live forwarding fee at call time.
+    /// @dev    Defense-in-depth floor: when the burn will actually be
+    ///         cross-chain, `maxFee` must be at least the admin-tracked
+    ///         `cctpForwardFee`. Circle still only charges its actual quote
+    ///         (up to maxFee), but the floor stops a permissionless caller
+    ///         from passing a value below the protocol's published fee.
+    ///         Same-chain (Arc) burns force maxFee = 0 inside
+    ///         `_approveAndBurn`, so the floor is intentionally skipped on
+    ///         that path.
     function releaseAfterWindow(uint256 escrowId, uint256 milestoneIndex, uint256 maxFee) external nonReentrant {
         Escrow storage e = escrows[escrowId];
         Milestone storage m = milestones[escrowId][milestoneIndex];
@@ -422,6 +437,7 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
 
         uint256 effectiveWindow = m.deliveredAt > 0 ? e.disputeWindow / 2 : e.disputeWindow;
         if (block.timestamp < m.conditionMetTimestamp + effectiveWindow) revert DisputeWindowNotExpired();
+        if (_isCrossChainEscrow(escrowId, e) && maxFee < cctpForwardFee) revert MaxFeeBelowFloor();
 
         m.state = MilestoneState.RELEASED;
 
@@ -556,6 +572,30 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
         refundBalances[newOwner] += amount;
 
         emit RefundCreditTransferred(msg.sender, newOwner, amount);
+    }
+
+    /// @notice Emergency recovery for wallets blacklisted
+    /// by Circle on chains where USDC is the native gas token
+    /// (e.g. Arc). On such chains a blacklisted wallet cannot
+    /// pay gas and therefore cannot call transferRefundCredit
+    /// itself. Admin verifies wallet ownership off-chain via
+    /// signed message before calling this function.
+    /// @dev Only callable by RECOVERY_MANAGER_ROLE. Does not
+    /// move USDC — only re-keys the internal balance mapping.
+    function adminTransferRefundCredit(
+        address blacklistedWallet,
+        address newOwner
+    ) external onlyRole(RECOVERY_MANAGER_ROLE) nonReentrant {
+        if (newOwner == address(0)) revert ZeroAddress();
+        if (newOwner == blacklistedWallet) revert InvalidRefundRecipient();
+
+        uint256 amount = refundBalances[blacklistedWallet];
+        if (amount == 0) revert NothingToWithdraw();
+
+        refundBalances[blacklistedWallet] = 0;
+        refundBalances[newOwner] += amount;
+
+        emit RefundCreditTransferred(blacklistedWallet, newOwner, amount);
     }
 
     /// @notice Recipient-only redirect for future milestone settlements. Updates
@@ -1087,6 +1127,21 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
             CCTP_MIN_FINALITY_THRESHOLD,
             abi.encodePacked(FORWARD_HOOK_DATA)
         );
+    }
+
+    /// @dev True if at least one destination on this escrow lives outside
+    ///      ARC_DOMAIN, i.e. the burn would actually invoke Circle's
+    ///      Forwarding Service. Used by {releaseAfterWindow} to scope the
+    ///      `maxFee` floor to the path that can be griefed.
+    function _isCrossChainEscrow(uint256 escrowId, Escrow storage e) internal view returns (bool) {
+        SplitRecipient[] storage s = splits[escrowId];
+        if (s.length == 0) {
+            return e.destinationDomain != ARC_DOMAIN;
+        }
+        for (uint256 i = 0; i < s.length; i++) {
+            if (s[i].destinationDomain != ARC_DOMAIN) return true;
+        }
+        return false;
     }
 
     function _validateSplits(SplitRecipient[] calldata _splits) internal view {

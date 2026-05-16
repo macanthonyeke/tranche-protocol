@@ -178,11 +178,12 @@ contract CrossChainEscrowAdversarialTest is Base {
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
 
         // Re-enter releaseAfterWindow from inside CCTP burn
-        bytes memory payload = abi.encodeWithSelector(escrow.releaseAfterWindow.selector, id, uint256(0), uint256(0));
+        bytes memory payload =
+            abi.encodeWithSelector(escrow.releaseAfterWindow.selector, id, uint256(0), uint256(CCTP_FORWARD_FEE));
         attacker.arm(payload);
         tokenMessenger.setReentrancy(address(attacker), abi.encodeWithSelector(ReentrancyAttacker.fire.selector));
 
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
 
         assertTrue(attacker.attempted(), "reentrancy attempt did not fire");
         assertFalse(attacker.lastSucceeded(), "reentrancy was NOT blocked");
@@ -229,7 +230,7 @@ contract CrossChainEscrowAdversarialTest is Base {
         attacker.arm(payload);
         tokenMessenger.setReentrancy(address(attacker), abi.encodeWithSelector(ReentrancyAttacker.fire.selector));
 
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
 
         assertTrue(attacker.attempted());
         assertFalse(attacker.lastSucceeded(), "reentrant withdrawRefund was NOT blocked");
@@ -338,7 +339,7 @@ contract CrossChainEscrowAdversarialTest is Base {
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
         vm.prank(pauser);
         escrow.pause();
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
     }
 
@@ -377,7 +378,7 @@ contract CrossChainEscrowAdversarialTest is Base {
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
         tokenMessenger.setShouldRevert(true);
         vm.expectRevert();
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
         // milestone state preserved (PENDING is wrong; it was set to RELEASED before .call,
         // but the revert unwinds it, so it should still be FULFILLED)
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.FULFILLED));

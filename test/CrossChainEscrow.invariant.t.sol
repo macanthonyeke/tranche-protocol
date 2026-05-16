@@ -19,6 +19,11 @@ contract Handler is Test, ICrossChainEscrow {
     address[] public actors;
     uint256[] public escrowIds;
 
+    // Mirrors the value the invariant runner seeds via setCctpForwardFee; the
+    // handler passes this when calling releaseAfterWindow so the cross-chain
+    // maxFee floor is cleared.
+    uint256 internal constant CCTP_FORWARD_FEE = 100_000;
+
     // Track historical milestone states to validate monotonic forward-only progression.
     mapping(uint256 => mapping(uint256 => uint8)) public lastSeenMilestoneState;
     bool public sawBackwardTransition;
@@ -171,7 +176,7 @@ contract Handler is Test, ICrossChainEscrow {
         // Optionally warp forward to make the window expire.
         uint256 warpAmt = bound(warpSeed, 0, 35 days);
         vm.warp(block.timestamp + warpAmt);
-        try escrow.releaseAfterWindow(id, idx, 0) {
+        try escrow.releaseAfterWindow(id, idx, CCTP_FORWARD_FEE) {
             releaseCalls++;
         } catch {}
     }

@@ -108,14 +108,20 @@ export function useDispute(escrowId, milestoneIndex) {
 
 // Single-call payload for the escrow detail page: escrow + milestones +
 // disputes + splits + derived flags + caller role.
-export function useEscrowDetail(escrowId, caller) {
+// `pollMs` enables periodic refetch so the Workroom updates when the
+// counterparty acts on another device.
+export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
   const enabled = escrowId !== undefined && escrowId !== null && !!caller
   const { data, isLoading, error, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'getEscrowDetail',
     args: enabled ? [BigInt(escrowId), caller] : undefined,
-    query: { enabled }
+    query: {
+      enabled,
+      refetchInterval: pollMs ?? false,
+      refetchIntervalInBackground: false
+    }
   })
 
   const detail = useMemo(() => {

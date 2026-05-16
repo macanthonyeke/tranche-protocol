@@ -7,7 +7,7 @@ import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTheme } from '../hooks/useTheme.jsx'
-import { useToast } from '../hooks/useToast.jsx'
+import { txToast } from '../hooks/useToast.jsx'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { formatUSDC, isValidAddress } from '../utils/format.js'
 
@@ -38,22 +38,24 @@ function SettingsInner() {
 function RefundSection() {
   const { address } = useAccount()
   const { balance, refetch } = useRefundBalance(address)
-  const toast = useToast()
   const [recipient, setRecipient] = useState(address || '')
   const { writeContractAsync } = useWriteContract()
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
   const [txError, setTxError] = useState(null)
+  const [txToastApi, setTxToastApi] = useState(null)
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
 
   useEffect(() => { if (address) setRecipient(address) }, [address])
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); refetch()
-    toast.success('Withdrawal complete.')
+    txToastApi?.success('Withdrawal complete.', { hash: txHash })
   }, [receipt]) // eslint-disable-line
 
   const submit = async () => {
+    const t = txToast({ loading: 'Submitting withdrawal — confirm in wallet…' })
+    setTxToastApi(t)
     try {
       if (!isValidAddress(recipient)) throw new Error('Invalid recipient address')
       setTxError(null); setTxStatus('confirming')
@@ -62,7 +64,11 @@ function RefundSection() {
         functionName: 'withdrawRefund', args: [recipient]
       })
       setTxHash(hash); setTxStatus('pending')
-    } catch (err) { setTxError(err); setTxStatus('error') }
+      t.update('Withdrawal submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error('Withdrawal failed.')
+    }
   }
 
   return (
@@ -119,7 +125,7 @@ function AppearanceSection() {
 function ThemeOption({ active, onClick, label }) {
   return (
     <button onClick={onClick}
-      className={`p-4 rounded-lg border text-sm font-medium transition-colors ${
+      className={`p-4 rounded-xl border text-sm font-medium transition-all duration-200 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
         active ? 'border-accent-blue bg-accent-muted text-accent' : 'border-border-subtle bg-background-tertiary text-text-secondary hover:bg-border-subtle'
       }`}>
       {label}
@@ -143,7 +149,7 @@ function AccountSection() {
 /* ---------- Section wrapper ---------- */
 function Section({ title, description, children }) {
   return (
-    <section className="bg-background-secondary p-6 rounded-xl border border-border-subtle flex flex-col gap-4">
+    <section className="bg-background-secondary p-6 rounded-2xl border border-border-subtle shadow-sm flex flex-col gap-4">
       <header>
         <h2 className="text-lg font-semibold">{title}</h2>
         {description && <p className="text-sm text-text-secondary mt-1">{description}</p>}

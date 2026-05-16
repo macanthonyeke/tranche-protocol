@@ -1,12 +1,17 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useAccount } from 'wagmi'
+import { motion, AnimatePresence } from 'framer-motion'
+import CountUp from 'react-countup'
+
 import ConnectGate from '../components/ConnectGate.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
+import EmptyState from '../components/EmptyState.jsx'
+import Skeleton from '../components/Skeleton.jsx'
 import { EscrowBadge, RoleBadge } from '../components/StatusBadge.jsx'
-import SkeletonCard from '../components/SkeletonCard.jsx'
 import { useDashboard, useUsdcBalance } from '../hooks/useEscrows.js'
-import { formatUSDC } from '../utils/format.js'
+import { useInfiniteList } from '../hooks/useInfiniteList.js'
+import { formatUSDC, formatUSDCNumber } from '../utils/format.js'
 
 export default function Dashboard() {
   return (
@@ -41,11 +46,13 @@ function DashboardInner() {
 
   const activeEscrows = useMemo(() => mySummaries.filter((s) => s.state === 0), [mySummaries])
 
-  // Heuristic for "action required" mirrors the prior contract-derived flags:
-  //   - any disputed milestone in this escrow
-  //   - freelancer with zero released milestones on an active escrow
-  // (We no longer fetch per-milestone state here; the detail page handles the
-  // finer signalled/fulfilled gating.)
+  // Total USDC locked across active escrows where the caller is the payer.
+  const totalLockedUsdc = useMemo(() => {
+    return activeEscrows
+      .filter((s) => s.isPayer)
+      .reduce((acc, s) => acc + Number(s.totalAmount) / 1e6, 0)
+  }, [activeEscrows])
+
   const actionRequired = useMemo(() => activeEscrows.filter((s) => {
     if (s.disputedMilestoneCount > 0) return true
     if (!s.isPayer && s.releasedMilestoneCount === 0) return true
@@ -76,7 +83,21 @@ function DashboardInner() {
           tone={openDisputeCount > 0 ? 'warning' : 'default'}
           loading={isLoading}
         />
-        <StatCard label="USDC Balance" value={formatUSDC(usdcBalance)} mono loading={isLoading} />
+        <StatCard
+          label="Total USDC Locked"
+          mono
+          loading={isLoading}
+          value={
+            <CountUp
+              end={totalLockedUsdc}
+              duration={0.8}
+              decimals={2}
+              separator=","
+              suffix=" USDC"
+              preserveValue
+            />
+          }
+        />
         <StatCard
           label="Refund Available"
           value={formatUSDC(refundBal)}
@@ -87,39 +108,83 @@ function DashboardInner() {
         />
       </div>
 
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 -mt-2">
+        <StatCard label="USDC Balance" value={formatUSDCNumber(usdcBalance) + ' USDC'} mono loading={isLoading} />
+      </div>
+
       {isLoading ? (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-7 flex flex-col gap-4"><SkeletonCard /><SkeletonCard /></div>
-          <div className="lg:col-span-5 flex flex-col gap-4"><SkeletonCard /></div>
-        </div>
+        <DashboardSkeleton />
       ) : activeEscrows.length === 0 ? (
-        <div className="card-surface p-12 text-center">
-          <h2 className="text-xl font-semibold mb-2">No escrows yet</h2>
-          <p className="text-sm text-text-secondary mb-6">When you create or receive an escrow, it'll appear here.</p>
-          <Link to="/create" className="btn-primary inline-flex">Create your first escrow</Link>
-        </div>
+        <EmptyState
+          title="No active escrows yet."
+          message="Let's lock in your first contract."
+          ctaLabel="Create your first escrow"
+          ctaTo="/create"
+        />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <section className="lg:col-span-7 flex flex-col gap-4">
-            <SectionHeader title="Action Required" count={actionRequired.length} tone="warning" />
-            {actionRequired.length === 0 ? (
-              <EmptyPanel text="Nothing needs your attention. Sit tight." />
-            ) : (
-              actionRequired.map((e) => <EscrowCard key={e.id} summary={e} />)
-            )}
-          </section>
-
-          <section className="lg:col-span-5 flex flex-col gap-4">
-            <SectionHeader title="Awaiting" count={awaiting.length} />
-            {awaiting.length === 0 ? (
-              <EmptyPanel text="No escrows waiting." />
-            ) : (
-              awaiting.map((e) => <EscrowCard key={e.id} summary={e} />)
-            )}
-          </section>
+          <EscrowSection
+            className="lg:col-span-7"
+            title="Action Required"
+            tone="warning"
+            escrows={actionRequired}
+            emptyText="Nothing needs your attention. Sit tight."
+          />
+          <EscrowSection
+            className="lg:col-span-5"
+            title="Awaiting"
+            escrows={awaiting}
+            emptyText="No escrows waiting."
+          />
         </div>
       )}
     </div>
+  )
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      <div className="lg:col-span-7 flex flex-col gap-4">
+        <Skeleton className="h-40" />
+        <Skeleton className="h-40" />
+      </div>
+      <div className="lg:col-span-5 flex flex-col gap-4">
+        <Skeleton className="h-40" />
+      </div>
+    </div>
+  )
+}
+
+function EscrowSection({ title, tone = 'default', escrows, emptyText, className = '' }) {
+  const { visible, hasMore, sentinelRef } = useInfiniteList(escrows, { pageSize: 8 })
+  return (
+    <section className={`flex flex-col gap-4 ${className}`}>
+      <SectionHeader title={title} count={escrows.length} tone={tone} />
+      {escrows.length === 0 ? (
+        <div className="card-surface p-6 text-sm text-text-secondary">{emptyText}</div>
+      ) : (
+        <AnimatePresence initial={false}>
+          {visible.map((e) => (
+            <motion.div
+              key={e.id}
+              layout
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+            >
+              <EscrowCard summary={e} />
+            </motion.div>
+          ))}
+          {hasMore && (
+            <div ref={sentinelRef} className="flex flex-col gap-4">
+              <Skeleton className="h-40" />
+            </div>
+          )}
+        </AnimatePresence>
+      )}
+    </section>
   )
 }
 
@@ -136,12 +201,6 @@ function SectionHeader({ title, count, tone = 'default' }) {
   )
 }
 
-function EmptyPanel({ text }) {
-  return (
-    <div className="card-surface p-6 text-sm text-text-secondary">{text}</div>
-  )
-}
-
 function StatCard({ label, value, mono = false, tone = 'default', action = null, loading = false }) {
   const valueCls = tone === 'warning'
     ? 'text-status-warning'
@@ -152,7 +211,7 @@ function StatCard({ label, value, mono = false, tone = 'default', action = null,
     <div className="card-surface p-5 flex flex-col gap-1">
       <div className="text-xs text-text-secondary">{label}</div>
       <div className={`text-2xl font-semibold ${valueCls} ${mono ? 'font-mono' : ''}`}>
-        {loading ? <span className="inline-block animate-pulse rounded bg-background-tertiary h-7 w-20" /> : value}
+        {loading ? <Skeleton className="h-7 w-24 inline-block" /> : value}
       </div>
       {action && <div className="mt-1">{action}</div>}
     </div>
@@ -170,33 +229,35 @@ function EscrowCard({ summary }) {
   return (
     <Link
       to={`/escrow/${summary.id}`}
-      className="card-surface p-5 hover:border-border-medium transition-colors flex flex-col gap-4"
+      className="card-clickable block p-5"
     >
-      <div className="flex items-center justify-between gap-2">
-        <RoleBadge role={role} />
-        <EscrowBadge state={summary.state} />
-      </div>
-
-      <div className="flex items-baseline gap-3 flex-wrap">
-        <span className="font-mono text-sm text-text-secondary">{inv}</span>
-        <span className="text-text-tertiary">·</span>
-        <span className="font-mono text-lg text-text-primary">{formatUSDC(summary.totalAmount)}</span>
-      </div>
-
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="text-xs text-text-secondary mb-1">{otherLabel}</div>
-          <AddressDisplay address={otherParty} size="sm" />
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-2">
+          <RoleBadge role={role} />
+          <EscrowBadge state={summary.state} />
         </div>
-        <div className="text-right">
-          <div className="text-xs text-text-secondary mb-1">Milestones</div>
-          <div className="text-sm font-mono">{summary.releasedMilestoneCount} / {summary.milestoneCount} paid</div>
-        </div>
-      </div>
 
-      <div className="flex items-center justify-between pt-2 border-t border-border-subtle">
-        <span className="text-xs text-text-tertiary">Escrow #{summary.id}</span>
-        <span className="text-sm text-accent">Open →</span>
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <span className="font-mono text-sm text-text-secondary">{inv}</span>
+          <span className="text-text-tertiary">·</span>
+          <span className="font-mono text-lg text-text-primary">{formatUSDC(summary.totalAmount)}</span>
+        </div>
+
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-xs text-text-secondary mb-1">{otherLabel}</div>
+            <AddressDisplay address={otherParty} size="sm" />
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-text-secondary mb-1">Milestones</div>
+            <div className="text-sm font-mono">{summary.releasedMilestoneCount} / {summary.milestoneCount} paid</div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between pt-2 border-t border-border-subtle">
+          <span className="text-xs text-text-tertiary">Escrow #{summary.id}</span>
+          <span className="text-sm text-accent">Open →</span>
+        </div>
       </div>
     </Link>
   )

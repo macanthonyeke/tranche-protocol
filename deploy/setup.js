@@ -1,3 +1,8 @@
+// WARNING: Deployer holds DEFAULT_ADMIN_ROLE,
+// FEE_MANAGER_ROLE, and RECOVERY_MANAGER_ROLE.
+// For mainnet, distribute these roles to separate
+// multisig wallets before announcing deployment.
+
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -52,6 +57,27 @@ const DEFAULT_ADMIN_ROLE = '0x00000000000000000000000000000000000000000000000000
 
 if (DOMAIN_MANAGER_ADDRESS.toLowerCase() === DEPLOYER_ADDRESS.toLowerCase()) {
   throw new Error('DOMAIN_MANAGER_ADDRESS must be different from DEPLOYER_ADDRESS.');
+}
+
+// Basic sanity check: sensitive roles should not share an address with the
+// deployer EOA. A shared address means a single key compromise reaches every
+// privileged action. We cannot detect a multisig from off-chain, so the
+// strongest signal we have is "this isn't the deployer EOA". For mainnet,
+// confirm separately that each address below is a multisig.
+const SENSITIVE_ADDRESSES = [
+  ['PROTOCOL_TREASURY', process.env.PROTOCOL_TREASURY],
+  ['ARBITER_ADDRESS', process.env.ARBITER_ADDRESS],
+  ['PAUSER_ADDRESS', process.env.PAUSER_ADDRESS],
+];
+for (const [label, addr] of SENSITIVE_ADDRESSES) {
+  if (!addr) continue;
+  if (addr.toLowerCase() === DEPLOYER_ADDRESS.toLowerCase()) {
+    console.warn(
+      `WARNING: ${label} (${addr}) is the same as DEPLOYER_ADDRESS. ` +
+        'A single-key compromise would reach every privileged role. ' +
+        'For mainnet, set this to a dedicated multisig.',
+    );
+  }
 }
 
 const domainManagerPrivateKey = process.env.DOMAIN_MANAGER_PRIVATE_KEY.startsWith('0x')
@@ -186,10 +212,6 @@ async function readContract(functionName, args = []) {
   });
 }
 
-async function grantRoleAndWait(role, account, label) {
-  await executeAndWait('grantRole', [role, account], `Granting ${label} to ${account}`);
-}
-
 async function grantRoleIfMissing(role, account, label) {
   const hasRole = await readContract('hasRole', [role, account]);
   if (hasRole) {
@@ -241,15 +263,19 @@ function updateDownstreamConfig(contractAddress) {
 console.log('Setting up CrossChainEscrow V2...');
 console.log('Contract:', CONTRACT_ADDRESS);
 
-const [arbiterRole, pauserRole, domainManagerRole] = await Promise.all([
+const [arbiterRole, pauserRole, domainManagerRole, feeManagerRole, recoveryManagerRole] = await Promise.all([
   readContract('ARBITER_ROLE'),
   readContract('PAUSER_ROLE'),
   readContract('DOMAIN_MANAGER_ROLE'),
+  readContract('FEE_MANAGER_ROLE'),
+  readContract('RECOVERY_MANAGER_ROLE'),
 ]);
 
 console.log('ARBITER_ROLE:', arbiterRole);
 console.log('PAUSER_ROLE:', pauserRole);
 console.log('DOMAIN_MANAGER_ROLE:', domainManagerRole);
+console.log('FEE_MANAGER_ROLE:', feeManagerRole);
+console.log('RECOVERY_MANAGER_ROLE:', recoveryManagerRole);
 
 const deployerIsAdmin = await readContract('hasRole', [DEFAULT_ADMIN_ROLE, DEPLOYER_ADDRESS]);
 
@@ -266,8 +292,11 @@ if (!deployerIsAdmin) {
 
 console.log('Deployer has DEFAULT_ADMIN_ROLE:', deployerIsAdmin);
 
-await grantRoleAndWait(arbiterRole, process.env.ARBITER_ADDRESS, 'ARBITER_ROLE');
-await grantRoleAndWait(pauserRole, process.env.PAUSER_ADDRESS, 'PAUSER_ROLE');
+// ARBITER_ROLE, PAUSER_ROLE, and DOMAIN_MANAGER_ROLE are granted by the
+// constructor to the addresses supplied at deploy time, so no grantRole
+// calls are needed here. DEFAULT_ADMIN_ROLE / FEE_MANAGER_ROLE /
+// RECOVERY_MANAGER_ROLE remain with the deployer — see warning at top of
+// file before mainnet.
 await grantRoleIfMissing(domainManagerRole, DOMAIN_MANAGER_ADDRESS, 'DOMAIN_MANAGER_ROLE');
 
 await executeWithDomainManagerAndWait(
@@ -276,25 +305,25 @@ await executeWithDomainManagerAndWait(
   'Adding Arc Testnet (domain 26) as supported domain',
 );
 
+// INTENTIONAL — initial deploy ships with the CCTP forwarding fee unset.
+// Same-chain (Arc -> Arc) releases work because _approveAndBurn forces
+// maxFee = 0 there. Cross-chain `claimSilentApproval` and
+// `releaseAfterWindow` will revert until a FEE_MANAGER bumps this to
+// match Circle's published forwarding fee (`tokenMessenger.getMinFeeAmount`).
+// Update with `node setFee.js` before any cross-chain testing.
 await executeAndWait(
   'setCctpForwardFee',
   [0],
   'Setting initial CCTP forward fee to 0 (same-chain only for now)',
 );
 
-if (await readContract('hasRole', [domainManagerRole, DEPLOYER_ADDRESS])) {
-  await executeAndWait(
-    'revokeRole',
-    [domainManagerRole, DEPLOYER_ADDRESS],
-    `Revoking DOMAIN_MANAGER_ROLE from deployer ${DEPLOYER_ADDRESS}`,
-  );
-}
-
 const [
   arbiterSet,
   pauserSet,
   domainManagerSet,
   deployerStillDomainManager,
+  deployerFeeManager,
+  deployerRecoveryManager,
   arcSupported,
   cctpForwardFee,
 ] = await Promise.all([
@@ -302,6 +331,8 @@ const [
   readContract('hasRole', [pauserRole, process.env.PAUSER_ADDRESS]),
   readContract('hasRole', [domainManagerRole, DOMAIN_MANAGER_ADDRESS]),
   readContract('hasRole', [domainManagerRole, DEPLOYER_ADDRESS]),
+  readContract('hasRole', [feeManagerRole, DEPLOYER_ADDRESS]),
+  readContract('hasRole', [recoveryManagerRole, DEPLOYER_ADDRESS]),
   readContract('supportedDomains', [26]),
   readContract('cctpForwardFee'),
 ]);
@@ -311,6 +342,8 @@ console.log('Arbiter configured:', arbiterSet);
 console.log('Pauser configured:', pauserSet);
 console.log('Domain manager configured:', domainManagerSet);
 console.log('Deployer still domain manager:', deployerStillDomainManager);
+console.log('Deployer has FEE_MANAGER_ROLE:', deployerFeeManager);
+console.log('Deployer has RECOVERY_MANAGER_ROLE:', deployerRecoveryManager);
 console.log('Arc domain 26 supported:', arcSupported);
 console.log('cctpForwardFee:', cctpForwardFee.toString());
 

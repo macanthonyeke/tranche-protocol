@@ -122,7 +122,10 @@ abstract contract Base is Test, ICrossChainEscrow {
     }
 
     function _release(uint256 escrowId, uint256 idx) internal {
-        escrow.releaseAfterWindow(escrowId, idx, 0);
+        // Default helper passes CCTP_FORWARD_FEE so cross-chain escrows
+        // (the suite default DEST_DOMAIN) clear the maxFee floor introduced
+        // in releaseAfterWindow. Same-chain tests override maxFee internally.
+        escrow.releaseAfterWindow(escrowId, idx, CCTP_FORWARD_FEE);
     }
 
     function _getMilestoneState(uint256 escrowId, uint256 idx) internal view returns (MilestoneState) {

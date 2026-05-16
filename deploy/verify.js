@@ -1,3 +1,8 @@
+// Post-deploy verification. Reads on-chain state via the Arc RPC and
+// logs PASSED / FAILED for each invariant the setup script is supposed
+// to leave in place. Exits non-zero if any check fails so this can be
+// wired into CI / release scripts.
+
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -20,6 +25,8 @@ if (!isAddress(process.env.CONTRACT_ADDRESS)) {
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 const ARC_RPC_URL = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
 const DEFAULT_ADMIN_ROLE = '0x0000000000000000000000000000000000000000000000000000000000000000';
+const ARC_DOMAIN = 26;
+const EXPECTED_PROTOCOL_FEE_BPS = 199n;
 
 const artifact = JSON.parse(
   fs.readFileSync(
@@ -57,24 +64,21 @@ function readContract(functionName, args = []) {
 async function getRoleMembers(role) {
   const count = await readContract('getRoleMemberCount', [role]);
   const members = [];
-
   for (let index = 0n; index < count; index++) {
     members.push(await readContract('getRoleMember', [role, index]));
   }
-
   return members;
 }
 
-async function getSupportedDomains() {
-  const domains = [];
+const results = [];
 
-  for (let domain = 0; domain <= 31; domain++) {
-    if (await readContract('supportedDomains', [domain])) {
-      domains.push(domain);
-    }
-  }
+function record(name, ok, detail) {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? 'PASSED' : 'FAILED'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
 
-  return domains;
+function eqAddress(a, b) {
+  return a && b && a.toLowerCase() === b.toLowerCase();
 }
 
 const [
@@ -87,9 +91,11 @@ const [
   arbiterRole,
   pauserRole,
   domainManagerRole,
+  feeManagerRole,
+  recoveryManagerRole,
   escrowCount,
   paused,
-  supportedDomains,
+  arcSupported,
 ] = await Promise.all([
   readContract('usdc'),
   readContract('tokenMessenger'),
@@ -100,43 +106,112 @@ const [
   readContract('ARBITER_ROLE'),
   readContract('PAUSER_ROLE'),
   readContract('DOMAIN_MANAGER_ROLE'),
+  readContract('FEE_MANAGER_ROLE'),
+  readContract('RECOVERY_MANAGER_ROLE'),
   readContract('escrowCount'),
   readContract('paused'),
-  getSupportedDomains(),
+  readContract('supportedDomains', [ARC_DOMAIN]),
 ]);
 
 const [
+  defaultAdminMembers,
   arbiterMembers,
   pauserMembers,
   domainManagerMembers,
-  defaultAdminMembers,
+  feeManagerMembers,
+  recoveryManagerMembers,
 ] = await Promise.all([
+  getRoleMembers(DEFAULT_ADMIN_ROLE),
   getRoleMembers(arbiterRole),
   getRoleMembers(pauserRole),
   getRoleMembers(domainManagerRole),
-  getRoleMembers(DEFAULT_ADMIN_ROLE),
+  getRoleMembers(feeManagerRole),
+  getRoleMembers(recoveryManagerRole),
 ]);
 
-console.log('CrossChainEscrow V2 Deployment Report');
-console.log('=====================================');
-console.log('Contract address:', CONTRACT_ADDRESS);
-console.log('USDC address:', usdc);
-console.log('TokenMessenger address:', tokenMessenger);
-console.log('Protocol treasury:', protocolTreasury);
-console.log(`Protocol fee: ${protocolFeeBps.toString()} bps (${Number(protocolFeeBps) / 100}%)`);
+console.log('CrossChainEscrow V2 Deployment Verification');
+console.log('===========================================');
+console.log('Contract:', CONTRACT_ADDRESS);
+console.log('USDC:', usdc);
+console.log('TokenMessenger:', tokenMessenger);
+console.log('Treasury:', protocolTreasury);
+console.log(`Protocol fee: ${protocolFeeBps.toString()} bps`);
 console.log('cctpForwardFee:', cctpForwardFee.toString());
 console.log('ARC_DOMAIN:', arcDomain.toString());
-console.log('Supported domains 0-31:', supportedDomains.length ? supportedDomains.join(', ') : '(none)');
 console.log('escrowCount:', escrowCount.toString());
-console.log('Paused:', paused);
+console.log('');
 
-console.log('\nRoles');
-console.log('-----');
-console.log('DEFAULT_ADMIN_ROLE:', DEFAULT_ADMIN_ROLE);
-console.log('DEFAULT_ADMIN_ROLE holders:', defaultAdminMembers.length ? defaultAdminMembers.join(', ') : '(none)');
-console.log('ARBITER_ROLE:', arbiterRole);
-console.log('ARBITER_ROLE holders:', arbiterMembers.length ? arbiterMembers.join(', ') : '(none)');
-console.log('PAUSER_ROLE:', pauserRole);
-console.log('PAUSER_ROLE holders:', pauserMembers.length ? pauserMembers.join(', ') : '(none)');
-console.log('DOMAIN_MANAGER_ROLE:', domainManagerRole);
-console.log('DOMAIN_MANAGER_ROLE holders:', domainManagerMembers.length ? domainManagerMembers.join(', ') : '(none)');
+// --- Role assignments ---
+const expectedArbiter = process.env.ARBITER_ADDRESS;
+const expectedPauser = process.env.PAUSER_ADDRESS;
+const expectedDomainManager = process.env.DOMAIN_MANAGER_ADDRESS;
+const expectedDeployer = process.env.DEPLOYER_ADDRESS;
+const expectedTreasury = process.env.PROTOCOL_TREASURY;
+
+record(
+  'DEFAULT_ADMIN_ROLE held by deployer',
+  expectedDeployer ? defaultAdminMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
+  defaultAdminMembers.join(', ') || '(none)',
+);
+record(
+  'ARBITER_ROLE held by configured arbiter',
+  expectedArbiter ? arbiterMembers.some((m) => eqAddress(m, expectedArbiter)) : false,
+  arbiterMembers.join(', ') || '(none)',
+);
+record(
+  'PAUSER_ROLE held by configured pauser',
+  expectedPauser ? pauserMembers.some((m) => eqAddress(m, expectedPauser)) : false,
+  pauserMembers.join(', ') || '(none)',
+);
+record(
+  'DOMAIN_MANAGER_ROLE held by configured domain manager',
+  expectedDomainManager ? domainManagerMembers.some((m) => eqAddress(m, expectedDomainManager)) : false,
+  domainManagerMembers.join(', ') || '(none)',
+);
+record(
+  'FEE_MANAGER_ROLE held by deployer',
+  expectedDeployer ? feeManagerMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
+  feeManagerMembers.join(', ') || '(none)',
+);
+record(
+  'RECOVERY_MANAGER_ROLE held by deployer',
+  expectedDeployer ? recoveryManagerMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
+  recoveryManagerMembers.join(', ') || '(none)',
+);
+
+// --- Pause state ---
+record('Contract is not paused', paused === false, `paused=${paused}`);
+
+// --- Protocol fee ---
+record(
+  `Protocol fee equals expected ${EXPECTED_PROTOCOL_FEE_BPS} bps`,
+  BigInt(protocolFeeBps) === EXPECTED_PROTOCOL_FEE_BPS,
+  `actual=${protocolFeeBps.toString()} bps`,
+);
+
+// --- Supported domains ---
+record(
+  `Arc domain (${ARC_DOMAIN}) is in the supported allow-list`,
+  arcSupported === true,
+  `supportedDomains[${ARC_DOMAIN}]=${arcSupported}`,
+);
+
+// --- Treasury address ---
+record(
+  'Treasury matches configured PROTOCOL_TREASURY',
+  expectedTreasury ? eqAddress(protocolTreasury, expectedTreasury) : false,
+  `on-chain=${protocolTreasury}, env=${expectedTreasury ?? '(unset)'}`,
+);
+
+const failed = results.filter((r) => !r.ok);
+console.log('');
+console.log(
+  `Result: ${results.length - failed.length} passed, ${failed.length} failed`,
+);
+
+if (failed.length > 0) {
+  console.error('Verification FAILED. See above.');
+  process.exit(1);
+}
+
+console.log('Verification PASSED.');

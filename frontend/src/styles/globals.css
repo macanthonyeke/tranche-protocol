@@ -67,15 +67,44 @@
   body {
     @apply bg-background-primary text-text-primary font-sans antialiased;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  }
-
-  *:focus-visible {
-    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-background-primary;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   ::selection {
     background-color: var(--accent-muted);
     color: var(--text-primary);
+  }
+
+  /* Strip native browser styling on form controls.
+     Force tertiary bg so old muddy/brownish system tints can't bleed through. */
+  input[type='text'],
+  input[type='number'],
+  input[type='email'],
+  input[type='url'],
+  input[type='search'],
+  input[type='password'],
+  input:not([type]),
+  textarea,
+  select {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+    box-shadow: none;
+  }
+
+  /* Kill iOS / macOS auto-fill yellow tint */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  textarea:-webkit-autofill,
+  select:-webkit-autofill {
+    -webkit-box-shadow: 0 0 0px 1000px var(--bg-tertiary) inset !important;
+    -webkit-text-fill-color: var(--text-primary) !important;
+    caret-color: var(--text-primary);
   }
 
   /* Scrollbars */
@@ -97,24 +126,51 @@
 }
 
 @layer components {
+  /* ----- Buttons: tactile press, focus ring, soft shadow ----- */
   .btn-primary {
-    @apply bg-accent text-white hover:bg-accent-hover rounded-lg font-medium px-6 py-3 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center bg-accent text-white hover:bg-accent-hover rounded-xl font-medium px-6 py-3
+           shadow-sm transition-all duration-200 active:scale-[0.98]
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
   .btn-secondary {
-    @apply bg-background-tertiary text-text-primary hover:bg-border-subtle rounded-lg px-6 py-3 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center bg-background-tertiary text-text-primary hover:bg-border-subtle rounded-xl px-6 py-3 font-medium
+           transition-all duration-200 active:scale-[0.98]
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
   .btn-danger {
-    @apply bg-status-error text-white hover:opacity-90 rounded-lg font-medium px-6 py-3 transition-colors;
+    @apply inline-flex items-center justify-center bg-status-error text-white hover:opacity-90 rounded-xl font-medium px-6 py-3
+           shadow-sm transition-all duration-200 active:scale-[0.98]
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
+  /* ----- Surfaces ----- */
   .card-surface {
-    @apply bg-background-secondary border border-border-subtle rounded-xl shadow-sm;
+    @apply bg-background-secondary border border-border-subtle rounded-2xl shadow-sm;
   }
 
+  /* Interactive card: subtle lift on hover */
+  .card-clickable {
+    @apply card-surface transition-all duration-200 hover:shadow-md hover:-translate-y-0.5
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
+  }
+
+  /* ----- Inputs: solid bg, h-12, flat, focus ring ----- */
   .input-field {
-    @apply bg-background-tertiary border border-border-medium focus:border-border-focused text-text-primary placeholder:text-text-tertiary rounded-lg px-4 py-3 w-full transition-colors outline-none;
+    @apply bg-background-tertiary border border-border-subtle text-text-primary placeholder:text-text-tertiary
+           rounded-xl px-4 h-12 w-full appearance-none
+           transition-all duration-200
+           focus:outline-none focus:border-border-focused
+           focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
+  }
+
+  /* Textarea variant — same look but auto height */
+  .input-field-multiline {
+    @apply input-field h-auto py-3;
   }
 
   .hash {
@@ -129,5 +185,10 @@
 @layer utilities {
   .scrollbar-thin {
     scrollbar-width: thin;
+  }
+
+  /* Skeleton primitive — animate-pulse + tertiary bg + rounded-xl */
+  .skeleton {
+    @apply animate-pulse bg-background-tertiary rounded-xl;
   }
 }

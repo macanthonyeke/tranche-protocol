@@ -499,12 +499,13 @@ contract CrossChainEscrowUpgradesTest is Base {
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        // Pass a non-zero live forwarding fee; the public API forwards it
-        // directly to CCTP.
-        escrow.releaseAfterWindow(id, 0, 12345);
+        // Pass a non-zero live forwarding fee at or above the
+        // `cctpForwardFee` floor; the public API forwards it directly to CCTP.
+        uint256 liveFee = CCTP_FORWARD_FEE + 12345;
+        escrow.releaseAfterWindow(id, 0, liveFee);
 
         (,,,,,, uint256 maxFee, uint32 minFinality,,) = _readBurnCall();
-        assertEq(maxFee, 12345, "cross-chain maxFee must equal the caller-supplied fee");
+        assertEq(maxFee, liveFee, "cross-chain maxFee must equal the caller-supplied fee");
         assertEq(uint256(minFinality), 2000, "minFinalityThreshold must be 2000 (Standard Transfer)");
         assertEq(uint256(escrow.CCTP_MIN_FINALITY_THRESHOLD()), 2000);
     }

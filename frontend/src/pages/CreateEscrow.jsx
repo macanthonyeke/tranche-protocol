@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useWaitForTransactionReceipt, useWriteContract, useReadContract } from 'wagmi'
 import { decodeEventLog } from 'viem'
+import { motion, AnimatePresence } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
@@ -9,7 +10,7 @@ import DatePicker from '../components/DatePicker.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
-import { useToast } from '../hooks/useToast.jsx'
+import { txToast } from '../hooks/useToast.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { ARC_DOMAIN, getDomainName, isEvmDomain } from '../config/chains.js'
 import { CONTRACT_ADDRESS, USDC_ADDRESS, ESCROW_ABI, USDC_ABI } from '../config/contract.js'
@@ -68,7 +69,6 @@ export default function CreateEscrow() {
 
 function Wizard() {
   const navigate = useNavigate()
-  const toast = useToast()
   const { address } = useAccount()
   const { supported, isLoading: loadingDomains } = useSupportedDomains()
 
@@ -99,6 +99,7 @@ function Wizard() {
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
   const [txError, setTxError] = useState(null)
+  const [txToastApi, setTxToastApi] = useState(null)
   const { writeContractAsync } = useWriteContract()
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
 
@@ -174,6 +175,8 @@ function Wizard() {
   const milestoneSum = milestoneAmountsBigInt.reduce((a, b) => a + b, 0n)
 
   const onApprove = async () => {
+    const t = txToast({ loading: 'Approving USDC — confirm in wallet…' })
+    setTxToastApi(t)
     try {
       setTxError(null); setTxStatus('confirming'); setPhase('approve')
       const hash = await writeContractAsync({
@@ -181,10 +184,16 @@ function Wizard() {
         args: [CONTRACT_ADDRESS, totalBaseUnits]
       })
       setTxHash(hash); setTxStatus('pending')
-    } catch (err) { setTxError(err); setTxStatus('error') }
+      t.update('Approval submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error('Approval failed.')
+    }
   }
 
   const onDeposit = async () => {
+    const t = txToast({ loading: 'Creating escrow — confirm in wallet…' })
+    setTxToastApi(t)
     try {
       if (milestoneSum !== totalBaseUnits) throw new Error('Amount mismatch')
       const invoiceHash = state.useCustomHash ? state.customInvoiceHash : hashDescription(state.description)
@@ -215,13 +224,19 @@ function Wizard() {
         ]
       })
       setTxHash(hash); setTxStatus('pending')
-    } catch (err) { setTxError(err); setTxStatus('error') }
+      t.update('Deposit submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error('Deposit failed.')
+    }
   }
 
   useEffect(() => {
     if (!receipt) return
-    if (phase === 'approve') { setTxStatus('success'); refetchAllowance() }
-    else if (phase === 'deposit') {
+    if (phase === 'approve') {
+      setTxStatus('success'); refetchAllowance()
+      txToastApi?.success('USDC approved.', { hash: txHash })
+    } else if (phase === 'deposit') {
       let escrowId = null
       try {
         for (const log of receipt.logs) {
@@ -240,7 +255,7 @@ function Wizard() {
       }
       setTxStatus('success')
       try { localStorage.removeItem(DRAFT_KEY) } catch {}
-      toast.success('Escrow created successfully.')
+      txToastApi?.success('Escrow created successfully.', { hash: txHash })
       setTimeout(() => navigate(escrowId !== null ? `/escrow/${escrowId}` : '/dashboard'), 800)
     }
   }, [receipt]) // eslint-disable-line
@@ -261,19 +276,30 @@ function Wizard() {
       <ProgressTracker step={step} onJump={(i) => i < step && setStep(i)} />
 
       {/* Form card */}
-      <div className="md:w-3/4 card-surface p-6 md:p-8 rounded-2xl">
+      <div className="md:w-3/4 card-surface p-6 md:p-8">
         <div className="flex flex-col gap-6">
-          {step === 1 && <Step1 state={state} setState={setState} errors={errors} chainOptions={chainOptions} loadingDomains={loadingDomains} />}
-          {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
-          {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
-          {step === 4 && <Step4 state={state} setState={setState} errors={errors}
-              milestonesSum={milestonesSum} totalAmountNum={totalAmountNum}
-              remaining={remaining} exactMatch={exactMatch} />}
-          {step === 5 && <Step5 state={state}
-              totalBaseUnits={totalBaseUnits} protocolFee={protocolFee}
-              milestoneAmountsBigInt={milestoneAmountsBigInt}
-              approved={approved} onApprove={onApprove} onDeposit={onDeposit}
-              txStatus={txStatus} phase={phase} />}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={step}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="flex flex-col gap-6"
+            >
+              {step === 1 && <Step1 state={state} setState={setState} errors={errors} chainOptions={chainOptions} loadingDomains={loadingDomains} />}
+              {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
+              {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
+              {step === 4 && <Step4 state={state} setState={setState} errors={errors}
+                  milestonesSum={milestonesSum} totalAmountNum={totalAmountNum}
+                  remaining={remaining} exactMatch={exactMatch} />}
+              {step === 5 && <Step5 state={state}
+                  totalBaseUnits={totalBaseUnits} protocolFee={protocolFee}
+                  milestoneAmountsBigInt={milestoneAmountsBigInt}
+                  approved={approved} onApprove={onApprove} onDeposit={onDeposit}
+                  txStatus={txStatus} phase={phase} />}
+            </motion.div>
+          </AnimatePresence>
 
           <div className="flex items-center justify-between pt-4 border-t border-border-subtle">
             <button className="btn-secondary"
@@ -403,7 +429,7 @@ function Step2({ state, setState, errors }) {
       {!state.useCustomHash ? (
         <Field label="Invoice description" error={errors.description}
           hint={<Tooltip content="Hashed locally with keccak256 — only the hash goes on-chain." />}>
-          <textarea rows={3} className="input-field"
+          <textarea rows={3} className="input-field-multiline"
             placeholder="e.g. Marketing site redesign, August deliverables…"
             value={state.description}
             onChange={(e) => setField('description')(e.target.value)}
@@ -503,34 +529,43 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
       </div>
 
       <div className="flex flex-col gap-4">
-        {state.milestones.map((m, i) => (
-          <div key={i}
-            className="flex flex-col sm:flex-row items-stretch sm:items-end gap-4 bg-background-primary p-4 rounded-lg border border-border-subtle">
-            <div className="flex-1 flex flex-col gap-2">
-              <div className="text-xs text-text-secondary">Milestone {i + 1}</div>
-              <CustomSelect value={m.title} onChange={(v) => update(i, 'title', v)} options={titleOptions} />
-              {m.title === 'Custom' && (
-                <input className="input-field mt-2" placeholder="Custom title"
-                  value={m.customTitle} onChange={(e) => update(i, 'customTitle', e.target.value)} />
-              )}
-              {errors[`milestone_${i}_title`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_title`]}</div>}
-            </div>
-            <div className="sm:w-44 flex flex-col gap-2">
-              <div className="text-xs text-text-secondary">Amount (USDC)</div>
-              <input type="number" step="0.01" min="0"
-                className="input-field font-mono" placeholder="0.00"
-                value={m.amount} onChange={(e) => update(i, 'amount', e.target.value)} />
-              {errors[`milestone_${i}_amount`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_amount`]}</div>}
-            </div>
-            <button type="button"
-              className="self-start sm:self-end btn-secondary py-2 px-3 text-sm"
-              disabled={state.milestones.length <= 1}
-              onClick={() => removeMilestone(i)}
-              aria-label="Remove milestone">
-              Remove
-            </button>
-          </div>
-        ))}
+        <AnimatePresence initial={false}>
+          {state.milestones.map((m, i) => (
+            <motion.div
+              key={i}
+              layout
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="flex flex-col sm:flex-row items-stretch sm:items-end gap-4 bg-background-primary p-4 rounded-xl border border-border-subtle"
+            >
+              <div className="flex-1 flex flex-col gap-2">
+                <div className="text-xs text-text-secondary">Milestone {i + 1}</div>
+                <CustomSelect value={m.title} onChange={(v) => update(i, 'title', v)} options={titleOptions} />
+                {m.title === 'Custom' && (
+                  <input className="input-field mt-2" placeholder="Custom title"
+                    value={m.customTitle} onChange={(e) => update(i, 'customTitle', e.target.value)} />
+                )}
+                {errors[`milestone_${i}_title`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_title`]}</div>}
+              </div>
+              <div className="sm:w-44 flex flex-col gap-2">
+                <div className="text-xs text-text-secondary">Amount (USDC)</div>
+                <input type="number" step="0.01" min="0"
+                  className="input-field font-mono" placeholder="0.00"
+                  value={m.amount} onChange={(e) => update(i, 'amount', e.target.value)} />
+                {errors[`milestone_${i}_amount`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_amount`]}</div>}
+              </div>
+              <button type="button"
+                className="self-start sm:self-end btn-secondary h-12 px-3 text-sm"
+                disabled={state.milestones.length <= 1}
+                onClick={() => removeMilestone(i)}
+                aria-label="Remove milestone">
+                Remove
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
 
       {state.milestones.length < 10 && (
@@ -545,9 +580,11 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
           <span className="text-text-secondary">Allocated</span>
           <span className="font-mono">{milestonesSum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span>
         </div>
-        <div className="h-2 rounded-full bg-background-tertiary overflow-hidden">
-          <div className={`h-full transition-all ${exactMatch ? 'bg-status-success' : over ? 'bg-status-error' : 'bg-accent'}`}
-            style={{ width: `${percentage}%` }} />
+        <div className="bg-background-tertiary w-full h-2 rounded-full overflow-hidden">
+          <div
+            className={`h-full transition-all duration-300 ${exactMatch ? 'bg-status-success' : over ? 'bg-status-error' : 'bg-accent'}`}
+            style={{ width: `${percentage}%` }}
+          />
         </div>
         <div className={`text-xs ${exactMatch ? 'text-status-success' : over ? 'text-status-error' : 'text-status-warning'}`}>
           {totalAmountNum === 0

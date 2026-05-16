@@ -55,7 +55,7 @@ export default function CustomSelect({
     <div className={`relative ${className}`} ref={wrapRef} onKeyDown={handleKey}>
       <button
         type="button"
-        className={`input-field flex items-center justify-between text-left ${open ? 'border-border-focused' : ''}`}
+        className={`input-field flex items-center justify-between text-left active:scale-[0.99] ${open ? 'border-border-focused' : ''}`}
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
       >

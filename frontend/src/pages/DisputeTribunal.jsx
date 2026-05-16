@@ -5,9 +5,12 @@ import { keccak256, toBytes } from 'viem'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
+import EmptyState from '../components/EmptyState.jsx'
+import Skeleton from '../components/Skeleton.jsx'
 import TxModal from '../components/TxModal.jsx'
 import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
 import { useIsArbiter } from '../hooks/useArbiter.js'
+import { txToast } from '../hooks/useToast.jsx'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { isValidBytes32 } from '../utils/encode.js'
 import { formatUSDC, truncateAddr } from '../utils/format.js'
@@ -65,7 +68,7 @@ function TribunalList() {
       </div>
 
       {isLoading ? (
-        <div className="card-surface p-8 animate-pulse h-40" />
+        <Skeleton className="h-40" />
       ) : cases.length === 0 ? (
         <div className="card-surface p-12 text-center">
           <h2 className="text-xl font-semibold mb-2">No active disputes</h2>
@@ -117,7 +120,7 @@ function DisputeRoom({ escrowId, milestoneIdx }) {
   const role = !detail ? null : detail.isPayer ? 'payer' : detail.isFreelancer ? 'freelancer' : null
 
   if (isLoading || !detail || !escrow || !milestone) {
-    return <div className="card-surface p-8 animate-pulse h-40" />
+    return <Skeleton className="h-40" />
   }
   if (milestone.state !== 2) {
     return (
@@ -256,11 +259,13 @@ function CounterEvidenceInput({ escrowId, milestoneIdx, dispute, role, address, 
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
   const [txError, setTxError] = useState(null)
+  const [txToastApi, setTxToastApi] = useState(null)
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
 
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); onSubmitted?.()
+    txToastApi?.success('Counter-evidence submitted.', { hash: txHash })
     setReason(''); setUri('')
   }, [receipt]) // eslint-disable-line
 
@@ -277,6 +282,8 @@ function CounterEvidenceInput({ escrowId, milestoneIdx, dispute, role, address, 
   }
 
   const submit = async () => {
+    const t = txToast({ loading: 'Submitting counter-evidence — confirm in wallet…' })
+    setTxToastApi(t)
     try {
       if (!reason.trim() || !uri.trim()) throw new Error('Reason and evidence URL required')
       const hash = keccak256(toBytes(reason + '|' + uri))
@@ -287,13 +294,17 @@ function CounterEvidenceInput({ escrowId, milestoneIdx, dispute, role, address, 
         args: [BigInt(escrowId), BigInt(milestoneIdx), hash, uri]
       })
       setTxHash(tx); setTxStatus('pending')
-    } catch (err) { setTxError(err); setTxStatus('error') }
+      t.update('Counter-evidence submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error('Counter-evidence failed.')
+    }
   }
 
   return (
     <>
       <footer className="p-4 border-t border-border-subtle bg-background-primary flex flex-col gap-2">
-        <textarea rows={2} className="input-field text-sm"
+        <textarea rows={2} className="input-field-multiline text-sm"
           placeholder="Your response…"
           value={reason} onChange={(e) => setReason(e.target.value)} />
         <div className="flex gap-2">
@@ -320,14 +331,18 @@ function ArbiterResolutionPanel({ escrowId, milestoneIdx, onResolved }) {
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
   const [txError, setTxError] = useState(null)
+  const [txToastApi, setTxToastApi] = useState(null)
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
 
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); onResolved?.()
+    txToastApi?.success('Dispute resolved.', { hash: txHash })
   }, [receipt]) // eslint-disable-line
 
   const resolve = async (releaseToRecipient) => {
+    const t = txToast({ loading: 'Resolving dispute — confirm in wallet…' })
+    setTxToastApi(t)
     try {
       if (!isValidBytes32(resolutionHash)) throw new Error('Invalid resolution hash')
       setTxError(null); setTxStatus('confirming')
@@ -337,7 +352,11 @@ function ArbiterResolutionPanel({ escrowId, milestoneIdx, onResolved }) {
         args: [BigInt(escrowId), BigInt(milestoneIdx), releaseToRecipient, resolutionHash, 0n]
       })
       setTxHash(tx); setTxStatus('pending')
-    } catch (err) { setTxError(err); setTxStatus('error') }
+      t.update('Resolution submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error('Resolution failed.')
+    }
   }
 
   return (

@@ -105,9 +105,9 @@ contract CrossChainEscrowFuzzTest is Base {
         vm.warp(block.timestamp + elapsed);
         if (elapsed < DISPUTE_WINDOW) {
             vm.expectRevert(DisputeWindowNotExpired.selector);
-            escrow.releaseAfterWindow(id, 0, 0);
+            escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
         } else {
-            escrow.releaseAfterWindow(id, 0, 0);
+            escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
             assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
         }
     }

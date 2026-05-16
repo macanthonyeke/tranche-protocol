@@ -214,7 +214,7 @@ contract CrossChainEscrowUnitTest is Base {
         vm.stopPrank();
     }
 
-    function test_Deposit_RevertOn_DeadlineInPast() public {
+    function test_Deposit_RevertOn_DeadlineTooSoon_AtCurrentTime() public {
         vm.warp(1_700_000_000);
         vm.startPrank(depositor);
         usdc.approve(address(escrow), 100e6);
@@ -629,7 +629,8 @@ contract CrossChainEscrowUnitTest is Base {
         assertEq(uint256(_getEscrowState(id)), uint256(EscrowState.COMPLETED));
 
         // CCTP burn was invoked with milestone amount. The helper passes
-        // maxFee = 0, so the burn records a zero forwarding cap.
+        // CCTP_FORWARD_FEE so the cross-chain floor is cleared; the burn
+        // records that value as the maxFee.
         assertEq(tokenMessenger.callsLength(), 1);
         MockTokenMessengerCall memory c = _lastCall();
         assertEq(c.caller, address(escrow));
@@ -637,7 +638,7 @@ contract CrossChainEscrowUnitTest is Base {
         assertEq(uint256(c.destinationDomain), uint256(DEST_DOMAIN));
         assertEq(c.mintRecipient, MINT_RECIPIENT);
         assertEq(c.burnToken, address(usdc));
-        assertEq(c.maxFee, 0);
+        assertEq(c.maxFee, CCTP_FORWARD_FEE);
         assertEq(uint256(c.minFinalityThreshold), 2000);
         assertTrue(c.withHook, "release should use depositForBurnWithHook");
         // Hook data is the 32-byte ASCII tag "cctp-forward".
@@ -699,7 +700,7 @@ contract CrossChainEscrowUnitTest is Base {
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
         vm.prank(stranger);
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
     }
 
@@ -712,7 +713,7 @@ contract CrossChainEscrowUnitTest is Base {
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
         vm.prank(pauser);
         escrow.pause();
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
         assertEq(usdc.balanceOf(address(tokenMessenger)), 100e6);
     }

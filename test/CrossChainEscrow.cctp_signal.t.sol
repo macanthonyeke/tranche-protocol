@@ -37,7 +37,7 @@ contract CrossChainEscrowCctpSignalTest is Base {
 
     function test_SetCctpForwardFee_RevertOn_NonAdmin() public {
         bytes memory expected = abi.encodeWithSelector(
-            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, escrow.DEFAULT_ADMIN_ROLE()
+            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, escrow.FEE_MANAGER_ROLE()
         );
         vm.prank(stranger);
         vm.expectRevert(expected);
@@ -80,19 +80,31 @@ contract CrossChainEscrowCctpSignalTest is Base {
         assertEq(maxFee, liveForwardFee);
     }
 
-    function test_CCTP_CrossChainRelease_DoesNotUseStoredForwardFee() public {
-        // The stored admin value is informational/configuration state. The
-        // release path uses the live fee supplied by the caller.
+    function test_CCTP_CrossChainRelease_UsesCallerValue_NotStoredForwardFee() public {
+        // The stored cctpForwardFee acts as the defense-in-depth floor for
+        // releaseAfterWindow, but the value that reaches CCTP is still the
+        // caller-supplied maxFee (anything >= the floor).
         vm.prank(deployer);
         escrow.setCctpForwardFee(777_777);
 
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, 800_000); // above floor, distinct from stored
 
         (,,,,,, uint256 maxFee,,,) = _readBurnCall();
-        assertEq(maxFee, 0);
+        assertEq(maxFee, 800_000);
+    }
+
+    function test_CCTP_CrossChainRelease_RevertOn_MaxFeeBelowFloor() public {
+        vm.prank(deployer);
+        escrow.setCctpForwardFee(777_777);
+
+        uint256 id = _depositSingle(100e6);
+        _fulfill(id, 0);
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.expectRevert(MaxFeeBelowFloor.selector);
+        escrow.releaseAfterWindow(id, 0, 777_776);
     }
 
     function test_CCTP_CrossChainBurnAmount_EqualsRecipientAmountPlusForwardFee() public {

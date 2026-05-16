@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+// Role constants exposed at file level for off-chain tooling (deploy scripts,
+// indexers) so callers can import them without duplicating the keccak. The
+// implementation contract re-declares them as `public constant` so they remain
+// ABI-accessible.
+bytes32 constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
+bytes32 constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
+
 interface ICrossChainEscrow {
     enum EscrowState {
         ACTIVE,
@@ -210,7 +217,6 @@ interface ICrossChainEscrow {
     error NothingToWithdraw();
     error NoInvoice();
     error NoInvoiceURI();
-    error DeadlineInPast();
     error NoEvidence();
     error NoEvidenceURI();
     error NoDisputeReason();
@@ -236,7 +242,6 @@ interface ICrossChainEscrow {
     error DisputeWindowTooLong();
     error InvalidRefundRecipient();
 
-    error ForwardFeeNotSet();
     error NoticeWindowTooShort();
     error NoticeWindowTooLong();
     error AlreadySignaled();
@@ -253,4 +258,7 @@ interface ICrossChainEscrow {
     error ArbiterTimeoutNotReached();
     /// @notice The low-level USDC `approve` call did not return success (L-02).
     error UsdcApproveFailed();
+    /// @notice `releaseAfterWindow` caller passed `maxFee` below the
+    ///         admin-tracked `cctpForwardFee` floor.
+    error MaxFeeBelowFloor();
 }

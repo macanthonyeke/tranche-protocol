@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {Base} from "./Base.t.sol";
 import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
 import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /// @notice Regression tests for each audit finding fix.
 contract CrossChainEscrowAuditFixesTest is Base {
@@ -164,7 +165,7 @@ contract CrossChainEscrowAuditFixesTest is Base {
 
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
 
         // The treasury should have received the 1% snapshot fee, not 5%.
         assertEq(usdc.balanceOf(protocolTreasury), 1e6, "fee must be 1% per the snapshot");
@@ -182,7 +183,7 @@ contract CrossChainEscrowAuditFixesTest is Base {
 
         _fulfill(id, 0);
         vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        escrow.releaseAfterWindow(id, 0, 0);
+        escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
 
         // Fee must go to the original treasury that was snapshotted.
         assertEq(usdc.balanceOf(protocolTreasury), 1e6, "fee must reach the original treasury");
@@ -254,6 +255,226 @@ contract CrossChainEscrowAuditFixesTest is Base {
         vm.prank(stranger);
         vm.expectRevert(NothingToWithdraw.selector);
         escrow.transferRefundCredit(makeAddr("anywhere"));
+    }
+
+    // -----------------------------------------------------------------------
+    // adminTransferRefundCredit: emergency recovery for blacklisted wallets.
+    // -----------------------------------------------------------------------
+
+    function _seedRefundCredit(uint256 amount) internal returns (address wallet) {
+        wallet = refundTo;
+        uint256 id = _depositSingle(amount);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+        _resolveAs(arbiter, id, 0, false);
+        assertEq(escrow.refundBalances(wallet), amount);
+    }
+
+    function test_AdminTransferRefundCredit_HappyPath() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+
+        vm.prank(deployer);
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+
+        assertEq(escrow.refundBalances(blacklisted), 0);
+        assertEq(escrow.refundBalances(rescue), 100e6);
+    }
+
+    function test_AdminTransferRefundCredit_NonAdminReverts() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, recoveryRole
+            )
+        );
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+    }
+
+    function test_AdminTransferRefundCredit_RevertOn_ZeroNewOwner() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        vm.prank(deployer);
+        vm.expectRevert(ZeroAddress.selector);
+        escrow.adminTransferRefundCredit(blacklisted, address(0));
+    }
+
+    function test_AdminTransferRefundCredit_RevertOn_NewOwnerEqualsBlacklisted() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        vm.prank(deployer);
+        vm.expectRevert(InvalidRefundRecipient.selector);
+        escrow.adminTransferRefundCredit(blacklisted, blacklisted);
+    }
+
+    function test_AdminTransferRefundCredit_RevertOn_ZeroBalance() public {
+        address blacklisted = makeAddr("emptyWallet");
+        address rescue = makeAddr("rescueWallet");
+        assertEq(escrow.refundBalances(blacklisted), 0);
+
+        vm.prank(deployer);
+        vm.expectRevert(NothingToWithdraw.selector);
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+    }
+
+    function test_AdminTransferRefundCredit_EmitsEvent() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit RefundCreditTransferred(blacklisted, rescue, 100e6);
+        vm.prank(deployer);
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+    }
+
+    function test_AdminTransferRefundCredit_BalanceMappingUpdates() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+
+        // Pre-seed rescue with an existing credit to confirm accumulation, not overwrite.
+        address otherSource = makeAddr("otherRefundTo");
+        uint256 other = _depositCustom(
+            depositor, recipient, otherSource, 50e6, _singleMilestone(50e6), DISPUTE_WINDOW
+        );
+        _fulfill(other, 0);
+        _raiseDisputeAs(depositor, other, 0);
+        _resolveAs(arbiter, other, 0, false);
+        vm.prank(otherSource);
+        escrow.transferRefundCredit(rescue);
+        assertEq(escrow.refundBalances(rescue), 50e6);
+
+        vm.prank(deployer);
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+        assertEq(escrow.refundBalances(blacklisted), 0);
+        assertEq(escrow.refundBalances(rescue), 150e6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Role granularity: FEE_MANAGER_ROLE and RECOVERY_MANAGER_ROLE.
+    // -----------------------------------------------------------------------
+
+    function _deployerOnlyAdmin() internal returns (address adminOnly) {
+        // An account that holds DEFAULT_ADMIN_ROLE but NOT the granular roles.
+        adminOnly = makeAddr("adminOnly");
+        bytes32 adminRole = escrow.DEFAULT_ADMIN_ROLE();
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        vm.startPrank(deployer);
+        escrow.grantRole(adminRole, adminOnly);
+        escrow.revokeRole(feeRole, adminOnly);
+        escrow.revokeRole(recoveryRole, adminOnly);
+        vm.stopPrank();
+    }
+
+    function test_FeeManagerRole_SetProtocolFee_AllowsHolder() public {
+        address feeMgr = makeAddr("feeMgr");
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(deployer);
+        escrow.grantRole(feeRole, feeMgr);
+
+        vm.prank(feeMgr);
+        escrow.setProtocolFee(123);
+        assertEq(escrow.protocolFeeBps(), 123);
+    }
+
+    function test_FeeManagerRole_SetProtocolFee_RejectsStranger() public {
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, feeRole
+            )
+        );
+        escrow.setProtocolFee(123);
+    }
+
+    function test_FeeManagerRole_SetProtocolFee_RejectsAdminOnly() public {
+        address adminOnly = _deployerOnlyAdmin();
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(adminOnly);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
+            )
+        );
+        escrow.setProtocolFee(123);
+    }
+
+    function test_FeeManagerRole_SetProtocolTreasury_AllowsHolder() public {
+        address feeMgr = makeAddr("feeMgr");
+        address newTreasury = makeAddr("newTreasury");
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(deployer);
+        escrow.grantRole(feeRole, feeMgr);
+
+        vm.prank(feeMgr);
+        escrow.setProtocolTreasury(newTreasury);
+        assertEq(escrow.protocolTreasury(), newTreasury);
+    }
+
+    function test_FeeManagerRole_SetProtocolTreasury_RejectsAdminOnly() public {
+        address adminOnly = _deployerOnlyAdmin();
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(adminOnly);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
+            )
+        );
+        escrow.setProtocolTreasury(makeAddr("newTreasury"));
+    }
+
+    function test_FeeManagerRole_SetCctpForwardFee_AllowsHolder() public {
+        address feeMgr = makeAddr("feeMgr");
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(deployer);
+        escrow.grantRole(feeRole, feeMgr);
+
+        vm.prank(feeMgr);
+        escrow.setCctpForwardFee(42_000);
+        assertEq(escrow.cctpForwardFee(), 42_000);
+    }
+
+    function test_FeeManagerRole_SetCctpForwardFee_RejectsAdminOnly() public {
+        address adminOnly = _deployerOnlyAdmin();
+        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        vm.prank(adminOnly);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
+            )
+        );
+        escrow.setCctpForwardFee(42_000);
+    }
+
+    function test_RecoveryManagerRole_AdminTransfer_AllowsHolder() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+        address recoveryMgr = makeAddr("recoveryMgr");
+        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        vm.prank(deployer);
+        escrow.grantRole(recoveryRole, recoveryMgr);
+
+        vm.prank(recoveryMgr);
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
+        assertEq(escrow.refundBalances(rescue), 100e6);
+    }
+
+    function test_RecoveryManagerRole_AdminTransfer_RejectsAdminOnly() public {
+        address blacklisted = _seedRefundCredit(100e6);
+        address rescue = makeAddr("rescueWallet");
+        address adminOnly = _deployerOnlyAdmin();
+        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+
+        vm.prank(adminOnly);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, recoveryRole
+            )
+        );
+        escrow.adminTransferRefundCredit(blacklisted, rescue);
     }
 
     // -----------------------------------------------------------------------

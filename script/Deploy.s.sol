@@ -15,6 +15,10 @@ import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
 ///   DOMAIN_MANAGER_ADDRESS   address with DOMAIN_MANAGER_ROLE
 ///   PROTOCOL_TREASURY        address that receives protocol fees
 ///
+/// The deployer additionally receives DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE,
+/// and RECOVERY_MANAGER_ROLE in the constructor. Re-delegate those via
+/// grantRole/revokeRole post-deploy if you want them on a different multisig.
+///
 /// Optional env vars (defaults shown):
 ///   USDC_ADDRESS             0x3600...0000 (Arc native USDC precompile)
 ///   TOKEN_MESSENGER          0x8FE6...2DAA (Arc TokenMessengerV2)
@@ -57,6 +61,7 @@ contract Deploy is Script {
         vm.stopBroadcast();
 
         console.log("CrossChainEscrow deployed at:", address(escrow));
+        console.log("Deployer holds DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE, RECOVERY_MANAGER_ROLE");
         console.log("Supported domains must be seeded by DOMAIN_MANAGER_ADDRESS");
     }
 
