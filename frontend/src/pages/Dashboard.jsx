@@ -2,7 +2,6 @@ import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence } from 'framer-motion'
-import CountUp from 'react-countup'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
@@ -46,13 +45,6 @@ function DashboardInner() {
 
   const activeEscrows = useMemo(() => mySummaries.filter((s) => s.state === 0), [mySummaries])
 
-  // Total USDC locked across active escrows where the caller is the payer.
-  const totalLockedUsdc = useMemo(() => {
-    return activeEscrows
-      .filter((s) => s.isPayer)
-      .reduce((acc, s) => acc + Number(s.totalAmount) / 1e6, 0)
-  }, [activeEscrows])
-
   const actionRequired = useMemo(() => activeEscrows.filter((s) => {
     if (s.disputedMilestoneCount > 0) return true
     if (!s.isPayer && s.releasedMilestoneCount === 0) return true
@@ -75,7 +67,7 @@ function DashboardInner() {
         </Link>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard label="Active Escrows" value={activeCount} loading={isLoading} />
         <StatCard
           label="Open Disputes"
@@ -84,32 +76,18 @@ function DashboardInner() {
           loading={isLoading}
         />
         <StatCard
-          label="Total USDC Locked"
+          label="Your Total Balance"
+          value={`${formatUSDCNumber(usdcBalance)} USDC`}
           mono
           loading={isLoading}
-          value={
-            <CountUp
-              end={totalLockedUsdc}
-              duration={0.8}
-              decimals={2}
-              separator=","
-              suffix=" USDC"
-              preserveValue
-            />
+          action={
+            refundBal > 0n ? (
+              <Link to="/settings" className="text-accent text-xs">
+                +{formatUSDC(refundBal)} refund available →
+              </Link>
+            ) : null
           }
         />
-        <StatCard
-          label="Refund Available"
-          value={formatUSDC(refundBal)}
-          mono
-          tone={refundBal > 0n ? 'accent' : 'default'}
-          loading={isLoading}
-          action={refundBal > 0n ? <Link to="/settings" className="text-accent text-xs">Withdraw →</Link> : null}
-        />
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 -mt-2">
-        <StatCard label="USDC Balance" value={formatUSDCNumber(usdcBalance) + ' USDC'} mono loading={isLoading} />
       </div>
 
       {isLoading ? (
@@ -127,12 +105,14 @@ function DashboardInner() {
             className="lg:col-span-7"
             title="Action Required"
             tone="warning"
+            variant="elevated"
             escrows={actionRequired}
             emptyText="Nothing needs your attention. Sit tight."
           />
           <EscrowSection
             className="lg:col-span-5"
             title="Awaiting"
+            variant="recessed"
             escrows={awaiting}
             emptyText="No escrows waiting."
           />
@@ -156,7 +136,7 @@ function DashboardSkeleton() {
   )
 }
 
-function EscrowSection({ title, tone = 'default', escrows, emptyText, className = '' }) {
+function EscrowSection({ title, tone = 'default', variant = 'default', escrows, emptyText, className = '' }) {
   const { visible, hasMore, sentinelRef } = useInfiniteList(escrows, { pageSize: 8 })
   return (
     <section className={`flex flex-col gap-4 ${className}`}>
@@ -174,7 +154,7 @@ function EscrowSection({ title, tone = 'default', escrows, emptyText, className 
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.2, ease: 'easeOut' }}
             >
-              <EscrowCard summary={e} />
+              <EscrowCard summary={e} variant={variant} />
             </motion.div>
           ))}
           {hasMore && (
@@ -218,7 +198,7 @@ function StatCard({ label, value, mono = false, tone = 'default', action = null,
   )
 }
 
-function EscrowCard({ summary }) {
+function EscrowCard({ summary, variant = 'default' }) {
   const role = summary.isPayer ? 'payer' : 'freelancer'
   const otherParty = summary.isPayer ? summary.recipient : summary.depositor
   const otherLabel = summary.isPayer ? 'Freelancer' : 'Payer'
@@ -226,10 +206,19 @@ function EscrowCard({ summary }) {
     ? `INV-${summary.invoiceHash.slice(2, 6).toUpperCase()}`
     : `ESC-${summary.id}`
 
+  // Elevated: prominent, accent-edged, lifted shadow — pulls the eye.
+  // Recessed: muted surface, opacity dialed back so action items dominate.
+  const wrapperCls =
+    variant === 'elevated'
+      ? 'block p-6 rounded-2xl bg-background-secondary border border-border-subtle border-l-4 border-l-accent-blue shadow-lg transition-all duration-200 hover:-translate-y-0.5 hover:shadow-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary'
+      : variant === 'recessed'
+        ? 'block p-5 rounded-2xl bg-background-primary border border-border-subtle opacity-70 transition-all duration-200 hover:opacity-100 hover:border-border-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary'
+        : 'card-clickable block p-5'
+
   return (
     <Link
       to={`/escrow/${summary.id}`}
-      className="card-clickable block p-5"
+      className={wrapperCls}
     >
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between gap-2">

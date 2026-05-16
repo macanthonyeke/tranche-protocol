@@ -1,332 +1,425 @@
+// "God Mode" tribunal: black-bg admin/arbiter command center with strict RBAC.
+// Sections render only when the connected wallet holds the corresponding role.
+// Wallets with no privileged roles are bounced to the dashboard.
+
 import { useEffect, useMemo, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
-import { keccak256, toBytes } from 'viem'
+import { isAddress, keccak256, toBytes } from 'viem'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
-import EmptyState from '../components/EmptyState.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import TxModal from '../components/TxModal.jsx'
 import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
-import { useIsArbiter } from '../hooks/useArbiter.js'
+import { useAllCallerRoles } from '../hooks/useArbiter.js'
+import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { txToast } from '../hooks/useToast.jsx'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { isValidBytes32 } from '../utils/encode.js'
 import { formatUSDC, truncateAddr } from '../utils/format.js'
+import { getDomainName, ALL_DOMAIN_NUMBERS } from '../config/chains.js'
+import { useReadContract } from 'wagmi'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
+const ARBITER_INACTION_TIMEOUT_SEC = 30 * 24 * 60 * 60
+const TIMEOUT_WARN_THRESHOLD_SEC = 7 * 24 * 60 * 60
+
+// "God Mode" button shapes. Stark, high-contrast, severe.
+const GOD_BTN = 'inline-flex items-center justify-center font-mono uppercase tracking-wider text-xs px-4 py-3 rounded-none border transition-colors disabled:opacity-40 disabled:cursor-not-allowed'
+const GOD_BTN_WHITE = `${GOD_BTN} bg-white text-black border-white hover:bg-gray-200`
+const GOD_BTN_RED = `${GOD_BTN} bg-status-error text-white border-status-error hover:opacity-90`
+const GOD_BTN_GHOST = `${GOD_BTN} bg-transparent text-text-primary border-border-medium hover:border-border-focused`
 
 export default function DisputeTribunal() {
   return (
-    <ConnectGate title="Connect to view the tribunal" message="Disputes require a connected wallet to view.">
+    <ConnectGate title="Connect to access the Tribunal" message="Restricted area. Connect the wallet that holds the required role.">
       <TribunalRouter />
     </ConnectGate>
   )
 }
 
 function TribunalRouter() {
-  const { id, milestone } = useParams()
-  if (id !== undefined && milestone !== undefined) {
-    return <DisputeRoom escrowId={Number(id)} milestoneIdx={Number(milestone)} />
-  }
-  return <TribunalList />
-}
-
-/* ---------- List view ---------- */
-function TribunalList() {
   const { address } = useAccount()
-  const { escrows: disputedEscrows, isLoading } = useDisputedEscrows()
-  const { isArbiter } = useIsArbiter(address)
+  const { roles, hasAny, isLoading } = useAllCallerRoles(address)
+  const { id, milestone } = useParams()
 
-  // Filter for non-arbiters: only show disputes the caller is party to.
-  // Note: this is a coarse filter at the escrow level. The dispute room handles
-  // the per-milestone case.
-  const cases = useMemo(() => {
-    if (!disputedEscrows) return []
-    if (isArbiter) return disputedEscrows
-    const lower = address?.toLowerCase()
-    return disputedEscrows.filter((e) =>
-      e.depositor?.toLowerCase() === lower || e.recipient?.toLowerCase() === lower
+  if (isLoading) {
+    return (
+      <FullBleedDark>
+        <div className="p-8"><Skeleton className="h-40" /></div>
+      </FullBleedDark>
     )
-  }, [disputedEscrows, address, isArbiter])
+  }
+
+  if (!hasAny) {
+    return <AccessDenied />
+  }
+
+  // Per-case 3-column view requires arbiter privileges.
+  if (id !== undefined && milestone !== undefined) {
+    if (!roles.isArbiter) {
+      return <Navigate to="/dashboard" replace />
+    }
+    return (
+      <FullBleedDark>
+        <DisputeCommandCenter escrowId={Number(id)} milestoneIdx={Number(milestone)} />
+      </FullBleedDark>
+    )
+  }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Dispute Tribunal</h1>
-          <p className="text-text-secondary text-sm mt-1">
-            {isArbiter ? 'All open disputes across the protocol.' : 'Your active disputes.'}
-          </p>
-        </div>
-        {isArbiter && (
-          <span className="rounded-full border border-accent/30 bg-accent-muted text-accent text-xs px-3 py-1">
-            Arbiter access
-          </span>
-        )}
-      </div>
+    <FullBleedDark>
+      <CommandCenter roles={roles} address={address} />
+    </FullBleedDark>
+  )
+}
 
-      {isLoading ? (
-        <Skeleton className="h-40" />
-      ) : cases.length === 0 ? (
-        <div className="card-surface p-12 text-center">
-          <h2 className="text-xl font-semibold mb-2">No active disputes</h2>
-          <p className="text-sm text-text-secondary">Nothing to mediate right now.</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {cases.map((c) => (
-            <Link key={c.id}
-              to={`/escrow/${c.id}`}
-              className="card-surface p-5 hover:border-border-medium transition-colors flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-xs text-text-secondary">ESC-{c.id}</span>
-                <span className="rounded-full bg-status-warning/15 text-status-warning text-xs px-2 py-1 font-medium">
-                  {c.disputedMilestoneCount} in dispute
-                </span>
-              </div>
-              <div className="font-mono text-xl">{formatUSDC(c.totalAmount)}</div>
-              <div className="flex justify-between text-xs">
-                <div>
-                  <div className="text-text-secondary mb-1">Payer</div>
-                  <AddressDisplay address={c.depositor} size="sm" />
-                </div>
-                <div className="text-right">
-                  <div className="text-text-secondary mb-1">Freelancer</div>
-                  <AddressDisplay address={c.recipient} size="sm" />
-                </div>
-              </div>
-              <div className="text-sm text-accent self-end">Open case →</div>
-            </Link>
-          ))}
-        </div>
-      )}
+/* ============================================================
+   Layout — full-bleed black background and monospace defaults.
+   Negates AppShell's main padding via negative margins.
+   ============================================================ */
+function FullBleedDark({ children }) {
+  return (
+    <div className="-mx-4 md:-mx-6 lg:-mx-8 -mt-4 md:-mt-6 lg:-mt-8 -mb-24 md:-mb-8 bg-[#050505] text-text-primary font-mono min-h-[calc(100vh-4rem)]">
+      <div className="px-4 md:px-8 py-8 max-w-content mx-auto">
+        {children}
+      </div>
     </div>
   )
 }
 
-/* ---------- Dispute Room (2-col chat-style) ---------- */
-function DisputeRoom({ escrowId, milestoneIdx }) {
+function AccessDenied() {
+  return (
+    <FullBleedDark>
+      <div className="flex flex-col items-center justify-center py-32 gap-6 text-center">
+        <div className="text-5xl font-mono uppercase tracking-[0.3em] text-status-error">
+          Access Denied
+        </div>
+        <p className="text-text-secondary font-sans max-w-md">
+          This wallet does not hold any privileged role on the protocol.
+          The Tribunal is restricted to arbiters, fee managers, domain managers,
+          recovery managers and pausers.
+        </p>
+        <Link to="/dashboard" className={GOD_BTN_WHITE}>← Return to dashboard</Link>
+      </div>
+    </FullBleedDark>
+  )
+}
+
+/* ============================================================
+   Top-level Command Center: header + disputes (arbiter) + admin modules.
+   ============================================================ */
+function CommandCenter({ roles, address }) {
+  const activeRoles = useMemo(() => {
+    const labels = []
+    if (roles.isDefaultAdmin) labels.push('ADMIN')
+    if (roles.isArbiter) labels.push('ARBITER')
+    if (roles.isFeeManager) labels.push('FEE MANAGER')
+    if (roles.isDomainManager) labels.push('DOMAIN MANAGER')
+    if (roles.isRecoveryManager) labels.push('RECOVERY MANAGER')
+    if (roles.isPauser) labels.push('PAUSER')
+    return labels
+  }, [roles])
+
+  return (
+    <div className="flex flex-col gap-10">
+      <header className="flex flex-col gap-3 border-b border-border-subtle pb-6">
+        <div className="text-xs uppercase tracking-[0.3em] text-text-tertiary">
+          Tribunal // Command Center
+        </div>
+        <h1 className="text-4xl font-mono uppercase tracking-tight text-text-primary">
+          God Mode
+        </h1>
+        <div className="flex items-center justify-between gap-4 flex-wrap pt-2">
+          <div className="flex flex-wrap gap-2">
+            {activeRoles.map((r) => (
+              <span key={r} className="text-[10px] uppercase tracking-[0.2em] border border-border-medium px-2 py-1 text-text-primary">
+                {r}
+              </span>
+            ))}
+          </div>
+          <div className="text-xs text-text-tertiary">
+            Caller&nbsp;
+            <span className="text-text-primary">{address ? truncateAddr(address) : '—'}</span>
+          </div>
+        </div>
+      </header>
+
+      {roles.isArbiter && <DisputesSection />}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {roles.isFeeManager && <FeeManagerModule />}
+        {roles.isDomainManager && <DomainManagerModule />}
+        {roles.isRecoveryManager && <RecoveryManagerModule />}
+        {roles.isPauser && <PauserModule />}
+      </div>
+    </div>
+  )
+}
+
+/* ============================================================
+   ARBITER — disputed escrows list with timeout indicator.
+   ============================================================ */
+function DisputesSection() {
+  const { escrows, isLoading } = useDisputedEscrows()
+  useTick(15_000) // refresh countdowns
+
+  return (
+    <section className="flex flex-col gap-4">
+      <ModuleHeader title="Open Disputes" subtitle={`${escrows.length} case(s) awaiting arbitration`} />
+      {isLoading ? (
+        <Skeleton className="h-40" />
+      ) : escrows.length === 0 ? (
+        <div className="border border-border-subtle p-8 text-center text-sm text-text-secondary">
+          No active disputes. Stand down.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {escrows.map((c) => (
+            <DisputedEscrowCard key={c.id} summary={c} />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function DisputedEscrowCard({ summary }) {
+  // We only have summary-level data here (no per-milestone dispute raisedAt).
+  // The per-case command center loads the full detail and shows precise timing.
+  return (
+    <Link
+      to={`/tribunal/${summary.id}/0`}
+      className="border border-border-subtle bg-[#0a0a0a] p-5 flex flex-col gap-3 hover:border-border-focused transition-colors"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-[0.2em] text-text-tertiary">
+          ESC-{summary.id}
+        </span>
+        <span className="text-[10px] uppercase tracking-[0.2em] text-status-warning border border-status-warning/40 px-2 py-0.5">
+          {summary.disputedMilestoneCount} in dispute
+        </span>
+      </div>
+      <div className="font-mono text-3xl text-white">{formatUSDC(summary.totalAmount)}</div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <div className="text-text-tertiary mb-1 uppercase tracking-wider">Payer</div>
+          <AddressDisplay address={summary.depositor} size="sm" />
+        </div>
+        <div className="text-right">
+          <div className="text-text-tertiary mb-1 uppercase tracking-wider">Freelancer</div>
+          <AddressDisplay address={summary.recipient} size="sm" />
+        </div>
+      </div>
+      <div className="text-[10px] uppercase tracking-[0.2em] text-text-primary self-end pt-1">
+        Open case →
+      </div>
+    </Link>
+  )
+}
+
+/* ============================================================
+   ARBITER — 3-column command center for a single dispute.
+   ============================================================ */
+function DisputeCommandCenter({ escrowId, milestoneIdx }) {
   const navigate = useNavigate()
   const { address } = useAccount()
-  const { detail, isLoading, refetch } = useEscrowDetail(escrowId, address)
+  const { detail, isLoading, refetch } = useEscrowDetail(escrowId, address, { pollMs: 12_000 })
   useTick(15_000)
 
   const escrow = detail?.escrow
   const milestone = detail?.milestones?.[milestoneIdx]
   const dispute = detail?.disputes?.[milestoneIdx]
-  const isArbiter = !!detail?.isArbiter
-  const role = !detail ? null : detail.isPayer ? 'payer' : detail.isFreelancer ? 'freelancer' : null
 
   if (isLoading || !detail || !escrow || !milestone) {
     return <Skeleton className="h-40" />
   }
   if (milestone.state !== 2) {
     return (
-      <div className="card-surface p-12 text-center">
-        <h2 className="text-xl font-semibold mb-2">No active dispute</h2>
-        <p className="text-sm text-text-secondary mb-6">This milestone is not currently in dispute.</p>
-        <Link to={`/escrow/${escrowId}`} className="btn-primary inline-flex">Back to escrow</Link>
+      <div className="border border-border-subtle p-12 text-center flex flex-col items-center gap-4">
+        <h2 className="text-xl font-mono uppercase tracking-wider">No active dispute</h2>
+        <p className="text-sm text-text-secondary">This milestone is not currently in dispute.</p>
+        <button className={GOD_BTN_GHOST} onClick={() => navigate('/tribunal')}>← Back to tribunal</button>
       </div>
     )
   }
 
+  const raisedAt = Number(dispute?.raisedAt ?? 0n)
+  const nowSec = Math.floor(Date.now() / 1000)
+  const elapsed = raisedAt > 0 ? nowSec - raisedAt : 0
+  const remaining = Math.max(0, ARBITER_INACTION_TIMEOUT_SEC - elapsed)
+  const danger = raisedAt > 0 && remaining < TIMEOUT_WARN_THRESHOLD_SEC
+
+  const disputedBy = dispute?.disputedBy
+  const payerIsDisputer = disputedBy?.toLowerCase() === escrow.depositor?.toLowerCase()
+
+  // Split evidence into payer/freelancer threads.
+  const payerEvidence = payerIsDisputer
+    ? { reason: dispute.reason, uri: dispute.evidenceURI, hash: dispute.evidenceHash, kind: 'opening' }
+    : (dispute?.counterEvidenceURI || dispute?.counterEvidenceHash !== ZERO_BYTES32
+        ? { reason: null, uri: dispute.counterEvidenceURI, hash: dispute.counterEvidenceHash, kind: 'counter' }
+        : null)
+  const freelancerEvidence = !payerIsDisputer
+    ? { reason: dispute.reason, uri: dispute.evidenceURI, hash: dispute.evidenceHash, kind: 'opening' }
+    : (dispute?.counterEvidenceURI || dispute?.counterEvidenceHash !== ZERO_BYTES32
+        ? { reason: null, uri: dispute.counterEvidenceURI, hash: dispute.counterEvidenceHash, kind: 'counter' }
+        : null)
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 lg:h-[calc(100vh-8rem)] gap-6">
-      {/* Left: Terms */}
-      <div className="bg-background-secondary border border-border-subtle rounded-xl p-6 overflow-y-auto flex flex-col gap-5">
-        <div className="flex items-center justify-between">
-          <button onClick={() => navigate('/tribunal')}
-            className="text-sm text-text-secondary hover:text-text-primary">
-            ← Tribunal
-          </button>
-          <span className="rounded-full bg-status-warning/15 text-status-warning text-xs px-2 py-1 font-medium">
+    <div className="flex flex-col gap-6 pb-32">
+      {/* Top bar */}
+      <div className="flex items-center justify-between gap-4 border-b border-border-subtle pb-4">
+        <button onClick={() => navigate('/tribunal')} className="text-xs uppercase tracking-[0.2em] text-text-tertiary hover:text-text-primary">
+          ← Tribunal
+        </button>
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] uppercase tracking-[0.2em] border border-status-warning/40 text-status-warning px-2 py-1">
             In Dispute
           </span>
+          <span className="text-[10px] uppercase tracking-[0.2em] text-text-tertiary">
+            ESC-{escrowId} / M{milestoneIdx + 1}
+          </span>
         </div>
-
-        <div>
-          <div className="text-xs text-text-secondary mb-1">Case</div>
-          <div className="font-mono text-lg">ESC-{escrowId} / Milestone {milestoneIdx + 1}</div>
-        </div>
-
-        <div>
-          <div className="text-xs text-text-secondary mb-1">Amount in dispute</div>
-          <div className="font-mono text-2xl">{formatUSDC(milestone.amount)}</div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <div className="text-xs text-text-secondary mb-1">Payer</div>
-            <AddressDisplay address={escrow.depositor} size="sm" />
-          </div>
-          <div>
-            <div className="text-xs text-text-secondary mb-1">Freelancer</div>
-            <AddressDisplay address={escrow.recipient} size="sm" />
-          </div>
-        </div>
-
-        {dispute?.disputedBy && (
-          <div>
-            <div className="text-xs text-text-secondary mb-1">Disputed by</div>
-            <AddressDisplay address={dispute.disputedBy} size="sm" />
-          </div>
-        )}
-
-        {escrow.invoiceURI && (
-          <a href={escrow.invoiceURI} target="_blank" rel="noreferrer"
-            className="btn-secondary text-sm text-center py-2 mt-auto">
-            View original invoice ↗
-          </a>
-        )}
-
-        {isArbiter && <ArbiterResolutionPanel
-          escrowId={escrowId} milestoneIdx={milestoneIdx} onResolved={refetch} />}
       </div>
 
-      {/* Right: Evidence chat-style panel */}
-      <div className="bg-background-secondary border border-border-subtle rounded-xl flex flex-col overflow-hidden">
-        <header className="px-6 py-4 border-b border-border-subtle">
-          <h2 className="text-lg font-semibold">Evidence</h2>
-          <p className="text-xs text-text-secondary">All evidence is committed on-chain by hash.</p>
-        </header>
+      {/* 3-column command center */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <TermsColumn
+          escrow={escrow}
+          milestone={milestone}
+          dispute={dispute}
+          escrowId={escrowId}
+          milestoneIdx={milestoneIdx}
+          raisedAt={raisedAt}
+          remaining={remaining}
+          danger={danger}
+        />
+        <EvidenceColumn
+          title="Payer Evidence"
+          who={escrow.depositor}
+          evidence={payerEvidence}
+        />
+        <EvidenceColumn
+          title="Freelancer Evidence"
+          who={escrow.recipient}
+          evidence={freelancerEvidence}
+        />
+      </div>
 
-        <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
-          {dispute?.disputedBy && (
-            <EvidenceBubble
-              who={dispute.disputedBy} side="primary"
-              reason={dispute.reason}
-              uri={dispute.evidenceURI}
-              hash={dispute.evidenceHash}
-              label="Opening evidence"
-            />
+      {/* Sticky decision bar */}
+      <ArbiterDecisionBar
+        escrowId={escrowId}
+        milestoneIdx={milestoneIdx}
+        onResolved={refetch}
+      />
+    </div>
+  )
+}
+
+function TermsColumn({ escrow, milestone, dispute, escrowId, milestoneIdx, raisedAt, remaining, danger }) {
+  return (
+    <div className="border border-border-subtle bg-[#0a0a0a] p-5 flex flex-col gap-4 overflow-hidden">
+      <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">Contract Terms</div>
+
+      <div>
+        <Label>Amount in dispute</Label>
+        <div className="font-mono text-3xl text-white">{formatUSDC(milestone.amount)}</div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Payer</Label>
+          <AddressDisplay address={escrow.depositor} size="sm" />
+        </div>
+        <div>
+          <Label>Freelancer</Label>
+          <AddressDisplay address={escrow.recipient} size="sm" />
+        </div>
+      </div>
+
+      <div>
+        <Label>Case</Label>
+        <div className="text-sm">ESC-{escrowId} / Milestone {milestoneIdx + 1}</div>
+      </div>
+
+      {dispute?.disputedBy && (
+        <div>
+          <Label>Disputed by</Label>
+          <AddressDisplay address={dispute.disputedBy} size="sm" />
+        </div>
+      )}
+
+      <div>
+        <Label>Invoice hash</Label>
+        <div className="font-mono text-xs break-all text-text-primary">
+          {escrow.invoiceHash}
+        </div>
+      </div>
+
+      {raisedAt > 0 && (
+        <div>
+          <Label>Arbiter timeout</Label>
+          <div className={`font-mono text-sm ${danger ? 'text-status-error animate-pulse' : 'text-text-primary'}`}>
+            {formatRemaining(remaining)}
+          </div>
+          <div className="text-[10px] text-text-tertiary mt-1">
+            Force-refundable by anyone after 30d of inaction.
+          </div>
+        </div>
+      )}
+
+      {escrow.invoiceURI && (
+        <a href={escrow.invoiceURI} target="_blank" rel="noreferrer" className={`${GOD_BTN_GHOST} mt-auto`}>
+          View original invoice ↗
+        </a>
+      )}
+    </div>
+  )
+}
+
+function EvidenceColumn({ title, who, evidence }) {
+  return (
+    <div className="border border-border-subtle bg-[#0a0a0a] p-5 flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 border-b border-border-subtle pb-3">
+        <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">{title}</div>
+        <AddressDisplay address={who} size="sm" />
+      </div>
+      {!evidence ? (
+        <div className="text-xs text-text-tertiary italic text-center py-12 font-sans">
+          No evidence submitted.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-text-tertiary">
+            {evidence.kind === 'opening' ? 'Opening evidence' : 'Counter evidence'}
+          </div>
+          {evidence.reason && (
+            <p className="text-sm text-text-primary font-sans">{evidence.reason}</p>
           )}
-          {dispute?.counterEvidenceURI && (
-            <EvidenceBubble
-              who={dispute.disputedBy?.toLowerCase() === escrow.depositor?.toLowerCase() ? escrow.recipient : escrow.depositor}
-              side="secondary"
-              uri={dispute.counterEvidenceURI}
-              hash={dispute.counterEvidenceHash}
-              label="Counter-evidence"
-            />
+          {evidence.uri && (
+            <a href={evidence.uri} target="_blank" rel="noreferrer"
+              className="text-xs underline break-all text-text-primary">
+              {evidence.uri} ↗
+            </a>
           )}
-          {!dispute?.counterEvidenceURI && (
-            <div className="text-sm text-text-tertiary italic text-center mt-4">
-              Awaiting counter-evidence from the other party.
+          {evidence.hash && evidence.hash !== ZERO_BYTES32 && (
+            <div className="text-[10px] text-text-tertiary break-all border-t border-border-subtle pt-2">
+              hash {evidence.hash}
             </div>
           )}
         </div>
-
-        <CounterEvidenceInput
-          escrowId={escrowId} milestoneIdx={milestoneIdx}
-          dispute={dispute} role={role} address={address}
-          onSubmitted={refetch}
-        />
-      </div>
-    </div>
-  )
-}
-
-function EvidenceBubble({ who, side, reason, uri, hash, label }) {
-  const align = side === 'primary' ? 'self-start' : 'self-end'
-  const tone = side === 'primary'
-    ? 'bg-background-tertiary border-border-subtle'
-    : 'bg-accent-muted border-accent/30'
-  return (
-    <div className={`${align} max-w-[85%] rounded-xl border ${tone} p-4 flex flex-col gap-2`}>
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[10px] uppercase tracking-wider text-text-secondary">{label}</span>
-        <AddressDisplay address={who} size="sm" />
-      </div>
-      {reason && <p className="text-sm text-text-primary">{reason}</p>}
-      {uri && (
-        <a href={uri} target="_blank" rel="noreferrer" className="text-sm text-accent break-all">
-          {uri} ↗
-        </a>
-      )}
-      {hash && hash !== ZERO_BYTES32 && (
-        <div className="font-mono text-[10px] text-text-tertiary break-all">{truncateAddr(hash)}</div>
       )}
     </div>
   )
 }
 
-function CounterEvidenceInput({ escrowId, milestoneIdx, dispute, role, address, onSubmitted }) {
-  const [reason, setReason] = useState('')
-  const [uri, setUri] = useState('')
-  const { writeContractAsync } = useWriteContract()
-  const [txStatus, setTxStatus] = useState('idle')
-  const [txHash, setTxHash] = useState(null)
-  const [txError, setTxError] = useState(null)
-  const [txToastApi, setTxToastApi] = useState(null)
-  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
-
-  useEffect(() => {
-    if (!receipt) return
-    setTxStatus('success'); onSubmitted?.()
-    txToastApi?.success('Counter-evidence submitted.', { hash: txHash })
-    setReason(''); setUri('')
-  }, [receipt]) // eslint-disable-line
-
-  if (!role) return null
-  const isDisputer = dispute?.disputedBy?.toLowerCase() === address?.toLowerCase()
-  const alreadyCountered = dispute?.counterEvidenceHash &&
-    dispute.counterEvidenceHash !== ZERO_BYTES32
-  if (isDisputer || alreadyCountered) {
-    return (
-      <footer className="p-4 border-t border-border-subtle bg-background-primary text-xs text-text-tertiary text-center">
-        {isDisputer ? 'You opened this dispute. Wait for the other party to respond.' : 'Counter-evidence already submitted.'}
-      </footer>
-    )
-  }
-
-  const submit = async () => {
-    const t = txToast({ loading: 'Submitting counter-evidence — confirm in wallet…' })
-    setTxToastApi(t)
-    try {
-      if (!reason.trim() || !uri.trim()) throw new Error('Reason and evidence URL required')
-      const hash = keccak256(toBytes(reason + '|' + uri))
-      setTxError(null); setTxStatus('confirming')
-      const tx = await writeContractAsync({
-        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
-        functionName: 'submitCounterEvidence',
-        args: [BigInt(escrowId), BigInt(milestoneIdx), hash, uri]
-      })
-      setTxHash(tx); setTxStatus('pending')
-      t.update('Counter-evidence submitted. Waiting for confirmation…')
-    } catch (err) {
-      setTxError(err); setTxStatus('error')
-      t.error('Counter-evidence failed.')
-    }
-  }
-
-  return (
-    <>
-      <footer className="p-4 border-t border-border-subtle bg-background-primary flex flex-col gap-2">
-        <textarea rows={2} className="input-field-multiline text-sm"
-          placeholder="Your response…"
-          value={reason} onChange={(e) => setReason(e.target.value)} />
-        <div className="flex gap-2">
-          <input className="input-field text-sm flex-1"
-            placeholder="https://… (evidence URL)"
-            value={uri} onChange={(e) => setUri(e.target.value.trim())} />
-          <button className="btn-primary text-sm px-4"
-            onClick={submit}
-            disabled={!reason.trim() || !uri.trim() || txStatus === 'confirming' || txStatus === 'pending'}>
-            Submit
-          </button>
-        </div>
-      </footer>
-      <TxModal status={txStatus} txHash={txHash} error={txError}
-        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
-        onRetry={submit} title="Submitting counter-evidence" />
-    </>
-  )
-}
-
-function ArbiterResolutionPanel({ escrowId, milestoneIdx, onResolved }) {
+/* ============================================================
+   ARBITER DECISION EXECUTION — sticky bottom bar, double-confirm.
+   ============================================================ */
+function ArbiterDecisionBar({ escrowId, milestoneIdx, onResolved }) {
   const [resolutionHash, setResolutionHash] = useState('')
+  const [pending, setPending] = useState(null) // null | 'release' | 'refund'
   const { writeContractAsync } = useWriteContract()
   const [txStatus, setTxStatus] = useState('idle')
   const [txHash, setTxHash] = useState(null)
@@ -336,15 +429,23 @@ function ArbiterResolutionPanel({ escrowId, milestoneIdx, onResolved }) {
 
   useEffect(() => {
     if (!receipt) return
-    setTxStatus('success'); onResolved?.()
-    txToastApi?.success('Dispute resolved.', { hash: txHash })
+    setTxStatus('success'); setPending(null); onResolved?.()
+    txToastApi?.success('Decision executed.', { hash: txHash })
   }, [receipt]) // eslint-disable-line
 
-  const resolve = async (releaseToRecipient) => {
-    const t = txToast({ loading: 'Resolving dispute — confirm in wallet…' })
+  const isBusy = txStatus === 'confirming' || txStatus === 'pending'
+  const hashValid = isValidBytes32(resolutionHash)
+
+  const arm = (kind) => {
+    if (!hashValid) return
+    setPending(kind)
+  }
+  const cancel = () => setPending(null)
+
+  const execute = async (releaseToRecipient) => {
+    const t = txToast({ loading: 'Executing decision — confirm in wallet…' })
     setTxToastApi(t)
     try {
-      if (!isValidBytes32(resolutionHash)) throw new Error('Invalid resolution hash')
       setTxError(null); setTxStatus('confirming')
       const tx = await writeContractAsync({
         address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
@@ -352,34 +453,494 @@ function ArbiterResolutionPanel({ escrowId, milestoneIdx, onResolved }) {
         args: [BigInt(escrowId), BigInt(milestoneIdx), releaseToRecipient, resolutionHash, 0n]
       })
       setTxHash(tx); setTxStatus('pending')
-      t.update('Resolution submitted. Waiting for confirmation…')
+      t.update('Submitted. Waiting for confirmation…')
     } catch (err) {
-      setTxError(err); setTxStatus('error')
-      t.error('Resolution failed.')
+      setTxError(err); setTxStatus('error'); setPending(null)
+      t.error('Decision failed.')
     }
   }
 
   return (
-    <div className="mt-auto pt-4 border-t border-border-subtle flex flex-col gap-3">
-      <div className="text-xs uppercase tracking-wide text-text-secondary">Arbiter resolution</div>
-      <input className="input-field font-mono text-sm"
-        placeholder="Resolution hash (bytes32)"
-        value={resolutionHash} onChange={(e) => setResolutionHash(e.target.value.trim())} />
-      <div className="flex gap-2">
-        <button className="btn-primary text-sm py-2 flex-1"
-          onClick={() => resolve(true)}
-          disabled={txStatus === 'confirming' || txStatus === 'pending'}>
-          Release to Freelancer
-        </button>
-        <button className="btn-danger text-sm py-2 flex-1"
-          onClick={() => resolve(false)}
-          disabled={txStatus === 'confirming' || txStatus === 'pending'}>
-          Refund Payer
-        </button>
+    <>
+      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#050505] border-t border-border-medium">
+        <div className="max-w-content mx-auto px-4 md:px-8 py-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">
+              Arbiter Decision Execution
+            </div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-status-error">
+              Decisions are final and on-chain.
+            </div>
+          </div>
+          <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
+            <input
+              className="flex-1 bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-sm px-3 py-3 focus:outline-none focus:border-border-focused"
+              placeholder="resolution hash (bytes32)"
+              value={resolutionHash}
+              onChange={(e) => setResolutionHash(e.target.value.trim())}
+              disabled={!!pending || isBusy}
+            />
+            {!pending && (
+              <div className="flex gap-2">
+                <button
+                  className={GOD_BTN_RED}
+                  onClick={() => arm('refund')}
+                  disabled={!hashValid || isBusy}
+                >
+                  Force Refund to Payer
+                </button>
+                <button
+                  className={GOD_BTN_WHITE}
+                  onClick={() => arm('release')}
+                  disabled={!hashValid || isBusy}
+                >
+                  Force Release to Payee
+                </button>
+              </div>
+            )}
+            {pending && (
+              <div className="flex items-center gap-2">
+                <div className="text-xs uppercase tracking-[0.2em] text-status-error animate-pulse pr-2">
+                  Confirm: {pending === 'release' ? 'Release to Payee' : 'Refund to Payer'}
+                </div>
+                <button className={GOD_BTN_GHOST} onClick={cancel} disabled={isBusy}>Cancel</button>
+                <button
+                  className={pending === 'release' ? GOD_BTN_WHITE : GOD_BTN_RED}
+                  onClick={() => execute(pending === 'release')}
+                  disabled={isBusy}
+                >
+                  {isBusy ? 'Executing…' : 'Confirm Execution'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
-      <TxModal status={txStatus} txHash={txHash} error={txError}
+      <TxModal
+        status={txStatus} txHash={txHash} error={txError}
         onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
-        title="Resolving dispute" />
+        title="Resolving dispute"
+      />
+    </>
+  )
+}
+
+/* ============================================================
+   FEE MANAGER MODULE
+   ============================================================ */
+function FeeManagerModule() {
+  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
+  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
+  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
+
+  return (
+    <Module title="Fee Manager" subtitle="Protocol fee, treasury, CCTP forward fee">
+      <Row label="Current fee">
+        <span className="font-mono text-base text-text-primary">
+          {fee.data !== undefined ? `${(Number(fee.data) / 100).toFixed(2)}%` : '—'}
+        </span>
+      </Row>
+      <WriteForm
+        placeholder="new fee in bps (e.g. 199 = 1.99%)"
+        validate={(v) => /^\d+$/.test(v) && Number(v) <= 1000}
+        label="Update protocol fee"
+        fn="setProtocolFee"
+        toCallArgs={(v) => [BigInt(v)]}
+        onSuccess={() => { fee.refetch?.() }}
+      />
+
+      <Divider />
+
+      <Row label="Treasury">
+        <span className="font-mono text-xs text-text-primary">{treasury.data ? truncateAddr(treasury.data) : '—'}</span>
+      </Row>
+      <WriteForm
+        placeholder="new treasury (0x…)"
+        validate={(v) => isAddress(v)}
+        label="Update treasury"
+        fn="setProtocolTreasury"
+        toCallArgs={(v) => [v]}
+        onSuccess={() => { treasury.refetch?.() }}
+      />
+
+      <Divider />
+
+      <Row label="CCTP forward fee">
+        <span className="font-mono text-base text-text-primary">
+          {cctp.data !== undefined ? `${(Number(cctp.data) / 1_000_000).toFixed(6)} USDC` : '—'}
+        </span>
+      </Row>
+      <WriteForm
+        placeholder="new fee in USDC base units (6 decimals)"
+        validate={(v) => /^\d+$/.test(v)}
+        label="Update CCTP forward fee"
+        fn="setCctpForwardFee"
+        toCallArgs={(v) => [BigInt(v)]}
+        onSuccess={() => { cctp.refetch?.() }}
+      />
+    </Module>
+  )
+}
+
+/* ============================================================
+   DOMAIN MANAGER MODULE
+   ============================================================ */
+function DomainManagerModule() {
+  const { supported, refetch } = useSupportedDomains()
+  return (
+    <Module title="Domain Manager" subtitle="Supported CCTP destination domains">
+      <div className="flex flex-col gap-2">
+        {supported.length === 0 ? (
+          <div className="text-xs text-text-tertiary italic">No supported domains yet.</div>
+        ) : (
+          supported.map((d) => (
+            <SupportedDomainRow key={d} domain={d} onRemoved={refetch} />
+          ))
+        )}
+      </div>
+
+      <Divider />
+
+      <WriteForm
+        placeholder="new domain id (e.g. 6 for Base Sepolia)"
+        validate={(v) => /^\d+$/.test(v) && ALL_DOMAIN_NUMBERS.includes(Number(v))}
+        label="Add supported domain"
+        fn="addSupportedDomain"
+        toCallArgs={(v) => [Number(v)]}
+        onSuccess={() => { refetch?.() }}
+      />
+    </Module>
+  )
+}
+
+function SupportedDomainRow({ domain, onRemoved }) {
+  const { writeContractAsync } = useWriteContract()
+  const [txHash, setTxHash] = useState(null)
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+
+  useEffect(() => {
+    if (receipt) { onRemoved?.(); setTxHash(null) }
+  }, [receipt]) // eslint-disable-line
+
+  const remove = async () => {
+    const t = txToast({ loading: `Removing domain ${domain}…` })
+    try {
+      const tx = await writeContractAsync({
+        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
+        functionName: 'removeSupportedDomain', args: [Number(domain)]
+      })
+      setTxHash(tx)
+      t.update('Submitted.')
+      // Resolve toast on receipt via separate effect (Sonner reuses the id).
+      t.success('Removed.', { hash: tx })
+    } catch (err) {
+      t.error('Removal failed.')
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between border border-border-subtle px-3 py-2 text-xs">
+      <span className="font-mono text-text-primary">{getDomainName(domain)} <span className="text-text-tertiary">#{domain}</span></span>
+      <button className={`${GOD_BTN_GHOST} !px-3 !py-1.5`} onClick={remove}>Remove</button>
     </div>
   )
 }
+
+/* ============================================================
+   RECOVERY MANAGER MODULE
+   ============================================================ */
+function RecoveryManagerModule() {
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const { writeContractAsync } = useWriteContract()
+  const [txStatus, setTxStatus] = useState('idle')
+  const [txHash, setTxHash] = useState(null)
+  const [txError, setTxError] = useState(null)
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [toastApi, setToastApi] = useState(null)
+
+  useEffect(() => {
+    if (!receipt) return
+    setTxStatus('success')
+    toastApi?.success('Refund credit transferred.', { hash: txHash })
+    setFrom(''); setTo(''); setConfirmOpen(false)
+  }, [receipt]) // eslint-disable-line
+
+  const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
+
+  const execute = async () => {
+    const t = txToast({ loading: 'Executing emergency recovery…' })
+    setToastApi(t)
+    try {
+      setTxError(null); setTxStatus('confirming')
+      const tx = await writeContractAsync({
+        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
+        functionName: 'adminTransferRefundCredit', args: [from, to]
+      })
+      setTxHash(tx); setTxStatus('pending')
+      t.update('Submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error'); setConfirmOpen(false)
+      t.error('Recovery failed.')
+    }
+  }
+
+  return (
+    <Module title="Recovery Manager" subtitle="Emergency refund-credit transfer" danger>
+      <div className="border border-status-error/40 bg-status-error/5 text-status-error text-[10px] uppercase tracking-[0.2em] px-3 py-2">
+        Warning: Irreversible recovery action.
+      </div>
+
+      <Label>Blacklisted wallet</Label>
+      <input
+        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
+        placeholder="0x… (current credit holder)"
+        value={from}
+        onChange={(e) => setFrom(e.target.value.trim())}
+      />
+
+      <Label>New owner</Label>
+      <input
+        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
+        placeholder="0x… (replacement wallet)"
+        value={to}
+        onChange={(e) => setTo(e.target.value.trim())}
+      />
+
+      {!confirmOpen ? (
+        <button
+          className={GOD_BTN_RED}
+          onClick={() => setConfirmOpen(true)}
+          disabled={!valid || txStatus === 'confirming' || txStatus === 'pending'}
+        >
+          Transfer Refund Credit
+        </button>
+      ) : (
+        <div className="flex flex-col gap-2 border border-status-error/40 p-3">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-status-error animate-pulse">
+            Confirm irreversible transfer
+          </div>
+          <div className="flex gap-2">
+            <button className={GOD_BTN_GHOST} onClick={() => setConfirmOpen(false)} disabled={txStatus === 'pending' || txStatus === 'confirming'}>
+              Cancel
+            </button>
+            <button className={GOD_BTN_RED} onClick={execute} disabled={txStatus === 'pending' || txStatus === 'confirming'}>
+              {txStatus === 'pending' || txStatus === 'confirming' ? 'Executing…' : 'Confirm Execution'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <TxModal
+        status={txStatus} txHash={txHash} error={txError}
+        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+        title="Emergency recovery"
+      />
+    </Module>
+  )
+}
+
+/* ============================================================
+   PAUSER MODULE
+   ============================================================ */
+function PauserModule() {
+  const paused = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'paused' })
+  const { writeContractAsync } = useWriteContract()
+  const [txStatus, setTxStatus] = useState('idle')
+  const [txHash, setTxHash] = useState(null)
+  const [txError, setTxError] = useState(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [toastApi, setToastApi] = useState(null)
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+
+  useEffect(() => {
+    if (!receipt) return
+    setTxStatus('success'); paused.refetch?.()
+    toastApi?.success(paused.data ? 'Unpaused.' : 'Paused.', { hash: txHash })
+    setConfirmOpen(false)
+  }, [receipt]) // eslint-disable-line
+
+  const isPaused = !!paused.data
+  const isBusy = txStatus === 'confirming' || txStatus === 'pending'
+
+  const execute = async () => {
+    const t = txToast({ loading: isPaused ? 'Unpausing…' : 'Pausing…' })
+    setToastApi(t)
+    try {
+      setTxError(null); setTxStatus('confirming')
+      const tx = await writeContractAsync({
+        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
+        functionName: isPaused ? 'unpause' : 'pause', args: []
+      })
+      setTxHash(tx); setTxStatus('pending')
+      t.update('Submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error'); setConfirmOpen(false)
+      t.error('Action failed.')
+    }
+  }
+
+  return (
+    <Module title="Pauser" subtitle="Protocol-wide circuit breaker" danger={isPaused}>
+      <div className={`text-2xl font-mono uppercase tracking-[0.2em] py-3 ${isPaused ? 'text-status-error' : 'text-status-success'}`}>
+        {isPaused ? '🔴 PAUSED' : '🟢 ACTIVE'}
+      </div>
+
+      {!confirmOpen ? (
+        <button
+          className={isPaused ? GOD_BTN_WHITE : GOD_BTN_RED}
+          onClick={() => setConfirmOpen(true)}
+          disabled={isBusy}
+        >
+          {isPaused ? 'Unpause Protocol' : 'Pause Protocol'}
+        </button>
+      ) : (
+        <div className="flex flex-col gap-2 border border-status-error/40 p-3">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-status-error animate-pulse">
+            Confirm protocol {isPaused ? 'unpause' : 'pause'}
+          </div>
+          <div className="flex gap-2">
+            <button className={GOD_BTN_GHOST} onClick={() => setConfirmOpen(false)} disabled={isBusy}>
+              Cancel
+            </button>
+            <button className={isPaused ? GOD_BTN_WHITE : GOD_BTN_RED} onClick={execute} disabled={isBusy}>
+              {isBusy ? 'Executing…' : 'Confirm'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isPaused && (
+        <div className="border border-status-error/40 bg-status-error/5 text-status-error text-[10px] uppercase tracking-[0.2em] px-3 py-2">
+          Protocol paused. No new escrows can be created.
+        </div>
+      )}
+
+      <TxModal
+        status={txStatus} txHash={txHash} error={txError}
+        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+        title={isPaused ? 'Unpausing protocol' : 'Pausing protocol'}
+      />
+    </Module>
+  )
+}
+
+/* ============================================================
+   Shared primitives
+   ============================================================ */
+function Module({ title, subtitle, children, danger = false }) {
+  return (
+    <section className={`border ${danger ? 'border-status-error/40' : 'border-border-subtle'} bg-[#0a0a0a] p-5 flex flex-col gap-3`}>
+      <ModuleHeader title={title} subtitle={subtitle} danger={danger} />
+      {children}
+    </section>
+  )
+}
+
+function ModuleHeader({ title, subtitle, danger = false }) {
+  return (
+    <header className="flex flex-col gap-1 border-b border-border-subtle pb-3">
+      <div className={`text-[10px] uppercase tracking-[0.3em] ${danger ? 'text-status-error' : 'text-text-tertiary'}`}>
+        {title}
+      </div>
+      {subtitle && (
+        <div className="text-xs text-text-secondary font-sans">{subtitle}</div>
+      )}
+    </header>
+  )
+}
+
+function Row({ label, children }) {
+  return (
+    <div className="flex items-center justify-between gap-3 text-xs">
+      <Label inline>{label}</Label>
+      {children}
+    </div>
+  )
+}
+
+function Label({ children, inline = false }) {
+  return (
+    <div className={`text-[10px] uppercase tracking-[0.2em] text-text-tertiary ${inline ? '' : 'mb-1'}`}>
+      {children}
+    </div>
+  )
+}
+
+function Divider() {
+  return <hr className="border-t border-border-subtle my-1" />
+}
+
+function WriteForm({ label, fn, placeholder, validate, toCallArgs, onSuccess }) {
+  const [value, setValue] = useState('')
+  const { writeContractAsync } = useWriteContract()
+  const [txStatus, setTxStatus] = useState('idle')
+  const [txHash, setTxHash] = useState(null)
+  const [txError, setTxError] = useState(null)
+  const [toastApi, setToastApi] = useState(null)
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+
+  useEffect(() => {
+    if (!receipt) return
+    setTxStatus('success'); onSuccess?.()
+    toastApi?.success('Update confirmed.', { hash: txHash })
+    setValue('')
+  }, [receipt]) // eslint-disable-line
+
+  const valid = validate(value)
+  const isBusy = txStatus === 'confirming' || txStatus === 'pending'
+
+  const submit = async () => {
+    const t = txToast({ loading: `${label} — confirm in wallet…` })
+    setToastApi(t)
+    try {
+      setTxError(null); setTxStatus('confirming')
+      const tx = await writeContractAsync({
+        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
+        functionName: fn, args: toCallArgs(value)
+      })
+      setTxHash(tx); setTxStatus('pending')
+      t.update('Submitted. Waiting for confirmation…')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error(`${label} failed.`)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-border-focused"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => setValue(e.target.value.trim())}
+        disabled={isBusy}
+      />
+      <button
+        className={GOD_BTN_WHITE}
+        onClick={submit}
+        disabled={!valid || isBusy}
+      >
+        {isBusy ? 'Submitting…' : label}
+      </button>
+      <TxModal
+        status={txStatus} txHash={txHash} error={txError}
+        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+        title={label}
+      />
+    </div>
+  )
+}
+
+/* ---------- helpers ---------- */
+function formatRemaining(seconds) {
+  if (seconds <= 0) return 'TIMEOUT REACHED — anyone can force refund'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  return `${d}d ${h}h remaining`
+}
+
+// Hint to esbuild that these imports aren't dead.
+void keccak256
+void toBytes

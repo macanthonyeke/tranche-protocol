@@ -10,7 +10,9 @@ export default function ToastViewport() {
       position="top-right"
       richColors
       closeButton
-      duration={4500}
+      expand={false}
+      visibleToasts={3}
+      duration={4000}
       toastOptions={{
         style: {
           background: 'var(--bg-secondary)',

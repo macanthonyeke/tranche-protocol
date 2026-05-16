@@ -67,6 +67,11 @@ function DetailInner() {
   const inv = escrow.invoiceHash ? `INV-${escrow.invoiceHash.slice(2, 6).toUpperCase()}` : `ESC-${escrow.id}`
 
   const activeIdx = milestones.findIndex((m) => m.state !== 3 && m.state !== 4)
+  // Percent of the timeline that should be "filled" with the gradient.
+  // Stop at the active milestone's dot — anything past it stays subtle.
+  const activeStopPct = milestones.length > 1
+    ? (activeIdx === -1 ? 100 : Math.min(100, Math.round((activeIdx / Math.max(1, milestones.length - 1)) * 100)))
+    : 0
 
   return (
     <div className="flex flex-col lg:flex-row gap-8">
@@ -83,7 +88,14 @@ function DetailInner() {
         </div>
 
         <div className="relative flex flex-col gap-6">
+          {/* Track: muted base line spanning the whole column. */}
           <div className="absolute left-3 top-2 bottom-2 w-0.5 bg-border-subtle" aria-hidden />
+          {/* Progress: glowing gradient that stops at the active milestone. */}
+          <div
+            className="absolute left-3 top-2 w-0.5 rounded-full bg-gradient-to-b from-accent-blue via-accent-blue/80 to-accent-blue/0 shadow-[0_0_12px_rgba(51,119,255,0.45)] transition-[height] duration-500"
+            style={{ height: `calc(${activeStopPct}% - 1rem)` }}
+            aria-hidden
+          />
           <AnimatePresence initial={false}>
             {milestones.map((m, i) => {
               const opt = optimistic[`milestone_${i}`]
@@ -150,7 +162,7 @@ function loadMilestoneTitles(escrowId) {
 function SpecsCard({ escrow, role, inv }) {
   const deadlinePassed = Number(escrow.deadline) * 1000 < Date.now()
   return (
-    <div className="card-surface p-6 flex flex-col gap-4">
+    <div className="bg-background-primary/50 border border-border-subtle rounded-2xl shadow-inner p-6 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         {role && <RoleBadge role={role} />}
         <EscrowBadge state={escrow.state} />
@@ -338,20 +350,23 @@ function MilestoneCard({
   const now = Math.floor(Date.now() / 1000)
   const deadlinePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline)
 
+  const completed = milestone.state === 3 || milestone.state === 4
   const activeCls = isActive
-    ? 'bg-accent-muted border-l-4 border-accent-blue pl-7'
-    : 'bg-background-secondary border border-border-subtle pl-7'
+    ? 'bg-background-secondary border border-border-focused pl-7 shadow-[0_0_15px_rgba(51,119,255,0.15)] animate-[pulse_2.5s_ease-in-out_infinite]'
+    : completed
+      ? 'bg-background-secondary border border-border-subtle pl-7 opacity-60 grayscale-[50%]'
+      : 'bg-background-secondary border border-border-subtle pl-7'
 
   return (
     <div className="relative pl-8">
       <span className={`absolute left-[7px] top-6 h-3 w-3 rounded-full border-2 ${
         milestone.state === 3 ? 'bg-status-success border-status-success'
         : milestone.state === 2 ? 'bg-status-warning border-status-warning'
-        : isActive ? 'bg-accent border-accent'
+        : isActive ? 'bg-accent border-accent shadow-[0_0_8px_rgba(51,119,255,0.6)]'
         : 'bg-background-primary border-border-medium'
       }`} aria-hidden />
 
-      <div className={`rounded-2xl p-5 flex flex-col gap-3 transition-colors ${activeCls}`}>
+      <div className={`rounded-2xl p-5 flex flex-col gap-3 transition-all ${activeCls}`}>
         <div className="flex items-center justify-between gap-2">
           <div>
             <div className="font-mono text-xs text-text-tertiary">M{milestone.index + 1}</div>
