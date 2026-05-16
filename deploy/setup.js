@@ -235,29 +235,14 @@ function upsertEnvValue(filePath, key, value) {
 }
 
 function updateFrontendConfig(contractAddress) {
-  const configPath = path.resolve(__dirname, '../frontend/src/lib/config.ts');
-  if (!fs.existsSync(configPath)) {
-    console.log('Frontend config not found; skipped frontend address update.');
-    return;
-  }
-
-  const current = fs.readFileSync(configPath, 'utf8');
-  const next = current.replace(
-    /(export const ESCROW_ADDRESS =\s*\n\s*")[^"]+(" as Address;)/,
-    `$1${contractAddress}$2`,
-  );
-
-  if (next === current) {
-    throw new Error('Could not find ESCROW_ADDRESS in frontend/src/lib/config.ts');
-  }
-
-  fs.writeFileSync(configPath, next);
+  const envPath = path.resolve(__dirname, '../frontend/.env');
+  upsertEnvValue(envPath, 'VITE_CONTRACT_ADDRESS', contractAddress);
 }
 
 function updateDownstreamConfig(contractAddress) {
   upsertEnvValue(path.resolve(__dirname, '../bot/.env'), 'CONTRACT_ADDRESS', contractAddress);
   updateFrontendConfig(contractAddress);
-  console.log('\nUpdated bot/.env and frontend/src/lib/config.ts with contract address.');
+  console.log('\nUpdated bot/.env and frontend/.env with contract address.');
 }
 
 console.log('Setting up CrossChainEscrow V2...');
