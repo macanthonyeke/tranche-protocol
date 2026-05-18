@@ -24,7 +24,7 @@ function SettingsInner() {
     <div className="max-w-xl mx-auto flex flex-col gap-8 w-full">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-text-secondary text-sm mt-1">Manage your account and withdraw refunded funds.</p>
+        <p className="text-text-secondary text-sm mt-1">Withdraw your refund balance and manage your preferences.</p>
       </div>
 
       <RefundSection />
@@ -50,11 +50,11 @@ function RefundSection() {
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); refetch()
-    txToastApi?.success('Withdrawal complete.', { hash: txHash })
+    txToastApi?.success('Withdrawn successfully.', { hash: txHash })
   }, [receipt]) // eslint-disable-line
 
   const submit = async () => {
-    const t = txToast({ loading: 'Submitting withdrawal — confirm in wallet…' })
+    const t = txToast({ loading: 'Submitting. Check your wallet.' })
     setTxToastApi(t)
     try {
       if (!isValidAddress(recipient)) throw new Error('Invalid recipient address')
@@ -64,44 +64,44 @@ function RefundSection() {
         functionName: 'withdrawRefund', args: [recipient]
       })
       setTxHash(hash); setTxStatus('pending')
-      t.update('Withdrawal submitted. Waiting for confirmation…')
+      t.update('Transaction sent. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error')
-      t.error('Withdrawal failed.')
+      t.error('Withdrawal failed. Try again.')
     }
   }
 
   return (
-    <Section title="Refund balance" description="USDC refunded from cancelled or disputed escrows.">
+    <Section title="Refund balance" description="USDC that was returned to you from cancelled or disputed escrows. Withdraw it to any address you control.">
       <div className="flex items-end justify-between gap-3">
         <div>
-          <div className="text-xs text-text-secondary mb-1">Available</div>
+          <div className="text-xs text-text-secondary mb-1">Available to withdraw</div>
           <div className="font-mono text-2xl text-accent">{formatUSDC(balance)}</div>
         </div>
       </div>
 
       <div className="flex flex-col gap-2">
         <label className="text-sm font-medium flex items-center">
-          Recipient address
-          <Tooltip content="You can withdraw to any address — useful if your original wallet was restricted." />
+          Withdraw to
+          <Tooltip content="You can send this to any wallet you control. If your original wallet is restricted, use a different one." />
         </label>
         <input className="input-field font-mono text-sm" placeholder="0x…"
           value={recipient}
           onChange={(e) => setRecipient(e.target.value.trim())} />
         {recipient && !isValidAddress(recipient) && (
-          <div className="text-xs text-status-error">Invalid address.</div>
+          <div className="text-xs text-status-error">That doesn't look like a valid address.</div>
         )}
       </div>
 
       <button className="btn-primary"
         onClick={submit}
         disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}>
-        {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Withdraw'}
+        {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Withdraw funds'}
       </button>
 
       <TxModal status={txStatus} txHash={txHash} error={txError}
         onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
-        onRetry={submit} title="Withdrawing refund" />
+        onRetry={submit} title="Processing withdrawal" />
     </Section>
   )
 }
@@ -110,7 +110,7 @@ function RefundSection() {
 function AppearanceSection() {
   const { theme, setTheme } = useTheme()
   return (
-    <Section title="Appearance" description="Customize how the app looks on this device.">
+    <Section title="Appearance" description="Choose how the app looks on this device.">
       <div className="flex flex-col gap-2">
         <span className="text-sm font-medium">Theme</span>
         <div className="grid grid-cols-2 gap-2">
@@ -137,7 +137,7 @@ function ThemeOption({ active, onClick, label }) {
 function AccountSection() {
   const { address } = useAccount()
   return (
-    <Section title="Connected account" description="Your currently connected wallet.">
+    <Section title="Connected wallet" description="The wallet you are currently connected with.">
       <div className="flex items-center justify-between">
         <span className="text-sm text-text-secondary">Wallet address</span>
         <AddressDisplay address={address} full size="sm" />

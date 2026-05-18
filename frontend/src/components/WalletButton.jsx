@@ -41,7 +41,7 @@ export default function WalletButton() {
         disabled={isPending}
         className="btn-primary text-sm px-4 py-2"
       >
-        {isPending ? 'Connecting…' : 'Connect Wallet'}
+        {isPending ? 'Connecting...' : 'Connect Wallet'}
       </button>
     )
   }
@@ -71,14 +71,14 @@ export default function WalletButton() {
               className="w-full text-left bg-background-tertiary rounded-md p-2 font-mono text-xs break-all hover:bg-border-subtle transition-colors"
             >
               {address}
-              <span className="ml-2 text-accent">{copied ? 'Copied!' : 'Copy'}</span>
+              <span className="ml-2 text-accent">{copied ? 'Copied' : 'Copy address'}</span>
             </button>
           </div>
           <button
             onClick={() => { disconnect(); setOpen(false) }}
             className="btn-danger w-full text-sm py-2"
           >
-            Disconnect
+            Disconnect wallet
           </button>
         </div>
       )}

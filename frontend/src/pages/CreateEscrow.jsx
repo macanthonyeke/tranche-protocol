@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useWaitForTransactionReceipt, useWriteContract, useReadContract } from 'wagmi'
 import { decodeEventLog } from 'viem'
@@ -20,11 +20,11 @@ import { isValidAddress, isValidUrl, formatUSDC, formatDeadline, formatWindow } 
 const DRAFT_KEY = 'escrow-draft'
 
 const STEP_DEFS = [
-  { num: 1, label: 'Parties & amount' },
-  { num: 2, label: 'Invoice' },
-  { num: 3, label: 'Timing' },
-  { num: 4, label: 'Milestones' },
-  { num: 5, label: 'Review & lock' }
+  { num: 1, label: 'Parties', heading: 'Who are you paying?', description: 'Approved milestone payments go directly to this address.' },
+  { num: 2, label: 'Invoice', heading: 'What is this for?', description: 'Give this escrow a description and link to the invoice document.' },
+  { num: 3, label: 'Timeline', heading: 'Set the timeline', description: 'When work needs to be done, and how long each party has to respond.' },
+  { num: 4, label: 'Milestones', heading: 'Allocate the milestones', description: 'Each milestone releases separately when the payer approves it.' },
+  { num: 5, label: 'Review', heading: 'Review and lock funds', description: 'Two steps: approve USDC spending, then create the escrow.' }
 ]
 
 const TITLE_PRESETS = [
@@ -61,7 +61,7 @@ const emptyState = () => ({
 
 export default function CreateEscrow() {
   return (
-    <ConnectGate title="Connect to create an escrow" message="You need a connected wallet to lock funds.">
+    <ConnectGate title="Wallet not connected" message="Connect your wallet to create an escrow.">
       <Wizard />
     </ConnectGate>
   )
@@ -128,34 +128,34 @@ function Wizard() {
   const validateStep = (s) => {
     const e = {}
     if (s === 1) {
-      if (!isValidAddress(state.freelancer)) e.freelancer = 'Enter a valid Ethereum address.'
+      if (!isValidAddress(state.freelancer)) e.freelancer = "That doesn't look like a valid address."
       if (state.freelancer && address && state.freelancer.toLowerCase() === address.toLowerCase())
-        e.freelancer = 'Freelancer cannot be the same as the payer.'
-      if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Select a supported destination chain.'
-      else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Non-EVM destinations aren\'t supported yet.'
-      if (!totalAmountNum || totalAmountNum <= 0) e.totalAmount = 'Enter a total amount greater than 0.'
+        e.freelancer = "The freelancer and payer can't be the same wallet."
+      if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Pick a supported destination chain.'
+      else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Only EVM-compatible chains are supported right now.'
+      if (!totalAmountNum || totalAmountNum <= 0) e.totalAmount = 'Enter an amount greater than zero.'
     }
     if (s === 2) {
-      if (!state.useCustomHash && !state.description.trim()) e.description = 'Describe what this invoice covers.'
-      if (state.useCustomHash && !isValidBytes32(state.customInvoiceHash)) e.customInvoiceHash = 'Custom hash must be 0x + 64 hex chars.'
-      if (!isValidUrl(state.invoiceURI)) e.invoiceURI = 'Enter a valid URL.'
+      if (!state.useCustomHash && !state.description.trim()) e.description = 'Add a description for this invoice.'
+      if (state.useCustomHash && !isValidBytes32(state.customInvoiceHash)) e.customInvoiceHash = 'Custom hash must start with 0x followed by 64 hex characters.'
+      if (!isValidUrl(state.invoiceURI)) e.invoiceURI = "That doesn't look like a valid URL."
     }
     if (s === 3) {
-      if (!state.deadline) e.deadline = 'Pick a project deadline.'
+      if (!state.deadline) e.deadline = 'Set a project deadline.'
       else {
         const ts = Math.floor(state.deadline.getTime() / 1000)
-        if (ts <= Math.floor(Date.now() / 1000) + 3600) e.deadline = 'Deadline must be at least 1 hour in the future.'
+        if (ts <= Math.floor(Date.now() / 1000) + 3600) e.deadline = 'Deadline needs to be at least 1 hour from now.'
       }
     }
     if (s === 4) {
-      if (state.milestones.length === 0) e.milestones = 'Add at least one milestone.'
+      if (state.milestones.length === 0) e.milestones = 'Add at least one milestone to continue.'
       state.milestones.forEach((m, i) => {
         const eff = m.title === 'Custom' ? m.customTitle.trim() : m.title
-        if (!eff) e[`milestone_${i}_title`] = 'Title required.'
+        if (!eff) e[`milestone_${i}_title`] = 'Give this milestone a title.'
         const a = parseFloat(m.amount)
-        if (!a || a <= 0) e[`milestone_${i}_amount`] = 'Amount must be > 0.'
+        if (!a || a <= 0) e[`milestone_${i}_amount`] = 'Milestone amount must be greater than zero.'
       })
-      if (!exactMatch) e.milestonesTotal = 'Milestone amounts must equal the total.'
+      if (!exactMatch) e.milestonesTotal = 'Milestone amounts need to add up to the total.'
     }
     return e
   }
@@ -175,7 +175,7 @@ function Wizard() {
   const milestoneSum = milestoneAmountsBigInt.reduce((a, b) => a + b, 0n)
 
   const onApprove = async () => {
-    const t = txToast({ loading: 'Approving USDC — confirm in wallet…' })
+    const t = txToast({ loading: 'Approving USDC. Check your wallet.' })
     setTxToastApi(t)
     try {
       setTxError(null); setTxStatus('confirming'); setPhase('approve')
@@ -184,15 +184,15 @@ function Wizard() {
         args: [CONTRACT_ADDRESS, totalBaseUnits]
       })
       setTxHash(hash); setTxStatus('pending')
-      t.update('Approval submitted. Waiting for confirmation…')
+      t.update('Approval sent. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error')
-      t.error('Approval failed.')
+      t.error('Approval failed. Try again.')
     }
   }
 
   const onDeposit = async () => {
-    const t = txToast({ loading: 'Creating escrow — confirm in wallet…' })
+    const t = txToast({ loading: 'Creating escrow. Check your wallet.' })
     setTxToastApi(t)
     try {
       if (milestoneSum !== totalBaseUnits) throw new Error('Amount mismatch')
@@ -224,10 +224,10 @@ function Wizard() {
         ]
       })
       setTxHash(hash); setTxStatus('pending')
-      t.update('Deposit submitted. Waiting for confirmation…')
+      t.update('Transaction sent. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error')
-      t.error('Deposit failed.')
+      t.error('Escrow creation failed. Try again.')
     }
   }
 
@@ -255,7 +255,7 @@ function Wizard() {
       }
       setTxStatus('success')
       try { localStorage.removeItem(DRAFT_KEY) } catch {}
-      txToastApi?.success('Escrow created successfully.', { hash: txHash })
+      txToastApi?.success('Escrow created. Funds are now locked.', { hash: txHash })
       setTimeout(() => navigate(escrowId !== null ? `/escrow/${escrowId}` : '/dashboard'), 800)
     }
   }, [receipt]) // eslint-disable-line
@@ -270,13 +270,15 @@ function Wizard() {
       .sort((a, b) => a.label.localeCompare(b.label))
   ), [supported])
 
+  const currentStep = STEP_DEFS.find((s) => s.num === step) ?? STEP_DEFS[0]
+
   return (
-    <div className="flex flex-col md:flex-row gap-8 md:gap-12 max-w-4xl mx-auto w-full">
+    <div className="flex flex-col md:flex-row gap-8 md:gap-12 max-w-4xl mx-auto w-full max-w-full">
       {/* Progress tracker */}
       <ProgressTracker step={step} onJump={(i) => i < step && setStep(i)} />
 
       {/* Form card */}
-      <div className="md:w-3/4 card-surface p-6 md:p-8">
+      <div className="w-full md:w-3/4 card-surface p-5 sm:p-6 md:p-8">
         <div className="flex flex-col gap-6">
           <AnimatePresence mode="wait">
             <motion.div
@@ -287,6 +289,7 @@ function Wizard() {
               transition={{ duration: 0.22, ease: 'easeOut' }}
               className="flex flex-col gap-6"
             >
+              <StepHeading heading={currentStep.heading} description={currentStep.description} />
               {step === 1 && <Step1 state={state} setState={setState} errors={errors} chainOptions={chainOptions} loadingDomains={loadingDomains} />}
               {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
               {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
@@ -321,51 +324,112 @@ function Wizard() {
   )
 }
 
-/* ---------- Progress tracker ---------- */
+/* ---------- Step heading ---------- */
+function StepHeading({ heading, description }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <h2 className="text-2xl font-semibold tracking-tight text-text-primary">{heading}</h2>
+      <p className="text-sm text-text-secondary">{description}</p>
+    </div>
+  )
+}
+
+/* ---------- Progress tracker ----------
+   Desktop shows a vertical rail with three states per step:
+     • completed — accent-filled circle with a checkmark
+     • current   — solid accent, ring, prominent label
+     • upcoming  — outlined, muted
+   Mobile shows just numbered dots; labels are hidden to save room. */
 function ProgressTracker({ step, onJump }) {
+  const total = STEP_DEFS.length
+  const current = STEP_DEFS.find((s) => s.num === step) ?? STEP_DEFS[0]
   return (
     <>
-      {/* Mobile: horizontal scroll */}
-      <div className="md:hidden flex flex-row justify-between w-full overflow-x-auto pb-4 mb-2 gap-3">
-        {STEP_DEFS.map((s) => {
-          const isCurrent = s.num === step
-          const isDone = s.num < step
-          return (
-            <button key={s.num} onClick={() => onJump(s.num)}
-              className={`flex items-center gap-2 shrink-0 px-3 py-2 rounded-full text-xs font-medium border ${
-                isCurrent ? 'bg-accent-muted border-accent-blue text-accent'
-                : isDone ? 'border-border-subtle text-text-secondary'
-                : 'border-border-subtle text-text-tertiary'
-              }`}>
-              <span className={`inline-flex items-center justify-center h-5 w-5 rounded-full text-[10px] font-mono ${
-                isCurrent ? 'bg-accent text-white' : isDone ? 'bg-background-tertiary text-text-secondary' : 'bg-background-tertiary text-text-tertiary'
-              }`}>{s.num}</span>
-              {s.label}
-            </button>
-          )
-        })}
+      {/* Mobile: header + segmented progress bar with numbered dots */}
+      <div className="md:hidden flex flex-col gap-3 w-full max-w-full">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-xs uppercase tracking-[0.15em] text-text-tertiary">
+            Step {step} of {total}
+          </span>
+          <span className="text-[10px] font-mono tabular text-text-tertiary">
+            {Math.round((step / total) * 100)}%
+          </span>
+        </div>
+        <h2 className="text-lg font-semibold tracking-tight text-text-primary">
+          {current.label}
+        </h2>
+        <div className="flex items-center gap-2">
+          {STEP_DEFS.map((s) => {
+            const isCurrent = s.num === step
+            const isDone = s.num < step
+            return (
+              <button
+                key={s.num}
+                type="button"
+                onClick={() => onJump(s.num)}
+                aria-label={`Go to step ${s.num}: ${s.label}`}
+                className={`relative flex-1 h-1.5 rounded-full transition-colors duration-300 ${
+                  isDone ? 'bg-accent' : isCurrent ? 'bg-accent/60' : 'bg-background-tertiary'
+                }`}
+              />
+            )
+          })}
+        </div>
       </div>
 
-      {/* Desktop: vertical, left of form */}
-      <aside className="hidden md:flex md:w-1/4 flex-col gap-8 border-l-2 border-border-subtle pl-6">
-        {STEP_DEFS.map((s) => {
-          const isCurrent = s.num === step
-          const isDone = s.num < step
-          return (
-            <button key={s.num} onClick={() => onJump(s.num)}
-              className={`relative flex items-start gap-3 text-left ${isDone || isCurrent ? '' : 'opacity-60'}`}>
-              <span className={`absolute -left-[34px] inline-flex items-center justify-center h-6 w-6 rounded-full text-[11px] font-mono border-2 ${
-                isCurrent ? 'bg-accent border-accent text-white'
-                : isDone ? 'bg-background-secondary border-accent text-accent'
-                : 'bg-background-primary border-border-subtle text-text-tertiary'
-              }`}>{s.num}</span>
-              <div>
-                <div className="text-xs text-text-secondary">Step {s.num}</div>
-                <div className={`text-sm font-medium ${isCurrent ? 'text-text-primary' : 'text-text-secondary'}`}>{s.label}</div>
-              </div>
-            </button>
-          )
-        })}
+      {/* Desktop: vertical rail, left of form */}
+      <aside className="hidden md:flex md:w-1/4 flex-col gap-6 pl-1">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium mb-2">
+          New Escrow
+        </div>
+        <div className="relative flex flex-col gap-5">
+          {/* Vertical line behind the dots */}
+          <div className="absolute left-3 top-3 bottom-3 w-px bg-border-subtle" aria-hidden />
+          <div
+            className="absolute left-3 top-3 w-px bg-accent transition-[height] duration-300"
+            style={{ height: `calc(${Math.max(0, (step - 1) / (STEP_DEFS.length - 1)) * 100}% - 1.5rem)` }}
+            aria-hidden
+          />
+          {STEP_DEFS.map((s) => {
+            const isCurrent = s.num === step
+            const isDone = s.num < step
+            return (
+              <button
+                key={s.num}
+                type="button"
+                onClick={() => onJump(s.num)}
+                disabled={!isDone && !isCurrent}
+                className={`relative flex items-center gap-3 text-left pl-8 -ml-1 transition-opacity ${
+                  isDone || isCurrent ? '' : 'opacity-50'
+                } ${(isDone || isCurrent) ? 'cursor-pointer hover:opacity-90' : 'cursor-not-allowed'}`}
+              >
+                <span
+                  className={`absolute left-0 inline-flex items-center justify-center h-6 w-6 rounded-full text-[11px] font-mono tabular border-2 transition-colors ${
+                    isCurrent
+                      ? 'bg-accent border-accent text-white shadow-[0_0_0_4px_var(--accent-muted)]'
+                      : isDone
+                        ? 'bg-accent border-accent text-white'
+                        : 'bg-background-secondary border-border-medium text-text-tertiary'
+                  }`}
+                >
+                  {isDone ? (
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
+                      <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  ) : (
+                    s.num
+                  )}
+                </span>
+                <div className="flex flex-col">
+                  <div className="text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Step {s.num}</div>
+                  <div className={`text-sm font-medium ${isCurrent ? 'text-text-primary' : isDone ? 'text-text-primary' : 'text-text-secondary'}`}>
+                    {s.label}
+                  </div>
+                </div>
+              </button>
+            )
+          })}
+        </div>
       </aside>
     </>
   )
@@ -376,13 +440,8 @@ function Step1({ state, setState, errors, chainOptions, loadingDomains }) {
   const setField = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
   return (
     <>
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Who are you paying?</h2>
-        <p className="text-sm text-text-secondary mt-1">Where funds go on milestone approval.</p>
-      </div>
-
       <Field label="Freelancer's wallet address" error={errors.freelancer}
-        hint={<Tooltip content="Acts as both the on-chain escrow recipient and the CCTP payout destination." />}>
+        hint={<Tooltip content="This is where payments land when milestones are approved." />}>
         <input className="input-field font-mono" placeholder="0x…"
           value={state.freelancer}
           onChange={(e) => setField('freelancer')(e.target.value.trim())}
@@ -390,20 +449,24 @@ function Step1({ state, setState, errors, chainOptions, loadingDomains }) {
       </Field>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Destination chain" error={errors.destinationDomain}
-          hint={<Tooltip content="Where the freelancer receives their USDC. Same-chain is free; cross-chain pays CCTP fee." />}>
+        <Field label="Payment chain" error={errors.destinationDomain}
+          hint={<Tooltip content="The chain where the freelancer receives their USDC. Same-chain has no extra fee. Cross-chain uses Circle CCTP and a small forwarding fee applies." />}>
           <CustomSelect
             value={Number(state.destinationDomain)} onChange={setField('destinationDomain')}
             options={chainOptions} searchable
-            placeholder={loadingDomains ? 'Loading chains…' : 'Select a chain'}
+            placeholder={loadingDomains ? 'Loading supported chains...' : 'Select a chain'}
           />
         </Field>
-        <Field label="Total escrow amount (USDC)" error={errors.totalAmount}>
-          <input type="number" step="0.01" min="0"
-            className="input-field font-mono" placeholder="0.00"
-            value={state.totalAmount}
-            onChange={(e) => setField('totalAmount')(e.target.value)}
-          />
+        <Field label="Total amount (USDC)" error={errors.totalAmount}
+          helper="Total locked from your wallet.">
+          <div className="relative">
+            <input type="number" step="0.01" min="0"
+              className="input-field font-mono tabular pr-16" placeholder="0.00"
+              value={state.totalAmount}
+              onChange={(e) => setField('totalAmount')(e.target.value)}
+            />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-text-tertiary font-medium">USDC</span>
+          </div>
         </Field>
       </div>
     </>
@@ -421,16 +484,12 @@ function Step2({ state, setState, errors }) {
 
   return (
     <>
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">What's the invoice?</h2>
-        <p className="text-sm text-text-secondary mt-1">A description and a link to the off-chain invoice.</p>
-      </div>
-
       {!state.useCustomHash ? (
         <Field label="Invoice description" error={errors.description}
-          hint={<Tooltip content="Hashed locally with keccak256 — only the hash goes on-chain." />}>
+          helper="Hashed locally. Only the hash is stored on-chain, not the text."
+          hint={<Tooltip content="Your description is hashed locally. Only the hash is stored on-chain, not the text itself." />}>
           <textarea rows={3} className="input-field-multiline"
-            placeholder="e.g. Marketing site redesign, August deliverables…"
+            placeholder="e.g. Brand identity redesign, Q3 deliverables"
             value={state.description}
             onChange={(e) => setField('description')(e.target.value)}
           />
@@ -452,8 +511,9 @@ function Step2({ state, setState, errors }) {
         Use a custom hash instead
       </label>
 
-      <Field label="Invoice URI" error={errors.invoiceURI}
-        hint={<Tooltip content="A URL where the off-chain invoice document can be retrieved." />}>
+      <Field label="Invoice URL" error={errors.invoiceURI}
+        helper="A link to the full invoice document. Stored on-chain for reference."
+        hint={<Tooltip content="A link to the actual invoice document. This gets stored on-chain for reference." />}>
         <input className="input-field" placeholder="https://…"
           value={state.invoiceURI}
           onChange={(e) => setField('invoiceURI')(e.target.value.trim())}
@@ -472,24 +532,22 @@ function Step3({ state, setState, errors }) {
   const setField = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
   return (
     <>
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Set the timeline</h2>
-        <p className="text-sm text-text-secondary mt-1">Deadlines and review windows.</p>
-      </div>
-
       <Field label="Project deadline" error={errors.deadline}
-        hint={<Tooltip content="After this date, undelivered milestones can be escalated to arbitration." />}>
+        helper="If milestones go undelivered past this date, they can be escalated."
+        hint={<Tooltip content="If milestones are undelivered past this date, they can be escalated to the arbiter." />}>
         <DatePicker value={state.deadline} onChange={setField('deadline')} />
       </Field>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Delivery notice window"
-          hint={<Tooltip content="If the payer goes silent after delivery, the milestone auto-releases after this window." />}>
+        <Field label="Auto-release window"
+          helper="How long the payer has to respond after delivery."
+          hint={<Tooltip content="How long the payer has to respond after a milestone is marked delivered. If they go silent, the payment auto-releases when this runs out." />}>
           <CustomSelect value={state.noticeWindowDays}
             onChange={setField('noticeWindowDays')} options={NOTICE_WINDOW_OPTIONS} />
         </Field>
         <Field label="Dispute window"
-          hint={<Tooltip content="After approval, either party can still open a dispute within this window." />}>
+          helper="How long either party has to dispute after approval."
+          hint={<Tooltip content="How long either party has to open a dispute after a milestone is approved." />}>
           <CustomSelect value={state.disputeWindowHours}
             onChange={setField('disputeWindowHours')} options={DISPUTE_WINDOW_OPTIONS} />
         </Field>
@@ -498,7 +556,9 @@ function Step3({ state, setState, errors }) {
   )
 }
 
-/* ---------- Step 4 ---------- */
+/* ---------- Step 4 ----------
+   Allocation table: index | title | amount | remove.
+   Allocation tracker: progress bar fills toward 100%, turns red on overflow. */
 function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaining, exactMatch }) {
   const titleOptions = TITLE_PRESETS.map((t) => ({ value: t, label: t }))
 
@@ -523,46 +583,60 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
 
   return (
     <>
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Milestones</h2>
-        <p className="text-sm text-text-secondary mt-1">Each milestone is paid independently when approved.</p>
-      </div>
+      {/* Allocation table */}
+      <div className="rounded-2xl border border-border-subtle overflow-hidden">
+        {/* Header row */}
+        <div className="hidden sm:grid grid-cols-[3rem_1fr_11rem_4rem] gap-3 px-4 py-2.5 bg-background-tertiary text-[10px] uppercase tracking-[0.15em] text-text-tertiary font-medium">
+          <div>#</div>
+          <div>Milestone</div>
+          <div className="text-right">Amount (USDC)</div>
+          <div />
+        </div>
 
-      <div className="flex flex-col gap-4">
         <AnimatePresence initial={false}>
           {state.milestones.map((m, i) => (
             <motion.div
               key={i}
               layout
-              initial={{ opacity: 0, y: 10 }}
+              initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.22, ease: 'easeOut' }}
-              className="flex flex-col sm:flex-row items-stretch sm:items-end gap-4 bg-background-primary p-4 rounded-xl border border-border-subtle"
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+              className={`grid grid-cols-1 sm:grid-cols-[3rem_1fr_11rem_4rem] gap-3 items-start px-4 py-3 border-t border-border-subtle ${i % 2 ? 'bg-background-secondary' : 'bg-background-primary'}`}
             >
-              <div className="flex-1 flex flex-col gap-2">
-                <div className="text-xs text-text-secondary">Milestone {i + 1}</div>
+              <div className="hidden sm:flex items-center h-12 font-mono tabular text-sm text-text-tertiary">
+                M{i + 1}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <div className="sm:hidden text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Milestone {i + 1}</div>
                 <CustomSelect value={m.title} onChange={(v) => update(i, 'title', v)} options={titleOptions} />
                 {m.title === 'Custom' && (
-                  <input className="input-field mt-2" placeholder="Custom title"
+                  <input className="input-field" placeholder="Custom title"
                     value={m.customTitle} onChange={(e) => update(i, 'customTitle', e.target.value)} />
                 )}
-                {errors[`milestone_${i}_title`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_title`]}</div>}
+                {errors[`milestone_${i}_title`] && <FieldError text={errors[`milestone_${i}_title`]} />}
               </div>
-              <div className="sm:w-44 flex flex-col gap-2">
-                <div className="text-xs text-text-secondary">Amount (USDC)</div>
-                <input type="number" step="0.01" min="0"
-                  className="input-field font-mono" placeholder="0.00"
-                  value={m.amount} onChange={(e) => update(i, 'amount', e.target.value)} />
-                {errors[`milestone_${i}_amount`] && <div className="text-xs text-status-error">{errors[`milestone_${i}_amount`]}</div>}
+              <div className="flex flex-col gap-1.5">
+                <div className="sm:hidden text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Amount</div>
+                <div className="relative">
+                  <input type="number" step="0.01" min="0"
+                    className="input-field font-mono tabular text-right pr-14" placeholder="0.00"
+                    value={m.amount} onChange={(e) => update(i, 'amount', e.target.value)} />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-text-tertiary font-medium uppercase tracking-wider">USDC</span>
+                </div>
+                {errors[`milestone_${i}_amount`] && <FieldError text={errors[`milestone_${i}_amount`]} />}
               </div>
-              <button type="button"
-                className="self-start sm:self-end btn-secondary h-12 px-3 text-sm"
-                disabled={state.milestones.length <= 1}
-                onClick={() => removeMilestone(i)}
-                aria-label="Remove milestone">
-                Remove
-              </button>
+              <div className="flex items-center sm:justify-end">
+                <button type="button"
+                  className="h-12 w-12 inline-flex items-center justify-center rounded-xl text-text-tertiary hover:bg-status-error/10 hover:text-status-error transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+                  disabled={state.milestones.length <= 1}
+                  onClick={() => removeMilestone(i)}
+                  aria-label={`Remove milestone ${i + 1}`}>
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                    <path d="M3 5h10M6 5V3.5A1 1 0 0 1 7 2.5h2a1 1 0 0 1 1 1V5M5 5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9L11 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+              </div>
             </motion.div>
           ))}
         </AnimatePresence>
@@ -570,140 +644,279 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
 
       {state.milestones.length < 10 && (
         <button type="button" className="btn-secondary self-start text-sm py-2" onClick={addMilestone}>
-          + Add Milestone
+          + Add milestone
         </button>
       )}
 
       {/* Allocation tracker */}
-      <div className="card-surface p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-text-secondary">Allocated</span>
-          <span className="font-mono">{milestonesSum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC</span>
-        </div>
-        <div className="bg-background-tertiary w-full h-2 rounded-full overflow-hidden">
-          <div
-            className={`h-full transition-all duration-300 ${exactMatch ? 'bg-status-success' : over ? 'bg-status-error' : 'bg-accent'}`}
-            style={{ width: `${percentage}%` }}
-          />
-        </div>
-        <div className={`text-xs ${exactMatch ? 'text-status-success' : over ? 'text-status-error' : 'text-status-warning'}`}>
-          {totalAmountNum === 0
-            ? 'Set a total amount in Step 1 first.'
-            : over
-            ? `You've exceeded the total by ${Math.abs(remaining).toFixed(2)} USDC.`
-            : exactMatch
-            ? 'All funds allocated. Ready to continue.'
-            : `${Math.abs(remaining).toFixed(2)} USDC unallocated.`}
-        </div>
-      </div>
+      <AllocationTracker
+        milestonesSum={milestonesSum}
+        totalAmountNum={totalAmountNum}
+        remaining={remaining}
+        exactMatch={exactMatch}
+        over={over}
+        percentage={percentage}
+      />
     </>
   )
 }
 
-/* ---------- Step 5 ---------- */
+function AllocationTracker({ milestonesSum, totalAmountNum, remaining, exactMatch, over, percentage }) {
+  const tone = exactMatch ? 'success' : over ? 'error' : 'neutral'
+  const fillCls = exactMatch ? 'bg-status-success' : over ? 'bg-status-error' : 'bg-accent'
+  const statusText = totalAmountNum === 0
+    ? 'Set a total amount in the first step before adding milestones.'
+    : over
+    ? `Over by ${Math.abs(remaining).toFixed(2)}`
+    : exactMatch
+    ? 'All funds allocated'
+    : `${Math.abs(remaining).toFixed(2)} left`
+  const statusCls = tone === 'success' ? 'text-status-success' : tone === 'error' ? 'text-status-error' : 'text-text-secondary'
+
+  return (
+    <div className="card-surface p-4 flex flex-col gap-3">
+      <div className="flex items-end justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Allocated</div>
+          <div className="font-mono tabular text-base">
+            <span className={over ? 'text-status-error' : 'text-text-primary'}>
+              {milestonesSum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+            <span className="text-text-tertiary"> / </span>
+            <span className="text-text-secondary">
+              {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
+            <span className="text-text-tertiary"> USDC</span>
+          </div>
+        </div>
+        <div className={`font-mono tabular text-sm font-medium ${statusCls}`}>
+          {statusText}
+        </div>
+      </div>
+      <div className="bg-background-tertiary w-full h-2 rounded-full overflow-hidden">
+        <div
+          className={`h-full transition-all duration-300 ${fillCls}`}
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Step 5 — Receipt-style review ---------- */
 function Step5({ state, totalBaseUnits, protocolFee, milestoneAmountsBigInt, approved, onApprove, onDeposit, txStatus, phase }) {
   const totalSum = milestoneAmountsBigInt.reduce((a, b) => a + b, 0n)
   const mismatch = totalSum !== totalBaseUnits
 
+  const approveLoading = phase === 'approve' && (txStatus === 'confirming' || txStatus === 'pending')
+  const depositLoading = phase === 'deposit' && (txStatus === 'confirming' || txStatus === 'pending')
+  const anyBusy = approveLoading || depositLoading
+
   return (
     <>
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Review & lock funds</h2>
-        <p className="text-sm text-text-secondary mt-1">Approve USDC, then submit the deposit.</p>
-      </div>
+      {/* Parties */}
+      <ReceiptSection title="Parties">
+        <ReceiptRow label="Freelancer">
+          <AddressDisplay address={state.freelancer} size="sm" />
+        </ReceiptRow>
+        <ReceiptRow label="Payment chain">
+          <span className="text-sm">{getDomainName(state.destinationDomain)}</span>
+        </ReceiptRow>
+      </ReceiptSection>
 
-      <div className="card-surface p-5 flex flex-col gap-3">
-        <ReviewRow label="Freelancer"><AddressDisplay address={state.freelancer} /></ReviewRow>
-        <ReviewRow label="Destination chain"><span className="text-sm">{getDomainName(state.destinationDomain)}</span></ReviewRow>
-        <ReviewRow label="Deadline">
-          <span className="font-mono text-sm">{state.deadline ? formatDeadline(Math.floor(state.deadline.getTime() / 1000)) : '—'}</span>
-        </ReviewRow>
-        <ReviewRow label="Delivery notice window">
+      {/* Timeline */}
+      <ReceiptSection title="Timeline">
+        <ReceiptRow label="Deadline">
+          <span className="font-mono tabular text-sm">{state.deadline ? formatDeadline(Math.floor(state.deadline.getTime() / 1000)) : '—'}</span>
+        </ReceiptRow>
+        <ReceiptRow label="Auto-release window">
           <span className="text-sm">{formatWindow(daysToSeconds(state.noticeWindowDays))}</span>
-        </ReviewRow>
-        <ReviewRow label="Dispute window">
+        </ReceiptRow>
+        <ReceiptRow label="Dispute window">
           <span className="text-sm">{formatWindow(hoursToSeconds(state.disputeWindowHours))}</span>
-        </ReviewRow>
-      </div>
+        </ReceiptRow>
+      </ReceiptSection>
 
-      <div className="card-surface p-5 flex flex-col gap-3">
-        <h3 className="text-sm font-medium text-text-secondary uppercase tracking-wide">Amount breakdown</h3>
+      {/* Amount breakdown — mini financial table, right-aligned monospace numbers */}
+      <ReceiptSection title="Amount breakdown">
         {state.milestones.map((m, i) => {
           const title = m.title === 'Custom' ? m.customTitle : m.title
           return (
-            <ReviewRow key={i} label={`${i + 1}. ${title}`}>
-              <span className="font-mono text-sm">{formatUSDC(milestoneAmountsBigInt[i])}</span>
-            </ReviewRow>
+            <ReceiptRow key={i} label={`${i + 1}. ${title || `Milestone ${i + 1}`}`}>
+              <ReceiptAmount value={milestoneAmountsBigInt[i]} />
+            </ReceiptRow>
           )
         })}
-        <hr className="border-border-subtle" />
-        <ReviewRow label="Subtotal"><span className="font-mono text-sm">{formatUSDC(totalSum)}</span></ReviewRow>
-        <ReviewRow label="Protocol fee (1.99%)"><span className="font-mono text-sm">{formatUSDC(protocolFee)}</span></ReviewRow>
-        <hr className="border-border-subtle" />
-        <ReviewRow label={<span className="font-medium text-text-primary">Total to lock</span>}>
-          <span className="font-mono text-lg text-accent">{formatUSDC(totalBaseUnits)}</span>
-        </ReviewRow>
+        <div className="h-px bg-border-subtle/60 my-1.5" />
+        <ReceiptRow label="Subtotal">
+          <ReceiptAmount value={totalSum} />
+        </ReceiptRow>
+        <ReceiptRow label="Protocol fee (1.99%)">
+          <ReceiptAmount value={protocolFee} muted />
+        </ReceiptRow>
+        <div className="h-px bg-border-medium my-1.5" />
+        <ReceiptRow label={<span className="text-sm font-semibold text-text-primary">Total to lock</span>}>
+          <span className="font-mono tabular text-lg font-semibold text-accent">{formatUSDC(totalBaseUnits)}</span>
+        </ReceiptRow>
         {mismatch && (
-          <div className="text-xs text-status-error">Milestone amounts don't match total. Go back to Step 4.</div>
+          <FieldError text="Milestone amounts don't add up to the total. Go back and fix the Milestones step." />
         )}
-      </div>
+      </ReceiptSection>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ActionStep label="Approve USDC" letter="A" done={approved}
-          loading={phase === 'approve' && (txStatus === 'confirming' || txStatus === 'pending')}>
-          {approved ? <span className="text-sm text-status-success">Approved ✓</span> : (
-            <button className="btn-primary text-sm py-2 px-4"
-              onClick={onApprove}
-              disabled={txStatus === 'confirming' || txStatus === 'pending' || mismatch || totalBaseUnits === 0n}>
-              Approve
-            </button>
-          )}
-        </ActionStep>
-        <ActionStep label="Create escrow" letter="B"
-          loading={phase === 'deposit' && (txStatus === 'confirming' || txStatus === 'pending')}>
-          <button className="btn-primary text-sm py-2 px-4"
-            onClick={onDeposit}
-            disabled={!approved || mismatch || txStatus === 'confirming' || txStatus === 'pending'}>
-            Lock funds
-          </button>
-        </ActionStep>
+      {/* Sequential approve + lock flow.
+          Both steps are visible at the same time so the user understands the
+          full flow before starting. Step A is active first. Once approved it
+          shows a checkmark and Step B becomes the active step. */}
+      <div className="flex flex-col gap-3">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Two-step submission</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 relative">
+          <FlowStep
+            letter="A"
+            label="Approve USDC"
+            description="Authorize the contract to move the USDC out of your wallet."
+            done={approved}
+            active={!approved}
+            loading={approveLoading}
+            actionLabel={approved ? 'Approved' : 'Approve USDC'}
+            onAction={onApprove}
+            disabled={anyBusy || mismatch || totalBaseUnits === 0n}
+          />
+          <FlowStep
+            letter="B"
+            label="Lock funds"
+            description="Create the escrow on-chain. The USDC moves into the contract."
+            done={false}
+            active={approved}
+            loading={depositLoading}
+            actionLabel="Lock funds"
+            onAction={onDeposit}
+            disabled={!approved || mismatch || anyBusy}
+          />
+          {/* Connector arrow between the two steps on wider screens */}
+          <span className="hidden sm:flex absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10 h-7 w-7 rounded-full bg-background-primary border border-border-subtle items-center justify-center text-text-tertiary">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+              <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </span>
+        </div>
       </div>
     </>
   )
 }
 
-/* ---------- shared sub-components ---------- */
-function Field({ label, hint, children, error }) {
+function ReceiptSection({ title, children }) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="card-surface p-5 flex flex-col gap-2">
+      <h3 className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium pb-2 border-b border-border-subtle/60 mb-1">
+        {title}
+      </h3>
+      {children}
+    </div>
+  )
+}
+
+function ReceiptRow({ label, children }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5">
+      <span className="text-sm text-text-secondary">{label}</span>
+      <div className="text-right">{children}</div>
+    </div>
+  )
+}
+
+function ReceiptAmount({ value, muted = false }) {
+  return (
+    <span className={`font-mono tabular text-sm ${muted ? 'text-text-secondary' : 'text-text-primary'}`}>
+      {formatUSDC(value)}
+    </span>
+  )
+}
+
+/* A flow step that combines the letter chip, label/desc, and CTA.
+   Visual states:
+     • done — green check, success border, subtle success tint, button replaced with "Approved" status
+     • active — accent border + accent letter chip, CTA enabled
+     • idle — muted, CTA disabled
+     • loading — CTA shows a spinner */
+function FlowStep({ letter, label, description, done, active, loading, actionLabel, onAction, disabled }) {
+  const borderCls = done
+    ? 'border-status-success/40'
+    : active
+      ? 'border-accent/40 shadow-[0_0_0_4px_var(--accent-muted)]'
+      : 'border-border-subtle'
+  const chipCls = done
+    ? 'bg-status-success/15 text-status-success'
+    : active
+      ? 'bg-accent text-white shadow-sm'
+      : 'bg-background-tertiary text-text-tertiary'
+
+  return (
+    <div className={`card-surface p-4 flex flex-col gap-3 border ${borderCls} transition-all`}>
+      <div className="flex items-start gap-3">
+        <span className={`inline-flex items-center justify-center h-8 w-8 rounded-full font-mono text-xs shrink-0 ${chipCls}`}>
+          {done ? (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : letter}
+        </span>
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="text-sm font-medium text-text-primary">{label}</div>
+          <p className="text-xs text-text-secondary leading-relaxed">{description}</p>
+        </div>
+      </div>
+      <div className="pt-1">
+        {done ? (
+          <div className="inline-flex items-center gap-1.5 text-sm text-status-success font-medium">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Approved
+          </div>
+        ) : (
+          <button
+            className="btn-primary text-sm py-2 px-4 w-full"
+            onClick={onAction}
+            disabled={disabled || loading || !active}
+          >
+            {loading ? (
+              <span className="inline-flex items-center gap-2">
+                <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden />
+                Working…
+              </span>
+            ) : actionLabel}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- shared sub-components ---------- */
+function Field({ label, hint, children, error, helper }) {
+  return (
+    <div className="flex flex-col gap-1.5">
       <label className="text-sm font-medium text-text-primary flex items-center">
         {label}{hint}
       </label>
       {children}
-      {error && <div className="text-xs text-status-error">{error}</div>}
+      {error ? (
+        <FieldError text={error} />
+      ) : helper ? (
+        <div className="text-xs text-text-tertiary">{helper}</div>
+      ) : null}
     </div>
   )
 }
 
-function ReviewRow({ label, children }) {
+function FieldError({ text }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-sm text-text-secondary">{label}</span>
-      <div>{children}</div>
-    </div>
-  )
-}
-
-function ActionStep({ label, letter, done, loading, children }) {
-  return (
-    <div className={`flex items-center justify-between gap-3 card-surface p-4 ${done ? 'border-status-success/40' : ''}`}>
-      <div className="flex items-center gap-3">
-        <span className={`inline-flex items-center justify-center h-7 w-7 rounded-full font-mono text-xs ${done ? 'bg-status-success/15 text-status-success' : 'bg-accent-muted text-accent'}`}>
-          {letter}
-        </span>
-        <span className="text-sm">{label}</span>
-      </div>
-      {loading ? <span className="text-sm text-text-secondary">Working…</span> : children}
+    <div className="flex items-center gap-1.5 text-xs text-status-error">
+      <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden className="shrink-0">
+        <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.4"/>
+        <path d="M7 4.2v3.2M7 9.5v0.05" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+      </svg>
+      <span>{text}</span>
     </div>
   )
 }

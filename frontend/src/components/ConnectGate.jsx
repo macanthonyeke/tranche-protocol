@@ -1,7 +1,7 @@
 import { useAccount } from 'wagmi'
 import WalletButton from './WalletButton.jsx'
 
-export default function ConnectGate({ children, title = 'Connect your wallet', message = 'Connect your wallet to continue.' }) {
+export default function ConnectGate({ children, title = 'Wallet not connected', message = 'You need a connected wallet to use this page.' }) {
   const { isConnected } = useAccount()
   if (isConnected) return children
   return (

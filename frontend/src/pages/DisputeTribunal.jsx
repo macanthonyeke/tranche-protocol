@@ -33,7 +33,7 @@ const GOD_BTN_GHOST = `${GOD_BTN} bg-transparent text-text-primary border-border
 
 export default function DisputeTribunal() {
   return (
-    <ConnectGate title="Connect to access the Tribunal" message="Restricted area. Connect the wallet that holds the required role.">
+    <ConnectGate title="Wallet not connected" message="Connect the wallet that holds an arbiter or admin role to access this panel.">
       <TribunalRouter />
     </ConnectGate>
   )
@@ -81,8 +81,8 @@ function TribunalRouter() {
    ============================================================ */
 function FullBleedDark({ children }) {
   return (
-    <div className="-mx-4 md:-mx-6 lg:-mx-8 -mt-4 md:-mt-6 lg:-mt-8 -mb-24 md:-mb-8 bg-[#050505] text-text-primary font-mono min-h-[calc(100vh-4rem)]">
-      <div className="px-4 md:px-8 py-8 max-w-content mx-auto">
+    <div className="-mx-4 md:-mx-6 lg:-mx-8 -mt-4 md:-mt-6 lg:-mt-8 -mb-24 lg:-mb-8 bg-[#050505] text-text-primary font-mono min-h-[calc(100vh-4rem)] w-auto max-w-full overflow-x-hidden">
+      <div className="px-4 md:px-6 lg:px-8 py-8 max-w-content mx-auto w-full">
         {children}
       </div>
     </div>
@@ -94,12 +94,12 @@ function AccessDenied() {
     <FullBleedDark>
       <div className="flex flex-col items-center justify-center py-32 gap-6 text-center">
         <div className="text-5xl font-mono uppercase tracking-[0.3em] text-status-error">
-          Access Denied
+          Access denied
         </div>
         <p className="text-text-secondary font-sans max-w-md">
-          This wallet does not hold any privileged role on the protocol.
-          The Tribunal is restricted to arbiters, fee managers, domain managers,
-          recovery managers and pausers.
+          This wallet doesn't hold any admin or arbiter role on the contract.
+          You need to be an arbiter, fee manager, domain manager,
+          recovery manager, or pauser to access this.
         </p>
         <Link to="/dashboard" className={GOD_BTN_WHITE}>← Return to dashboard</Link>
       </div>
@@ -126,10 +126,10 @@ function CommandCenter({ roles, address }) {
     <div className="flex flex-col gap-10">
       <header className="flex flex-col gap-3 border-b border-border-subtle pb-6">
         <div className="text-xs uppercase tracking-[0.3em] text-text-tertiary">
-          Tribunal // Command Center
+          Arbiter Panel
         </div>
         <h1 className="text-4xl font-mono uppercase tracking-tight text-text-primary">
-          God Mode
+          Admin Controls
         </h1>
         <div className="flex items-center justify-between gap-4 flex-wrap pt-2">
           <div className="flex flex-wrap gap-2">
@@ -167,12 +167,20 @@ function DisputesSection() {
 
   return (
     <section className="flex flex-col gap-4">
-      <ModuleHeader title="Open Disputes" subtitle={`${escrows.length} case(s) awaiting arbitration`} />
+      <ModuleHeader title="Open Disputes" subtitle={`${escrows.length} case(s) waiting for a decision`} />
       {isLoading ? (
         <Skeleton className="h-40" />
       ) : escrows.length === 0 ? (
-        <div className="border border-border-subtle p-8 text-center text-sm text-text-secondary">
-          No active disputes. Stand down.
+        <div className="border border-border-subtle px-6 py-16 sm:py-20 flex flex-col items-center text-center gap-4">
+          <div className="w-16 h-16 border border-border-medium flex items-center justify-center text-text-secondary">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M12 2v3M5 7h14M6 7l-2 11h16L18 7M11 12v4M13 12v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+          <div className="flex flex-col gap-1">
+            <div className="text-sm uppercase tracking-[0.2em] text-text-primary">No open disputes right now</div>
+            <div className="text-xs text-text-tertiary font-sans">When a case lands, it will appear here for review.</div>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -198,10 +206,10 @@ function DisputedEscrowCard({ summary }) {
           ESC-{summary.id}
         </span>
         <span className="text-[10px] uppercase tracking-[0.2em] text-status-warning border border-status-warning/40 px-2 py-0.5">
-          {summary.disputedMilestoneCount} in dispute
+          {summary.disputedMilestoneCount} In Dispute
         </span>
       </div>
-      <div className="font-mono text-3xl text-white">{formatUSDC(summary.totalAmount)}</div>
+      <div className="font-mono tabular text-3xl text-white">{formatUSDC(summary.totalAmount)}</div>
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>
           <div className="text-text-tertiary mb-1 uppercase tracking-wider">Payer</div>
@@ -213,7 +221,7 @@ function DisputedEscrowCard({ summary }) {
         </div>
       </div>
       <div className="text-[10px] uppercase tracking-[0.2em] text-text-primary self-end pt-1">
-        Open case →
+        Review case →
       </div>
     </Link>
   )
@@ -239,7 +247,7 @@ function DisputeCommandCenter({ escrowId, milestoneIdx }) {
     return (
       <div className="border border-border-subtle p-12 text-center flex flex-col items-center gap-4">
         <h2 className="text-xl font-mono uppercase tracking-wider">No active dispute</h2>
-        <p className="text-sm text-text-secondary">This milestone is not currently in dispute.</p>
+        <p className="text-sm text-text-secondary">This milestone does not have an open dispute.</p>
         <button className={GOD_BTN_GHOST} onClick={() => navigate('/tribunal')}>← Back to tribunal</button>
       </div>
     )
@@ -267,9 +275,9 @@ function DisputeCommandCenter({ escrowId, milestoneIdx }) {
         : null)
 
   return (
-    <div className="flex flex-col gap-6 pb-32">
+    <div className="flex flex-col gap-6 pb-64 lg:pb-32">
       {/* Top bar */}
-      <div className="flex items-center justify-between gap-4 border-b border-border-subtle pb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle pb-4">
         <button onClick={() => navigate('/tribunal')} className="text-xs uppercase tracking-[0.2em] text-text-tertiary hover:text-text-primary">
           ← Tribunal
         </button>
@@ -296,12 +304,12 @@ function DisputeCommandCenter({ escrowId, milestoneIdx }) {
           danger={danger}
         />
         <EvidenceColumn
-          title="Payer Evidence"
+          title="Payer's evidence"
           who={escrow.depositor}
           evidence={payerEvidence}
         />
         <EvidenceColumn
-          title="Freelancer Evidence"
+          title="Freelancer's evidence"
           who={escrow.recipient}
           evidence={freelancerEvidence}
         />
@@ -320,11 +328,11 @@ function DisputeCommandCenter({ escrowId, milestoneIdx }) {
 function TermsColumn({ escrow, milestone, dispute, escrowId, milestoneIdx, raisedAt, remaining, danger }) {
   return (
     <div className="border border-border-subtle bg-[#0a0a0a] p-5 flex flex-col gap-4 overflow-hidden">
-      <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">Contract Terms</div>
+      <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">Escrow Details</div>
 
       <div>
         <Label>Amount in dispute</Label>
-        <div className="font-mono text-3xl text-white">{formatUSDC(milestone.amount)}</div>
+        <div className="font-mono tabular text-3xl text-white">{formatUSDC(milestone.amount)}</div>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -345,7 +353,7 @@ function TermsColumn({ escrow, milestone, dispute, escrowId, milestoneIdx, raise
 
       {dispute?.disputedBy && (
         <div>
-          <Label>Disputed by</Label>
+          <Label>Raised by</Label>
           <AddressDisplay address={dispute.disputedBy} size="sm" />
         </div>
       )}
@@ -364,14 +372,14 @@ function TermsColumn({ escrow, milestone, dispute, escrowId, milestoneIdx, raise
             {formatRemaining(remaining)}
           </div>
           <div className="text-[10px] text-text-tertiary mt-1">
-            Force-refundable by anyone after 30d of inaction.
+            If the arbiter takes no action for 30 days, anyone can force a refund to the payer.
           </div>
         </div>
       )}
 
       {escrow.invoiceURI && (
         <a href={escrow.invoiceURI} target="_blank" rel="noreferrer" className={`${GOD_BTN_GHOST} mt-auto`}>
-          View original invoice ↗
+          View invoice ↗
         </a>
       )}
     </div>
@@ -387,12 +395,12 @@ function EvidenceColumn({ title, who, evidence }) {
       </div>
       {!evidence ? (
         <div className="text-xs text-text-tertiary italic text-center py-12 font-sans">
-          No evidence submitted.
+          No evidence submitted yet.
         </div>
       ) : (
         <div className="flex flex-col gap-3">
           <div className="text-[10px] uppercase tracking-[0.2em] text-text-tertiary">
-            {evidence.kind === 'opening' ? 'Opening evidence' : 'Counter evidence'}
+            {evidence.kind === 'opening' ? 'Opening statement' : 'Counter-evidence'}
           </div>
           {evidence.reason && (
             <p className="text-sm text-text-primary font-sans">{evidence.reason}</p>
@@ -430,7 +438,7 @@ function ArbiterDecisionBar({ escrowId, milestoneIdx, onResolved }) {
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); setPending(null); onResolved?.()
-    txToastApi?.success('Decision executed.', { hash: txHash })
+    txToastApi?.success('Decision recorded on-chain.', { hash: txHash })
   }, [receipt]) // eslint-disable-line
 
   const isBusy = txStatus === 'confirming' || txStatus === 'pending'
@@ -443,7 +451,7 @@ function ArbiterDecisionBar({ escrowId, milestoneIdx, onResolved }) {
   const cancel = () => setPending(null)
 
   const execute = async (releaseToRecipient) => {
-    const t = txToast({ loading: 'Executing decision — confirm in wallet…' })
+    const t = txToast({ loading: 'Executing decision. Check your wallet.' })
     setTxToastApi(t)
     try {
       setTxError(null); setTxStatus('confirming')
@@ -453,64 +461,66 @@ function ArbiterDecisionBar({ escrowId, milestoneIdx, onResolved }) {
         args: [BigInt(escrowId), BigInt(milestoneIdx), releaseToRecipient, resolutionHash, 0n]
       })
       setTxHash(tx); setTxStatus('pending')
-      t.update('Submitted. Waiting for confirmation…')
+      t.update('Submitted. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error'); setPending(null)
-      t.error('Decision failed.')
+      t.error('Transaction failed. Try again.')
     }
   }
 
   return (
     <>
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#050505] border-t border-border-medium">
-        <div className="max-w-content mx-auto px-4 md:px-8 py-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-4">
+      <div className="fixed bottom-16 lg:bottom-0 left-0 right-0 z-40 bg-[#050505] border-t border-border-medium w-full max-w-full">
+        <div className="max-w-content mx-auto px-4 md:px-6 lg:px-8 py-4 flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-4">
             <div className="text-[10px] uppercase tracking-[0.3em] text-text-tertiary">
-              Arbiter Decision Execution
+              Record your decision
             </div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-status-error">
-              Decisions are final and on-chain.
+              This is irreversible. The decision gets written on-chain.
             </div>
           </div>
-          <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
+          <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center">
             <input
-              className="flex-1 bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-sm px-3 py-3 focus:outline-none focus:border-border-focused"
+              className="flex-1 w-full bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-sm px-3 py-3 focus:outline-none focus:border-border-focused"
               placeholder="resolution hash (bytes32)"
               value={resolutionHash}
               onChange={(e) => setResolutionHash(e.target.value.trim())}
               disabled={!!pending || isBusy}
             />
             {!pending && (
-              <div className="flex gap-2">
+              <div className="flex flex-col sm:flex-row gap-2">
                 <button
                   className={GOD_BTN_RED}
                   onClick={() => arm('refund')}
                   disabled={!hashValid || isBusy}
                 >
-                  Force Refund to Payer
+                  Refund to Payer
                 </button>
                 <button
                   className={GOD_BTN_WHITE}
                   onClick={() => arm('release')}
                   disabled={!hashValid || isBusy}
                 >
-                  Force Release to Payee
+                  Release to Freelancer
                 </button>
               </div>
             )}
             {pending && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <div className="text-xs uppercase tracking-[0.2em] text-status-error animate-pulse pr-2">
-                  Confirm: {pending === 'release' ? 'Release to Payee' : 'Refund to Payer'}
+                  {pending === 'release' ? 'Confirm release to freelancer' : 'Confirm refund to payer'}
                 </div>
-                <button className={GOD_BTN_GHOST} onClick={cancel} disabled={isBusy}>Cancel</button>
-                <button
-                  className={pending === 'release' ? GOD_BTN_WHITE : GOD_BTN_RED}
-                  onClick={() => execute(pending === 'release')}
-                  disabled={isBusy}
-                >
-                  {isBusy ? 'Executing…' : 'Confirm Execution'}
-                </button>
+                <div className="flex gap-2">
+                  <button className={GOD_BTN_GHOST} onClick={cancel} disabled={isBusy}>Cancel</button>
+                  <button
+                    className={pending === 'release' ? GOD_BTN_WHITE : GOD_BTN_RED}
+                    onClick={() => execute(pending === 'release')}
+                    disabled={isBusy}
+                  >
+                    {isBusy ? 'Executing…' : 'Confirm Execution'}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -519,7 +529,7 @@ function ArbiterDecisionBar({ escrowId, milestoneIdx, onResolved }) {
       <TxModal
         status={txStatus} txHash={txHash} error={txError}
         onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
-        title="Resolving dispute"
+        title="Recording decision"
       />
     </>
   )
@@ -534,16 +544,16 @@ function FeeManagerModule() {
   const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
 
   return (
-    <Module title="Fee Manager" subtitle="Protocol fee, treasury, CCTP forward fee">
+    <Module title="Fee Manager" subtitle="Fee rate, treasury address, and CCTP forwarding fee">
       <Row label="Current fee">
         <span className="font-mono text-base text-text-primary">
           {fee.data !== undefined ? `${(Number(fee.data) / 100).toFixed(2)}%` : '—'}
         </span>
       </Row>
       <WriteForm
-        placeholder="new fee in bps (e.g. 199 = 1.99%)"
+        placeholder="New fee in basis points (199 = 1.99%)"
         validate={(v) => /^\d+$/.test(v) && Number(v) <= 1000}
-        label="Update protocol fee"
+        label="Update fee"
         fn="setProtocolFee"
         toCallArgs={(v) => [BigInt(v)]}
         onSuccess={() => { fee.refetch?.() }}
@@ -555,7 +565,7 @@ function FeeManagerModule() {
         <span className="font-mono text-xs text-text-primary">{treasury.data ? truncateAddr(treasury.data) : '—'}</span>
       </Row>
       <WriteForm
-        placeholder="new treasury (0x…)"
+        placeholder="New treasury address (0x...)"
         validate={(v) => isAddress(v)}
         label="Update treasury"
         fn="setProtocolTreasury"
@@ -565,15 +575,15 @@ function FeeManagerModule() {
 
       <Divider />
 
-      <Row label="CCTP forward fee">
+      <Row label="CCTP forwarding fee">
         <span className="font-mono text-base text-text-primary">
           {cctp.data !== undefined ? `${(Number(cctp.data) / 1_000_000).toFixed(6)} USDC` : '—'}
         </span>
       </Row>
       <WriteForm
-        placeholder="new fee in USDC base units (6 decimals)"
+        placeholder="New fee in USDC base units (6 decimals, e.g. 1000000 = 1 USDC)"
         validate={(v) => /^\d+$/.test(v)}
-        label="Update CCTP forward fee"
+        label="Update forwarding fee"
         fn="setCctpForwardFee"
         toCallArgs={(v) => [BigInt(v)]}
         onSuccess={() => { cctp.refetch?.() }}
@@ -588,10 +598,10 @@ function FeeManagerModule() {
 function DomainManagerModule() {
   const { supported, refetch } = useSupportedDomains()
   return (
-    <Module title="Domain Manager" subtitle="Supported CCTP destination domains">
+    <Module title="Domain Manager" subtitle="Supported destination chains">
       <div className="flex flex-col gap-2">
         {supported.length === 0 ? (
-          <div className="text-xs text-text-tertiary italic">No supported domains yet.</div>
+          <div className="text-xs text-text-tertiary italic">No destination chains added yet.</div>
         ) : (
           supported.map((d) => (
             <SupportedDomainRow key={d} domain={d} onRemoved={refetch} />
@@ -602,9 +612,9 @@ function DomainManagerModule() {
       <Divider />
 
       <WriteForm
-        placeholder="new domain id (e.g. 6 for Base Sepolia)"
+        placeholder="CCTP domain ID (e.g. 6 for Base Sepolia)"
         validate={(v) => /^\d+$/.test(v) && ALL_DOMAIN_NUMBERS.includes(Number(v))}
-        label="Add supported domain"
+        label="Add chain"
         fn="addSupportedDomain"
         toCallArgs={(v) => [Number(v)]}
         onSuccess={() => { refetch?.() }}
@@ -679,7 +689,7 @@ function RecoveryManagerModule() {
         functionName: 'adminTransferRefundCredit', args: [from, to]
       })
       setTxHash(tx); setTxStatus('pending')
-      t.update('Submitted. Waiting for confirmation…')
+      t.update('Submitted. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error'); setConfirmOpen(false)
       t.error('Recovery failed.')
@@ -687,22 +697,22 @@ function RecoveryManagerModule() {
   }
 
   return (
-    <Module title="Recovery Manager" subtitle="Emergency refund-credit transfer" danger>
+    <Module title="Recovery Manager" subtitle="Transfer refund credit to a new wallet" danger>
       <div className="border border-status-error/40 bg-status-error/5 text-status-error text-[10px] uppercase tracking-[0.2em] px-3 py-2">
-        Warning: Irreversible recovery action.
+        This cannot be undone.
       </div>
 
-      <Label>Blacklisted wallet</Label>
+      <Label>Restricted wallet (current credit holder)</Label>
       <input
-        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
+        className="w-full bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
         placeholder="0x… (current credit holder)"
         value={from}
         onChange={(e) => setFrom(e.target.value.trim())}
       />
 
-      <Label>New owner</Label>
+      <Label>Replacement wallet</Label>
       <input
-        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
+        className="w-full bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-status-error"
         placeholder="0x… (replacement wallet)"
         value={to}
         onChange={(e) => setTo(e.target.value.trim())}
@@ -714,12 +724,12 @@ function RecoveryManagerModule() {
           onClick={() => setConfirmOpen(true)}
           disabled={!valid || txStatus === 'confirming' || txStatus === 'pending'}
         >
-          Transfer Refund Credit
+          Transfer credit
         </button>
       ) : (
         <div className="flex flex-col gap-2 border border-status-error/40 p-3">
           <div className="text-[10px] uppercase tracking-[0.2em] text-status-error animate-pulse">
-            Confirm irreversible transfer
+            Confirm transfer
           </div>
           <div className="flex gap-2">
             <button className={GOD_BTN_GHOST} onClick={() => setConfirmOpen(false)} disabled={txStatus === 'pending' || txStatus === 'confirming'}>
@@ -735,7 +745,7 @@ function RecoveryManagerModule() {
       <TxModal
         status={txStatus} txHash={txHash} error={txError}
         onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
-        title="Emergency recovery"
+        title="Recovery"
       />
     </Module>
   )
@@ -757,7 +767,7 @@ function PauserModule() {
   useEffect(() => {
     if (!receipt) return
     setTxStatus('success'); paused.refetch?.()
-    toastApi?.success(paused.data ? 'Unpaused.' : 'Paused.', { hash: txHash })
+    toastApi?.success(paused.data ? 'Protocol is now active.' : 'Protocol is now paused.', { hash: txHash })
     setConfirmOpen(false)
   }, [receipt]) // eslint-disable-line
 
@@ -774,7 +784,7 @@ function PauserModule() {
         functionName: isPaused ? 'unpause' : 'pause', args: []
       })
       setTxHash(tx); setTxStatus('pending')
-      t.update('Submitted. Waiting for confirmation…')
+      t.update('Submitted. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error'); setConfirmOpen(false)
       t.error('Action failed.')
@@ -782,9 +792,9 @@ function PauserModule() {
   }
 
   return (
-    <Module title="Pauser" subtitle="Protocol-wide circuit breaker" danger={isPaused}>
+    <Module title="Pauser" subtitle="Pause or unpause the entire protocol" danger={isPaused}>
       <div className={`text-2xl font-mono uppercase tracking-[0.2em] py-3 ${isPaused ? 'text-status-error' : 'text-status-success'}`}>
-        {isPaused ? '🔴 PAUSED' : '🟢 ACTIVE'}
+        {isPaused ? 'Paused' : 'Active'}
       </div>
 
       {!confirmOpen ? (
@@ -793,12 +803,12 @@ function PauserModule() {
           onClick={() => setConfirmOpen(true)}
           disabled={isBusy}
         >
-          {isPaused ? 'Unpause Protocol' : 'Pause Protocol'}
+          {isPaused ? 'Unpause' : 'Pause'}
         </button>
       ) : (
         <div className="flex flex-col gap-2 border border-status-error/40 p-3">
           <div className="text-[10px] uppercase tracking-[0.2em] text-status-error animate-pulse">
-            Confirm protocol {isPaused ? 'unpause' : 'pause'}
+            {isPaused ? 'Confirm: unpause the protocol' : 'Confirm: pause the protocol'}
           </div>
           <div className="flex gap-2">
             <button className={GOD_BTN_GHOST} onClick={() => setConfirmOpen(false)} disabled={isBusy}>
@@ -813,7 +823,7 @@ function PauserModule() {
 
       {isPaused && (
         <div className="border border-status-error/40 bg-status-error/5 text-status-error text-[10px] uppercase tracking-[0.2em] px-3 py-2">
-          Protocol paused. No new escrows can be created.
+          Protocol is paused. No new escrows can be created until it is unpaused.
         </div>
       )}
 
@@ -901,7 +911,7 @@ function WriteForm({ label, fn, placeholder, validate, toCallArgs, onSuccess }) 
         functionName: fn, args: toCallArgs(value)
       })
       setTxHash(tx); setTxStatus('pending')
-      t.update('Submitted. Waiting for confirmation…')
+      t.update('Submitted. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error')
       t.error(`${label} failed.`)
@@ -911,7 +921,7 @@ function WriteForm({ label, fn, placeholder, validate, toCallArgs, onSuccess }) 
   return (
     <div className="flex flex-col gap-2">
       <input
-        className="bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-border-focused"
+        className="w-full bg-[#0a0a0a] border border-border-subtle text-text-primary placeholder:text-text-tertiary font-mono text-xs px-3 py-2.5 focus:outline-none focus:border-border-focused"
         placeholder={placeholder}
         value={value}
         onChange={(e) => setValue(e.target.value.trim())}
@@ -935,10 +945,10 @@ function WriteForm({ label, fn, placeholder, validate, toCallArgs, onSuccess }) 
 
 /* ---------- helpers ---------- */
 function formatRemaining(seconds) {
-  if (seconds <= 0) return 'TIMEOUT REACHED — anyone can force refund'
+  if (seconds <= 0) return 'Arbiter timeout reached. Anyone can now trigger a refund.'
   const d = Math.floor(seconds / 86400)
   const h = Math.floor((seconds % 86400) / 3600)
-  return `${d}d ${h}h remaining`
+  return `${d}d ${h}h left before timeout`
 }
 
 // Hint to esbuild that these imports aren't dead.

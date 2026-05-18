@@ -77,8 +77,8 @@ function LedgerInner() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-3xl font-semibold tracking-tight">Ledger</h1>
-        <p className="text-text-secondary text-sm mt-1">A complete record of every escrow you've been part of.</p>
+        <h1 className="text-3xl font-semibold tracking-tight">History</h1>
+        <p className="text-text-secondary text-sm mt-1">Every escrow tied to your wallet, from the beginning.</p>
       </div>
 
       <CommandBar
@@ -90,20 +90,26 @@ function LedgerInner() {
         <LedgerSkeleton />
       ) : !hasAnyHistory ? (
         <EmptyState
-          title="No active escrows yet."
-          message="Let's lock in your first contract."
-          ctaLabel="Create your first escrow"
+          title="Nothing here yet."
+          message="Create your first escrow and it will show up here."
+          ctaLabel="Create Escrow"
           ctaTo="/create"
         />
       ) : filtered.length === 0 ? (
-        <div className="card-surface p-12 text-center">
-          <h2 className="text-base font-medium mb-1">No escrows match your filters</h2>
-          <p className="text-sm text-text-secondary">Try widening the search or filter above.</p>
+        <div className="card-surface px-6 py-16 sm:py-20 text-center flex flex-col items-center gap-3">
+          <div className="w-14 h-14 rounded-2xl bg-background-tertiary text-text-secondary flex items-center justify-center ring-1 ring-border-subtle">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="10" cy="10" r="6" stroke="currentColor" strokeWidth="1.6"/>
+              <path d="M15 15l5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+            </svg>
+          </div>
+          <h2 className="text-base font-semibold text-text-primary">No results for those filters</h2>
+          <p className="text-sm text-text-secondary max-w-xs">Try clearing the filters or searching by a different address.</p>
         </div>
       ) : (
         <>
-          {/* Desktop table */}
-          <div className="hidden md:block overflow-hidden card-surface">
+          {/* Desktop table — wrapped in overflow-x-auto for narrow desktop windows */}
+          <div className="hidden md:block w-full max-w-full overflow-x-auto card-surface">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr>
@@ -130,13 +136,13 @@ function LedgerInner() {
                         transition={{ duration: 0.18 }}
                         className="hover:bg-background-tertiary/50 transition-colors"
                       >
-                        <Td><span className="font-mono text-sm">#{e.id}</span></Td>
-                        <Td><span className="text-sm">{e.isPayer ? 'Paying' : 'Receiving'}</span></Td>
+                        <Td><span className="font-mono tabular text-sm">#{e.id}</span></Td>
+                        <Td><span className="text-sm">{e.isPayer ? "You're the payer" : "You're the freelancer"}</span></Td>
                         <Td><AddressDisplay address={counterparty} size="sm" /></Td>
                         <Td className="text-right">
-                          <span className="font-mono">{formatUSDC(e.totalAmount)}</span>
+                          <span className="font-mono tabular">{formatUSDC(e.totalAmount)}</span>
                         </Td>
-                        <Td><span className="font-mono text-sm text-text-secondary">{formatDeadline(e.deadline)}</span></Td>
+                        <Td><span className="font-mono tabular text-sm text-text-secondary">{formatDeadline(e.deadline)}</span></Td>
                         <Td><EscrowBadge state={e.state} /></Td>
                         <Td className="text-right">
                           <Link to={`/escrow/${e.id}`} className="text-sm text-accent">Open →</Link>
@@ -172,17 +178,17 @@ function LedgerInner() {
                       <div className="flex flex-col gap-2">
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <div className="font-mono text-xs text-text-tertiary">#{e.id}</div>
-                            <div className="text-sm">{e.isPayer ? 'Paying' : 'Receiving'}</div>
+                            <div className="font-mono tabular text-xs text-text-tertiary">#{e.id}</div>
+                            <div className="text-sm">{e.isPayer ? "You're the payer" : "You're the freelancer"}</div>
                           </div>
                           <EscrowBadge state={e.state} />
                         </div>
                         <AddressDisplay address={counterparty} size="sm" />
                         <div className="flex items-end justify-between">
                           <div className="text-xs text-text-secondary">
-                            Deadline · <span className="font-mono">{formatDeadline(e.deadline)}</span>
+                            Deadline · <span className="font-mono tabular">{formatDeadline(e.deadline)}</span>
                           </div>
-                          <span className="font-mono text-lg">{formatUSDC(e.totalAmount)}</span>
+                          <span className="font-mono tabular text-lg">{formatUSDC(e.totalAmount)}</span>
                         </div>
                       </div>
                     </Link>
@@ -221,7 +227,7 @@ function CommandBar({ search, onSearch, filter, onFilter }) {
         </span>
         <input
           type="text"
-          placeholder="Search by 0x address or escrow ID (e.g. #42)"
+          placeholder="Search by wallet address or escrow ID (e.g. #42)"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
           className="bg-background-tertiary border border-border-subtle rounded-xl pl-9 pr-4 h-12 w-full appearance-none
