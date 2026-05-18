@@ -1,11 +1,11 @@
 import { useState } from 'react'
-import { useAccount, useReadContract } from 'wagmi'
+import { useReadContract } from 'wagmi'
 import { isAddress } from 'viem'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
-import { useAllCallerRoles } from '../hooks/useArbiter.js'
+import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
@@ -21,8 +21,7 @@ export default function ProtocolSettings() {
 }
 
 function ProtocolSettingsInner() {
-  const { address } = useAccount()
-  const { roles, isLoading } = useAllCallerRoles(address)
+  const { roles, isLoading } = useRoles()
 
   if (isLoading) {
     return (

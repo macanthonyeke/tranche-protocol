@@ -4,7 +4,7 @@ import { useAccount } from 'wagmi'
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
-import { useIsArbiter } from '../hooks/useArbiter.js'
+import { useRoles } from '../hooks/useRoles.jsx'
 import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { isValidBytes32 } from '../utils/encode.js'
@@ -25,7 +25,7 @@ export default function ArbiterPanel() {
 
 function ArbiterInner() {
   const { address } = useAccount()
-  const { isArbiter, isLoading } = useIsArbiter(address)
+  const { isArbiter, isLoading } = useRoles()
   useTick(15_000)
 
   if (isLoading) {

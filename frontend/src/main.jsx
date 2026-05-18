@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App.jsx'
 import { config } from './config/wagmi.js'
 import { ThemeProvider } from './hooks/useTheme.jsx'
+import { RoleProvider } from './hooks/useRoles.jsx'
 import './styles/globals.css'
 
 const queryClient = new QueryClient()
@@ -16,9 +17,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
+          <RoleProvider>
+            <BrowserRouter>
+              <App />
+            </BrowserRouter>
+          </RoleProvider>
         </ThemeProvider>
       </QueryClientProvider>
     </WagmiProvider>

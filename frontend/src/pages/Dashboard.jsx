@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import { useDashboard, useUsdcBalance } from '../hooks/useEscrows.js'
+import { useRoles } from '../hooks/useRoles.jsx'
 import { formatUSDC, formatUSDCNumber } from '../utils/format.js'
 
 const PAGE_SIZE = 9
@@ -37,6 +38,15 @@ export default function Dashboard() {
 
 function DashboardInner() {
   const { address } = useAccount()
+  const navigate = useNavigate()
+  const { isArbiter, isAdmin, isLoading: rolesLoading } = useRoles()
+
+  useEffect(() => {
+    if (rolesLoading) return
+    if (isArbiter) navigate('/arbiter', { replace: true })
+    else if (isAdmin) navigate('/protocol', { replace: true })
+  }, [rolesLoading, isArbiter, isAdmin, navigate])
+
   const { dashboard, isLoading, refetch } = useDashboard(address)
   const { balance: usdcBalance } = useUsdcBalance(address)
 
@@ -80,6 +90,17 @@ function DashboardInner() {
     if (isRefreshing) return
     setIsRefreshing(true)
     try { await refetch?.() } finally { setIsRefreshing(false) }
+  }
+
+  // While roles are resolving, or for privileged wallets that are about to be
+  // redirected, suppress the consumer vault grid so it never flashes.
+  if (rolesLoading || isArbiter || isAdmin) {
+    return (
+      <div className="flex flex-col gap-6">
+        <Skeleton className="h-24" />
+        <Skeleton className="h-64" />
+      </div>
+    )
   }
 
   return (

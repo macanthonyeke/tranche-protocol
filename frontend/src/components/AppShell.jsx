@@ -1,17 +1,45 @@
 import { NavLink, Link } from 'react-router-dom'
 import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
+import { useRoles } from '../hooks/useRoles.jsx'
 
-const NAV = [
+const CONSUMER_NAV = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/create',    label: 'Create' },
   { to: '/ledger',    label: 'History' },
-  { to: '/arbiter',   label: 'Arbiter Panel' },
-  { to: '/protocol',  label: 'Protocol' },
   { to: '/settings',  label: 'Settings' }
 ]
 
-const MOBILE_NAV = [
+const ARBITER_NAV = [{ to: '/arbiter',  label: 'Arbiter Panel' }]
+const ADMIN_NAV   = [{ to: '/protocol', label: 'Protocol Settings' }]
+
+function useNavLinks() {
+  const { isArbiter, isAdmin, isStandardUser, isConnected, isLoading } = useRoles()
+  // Disconnected wallets and still-resolving wallets see the consumer nav so
+  // the landing flow remains discoverable without leaking admin routes.
+  if (!isConnected || isLoading || isStandardUser) return CONSUMER_NAV
+  const links = []
+  if (isArbiter) links.push(...ARBITER_NAV)
+  if (isAdmin) links.push(...ADMIN_NAV)
+  return links
+}
+
+const ShieldMobileIcon = (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+    <path d="M10 2.5 4 4.5v4c0 3.4 2.6 6.5 6 7.5 3.4-1 6-4.1 6-7.5v-4l-6-2Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
+  </svg>
+)
+
+const SlidersMobileIcon = (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+    <path d="M4 6h12M4 10h12M4 14h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    <circle cx="8"  cy="6"  r="1.6" fill="currentColor"/>
+    <circle cx="13" cy="10" r="1.6" fill="currentColor"/>
+    <circle cx="6"  cy="14" r="1.6" fill="currentColor"/>
+  </svg>
+)
+
+const MOBILE_NAV_CONSUMER = [
   {
     to: '/dashboard',
     label: 'Dashboard',
@@ -55,7 +83,20 @@ const MOBILE_NAV = [
   }
 ]
 
+const MOBILE_NAV_ARBITER = [{ to: '/arbiter',  label: 'Arbiter',  icon: ShieldMobileIcon }]
+const MOBILE_NAV_ADMIN   = [{ to: '/protocol', label: 'Protocol', icon: SlidersMobileIcon }]
+
+function useMobileNavLinks() {
+  const { isArbiter, isAdmin, isStandardUser, isConnected, isLoading } = useRoles()
+  if (!isConnected || isLoading || isStandardUser) return MOBILE_NAV_CONSUMER
+  const links = []
+  if (isArbiter) links.push(...MOBILE_NAV_ARBITER)
+  if (isAdmin) links.push(...MOBILE_NAV_ADMIN)
+  return links
+}
+
 function TopNav() {
+  const navLinks = useNavLinks()
   return (
     <header className="sticky top-0 z-50 w-full bg-background-primary/80 backdrop-blur-md border-b border-border-subtle h-16 flex items-center px-6 md:px-12 justify-between">
       {/* Left — Branding & Environment */}
@@ -71,7 +112,7 @@ function TopNav() {
 
       {/* Center — Navigation Links */}
       <nav className="hidden md:flex items-center gap-8">
-        {NAV.map((item) => (
+        {navLinks.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -118,9 +159,11 @@ function TopNav() {
 }
 
 function BottomNav() {
+  const mobileLinks = useMobileNavLinks()
+  if (mobileLinks.length === 0) return null
   return (
     <nav className="flex md:hidden fixed bottom-0 inset-x-0 z-50 h-16 w-full border-t border-border-subtle bg-background-secondary justify-around items-stretch">
-      {MOBILE_NAV.map((item) => (
+      {mobileLinks.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
