@@ -6,7 +6,6 @@ const NAV = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/create',    label: 'Create' },
   { to: '/ledger',    label: 'History' },
-  { to: '/tribunal',  label: 'Arbiter Panel' },
   { to: '/settings',  label: 'Settings' }
 ]
 
@@ -39,15 +38,6 @@ const MOBILE_NAV = [
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
         <path d="M4 4h12v12H4z" stroke="currentColor" strokeWidth="1.4"/>
         <path d="M7 8h6M7 11h6M7 14h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-      </svg>
-    )
-  },
-  {
-    to: '/tribunal',
-    label: 'Arbiter',
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-        <path d="M10 3v3M5 7h10M6 7l-2 9h12L14 7M9 11v3M11 11v3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
     )
   },

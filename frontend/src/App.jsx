@@ -11,7 +11,6 @@ import Dashboard from './pages/Dashboard.jsx'
 import EscrowDetail from './pages/EscrowDetail.jsx'
 import Settings from './pages/Settings.jsx'
 import Ledger from './pages/Ledger.jsx'
-import DisputeTribunal from './pages/DisputeTribunal.jsx'
 import NotFound from './pages/NotFound.jsx'
 
 function Shelled({ children, maxWidth }) {
@@ -36,8 +35,6 @@ export default function App() {
           <Route path="/create" element={<Shelled><CreateEscrow /></Shelled>} />
           <Route path="/escrow/:id" element={<Shelled><EscrowDetail /></Shelled>} />
           <Route path="/ledger" element={<Shelled><Ledger /></Shelled>} />
-          <Route path="/tribunal" element={<Shelled><DisputeTribunal /></Shelled>} />
-          <Route path="/tribunal/:id/:milestone" element={<Shelled maxWidth="full"><DisputeTribunal /></Shelled>} />
           <Route path="/settings" element={<Shelled><Settings /></Shelled>} />
 
           <Route path="*" element={<Shelled><NotFound /></Shelled>} />
