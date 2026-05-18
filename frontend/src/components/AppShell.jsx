@@ -6,6 +6,8 @@ const NAV = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/create',    label: 'Create' },
   { to: '/ledger',    label: 'History' },
+  { to: '/arbiter',   label: 'Arbiter Panel' },
+  { to: '/protocol',  label: 'Protocol' },
   { to: '/settings',  label: 'Settings' }
 ]
 
