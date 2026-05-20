@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAccount, useWaitForTransactionReceipt, useWriteContract } from 'wagmi'
 
 import ConnectGate from '../components/ConnectGate.jsx'
+import Field from '../components/Field.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
@@ -80,22 +81,30 @@ function RefundSection() {
         </div>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <label className="text-sm font-medium flex items-center">
-          Withdraw to
-          <Tooltip content="You can send this to any wallet you control. If your original wallet is restricted, use a different one." />
-        </label>
-        <input className="input-field font-mono text-sm" placeholder="0x…"
-          value={recipient}
-          onChange={(e) => setRecipient(e.target.value.trim())} />
-        {recipient && !isValidAddress(recipient) && (
-          <div className="text-xs text-status-error">That doesn't look like a valid address.</div>
+      <Field
+        label={<>Withdraw to<Tooltip content="You can send this to any wallet you control. If your original wallet is restricted, use a different one." /></>}
+        error={recipient && !isValidAddress(recipient) ? "That doesn't look like a valid address." : undefined}
+      >
+        {(props) => (
+          <input
+            {...props}
+            className="input-field font-mono text-sm"
+            placeholder="0x…"
+            autoComplete="off"
+            spellCheck={false}
+            inputMode="text"
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value.trim())}
+          />
         )}
-      </div>
+      </Field>
 
-      <button className="btn-primary"
+      <button
+        type="button"
+        className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}>
+        disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}
+      >
         {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Withdraw funds'}
       </button>
 
@@ -111,11 +120,15 @@ function AppearanceSection() {
   const { theme, setTheme } = useTheme()
   return (
     <Section title="Appearance" description="Choose how the app looks on this device.">
-      <div className="flex flex-col gap-2">
+      <div
+        role="radiogroup"
+        aria-label="Theme"
+        className="flex flex-col gap-2"
+      >
         <span className="text-sm font-medium">Theme</span>
         <div className="grid grid-cols-2 gap-2">
           <ThemeOption active={theme === 'light'} onClick={() => setTheme('light')} label="Light" />
-          <ThemeOption active={theme === 'dark'} onClick={() => setTheme('dark')} label="Dark" />
+          <ThemeOption active={theme === 'dark'}  onClick={() => setTheme('dark')}  label="Dark" />
         </div>
       </div>
     </Section>
@@ -124,10 +137,17 @@ function AppearanceSection() {
 
 function ThemeOption({ active, onClick, label }) {
   return (
-    <button onClick={onClick}
-      className={`p-4 rounded-xl border text-sm font-medium transition-all duration-200 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
-        active ? 'border-accent-blue bg-accent-muted text-accent' : 'border-border-subtle bg-background-tertiary text-text-secondary hover:bg-border-subtle'
-      }`}>
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      className={`p-4 rounded-xl border text-sm font-medium transition-[background-color,border-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
+        active
+          ? 'border-accent-blue bg-accent-muted text-accent'
+          : 'border-border-subtle bg-background-tertiary text-text-secondary hover:bg-border-subtle'
+      }`}
+    >
       {label}
     </button>
   )

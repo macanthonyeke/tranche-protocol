@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
 import DatePicker from '../components/DatePicker.jsx'
+import Field, { FieldError } from '../components/Field.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
@@ -286,7 +287,7 @@ function Wizard() {
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.22, ease: 'easeOut' }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
               className="flex flex-col gap-6"
             >
               <StepHeading heading={currentStep.heading} description={currentStep.description} />
@@ -442,31 +443,38 @@ function Step1({ state, setState, errors, chainOptions, loadingDomains }) {
     <>
       <Field label="Freelancer's wallet address" error={errors.freelancer}
         hint={<Tooltip content="This is where payments land when milestones are approved." />}>
-        <input className="input-field font-mono" placeholder="0x…"
-          value={state.freelancer}
-          onChange={(e) => setField('freelancer')(e.target.value.trim())}
-        />
+        {(props) => (
+          <input {...props} className="input-field font-mono" placeholder="0x…"
+            autoComplete="off" spellCheck={false} inputMode="text"
+            value={state.freelancer}
+            onChange={(e) => setField('freelancer')(e.target.value.trim())}
+          />
+        )}
       </Field>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Field label="Payment chain" error={errors.destinationDomain}
           hint={<Tooltip content="The chain where the freelancer receives their USDC. Same-chain has no extra fee. Cross-chain uses Circle CCTP and a small forwarding fee applies." />}>
-          <CustomSelect
-            value={Number(state.destinationDomain)} onChange={setField('destinationDomain')}
-            options={chainOptions} searchable
-            placeholder={loadingDomains ? 'Loading supported chains...' : 'Select a chain'}
-          />
+          {(props) => (
+            <CustomSelect {...props}
+              value={Number(state.destinationDomain)} onChange={setField('destinationDomain')}
+              options={chainOptions} searchable
+              placeholder={loadingDomains ? 'Loading supported chains...' : 'Select a chain'}
+            />
+          )}
         </Field>
         <Field label="Total amount (USDC)" error={errors.totalAmount}
           helper="Total locked from your wallet.">
-          <div className="relative">
-            <input type="number" step="0.01" min="0"
-              className="input-field font-mono tabular pr-16" placeholder="0.00"
-              value={state.totalAmount}
-              onChange={(e) => setField('totalAmount')(e.target.value)}
-            />
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-text-tertiary font-medium">USDC</span>
-          </div>
+          {(props) => (
+            <div className="relative">
+              <input {...props} type="number" step="0.01" min="0" inputMode="decimal"
+                className="input-field font-mono tabular pr-16" placeholder="0.00"
+                value={state.totalAmount}
+                onChange={(e) => setField('totalAmount')(e.target.value)}
+              />
+              <span aria-hidden className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-text-tertiary font-medium">USDC</span>
+            </div>
+          )}
         </Field>
       </div>
     </>
@@ -488,23 +496,29 @@ function Step2({ state, setState, errors }) {
         <Field label="Invoice description" error={errors.description}
           helper="Hashed locally. Only the hash is stored on-chain, not the text."
           hint={<Tooltip content="Your description is hashed locally. Only the hash is stored on-chain, not the text itself." />}>
-          <textarea rows={3} className="input-field-multiline"
-            placeholder="e.g. Brand identity redesign, Q3 deliverables"
-            value={state.description}
-            onChange={(e) => setField('description')(e.target.value)}
-          />
+          {(props) => (
+            <textarea {...props} rows={3} className="input-field-multiline"
+              placeholder="e.g. Brand identity redesign, Q3 deliverables"
+              maxLength={500}
+              value={state.description}
+              onChange={(e) => setField('description')(e.target.value)}
+            />
+          )}
         </Field>
       ) : (
         <Field label="Custom invoice hash (bytes32)" error={errors.customInvoiceHash}>
-          <input className="input-field font-mono" placeholder="0x…"
-            value={state.customInvoiceHash}
-            onChange={(e) => setField('customInvoiceHash')(e.target.value.trim())}
-          />
+          {(props) => (
+            <input {...props} className="input-field font-mono" placeholder="0x…"
+              autoComplete="off" spellCheck={false}
+              value={state.customInvoiceHash}
+              onChange={(e) => setField('customInvoiceHash')(e.target.value.trim())}
+            />
+          )}
         </Field>
       )}
 
-      <label className="flex items-center gap-2 text-sm text-text-secondary">
-        <input type="checkbox" className="rounded border-border-medium accent-[var(--accent-blue)]"
+      <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer select-none">
+        <input type="checkbox" className="rounded border-border-medium accent-[var(--accent-blue)] h-4 w-4"
           checked={state.useCustomHash}
           onChange={(e) => setField('useCustomHash')(e.target.checked)}
         />
@@ -514,14 +528,19 @@ function Step2({ state, setState, errors }) {
       <Field label="Invoice URL" error={errors.invoiceURI}
         helper="A link to the full invoice document. Stored on-chain for reference."
         hint={<Tooltip content="A link to the actual invoice document. This gets stored on-chain for reference." />}>
-        <input className="input-field" placeholder="https://…"
-          value={state.invoiceURI}
-          onChange={(e) => setField('invoiceURI')(e.target.value.trim())}
-        />
+        {(props) => (
+          <input {...props} type="url" className="input-field" placeholder="https://…"
+            autoComplete="url" spellCheck={false} inputMode="url"
+            value={state.invoiceURI}
+            onChange={(e) => setField('invoiceURI')(e.target.value.trim())}
+          />
+        )}
       </Field>
 
       <Field label="Invoice hash preview">
-        <input className="input-field font-mono text-xs" readOnly value={hashPreview || '—'} />
+        {(props) => (
+          <input {...props} className="input-field font-mono text-xs" readOnly value={hashPreview || '—'} />
+        )}
       </Field>
     </>
   )
@@ -535,21 +554,27 @@ function Step3({ state, setState, errors }) {
       <Field label="Project deadline" error={errors.deadline}
         helper="If milestones go undelivered past this date, they can be escalated."
         hint={<Tooltip content="If milestones are undelivered past this date, they can be escalated to the arbiter." />}>
-        <DatePicker value={state.deadline} onChange={setField('deadline')} />
+        {(props) => (
+          <DatePicker {...props} value={state.deadline} onChange={setField('deadline')} />
+        )}
       </Field>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Field label="Auto-release window"
           helper="How long the payer has to respond after delivery."
           hint={<Tooltip content="How long the payer has to respond after a milestone is marked delivered. If they go silent, the payment auto-releases when this runs out." />}>
-          <CustomSelect value={state.noticeWindowDays}
-            onChange={setField('noticeWindowDays')} options={NOTICE_WINDOW_OPTIONS} />
+          {(props) => (
+            <CustomSelect {...props} value={state.noticeWindowDays}
+              onChange={setField('noticeWindowDays')} options={NOTICE_WINDOW_OPTIONS} />
+          )}
         </Field>
         <Field label="Dispute window"
           helper="How long either party has to dispute after approval."
           hint={<Tooltip content="How long either party has to open a dispute after a milestone is approved." />}>
-          <CustomSelect value={state.disputeWindowHours}
-            onChange={setField('disputeWindowHours')} options={DISPUTE_WINDOW_OPTIONS} />
+          {(props) => (
+            <CustomSelect {...props} value={state.disputeWindowHours}
+              onChange={setField('disputeWindowHours')} options={DISPUTE_WINDOW_OPTIONS} />
+          )}
         </Field>
       </div>
     </>
@@ -583,10 +608,15 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
 
   return (
     <>
-      {/* Allocation table */}
-      <div className="rounded-2xl border border-border-subtle overflow-hidden">
+      {/* Allocation table.
+          Wrapper carries the surface and rounded edges; no overflow-hidden so
+          per-row dropdowns (e.g. the milestone title CustomSelect) can float
+          outside the row without being clipped. Zebra rows were dropped: the
+          flat surface plus border-t separators read just as cleanly and
+          remove the need to clip-to-rounded-corners. */}
+      <div className="rounded-2xl border border-border-subtle bg-background-secondary">
         {/* Header row */}
-        <div className="hidden sm:grid grid-cols-[3rem_1fr_11rem_4rem] gap-3 px-4 py-2.5 bg-background-tertiary text-[10px] uppercase tracking-[0.15em] text-text-tertiary font-medium">
+        <div className="hidden sm:grid grid-cols-[3rem_1fr_11rem_4rem] gap-3 px-4 py-2.5 rounded-t-2xl bg-background-tertiary text-[10px] uppercase tracking-[0.15em] text-text-tertiary font-medium">
           <div>#</div>
           <div>Milestone</div>
           <div className="text-right">Amount (USDC)</div>
@@ -601,17 +631,26 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.2, ease: 'easeOut' }}
-              className={`grid grid-cols-1 sm:grid-cols-[3rem_1fr_11rem_4rem] gap-3 items-start px-4 py-3 border-t border-border-subtle ${i % 2 ? 'bg-background-secondary' : 'bg-background-primary'}`}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              className="relative grid grid-cols-1 sm:grid-cols-[3rem_1fr_11rem_4rem] gap-3 items-start px-4 py-3 border-t border-border-subtle"
             >
               <div className="hidden sm:flex items-center h-12 font-mono tabular text-sm text-text-tertiary">
                 M{i + 1}
               </div>
               <div className="flex flex-col gap-1.5">
                 <div className="sm:hidden text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Milestone {i + 1}</div>
-                <CustomSelect value={m.title} onChange={(v) => update(i, 'title', v)} options={titleOptions} />
+                <CustomSelect
+                  value={m.title}
+                  onChange={(v) => update(i, 'title', v)}
+                  options={titleOptions}
+                  aria-label={`Milestone ${i + 1} title`}
+                  aria-invalid={errors[`milestone_${i}_title`] ? true : undefined}
+                />
                 {m.title === 'Custom' && (
                   <input className="input-field" placeholder="Custom title"
+                    aria-label={`Milestone ${i + 1} custom title`}
+                    aria-invalid={errors[`milestone_${i}_title`] ? true : undefined}
+                    maxLength={80}
                     value={m.customTitle} onChange={(e) => update(i, 'customTitle', e.target.value)} />
                 )}
                 {errors[`milestone_${i}_title`] && <FieldError text={errors[`milestone_${i}_title`]} />}
@@ -619,10 +658,12 @@ function Step4({ state, setState, errors, milestonesSum, totalAmountNum, remaini
               <div className="flex flex-col gap-1.5">
                 <div className="sm:hidden text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Amount</div>
                 <div className="relative">
-                  <input type="number" step="0.01" min="0"
+                  <input type="number" step="0.01" min="0" inputMode="decimal"
+                    aria-label={`Milestone ${i + 1} amount (USDC)`}
+                    aria-invalid={errors[`milestone_${i}_amount`] ? true : undefined}
                     className="input-field font-mono tabular text-right pr-14" placeholder="0.00"
                     value={m.amount} onChange={(e) => update(i, 'amount', e.target.value)} />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-text-tertiary font-medium uppercase tracking-wider">USDC</span>
+                  <span aria-hidden className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-text-tertiary font-medium uppercase tracking-wider">USDC</span>
                 </div>
                 {errors[`milestone_${i}_amount`] && <FieldError text={errors[`milestone_${i}_amount`]} />}
               </div>
@@ -693,10 +734,17 @@ function AllocationTracker({ milestonesSum, totalAmountNum, remaining, exactMatc
           {statusText}
         </div>
       </div>
-      <div className="bg-background-tertiary w-full h-2 rounded-full overflow-hidden">
+      <div
+        className="bg-background-tertiary w-full h-2 rounded-full overflow-hidden"
+        role="progressbar"
+        aria-valuenow={Math.round(percentage)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Milestone allocation"
+      >
         <div
-          className={`h-full transition-all duration-300 ${fillCls}`}
-          style={{ width: `${percentage}%` }}
+          className={`h-full w-full origin-left transition-[transform,background-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${fillCls}`}
+          style={{ transform: `scaleX(${percentage / 100})` }}
         />
       </div>
     </div>
@@ -851,7 +899,7 @@ function FlowStep({ letter, label, description, done, active, loading, actionLab
       : 'bg-background-tertiary text-text-tertiary'
 
   return (
-    <div className={`card-surface p-4 flex flex-col gap-3 border ${borderCls} transition-all`}>
+    <div className={`card-surface p-4 flex flex-col gap-3 border ${borderCls} transition-[border-color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]`}>
       <div className="flex items-start gap-3">
         <span className={`inline-flex items-center justify-center h-8 w-8 rounded-full font-mono text-xs shrink-0 ${chipCls}`}>
           {done ? (
@@ -892,31 +940,3 @@ function FlowStep({ letter, label, description, done, active, loading, actionLab
   )
 }
 
-/* ---------- shared sub-components ---------- */
-function Field({ label, hint, children, error, helper }) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-text-primary flex items-center">
-        {label}{hint}
-      </label>
-      {children}
-      {error ? (
-        <FieldError text={error} />
-      ) : helper ? (
-        <div className="text-xs text-text-tertiary">{helper}</div>
-      ) : null}
-    </div>
-  )
-}
-
-function FieldError({ text }) {
-  return (
-    <div className="flex items-center gap-1.5 text-xs text-status-error">
-      <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden className="shrink-0">
-        <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.4"/>
-        <path d="M7 4.2v3.2M7 9.5v0.05" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-      </svg>
-      <span>{text}</span>
-    </div>
-  )
-}

@@ -36,7 +36,7 @@ export default function TxModal({
           initial={{ opacity: 0, scale: 0.96, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.98, y: -4 }}
-          transition={{ duration: 0.22, ease: 'easeOut' }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
           className="card-surface w-full max-w-md p-8 text-center"
           onClick={(e) => e.stopPropagation()}
         >

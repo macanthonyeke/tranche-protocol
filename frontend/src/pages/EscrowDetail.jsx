@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
+import IconButton from '../components/IconButton.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
 import { useEscrowDetail, useTick } from '../hooks/useEscrows.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
@@ -127,15 +128,13 @@ function InspectionHeader({ escrow, inv }) {
           <h1 className="text-3xl font-mono font-bold text-text-primary tracking-tight truncate">
             {inv}
           </h1>
-          <button
-            type="button"
+          <IconButton
             onClick={onCopy}
-            aria-label={`Copy ${inv}`}
-            className="inline-flex items-center justify-center h-8 w-8 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-background-tertiary transition-colors"
+            label={`Copy ${inv}`}
             title={copied ? 'Copied' : 'Copy ID'}
           >
             {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-          </button>
+          </IconButton>
         </div>
 
         <StateGlowPill state={escrow.state} />
@@ -147,14 +146,14 @@ function InspectionHeader({ escrow, inv }) {
 function StateGlowPill({ state }) {
   const verb = ESCROW_LABELS[state] ?? 'Active'
   const tone = state === 1
-    ? { dot: 'bg-status-success', text: 'text-status-success', ring: 'border-status-success/30 bg-status-success/10', glow: 'shadow-[0_0_10px_rgba(5,150,105,0.55)]' }
+    ? { dot: 'bg-status-success', text: 'text-status-success', ring: 'border-status-success/30 bg-status-success/10' }
     : state === 2
-    ? { dot: 'bg-text-tertiary', text: 'text-text-tertiary', ring: 'border-border-subtle bg-background-tertiary', glow: '' }
-    : { dot: 'bg-accent-blue', text: 'text-accent-blue', ring: 'border-accent/30 bg-accent-muted/40', glow: 'shadow-[0_0_10px_rgba(51,119,255,0.55)]' }
+    ? { dot: 'bg-text-tertiary', text: 'text-text-tertiary', ring: 'border-border-subtle bg-background-tertiary' }
+    : { dot: 'bg-accent-blue', text: 'text-accent-blue', ring: 'border-accent/30 bg-accent-muted/40' }
   const pulse = state === 0 ? 'animate-pulse' : ''
   return (
     <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium ${tone.ring} ${tone.text}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${tone.dot} ${tone.glow} ${pulse}`} aria-hidden />
+      <span className={`h-1.5 w-1.5 rounded-full ${tone.dot} ${pulse}`} aria-hidden />
       {verb} on Arc Network
     </span>
   )
@@ -167,7 +166,7 @@ function StateGlowPill({ state }) {
 function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   return (
     <aside className="lg:col-span-1 flex flex-col gap-6">
-      <div className="bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-6 backdrop-blur-sm h-fit flex flex-col gap-6">
+      <div className="bg-background-secondary border border-border-subtle rounded-2xl p-6 h-fit flex flex-col gap-6">
         <div className="flex flex-col gap-1">
           <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Total Locked</span>
           <div className="font-mono tabular-nums font-bold text-3xl text-text-primary leading-tight">
@@ -295,10 +294,19 @@ function MilestoneStack({
   disputeWindowExpired, deliverySignaled, effectiveDisputeDeadlines,
   optimistic, onChange, setOpt, clearOpt
 }) {
+  const hasDispute = milestones.some((m) => m.state === 2)
   return (
-    <div className="bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-6">
+    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-6 shadow-sm">
       <div className="flex items-baseline justify-between mb-5">
-        <h2 className="text-base font-semibold text-text-primary tracking-tight">Milestones</h2>
+        <h2 className="text-base font-semibold text-text-primary tracking-tight">
+          Milestones
+          {hasDispute && (
+            <span className="ml-3 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono uppercase tracking-[0.18em] text-status-warning bg-status-warning/10 align-middle">
+              <span className="h-1.5 w-1.5 rounded-full bg-status-warning animate-pulse" />
+              In Tribunal
+            </span>
+          )}
+        </h2>
         <span className="text-xs font-mono tabular-nums text-text-tertiary uppercase tracking-widest">
           {milestones.filter((m) => m.state === 3).length} / {milestones.length} released
         </span>
@@ -315,7 +323,7 @@ function MilestoneStack({
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.25, ease: 'easeOut' }}
+                transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
               >
                 <MilestoneRow
                   escrow={escrow}
@@ -364,12 +372,16 @@ function MilestoneRow({
     deliverySignaled, noticeDeadline, disputeWindowExpired, effectiveDisputeDeadline
   })
 
+  const inDispute = milestone.state === 2
+  const rowCls = inDispute
+    ? 'border border-status-warning/40 bg-status-warning/[0.04] rounded-xl p-5 relative'
+    : 'border border-border-subtle bg-background-primary rounded-xl p-5 relative'
   return (
-    <div className="border border-border-subtle bg-black/[0.01] dark:bg-white/[0.005] rounded-xl p-5 relative">
+    <div className={rowCls}>
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-2 min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-text-tertiary">
+            <span className={`font-mono text-[10px] uppercase tracking-[0.18em] ${inDispute ? 'text-status-warning' : 'text-text-tertiary'}`}>
               M{milestone.index + 1}
             </span>
             <h3 className="text-base font-semibold text-text-primary truncate">{title}</h3>
@@ -537,7 +549,12 @@ function MilestoneAction({
       type="button"
       onClick={run}
       disabled={tx.isBusy}
-      className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-accent-blue text-white rounded-xl font-medium text-sm shadow-[0_4px_12px_rgba(51,119,255,0.3)] hover:bg-accent-blue/90 transition-all disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]"
+      className="inline-flex items-center justify-center gap-2 px-4 py-2
+                 bg-accent-blue text-white rounded-xl font-medium text-sm shadow-sm
+                 hover:bg-accent-hover
+                 transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                 disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
+                 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
     >
       {isLoading && (
         <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden />
@@ -585,7 +602,7 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   const freelancerApproved = (role === 'freelancer' && optApproved) || escrow.recipientApproveCancel
 
   return (
-    <div className="bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-5 backdrop-blur-sm flex flex-col gap-3">
+    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Cancel by mutual agreement</h3>
       <p className="text-xs text-text-secondary leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
       <div className="flex flex-col gap-2 bg-background-tertiary rounded-xl px-3 py-2.5">
@@ -626,6 +643,8 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
   const [domain, setDomain] = useState(() => Number(escrow.destinationDomain ?? ARC_DOMAIN))
   const [successInfo, setSuccessInfo] = useState(null)
   const { supported } = useSupportedDomains()
+  const addrId = useId()
+  const chainId = useId()
 
   const currentAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : null
   const currentDomain = Number(escrow.destinationDomain)
@@ -653,7 +672,7 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
   }
 
   return (
-    <div className="bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-5 backdrop-blur-sm flex flex-col gap-4">
+    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-[11px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Receiving address</h3>
         {!editing && (
@@ -691,21 +710,26 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             className="flex flex-col gap-3 overflow-hidden"
           >
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-text-secondary">New address</label>
+              <label htmlFor={addrId} className="text-xs font-medium text-text-secondary">New address</label>
               <input
+                id={addrId}
                 className="input-field font-mono text-sm"
                 placeholder="0x…"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={addr && !isValidAddress(addr) ? true : undefined}
                 value={addr}
                 onChange={(e) => setAddr(e.target.value.trim())}
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-text-secondary">Receiving chain</label>
+              <label htmlFor={chainId} className="text-xs font-medium text-text-secondary">Receiving chain</label>
               <CustomSelect
+                id={chainId}
                 value={Number(domain)}
                 onChange={(v) => setDomain(Number(v))}
                 options={domainOptions}

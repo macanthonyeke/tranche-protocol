@@ -7,7 +7,11 @@ export default function CustomSelect({
   placeholder = 'Select…',
   searchable = false,
   disabled = false,
-  className = ''
+  className = '',
+  id,
+  'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -52,9 +56,15 @@ export default function CustomSelect({
   }
 
   return (
-    <div className={`relative ${className}`} ref={wrapRef} onKeyDown={handleKey}>
+    <div className={`relative ${open ? 'z-30' : ''} ${className}`} ref={wrapRef} onKeyDown={handleKey}>
       <button
         type="button"
+        id={id}
+        aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        aria-haspopup="listbox"
+        aria-expanded={open}
         className={`input-field flex items-center justify-between text-left active:scale-[0.99] ${open ? 'border-border-focused' : ''}`}
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import IconButton from './IconButton.jsx'
 
 function startOfDay(d) {
   const x = new Date(d)
@@ -16,7 +17,15 @@ function formatDisplay(d) {
 
 const DOW = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
-export default function DatePicker({ value, onChange, placeholder = 'Select a date' }) {
+export default function DatePicker({
+  value,
+  onChange,
+  placeholder = 'Select a date',
+  id,
+  'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid
+}) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const today = startOfDay(new Date())
@@ -45,6 +54,12 @@ export default function DatePicker({ value, onChange, placeholder = 'Select a da
     <div className="relative" ref={wrapRef}>
       <button
         type="button"
+        id={id}
+        aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        aria-haspopup="dialog"
+        aria-expanded={open}
         className={`input-field flex items-center justify-between text-left font-mono ${open ? 'border-border-focused' : ''}`}
         onClick={() => setOpen((o) => !o)}
       >
@@ -60,17 +75,19 @@ export default function DatePicker({ value, onChange, placeholder = 'Select a da
       {open && (
         <div className="absolute z-50 left-0 top-[calc(100%+4px)] card-surface p-3 w-[280px]">
           <div className="flex items-center justify-between mb-3">
-            <button type="button" onClick={() => goto(-1)} aria-label="Previous month"
-              className="h-7 w-7 inline-flex items-center justify-center rounded-md text-text-secondary hover:bg-background-tertiary">
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M7.5 3l-3 3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
+            <IconButton size="sm" label="Previous month" onClick={() => goto(-1)}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M7.5 3l-3 3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </IconButton>
             <div className="text-sm font-medium">
               {cursor.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}
             </div>
-            <button type="button" onClick={() => goto(1)} aria-label="Next month"
-              className="h-7 w-7 inline-flex items-center justify-center rounded-md text-text-secondary hover:bg-background-tertiary">
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 3l3 3-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
+            <IconButton size="sm" label="Next month" onClick={() => goto(1)}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M4.5 3l3 3-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </IconButton>
           </div>
 
           <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-text-tertiary mb-1">

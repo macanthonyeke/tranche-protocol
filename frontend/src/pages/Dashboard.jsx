@@ -104,66 +104,74 @@ function DashboardInner() {
   }
 
   return (
-    <div className="flex flex-col gap-8 md:gap-12">
-      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Dashboard</h1>
-          <p className="text-text-secondary text-sm mt-1">Everything tied to your wallet, in one place.</p>
-        </div>
-        <Link to="/create" className="btn-primary text-sm py-2.5 self-start md:self-auto">
+    <div className="flex flex-col gap-10 md:gap-14">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight text-text-primary">Dashboard</h1>
+        <Link to="/create" className="btn-primary text-sm py-2.5 self-start sm:self-auto whitespace-nowrap">
           + New Escrow
         </Link>
-      </div>
+      </header>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard label="Active Escrows" value={activeCount} loading={isLoading} />
-        <StatCard
+      {/* Stat tiles. Four real metrics, semantically distinct: two USDC values
+          (wallet balance, claimable) and two integer counts (active, disputes).
+          The Claimable tile is a Link to /settings when there's something to
+          withdraw — that interaction shift is what keeps the row from reading
+          as an identical card grid. */}
+      <section aria-label="Account summary" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading}>
+          <UsdcValue value={usdcBalance} />
+        </StatTile>
+
+        <StatTile label="Active Escrows" sublabel={activeCount === 1 ? 'In progress' : 'In progress'} loading={isLoading}>
+          <CountValue value={activeCount} />
+        </StatTile>
+
+        <StatTile
           label="Open Disputes"
-          value={openDisputeCount}
+          sublabel={openDisputeCount > 0 ? 'Needs attention' : 'All clear'}
           tone={openDisputeCount > 0 ? 'warning' : 'default'}
           loading={isLoading}
-        />
-        <StatCard
-          label="Total Locked"
-          value={`${formatUSDCNumber(usdcBalance)} USDC`}
-          mono
-          loading={isLoading}
-          action={
-            refundBal > 0n ? (
-              <Link to="/settings" className="text-accent text-xs">
-                +{formatUSDC(refundBal)} refund ready to withdraw →
-              </Link>
-            ) : null
-          }
-        />
-      </div>
+        >
+          <CountValue value={openDisputeCount} tone={openDisputeCount > 0 ? 'warning' : 'default'} />
+        </StatTile>
+
+        <ClaimableTile loading={isLoading} balance={refundBal} />
+      </section>
 
       <section>
         <div className="flex items-center justify-between gap-4">
           <h2 className="text-2xl font-bold text-text-primary tracking-tight">Your Escrows</h2>
           <div className="flex items-center gap-2 px-3 py-1 bg-background-tertiary border border-border-subtle rounded-md shrink-0">
             <span className="w-1.5 h-1.5 bg-status-success rounded-full animate-pulse" />
-            <span className="text-xs font-mono text-text-secondary tracking-widest uppercase whitespace-nowrap">
+            <span className="text-xs font-mono tabular-nums text-text-secondary tracking-widest uppercase whitespace-nowrap">
               {mySummaries.length} Total On-Chain
             </span>
           </div>
         </div>
         <p className="text-sm text-text-secondary mt-1">Manage your deposits, incoming payments, and refunds.</p>
 
-        <div className="flex items-center justify-between border-b border-border-subtle w-full mt-4">
-          <div className="flex items-center gap-6 overflow-x-auto scrollbar-hide">
+        <div className="w-full mt-10 flex items-center justify-between gap-3 flex-wrap">
+          <div
+            role="tablist"
+            aria-label="Filter escrows"
+            className="inline-flex items-center gap-1 p-1 bg-background-tertiary rounded-xl border border-border-subtle overflow-x-auto scrollbar-hide max-w-full snap-x snap-mandatory"
+          >
             {LEDGER_TABS.map((tab) => {
               const isActive = tab.key === activeTab
               return (
                 <button
                   key={tab.key}
                   type="button"
+                  role="tab"
+                  aria-selected={isActive}
                   onClick={() => setActiveTab(tab.key)}
-                  aria-pressed={isActive}
                   className={
-                    isActive
-                      ? '-mb-[1px] pb-4 border-b-2 font-medium text-sm border-accent-blue text-text-primary transition-colors whitespace-nowrap'
-                      : 'pb-4 font-medium text-sm text-text-secondary hover:text-text-primary transition-colors whitespace-nowrap'
+                    `inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
+                    `transition-[background-color,color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ` +
+                    `focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-tertiary ` +
+                    (isActive
+                      ? 'text-text-primary bg-background-primary shadow-sm'
+                      : 'text-text-secondary hover:text-text-primary')
                   }
                 >
                   {tab.label}
@@ -175,11 +183,15 @@ function DashboardInner() {
             type="button"
             onClick={handleRefresh}
             disabled={isRefreshing}
-            className="pb-4 flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary transition-colors disabled:opacity-60"
+            aria-label="Refresh escrow list"
+            className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
           >
-            <RefreshCwIcon size={14} spinning={isRefreshing} /> Refresh
+            <RefreshCwIcon size={14} spinning={isRefreshing} />
+            <span className="hidden sm:inline">Refresh</span>
+            <span className="sm:hidden sr-only">Refresh</span>
           </button>
         </div>
+        <div className="w-full mt-3 border-b border-border-subtle/50" aria-hidden="true" />
 
         {isLoading ? (
           <DashboardSkeleton />
@@ -198,7 +210,7 @@ function DashboardInner() {
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
-                    transition={{ duration: 0.2, ease: 'easeOut' }}
+                    transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
                   >
                     <PremiumEscrowCard summary={e} />
                   </motion.div>
@@ -206,29 +218,47 @@ function DashboardInner() {
               </AnimatePresence>
             </div>
 
-            <div className="flex items-center justify-between w-full mt-10 pt-6 border-t border-border-subtle text-sm text-text-secondary font-mono">
-              <span>
-                Showing {pageStart + 1}-{pageEnd} of {filteredEscrows.length} escrows
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(0, p - 1))}
-                  disabled={safePage === 0}
-                  className="px-3 py-1.5 border border-border-subtle rounded-lg hover:bg-background-tertiary text-text-primary text-xs font-sans transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            <nav aria-label="Escrow list pagination" className="mt-10">
+              <div className="h-px w-full bg-border-subtle/60" aria-hidden="true" />
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pt-6">
+                <span
+                  aria-live="polite"
+                  className="font-mono text-xs uppercase tracking-wider text-text-tertiary tabular-nums"
                 >
-                  Previous
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-                  disabled={safePage >= totalPages - 1}
-                  className="px-3 py-1.5 border border-border-subtle rounded-lg hover:bg-background-tertiary text-text-primary text-xs font-sans transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                >
-                  Next
-                </button>
+                  Showing{' '}
+                  <span className="text-text-primary tabular-nums">{pageStart + 1}–{pageEnd}</span>{' '}
+                  of <span className="text-text-primary tabular-nums">{filteredEscrows.length}</span> escrows
+                </span>
+                <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    disabled={safePage === 0}
+                    aria-label="Previous page"
+                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                  >
+                    <ChevronLeftIcon size={14} />
+                    Prev
+                  </button>
+                  <span
+                    className="px-2 text-text-secondary tabular-nums font-mono text-xs uppercase tracking-wider"
+                    aria-current="page"
+                  >
+                    {safePage + 1} / {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={safePage >= totalPages - 1}
+                    aria-label="Next page"
+                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                  >
+                    Next
+                    <ChevronRightIcon size={14} />
+                  </button>
+                </div>
               </div>
-            </div>
+            </nav>
           </>
         )}
       </section>
@@ -243,35 +273,88 @@ function PremiumEscrowCard({ summary }) {
   const roleLabel = summary.isPayer ? "You're Paying" : 'Receiving'
   const status = deriveStatus(summary)
 
+  const milestoneCount = Number(summary.milestoneCount) || 0
+  const releasedCount = Number(summary.releasedMilestoneCount) || 0
+  const progressPct = milestoneCount > 0
+    ? Math.min(100, Math.max(0, (releasedCount / milestoneCount) * 100))
+    : 0
+  const dotCount = Math.min(milestoneCount, 8)
+
   return (
     <Link
       to={`/escrow/${summary.id}`}
-      className="block bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-6 relative group hover:-translate-y-1 hover:border-border-focused/50 transition-all duration-300 backdrop-blur-sm hover:shadow-[0_20px_40px_rgba(0,0,0,0.2)] dark:hover:shadow-[0_20px_40px_rgba(0,0,0,0.6)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+      className="group block relative rounded-2xl p-6
+                 bg-background-secondary border border-border-subtle
+                 transition-[transform,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]
+                 hover:-translate-y-0.5 hover:shadow-md
+                 hover:border-border-medium
+                 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
     >
       <div className="flex justify-between items-start mb-4">
-        <span className="text-sm font-mono text-text-secondary">{inv}</span>
-        <span className="px-2 py-1 text-xs font-medium bg-background-tertiary rounded-md text-text-secondary">
+        <span className="text-sm font-mono tabular-nums text-text-secondary">{inv}</span>
+        <span className="px-2 py-1 text-[11px] font-mono uppercase tracking-wider bg-background-tertiary border border-border-subtle rounded-md text-text-secondary">
           {roleLabel}
         </span>
       </div>
 
-      <div className="text-3xl font-mono font-bold tracking-tight text-text-primary mt-3 tabular">
+      <div className="text-3xl font-mono font-bold tracking-tight text-text-primary mt-3 tabular-nums">
         {formatUSDCNumber(summary.totalAmount)}{' '}
         <span className="text-base font-sans font-normal text-text-secondary ml-1">USDC</span>
       </div>
 
-      <div className="h-px w-full bg-border-subtle my-5" />
+      <div className="h-px w-full bg-border-subtle/70 my-5" />
 
-      <div className="flex justify-between items-end">
-        <span className="text-sm text-text-secondary">
-          <span className="font-mono tabular">{summary.releasedMilestoneCount} / {summary.milestoneCount}</span> released
+      <div className="flex justify-between items-end gap-4">
+        <div className="flex flex-col min-w-0">
+          <span className="text-xs font-mono tabular-nums text-text-secondary mb-1.5 block">
+            {releasedCount} / {milestoneCount} Released
+          </span>
+          <div
+            className="w-full max-w-[120px] h-1.5 bg-background-tertiary rounded-full overflow-hidden mb-1.5"
+            role="progressbar"
+            aria-valuenow={Math.round(progressPct)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label={`${releasedCount} of ${milestoneCount} milestones released`}
+          >
+            <div
+              className="h-full w-full bg-accent-blue origin-left transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              style={{ transform: `scaleX(${progressPct / 100})` }}
+            />
+          </div>
+          {dotCount > 0 && (
+            <div className="flex gap-1">
+              {Array.from({ length: dotCount }).map((_, i) => (
+                <div
+                  key={i}
+                  className={`w-1.5 h-1.5 rounded-full ${i < releasedCount ? 'bg-accent-blue' : 'bg-background-tertiary dark:bg-white/10'}`}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+        <span
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider rounded-full shrink-0 ${status.badgeCls}`}
+        >
+          {status.pulse && (
+            <span className={`w-1.5 h-1.5 rounded-full ${status.dotCls} animate-pulse`} aria-hidden="true" />
+          )}
+          <span>{status.label}</span>
         </span>
-        <span className={`flex items-center gap-2 text-sm font-medium transition-colors ${status.textCls} group-hover:opacity-80`}>
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${status.dotCls} ${status.glowCls} ${status.pulse ? 'animate-pulse' : ''}`}
-            aria-hidden="true"
-          />
-          <span>{status.label} →</span>
+      </div>
+
+      <div className="mt-5 pt-4 border-t border-border-subtle/70 flex items-center justify-end">
+        <span
+          className="inline-flex items-center gap-1.5 text-xs font-medium font-mono uppercase tracking-wider
+                     px-3 py-1.5 rounded-lg border border-border-subtle text-text-secondary
+                     bg-transparent transition-colors duration-200
+                     group-hover:bg-background-tertiary group-hover:text-text-primary group-hover:border-border-medium"
+        >
+          View Details
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="m13 5 7 7-7 7" />
+          </svg>
         </span>
       </div>
     </Link>
@@ -282,43 +365,39 @@ function deriveStatus(summary) {
   if (summary.disputedMilestoneCount > 0) {
     return {
       label: 'Disputed',
-      textCls: 'text-status-warning',
+      badgeCls: 'bg-status-warning/10 text-status-warning border border-status-warning/20',
       dotCls: 'bg-status-warning',
-      glowCls: 'shadow-[0_0_8px_rgba(234,88,12,0.55)]',
       pulse: true
     }
   }
   if (summary.state === 1) {
     return {
       label: 'Completed',
-      textCls: 'text-status-success',
+      badgeCls: 'bg-status-success/10 text-status-success border border-status-success/20',
       dotCls: 'bg-status-success',
-      glowCls: 'shadow-[0_0_8px_rgba(5,150,105,0.55)]',
       pulse: false
     }
   }
   if (summary.state === 2) {
     return {
       label: 'Cancelled',
-      textCls: 'text-text-tertiary',
+      badgeCls: 'bg-background-tertiary text-text-tertiary border border-border-subtle',
       dotCls: 'bg-text-tertiary',
-      glowCls: '',
       pulse: false
     }
   }
   return {
-    label: 'View',
-    textCls: 'text-accent-blue',
+    label: 'Active',
+    badgeCls: 'bg-accent-blue/10 text-accent-blue border border-accent-blue/20',
     dotCls: 'bg-accent-blue',
-    glowCls: 'shadow-[0_0_8px_rgba(51,119,255,0.55)]',
     pulse: true
   }
 }
 
 function LedgerEmptyState() {
   return (
-    <div className="w-full bg-black/[0.02] dark:bg-white/[0.02] border border-border-subtle rounded-2xl p-16 flex flex-col items-center justify-center backdrop-blur-sm">
-      <div className="w-16 h-16 rounded-2xl bg-accent-blue/10 border border-accent-blue/20 text-accent-blue shadow-[0_0_15px_rgba(51,119,255,0.15)] flex items-center justify-center mb-6">
+    <div className="w-full bg-background-secondary border border-border-subtle rounded-2xl p-16 flex flex-col items-center justify-center">
+      <div className="w-16 h-16 rounded-2xl bg-accent-muted text-accent-blue flex items-center justify-center mb-6">
         <InboxIcon size={24} />
       </div>
       <h3 className="text-lg font-semibold text-text-primary">No escrows found</h3>
@@ -360,23 +439,126 @@ function RefreshCwIcon({ size = 14, spinning = false }) {
   )
 }
 
+/* ---------- Stat tiles ----------
+   Compact stat cells. Label up top in mono-uppercase, value mid, sublabel below.
+   Tone shifts the value color when something needs attention. Loading uses a
+   width-pegged skeleton so the row doesn't reflow when data arrives. */
+function StatTile({ label, sublabel, children, tone = 'default', loading = false }) {
+  const sublabelCls = tone === 'warning' ? 'text-status-warning' : 'text-text-tertiary'
+  return (
+    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
+      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-tertiary">
+        {label}
+      </span>
+      <div className="min-h-[2.25rem] flex items-baseline">
+        {loading ? <Skeleton className="h-7 w-24" /> : children}
+      </div>
+      {sublabel && (
+        <span className={`text-xs ${sublabelCls}`}>
+          {sublabel}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function UsdcValue({ value }) {
+  return (
+    <span className="font-mono tabular-nums text-2xl font-semibold tracking-tight text-text-primary leading-none">
+      {formatUSDCNumber(value)}
+      <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
+    </span>
+  )
+}
+
+function CountValue({ value, tone = 'default' }) {
+  const cls = tone === 'warning' ? 'text-status-warning' : 'text-text-primary'
+  return (
+    <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${cls}`}>
+      {value}
+    </span>
+  )
+}
+
+/* The Claimable tile is a Link when there's something to withdraw, a static
+   div when there isn't. The interaction shift is the load-bearing visual
+   distinction between this tile and the other three. */
+function ClaimableTile({ balance, loading }) {
+  const hasFunds = balance > 0n
+
+  const inner = (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-tertiary">
+          Claimable Balance
+        </span>
+        {hasFunds && (
+          <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.18em] text-accent-blue">
+            Withdraw
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+        )}
+      </div>
+      <div className="min-h-[2.25rem] flex items-baseline">
+        {loading ? (
+          <Skeleton className="h-7 w-24" />
+        ) : (
+          <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-accent-blue' : 'text-text-primary'}`}>
+            {formatUSDCNumber(balance)}
+            <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
+          </span>
+        )}
+      </div>
+      <span className={`text-xs ${hasFunds ? 'text-accent-blue' : 'text-text-tertiary'}`}>
+        {hasFunds ? 'Ready to withdraw' : 'Nothing to claim'}
+      </span>
+    </>
+  )
+
+  if (hasFunds && !loading) {
+    return (
+      <Link
+        to="/settings"
+        aria-label={`Withdraw ${formatUSDC(balance)} USDC from your refund balance`}
+        className="group bg-background-secondary border border-accent-blue/40 rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm
+                   transition-[border-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                   hover:-translate-y-0.5 hover:shadow-lift-md hover:border-accent-blue
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+      >
+        {inner}
+      </Link>
+    )
+  }
+
+  return (
+    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
+      {inner}
+    </div>
+  )
+}
+
 function DashboardSkeleton() {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-8">
       {Array.from({ length: 6 }).map((_, i) => (
         <div
           key={i}
-          className="bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-2xl p-6 backdrop-blur-sm"
+          className="bg-background-secondary border border-border-subtle rounded-2xl p-6"
         >
           <div className="flex justify-between items-start mb-4">
             <Skeleton className="h-4 w-20" />
             <Skeleton className="h-6 w-24 rounded-md" />
           </div>
           <Skeleton className="h-9 w-40 mt-3" />
-          <div className="h-px w-full bg-border-subtle my-5" />
+          <div className="h-px w-full bg-border-subtle/70 my-5" />
           <div className="flex justify-between items-end">
             <Skeleton className="h-4 w-24" />
             <Skeleton className="h-4 w-20" />
+          </div>
+          <div className="mt-5 pt-4 border-t border-border-subtle/70 flex justify-end">
+            <Skeleton className="h-7 w-28 rounded-lg" />
           </div>
         </div>
       ))}
@@ -384,19 +566,18 @@ function DashboardSkeleton() {
   )
 }
 
-function StatCard({ label, value, mono = false, tone = 'default', action = null, loading = false }) {
-  const valueCls = tone === 'warning'
-    ? 'text-status-warning'
-    : tone === 'accent'
-    ? 'text-accent'
-    : 'text-text-primary'
+function ChevronLeftIcon({ size = 14 }) {
   return (
-    <div className="card-surface p-5 flex flex-col gap-1">
-      <div className="text-xs text-text-secondary">{label}</div>
-      <div className={`text-2xl font-semibold ${valueCls} ${mono ? 'font-mono tabular' : ''}`}>
-        {loading ? <Skeleton className="h-7 w-24 inline-block" /> : value}
-      </div>
-      {action && <div className="mt-1">{action}</div>}
-    </div>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m15 18-6-6 6-6" />
+    </svg>
+  )
+}
+
+function ChevronRightIcon({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m9 18 6-6-6-6" />
+    </svg>
   )
 }

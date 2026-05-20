@@ -1,13 +1,14 @@
+import IconButton from './IconButton.jsx'
 import { useTheme } from '../hooks/useTheme.jsx'
 
 export default function ThemeToggle() {
   const { theme, toggle } = useTheme()
   const isDark = theme === 'dark'
   return (
-    <button
+    <IconButton
       onClick={toggle}
-      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      className="inline-flex items-center justify-center h-9 w-9 rounded-xl border border-border-subtle text-text-secondary hover:bg-background-tertiary hover:text-text-primary transition-all duration-200 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+      tone="bordered"
+      label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
     >
       {isDark ? (
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -20,6 +21,6 @@ export default function ThemeToggle() {
             stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
         </svg>
       )}
-    </button>
+    </IconButton>
   )
 }

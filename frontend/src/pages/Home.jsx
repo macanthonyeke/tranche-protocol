@@ -8,7 +8,7 @@ import { CONTRACT_ADDRESS, arcTestnet } from '../config/wagmi.js'
 import { truncateAddr } from '../utils/format'
 
 const ExternalLinkIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <path d="M7 17 17 7" />
     <path d="M8 7h9v9" />
   </svg>
@@ -41,7 +41,7 @@ function ContractPill({ address }) {
         target="_blank"
         rel="noopener noreferrer"
         title="View on Arc Explorer"
-        className="group w-8 h-8 flex items-center justify-center rounded-full bg-background-secondary hover:bg-accent-blue/10 hover:text-accent-blue text-text-tertiary transition-all"
+        className="group w-8 h-8 flex items-center justify-center rounded-full bg-background-secondary hover:bg-accent-blue/10 hover:text-accent-blue text-text-tertiary transition-[background-color,color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
       >
         <ExternalLinkIcon />
       </a>
@@ -67,7 +67,7 @@ const STEPS = [
 ]
 
 const CoinsIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <circle cx="8" cy="8" r="6" />
     <path d="M18.09 10.37A6 6 0 1 1 10.34 18" />
     <path d="M7 6h1v4" />
@@ -75,13 +75,13 @@ const CoinsIcon = (props) => (
   </svg>
 )
 const ShieldCheckIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
     <path d="m9 12 2 2 4-4" />
   </svg>
 )
 const FileSearchIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
     <polyline points="14 2 14 8 20 8" />
     <circle cx="11.5" cy="14.5" r="2.5" />
@@ -89,21 +89,21 @@ const FileSearchIcon = (props) => (
   </svg>
 )
 const TimerIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <line x1="10" x2="14" y1="2" y2="2" />
     <line x1="12" x2="15" y1="14" y2="11" />
     <circle cx="12" cy="14" r="8" />
   </svg>
 )
 const GlobeIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <circle cx="12" cy="12" r="10" />
     <line x1="2" x2="22" y1="12" y2="12" />
     <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
   </svg>
 )
 const WalletIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" {...props}>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
     <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
     <path d="M18 12a2 2 0 0 0 0 4h4v-4z" />
@@ -150,7 +150,7 @@ function HeroVisual() {
     <motion.div
       animate={{ y: [-8, 8, -8] }}
       transition={{ repeat: Infinity, duration: 5, ease: 'easeInOut' }}
-      className="bg-background-secondary border border-border-subtle shadow-[0_20px_50px_rgba(0,0,0,0.1)] dark:shadow-[0_30px_60px_rgba(0,0,0,0.4)] rounded-2xl p-6 w-full max-w-md mx-auto"
+      className="bg-background-secondary border border-border-subtle rounded-2xl p-6 w-full max-w-md mx-auto"
     >
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2">
@@ -169,7 +169,7 @@ function HeroVisual() {
       </div>
 
       {/* Route */}
-      <div className="bg-black/[0.02] dark:bg-white/[0.03] border border-black/5 dark:border-white/5 rounded-xl p-5 backdrop-blur-md flex flex-col gap-3 relative overflow-hidden mb-4">
+      <div className="bg-background-tertiary border border-border-subtle rounded-xl p-5 flex flex-col gap-3 relative overflow-hidden mb-4">
         <div className="flex items-center justify-between gap-4">
           <div className="flex flex-col">
             <span className="text-xs text-text-secondary uppercase tracking-wider">From</span>
@@ -190,7 +190,7 @@ function HeroVisual() {
               initial={{ left: '5%', opacity: 0 }}
               animate={{ left: ['5%', '50%', '95%'], opacity: [0, 1, 0] }}
               transition={{ duration: 2, times: [0, 0.5, 1], repeat: Infinity, repeatDelay: 1, ease: 'easeInOut' }}
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 bg-accent-blue rounded-full shadow-[0_0_15px_3px_rgba(51,119,255,0.8)] z-10"
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 bg-accent-blue rounded-full shadow-glow-accent z-10"
             />
           </div>
 
@@ -279,7 +279,7 @@ function ProtocolTicker() {
    ------------------------------------------------------------ */
 function CodeEditor() {
   return (
-    <div className="bg-background-primary border border-border-subtle rounded-xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.1)] dark:shadow-[0_20px_50px_rgba(0,0,0,0.5)] max-w-4xl mx-auto">
+    <div className="bg-background-primary border border-border-subtle rounded-xl overflow-hidden max-w-4xl mx-auto">
       {/* macOS terminal header */}
       <div className="h-10 bg-background-secondary border-b border-border-subtle flex items-center px-4 gap-2">
         <span className="w-3 h-3 rounded-full bg-[#FF5F56]" />
@@ -419,19 +419,13 @@ export default function Home() {
       </header>
 
       {/* Hero (split layout) */}
-      <section className="relative overflow-hidden">
-        {/* Premium radial glow */}
-        <div
-          aria-hidden
-          className="absolute top-[-10%] left-[20%] w-[600px] h-[600px] bg-accent-blue/10 dark:bg-accent-blue/20 blur-3xl rounded-full pointer-events-none"
-        />
-
+      <section className="relative">
         <div className="relative lg:grid lg:grid-cols-2 lg:gap-12 lg:items-center py-16 sm:py-24 px-4 sm:px-6 lg:px-8 max-w-[1200px] mx-auto w-full">
           {/* Left: copy */}
           <motion.div
             initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: 'easeOut' }}
+            transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
             className="flex flex-col items-start text-left"
           >
             <span className="inline-flex items-center gap-2 rounded-full border border-border-subtle bg-background-secondary px-3 py-1 text-xs text-text-secondary mb-6">
@@ -447,7 +441,7 @@ export default function Home() {
             <div className="mt-10 flex flex-col sm:flex-row gap-3">
               <Link
                 to="/create"
-                className="inline-flex items-center justify-center rounded-xl px-6 py-3 font-medium bg-accent-blue text-white shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                className="inline-flex items-center justify-center rounded-xl px-6 py-3 font-medium bg-accent-blue text-white shadow-lift-md hover:shadow-lift-lg hover:-translate-y-0.5 transition-[box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
               >
                 Create an Escrow
               </Link>
@@ -462,7 +456,7 @@ export default function Home() {
           <motion.div
             initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, ease: 'easeOut', delay: 0.15 }}
+            transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1], delay: 0.15 }}
             className="mt-16 lg:mt-0"
           >
             <HeroVisual />
@@ -484,62 +478,88 @@ export default function Home() {
         <CodeEditor />
       </section>
 
-      {/* How it works */}
-      <section className="max-w-content mx-auto w-full px-4 md:px-8 py-16">
-        <h2 className="text-3xl md:text-4xl font-semibold tracking-tight mb-10">How it works</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {STEPS.map((s) => (
-            <div
-              key={s.n}
-              className="card-surface p-6 flex flex-col gap-3 relative overflow-hidden group hover:-translate-y-1 transition-all duration-300 border border-border-subtle hover:border-border-medium"
-            >
-              <div className="font-mono text-accent text-sm relative z-10">{s.n}</div>
-              <h3 className="text-xl font-semibold text-text-primary relative z-10">{s.title}</h3>
-              <p className="text-sm text-text-secondary relative z-10">{s.text}</p>
-              <span
-                aria-hidden
-                className="absolute -bottom-8 -right-8 text-9xl font-black text-text-primary opacity-[0.03] dark:opacity-10 pointer-events-none transition-opacity duration-300 group-hover:opacity-[0.06] dark:group-hover:opacity-20 font-geist leading-none select-none"
-              >
-                {s.n}
-              </span>
-            </div>
-          ))}
+      {/* How it works — horizontal numbered stepper.
+          No cards. Each step is anchored by a display-scale numeral; thin
+          hairline connectors thread between them on desktop. Mobile collapses
+          to a single vertical column where the numerals stay oversized so the
+          rhythm survives the breakpoint. */}
+      <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
+        <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
+          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">How it works</h2>
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-tertiary">
+            Three on-chain steps
+          </span>
         </div>
+        <ol className="grid grid-cols-1 md:grid-cols-3 gap-y-10 md:gap-x-10">
+          {STEPS.map((s, i) => (
+            <li key={s.n} className="relative flex flex-col gap-3">
+              <div className="flex items-center gap-4">
+                <span className="font-mono text-text-primary text-5xl md:text-6xl font-semibold tabular-nums tracking-tight leading-none">
+                  {s.n}
+                </span>
+                {/* Hairline connector to the next step. Hidden on the last item
+                    and on mobile (the stepper collapses to a vertical stack). */}
+                {i < STEPS.length - 1 && (
+                  <span aria-hidden className="hidden md:flex flex-1 h-px bg-border-subtle" />
+                )}
+              </div>
+              <h3 className="text-lg font-semibold text-text-primary">{s.title}</h3>
+              <p className="text-sm text-text-secondary leading-relaxed max-w-prose">{s.text}</p>
+            </li>
+          ))}
+        </ol>
       </section>
 
-      {/* Features */}
-      <section className="max-w-content mx-auto w-full px-4 md:px-8 py-16">
-        <div className="mb-10">
-          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">Built for how Arc is designed to work</h2>
+      {/* Features — asymmetric editorial.
+          The lead feature lives un-carded at hero scale, breathing on the page
+          background. The remaining five become a typographic 2-column list
+          with small inline icons. No card grid; whitespace and weight carry
+          hierarchy. */}
+      <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
+        <div className="flex flex-col gap-3 mb-12 md:mb-16">
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-accent-blue">
+            Built for Arc
+          </span>
+          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight max-w-2xl">
+            Built for how Arc is designed to work
+          </h2>
         </div>
-        {/* Lead card */}
-        <div className="group relative overflow-hidden rounded-2xl p-8 md:p-10 mb-6 bg-background-secondary bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-accent-blue/[0.08] to-transparent border border-border-subtle hover:border-border-focused/50 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-accent-blue/10">
-          <div className="flex items-start gap-6">
-            <div className="w-12 h-12 flex-shrink-0 flex items-center justify-center rounded-xl bg-accent-blue/10 border border-accent-blue/20 text-accent-blue shadow-[0_0_15px_rgba(51,119,255,0.15)] group-hover:shadow-[0_0_25px_rgba(51,119,255,0.3)] transition-shadow duration-300">
+
+        {/* Lead feature: no card wrapper, hero-scale headline, generous air. */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6 md:gap-10 items-start mb-16 md:mb-20">
+          <div className="md:col-span-1 flex md:justify-center">
+            <div className="w-14 h-14 flex items-center justify-center rounded-xl bg-accent-muted text-accent-blue">
               <LEAD_FEATURE.Icon />
             </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-xl md:text-2xl font-semibold text-text-primary mb-3">{LEAD_FEATURE.title}</h3>
-              <p className="text-sm md:text-base text-text-secondary">{LEAD_FEATURE.text}</p>
-            </div>
+          </div>
+          <div className="md:col-span-11 md:pl-2">
+            <h3 className="text-2xl md:text-3xl lg:text-[2.5rem] font-semibold text-text-primary leading-tight tracking-tight max-w-3xl">
+              {LEAD_FEATURE.title}
+            </h3>
+            <p className="mt-4 text-base md:text-lg text-text-secondary leading-relaxed max-w-2xl">
+              {LEAD_FEATURE.text}
+            </p>
           </div>
         </div>
 
-        {/* Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Supporting features: typographic two-column list, rows separated by
+            hairlines instead of card chrome. */}
+        <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-12 md:gap-x-16 border-t border-border-subtle">
           {FEATURES.map(({ title, text, Icon }) => (
-            <div
+            <li
               key={title}
-              className="group relative overflow-hidden rounded-2xl p-6 flex flex-col bg-background-secondary bg-[radial-gradient(ellipse_at_top_left,_var(--tw-gradient-stops))] from-white/[0.03] to-transparent border border-border-subtle hover:border-border-focused/50 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-accent-blue/10"
+              className="flex gap-4 py-7 border-b border-border-subtle md:[&:nth-last-child(2):nth-child(odd)]:border-b-0"
             >
-              <div className="w-12 h-12 flex items-center justify-center rounded-xl bg-accent-blue/10 border border-accent-blue/20 text-accent-blue mb-4 shadow-[0_0_15px_rgba(51,119,255,0.15)] group-hover:shadow-[0_0_25px_rgba(51,119,255,0.3)] transition-shadow duration-300">
+              <span className="shrink-0 mt-1 text-accent-blue">
                 <Icon />
+              </span>
+              <div className="flex flex-col gap-2 min-w-0">
+                <h4 className="text-base font-semibold text-text-primary">{title}</h4>
+                <p className="text-sm text-text-secondary leading-relaxed">{text}</p>
               </div>
-              <h3 className="text-lg font-semibold text-text-primary mb-2">{title}</h3>
-              <p className="text-sm text-text-secondary">{text}</p>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       </section>
 
       {/* Footer */}

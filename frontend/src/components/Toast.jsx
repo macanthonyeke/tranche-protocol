@@ -18,7 +18,7 @@ export default function ToastViewport() {
           background: 'var(--bg-secondary)',
           color: 'var(--text-primary)',
           border: '1px solid var(--border-subtle)',
-          fontFamily: 'Inter, Geist, ui-sans-serif, system-ui, sans-serif',
+          fontFamily: 'Geist, ui-sans-serif, system-ui, sans-serif',
           borderRadius: '0.75rem'
         }
       }}

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAccount } from 'wagmi'
 
 import ConnectGate from '../components/ConnectGate.jsx'
+import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
@@ -158,10 +159,12 @@ function CaseCard({ summary, active, onSelect }) {
     <button
       type="button"
       onClick={onSelect}
-      className={`text-left rounded-2xl border p-4 transition-all flex flex-col gap-3 ${
+      className={`text-left rounded-2xl border p-4 flex flex-col gap-3
+                  transition-[border-color,background-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                  focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
         active
           ? 'border-status-error/40 bg-status-error/5'
-          : 'border-border-subtle bg-background-secondary dark:bg-white/[0.01] hover:border-border-medium'
+          : 'border-border-subtle bg-background-secondary hover:border-border-medium'
       }`}
     >
       <div className="flex items-center justify-between gap-2">
@@ -307,7 +310,7 @@ function DisputeCaseDesk({ escrow, milestone, dispute, userAddress, onChange }) 
   return (
     <div className="flex flex-col gap-6">
       {/* Per-case header */}
-      <div className="rounded-2xl border border-border-subtle bg-background-secondary dark:bg-white/[0.01] p-5 backdrop-blur-sm flex flex-col gap-3">
+      <div className="rounded-2xl border border-border-subtle bg-background-secondary p-5 flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex flex-col gap-1">
             <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
@@ -367,7 +370,7 @@ function DisputeCaseDesk({ escrow, milestone, dispute, userAddress, onChange }) 
 
 function EvidenceBox({ title, who, evidence, waiting }) {
   return (
-    <div className="bg-black/[0.02] dark:bg-white/[0.02] border border-border-subtle rounded-xl p-5 flex flex-col gap-4">
+    <div className="bg-background-tertiary border border-border-subtle rounded-xl p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">
           {title}
@@ -433,7 +436,7 @@ function ArbiterDecisionBlock({ escrowId, milestoneIdx, onResolved }) {
   )
 
   return (
-    <div className="flex flex-col gap-4 mt-2 p-6 bg-background-secondary dark:bg-white/[0.01] border border-border-subtle rounded-xl backdrop-blur-sm">
+    <div className="flex flex-col gap-4 mt-2 p-6 bg-background-secondary border border-border-subtle rounded-xl">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex flex-col gap-1">
           <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
@@ -448,13 +451,25 @@ function ArbiterDecisionBlock({ escrowId, milestoneIdx, onResolved }) {
         </span>
       </div>
 
-      <input
-        className="input-field font-mono tabular-nums text-sm"
-        placeholder="0x… resolution hash (bytes32)"
-        value={resolutionHash}
-        onChange={(e) => setResolutionHash(e.target.value.trim())}
-        disabled={!!pending || tx.isBusy}
-      />
+      <Field
+        label="Resolution hash"
+        helper="bytes32 reference to the decision rationale stored off-chain."
+        error={resolutionHash && !hashValid ? 'Must be 0x followed by 64 hex characters.' : undefined}
+      >
+        {(props) => (
+          <input
+            {...props}
+            className="input-field font-mono tabular-nums text-sm"
+            placeholder="0x… resolution hash (bytes32)"
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={66}
+            value={resolutionHash}
+            onChange={(e) => setResolutionHash(e.target.value.trim())}
+            disabled={!!pending || tx.isBusy}
+          />
+        )}
+      </Field>
 
       {!pending ? (
         <div className="flex flex-col sm:flex-row gap-3">
@@ -470,7 +485,7 @@ function ArbiterDecisionBlock({ escrowId, milestoneIdx, onResolved }) {
             type="button"
             onClick={() => setPending('release')}
             disabled={!hashValid || tx.isBusy}
-            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-blue text-white shadow-[0_4px_12px_rgba(51,119,255,0.3)] hover:bg-accent-blue/90 transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-blue text-white shadow-sm hover:bg-accent-hover transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
           >
             Resolve in favor of Freelancer
           </button>

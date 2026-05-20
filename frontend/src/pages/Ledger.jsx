@@ -218,33 +218,46 @@ function LedgerSkeleton() {
 function CommandBar({ search, onSearch, filter, onFilter }) {
   return (
     <div className="card-surface p-3 flex flex-col md:flex-row gap-3 items-stretch md:items-center">
-      <div className="relative flex-1">
-        <span className="absolute inset-y-0 left-3 inline-flex items-center text-text-tertiary">
+      <div role="search" className="relative flex-1">
+        <span aria-hidden className="absolute inset-y-0 left-3 inline-flex items-center text-text-tertiary pointer-events-none">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
             <path d="M10.5 10.5L13 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </span>
         <input
-          type="text"
+          type="search"
+          aria-label="Search escrows by wallet address or ID"
           placeholder="Search by wallet address or escrow ID (e.g. #42)"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          enterKeyHint="search"
           className="bg-background-tertiary border border-border-subtle rounded-xl pl-9 pr-4 h-12 w-full appearance-none
-                     text-sm text-text-primary placeholder:text-text-tertiary transition-all duration-200
+                     text-sm text-text-primary placeholder:text-text-tertiary
+                     transition-[border-color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
                      focus:outline-none focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-background-primary
                      focus:border-border-focused"
         />
       </div>
 
-      <div className="inline-flex items-center rounded-xl bg-background-tertiary p-1 gap-1 self-start md:self-auto">
+      <div
+        role="tablist"
+        aria-label="Filter by status"
+        className="inline-flex items-center rounded-xl bg-background-tertiary p-1 gap-1 self-start md:self-auto"
+      >
         {FILTERS.map((f) => {
           const active = filter === f.value
           return (
             <button
               key={f.value}
+              type="button"
+              role="tab"
+              aria-selected={active}
               onClick={() => onFilter(f.value)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 active:scale-[0.98]
+              className={`px-3 py-2 rounded-lg text-xs font-medium
+                transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98]
                 ${active
                   ? 'bg-background-secondary text-text-primary shadow-sm'
                   : 'text-text-secondary hover:text-text-primary'}

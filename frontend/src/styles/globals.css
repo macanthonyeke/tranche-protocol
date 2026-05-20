@@ -7,57 +7,84 @@
    ============================================================ */
 
 @layer base {
+  /* Neutrals run on a single hue rail (256, leaning toward the accent blue) at
+     low chroma. Pure #fff / #000 are banned: every surface carries a faint
+     trace of the brand so light mode doesn't read sterile and dark mode
+     doesn't read like a generic terminal. */
   :root {
     /* Surfaces */
-    --bg-primary: #F9FAFB;
-    --bg-secondary: #FFFFFF;
-    --bg-tertiary: #F3F4F6;
+    --bg-primary: oklch(98.5% 0.005 256);
+    --bg-secondary: oklch(99.6% 0.003 256);
+    --bg-tertiary: oklch(96.4% 0.008 256);
 
     /* Text */
-    --text-primary: #111827;
-    --text-secondary: #4B5563;
-    --text-tertiary: #6B7280;
+    --text-primary: oklch(22% 0.022 256);
+    --text-secondary: oklch(46% 0.018 256);
+    --text-tertiary: oklch(58% 0.016 256);
 
     /* Borders */
-    --border-subtle: #E5E7EB;
-    --border-medium: #D1D5DB;
-    --border-focused: #0055FF;
+    --border-subtle: oklch(91% 0.008 256);
+    --border-medium: oklch(82% 0.012 256);
+    --border-focused: oklch(50.6% 0.247 264);
 
     /* Accent */
-    --accent-blue: #0055FF;
-    --accent-hover: #0044CC;
-    --accent-muted: #E6EFFF;
+    --accent-blue: oklch(50.6% 0.247 264);
+    --accent-hover: oklch(43% 0.247 264);
+    --accent-muted: oklch(94.5% 0.04 264);
 
     /* Status */
-    --status-success: #059669;
-    --status-warning: #EA580C;
-    --status-error: #DC2626;
+    --status-success: oklch(56% 0.135 162);
+    --status-warning: oklch(63% 0.18 45);
+    --status-error: oklch(58% 0.22 25);
+
+    /* Elevation. Subtle on light, deeper on dark; all run through color-mix so
+       the cast picks up the brand hue rather than reading as flat gray. */
+    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, var(--text-primary) 8%, transparent);
+    --shadow-lift-md: 0 4px 12px color-mix(in oklch, var(--text-primary) 10%, transparent);
+    --shadow-lift-lg: 0 12px 32px color-mix(in oklch, var(--text-primary) 12%, transparent);
+    --shadow-glow-accent: 0 0 16px color-mix(in oklch, var(--accent-blue) 60%, transparent);
 
     color-scheme: light;
   }
 
   .dark {
-    --bg-primary: #0A0A0C;
-    --bg-secondary: #141417;
-    --bg-tertiary: #1E1E24;
+    --bg-primary: oklch(14% 0.01 256);
+    --bg-secondary: oklch(17.5% 0.012 256);
+    --bg-tertiary: oklch(22% 0.014 256);
 
-    --text-primary: #F3F4F6;
-    --text-secondary: #9CA3AF;
-    --text-tertiary: #6B7280;
+    --text-primary: oklch(95% 0.005 256);
+    --text-secondary: oklch(70% 0.015 256);
+    --text-tertiary: oklch(54% 0.018 256);
 
-    --border-subtle: #27272A;
-    --border-medium: #3F3F46;
-    --border-focused: #3377FF;
+    --border-subtle: oklch(26% 0.014 256);
+    --border-medium: oklch(34% 0.018 256);
+    --border-focused: oklch(63% 0.22 264);
 
-    --accent-blue: #3377FF;
-    --accent-hover: #558FFF;
-    --accent-muted: #1A2B4C;
+    --accent-blue: oklch(63% 0.22 264);
+    --accent-hover: oklch(72% 0.19 264);
+    --accent-muted: oklch(28% 0.08 264);
 
-    --status-success: #10B981;
-    --status-warning: #F97316;
-    --status-error: #EF4444;
+    --status-success: oklch(70% 0.16 162);
+    --status-warning: oklch(72% 0.18 45);
+    --status-error: oklch(66% 0.22 25);
+
+    /* Dark mode runs the elevation deeper since the ambient surface is darker. */
+    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, black 35%, transparent);
+    --shadow-lift-md: 0 6px 16px color-mix(in oklch, black 45%, transparent);
+    --shadow-lift-lg: 0 16px 40px color-mix(in oklch, black 55%, transparent);
+    --shadow-glow-accent: 0 0 18px color-mix(in oklch, var(--accent-blue) 70%, transparent);
 
     color-scheme: dark;
+  }
+
+  /* Respect reduced-motion across all animations and transitions. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 
   html, body, #root {
@@ -129,36 +156,45 @@
 }
 
 @layer components {
-  /* ----- Buttons: tactile press, focus ring, soft shadow ----- */
+  /* ----- Buttons: tactile press, focus ring, soft shadow.
+     Transitions are scoped to the properties that actually change on hover/press
+     so unrelated paints don't get caught in the animation budget. */
   .btn-primary {
     @apply inline-flex items-center justify-center bg-accent text-white hover:bg-accent-hover rounded-xl font-medium px-6 py-3
-           shadow-sm transition-all duration-200 active:scale-[0.98]
+           shadow-lift-sm
+           transition-[background-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+           active:scale-[0.98]
            focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
            disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
   .btn-secondary {
     @apply inline-flex items-center justify-center bg-background-tertiary text-text-primary hover:bg-border-subtle rounded-xl px-6 py-3 font-medium
-           transition-all duration-200 active:scale-[0.98]
+           transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+           active:scale-[0.98]
            focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
            disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
   .btn-danger {
     @apply inline-flex items-center justify-center bg-status-error text-white hover:opacity-90 rounded-xl font-medium px-6 py-3
-           shadow-sm transition-all duration-200 active:scale-[0.98]
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
+           shadow-lift-sm
+           transition-[opacity,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+           active:scale-[0.98]
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
            disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
 
   /* ----- Surfaces ----- */
   .card-surface {
-    @apply bg-background-secondary border border-border-subtle rounded-2xl shadow-sm;
+    @apply bg-background-secondary border border-border-subtle rounded-2xl shadow-lift-sm;
   }
 
-  /* Interactive card: subtle lift on hover */
+  /* Interactive card: subtle lift on hover. Only transforms and elevation
+     animate; layout properties stay still. */
   .card-clickable {
-    @apply card-surface transition-all duration-200 hover:shadow-md hover:-translate-y-0.5
+    @apply card-surface transition-[box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+           hover:shadow-lift-md hover:-translate-y-0.5
            focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
   }
 
@@ -166,7 +202,7 @@
   .input-field {
     @apply bg-background-tertiary border border-border-subtle text-text-primary placeholder:text-text-tertiary
            rounded-xl px-4 h-12 w-full appearance-none
-           transition-all duration-200
+           transition-[border-color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
            focus:outline-none focus:border-border-focused
            focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
   }

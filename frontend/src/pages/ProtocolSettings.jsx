@@ -3,6 +3,7 @@ import { useReadContract } from 'wagmi'
 import { isAddress } from 'viem'
 
 import ConnectGate from '../components/ConnectGate.jsx'
+import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
@@ -241,14 +242,16 @@ function SupportedDomainRow({ domain, onRemoved }) {
     { loadingMessage: `Removing ${getDomainName(domain)}…` }
   )
   return (
-    <div className="flex items-center justify-between rounded-xl border border-border-subtle bg-background-tertiary px-3 py-2.5 text-sm">
+    <div className="flex items-center justify-between rounded-xl border border-border-subtle bg-background-tertiary pl-3 pr-1 py-1 text-sm">
       <span className="font-mono tabular-nums text-text-primary">
         {getDomainName(domain)} <span className="text-text-tertiary">#{domain}</span>
       </span>
       <button
+        type="button"
         onClick={remove}
         disabled={tx.isBusy}
-        className="text-xs font-medium text-status-error hover:opacity-80 transition-opacity disabled:opacity-50"
+        aria-label={`Remove ${getDomainName(domain)}`}
+        className="inline-flex items-center justify-center h-11 min-w-[5rem] px-3 rounded-lg text-xs font-medium text-status-error hover:bg-status-error/10 transition-colors disabled:opacity-50 disabled:hover:bg-transparent focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
       >
         {tx.isBusy ? 'Removing…' : 'Remove'}
       </button>
@@ -279,27 +282,47 @@ function RecoveryManagerSection() {
         Emergency action — only use when a wallet has lost access to its refund credit.
       </div>
 
-      <div className="flex flex-col gap-2">
-        <label className="text-sm font-medium">Restricted wallet</label>
-        <input
-          className="input-field font-mono text-sm"
-          placeholder="0x… (current credit holder)"
-          value={from}
-          onChange={(e) => setFrom(e.target.value.trim())}
-          disabled={tx.isBusy}
-        />
-      </div>
+      <Field
+        label="Restricted wallet"
+        error={from && !isAddress(from) ? 'Not a valid address.' : undefined}
+      >
+        {(props) => (
+          <input
+            {...props}
+            className="input-field font-mono text-sm"
+            placeholder="0x… (current credit holder)"
+            autoComplete="off"
+            spellCheck={false}
+            value={from}
+            onChange={(e) => setFrom(e.target.value.trim())}
+            disabled={tx.isBusy}
+          />
+        )}
+      </Field>
 
-      <div className="flex flex-col gap-2">
-        <label className="text-sm font-medium">Replacement wallet</label>
-        <input
-          className="input-field font-mono text-sm"
-          placeholder="0x… (replacement)"
-          value={to}
-          onChange={(e) => setTo(e.target.value.trim())}
-          disabled={tx.isBusy}
-        />
-      </div>
+      <Field
+        label="Replacement wallet"
+        error={
+          to && !isAddress(to)
+            ? 'Not a valid address.'
+            : isAddress(from) && isAddress(to) && from.toLowerCase() === to.toLowerCase()
+              ? 'Replacement must differ from the restricted wallet.'
+              : undefined
+        }
+      >
+        {(props) => (
+          <input
+            {...props}
+            className="input-field font-mono text-sm"
+            placeholder="0x… (replacement)"
+            autoComplete="off"
+            spellCheck={false}
+            value={to}
+            onChange={(e) => setTo(e.target.value.trim())}
+            disabled={tx.isBusy}
+          />
+        )}
+      </Field>
 
       {!confirmOpen ? (
         <button
@@ -434,29 +457,41 @@ function WriteForm({ label, fn, placeholder, validate, toArgs, onSuccess }) {
     onConfirmed: () => { onSuccess?.(); setValue('') }
   })
   const valid = validate(value)
-
-  const submit = () => tx.run(
-    escrowWrite(fn, toArgs(value)),
-    { loadingMessage: `${label} — check your wallet.` }
-  )
+  // Only surface the invalid state once the user has actually typed something;
+  // empty inputs aren't "errors", they're starting state.
+  const showInvalid = value.length > 0 && !valid
 
   return (
-    <div className="flex flex-col gap-2">
-      <input
-        className="input-field font-mono text-sm"
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => setValue(e.target.value.trim())}
-        disabled={tx.isBusy}
-      />
-      <button
-        className="btn-primary text-sm py-2.5 self-start"
-        onClick={submit}
-        disabled={!valid || tx.isBusy}
-      >
-        {tx.isBusy ? 'Submitting…' : label}
-      </button>
-    </div>
+    <Field
+      label={label}
+      error={showInvalid ? 'Value does not satisfy the expected format.' : undefined}
+    >
+      {(props) => (
+        <div className="flex flex-col gap-2">
+          <input
+            {...props}
+            className="input-field font-mono text-sm"
+            placeholder={placeholder}
+            autoComplete="off"
+            spellCheck={false}
+            value={value}
+            onChange={(e) => setValue(e.target.value.trim())}
+            disabled={tx.isBusy}
+          />
+          <button
+            type="button"
+            className="btn-primary text-sm py-2.5 self-start"
+            onClick={() => tx.run(
+              escrowWrite(fn, toArgs(value)),
+              { loadingMessage: `${label}. Check your wallet.` }
+            )}
+            disabled={!valid || tx.isBusy}
+          >
+            {tx.isBusy ? 'Submitting…' : label}
+          </button>
+        </div>
+      )}
+    </Field>
   )
 }
 

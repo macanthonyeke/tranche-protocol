@@ -33,9 +33,9 @@ export default {
         }
       },
       fontFamily: {
-        sans: ['Inter', 'Geist', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', '"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
-        geist: ['Geist', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
+        sans: ['Geist', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        geist: ['Geist', 'ui-sans-serif', 'system-ui', 'sans-serif']
       },
       borderRadius: {
         xl: '0.75rem',
@@ -43,6 +43,12 @@ export default {
       },
       maxWidth: {
         content: '1200px'
+      },
+      boxShadow: {
+        'lift-sm':     'var(--shadow-lift-sm)',
+        'lift-md':     'var(--shadow-lift-md)',
+        'lift-lg':     'var(--shadow-lift-lg)',
+        'glow-accent': 'var(--shadow-glow-accent)'
       }
     }
   },
