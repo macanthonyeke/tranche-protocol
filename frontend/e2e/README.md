@@ -9,14 +9,24 @@ each one, and reports any element whose bounding rect extends past the viewport.
 
 ### One-time setup
 
+`playwright` is in `devDependencies` so a normal `npm ci` / `npm install`
+pulls it in. Browser binaries are downloaded separately:
+
 ```sh
-npm i -D playwright
 npx playwright install --with-deps chromium
 ```
 
 The `--with-deps` flag installs OS shared libraries (nss, xkb, gbm, drm, etc.)
 via apt on Debian/Ubuntu containers, which headless Chromium needs to launch.
 Drop it if your environment already has those libraries.
+
+### CI
+
+The repo runs this driver in CI on every push / PR via the `frontend-e2e`
+job in `.github/workflows/test.yml`. The job boots the dev server, waits
+for it to respond on `localhost:5173`, runs `npm run e2e:responsive`, and
+uploads `e2e/shots/` as an artifact on failure so the screenshot that
+caught the regression is one click away in the Actions UI.
 
 ### Running
 
