@@ -39,18 +39,21 @@ export default function Field({ label, hint, children, error, helper }) {
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label
-        id={labelId}
-        htmlFor={fieldId}
-        className="text-sm font-medium text-text-primary flex items-center"
-      >
-        {label}{hint}
-      </label>
+      <div className="flex items-center justify-between gap-2">
+        <label
+          id={labelId}
+          htmlFor={fieldId}
+          className="field-label"
+        >
+          {label}
+        </label>
+        {hint && <div className="text-ink-3">{hint}</div>}
+      </div>
       {content}
       {error ? (
         <FieldError id={errorId} text={error} />
       ) : helper ? (
-        <div id={helperId} className="text-xs text-text-tertiary">{helper}</div>
+        <div id={helperId} className="text-[12.5px] text-ink-3">{helper}</div>
       ) : null}
     </div>
   )
@@ -58,7 +61,7 @@ export default function Field({ label, hint, children, error, helper }) {
 
 export function FieldError({ text, id }) {
   return (
-    <div id={id} role="alert" className="flex items-center gap-1.5 text-xs text-status-error">
+    <div id={id} role="alert" className="flex items-center gap-1.5 text-[12.5px] text-bad">
       <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden className="shrink-0">
         <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.4" />
         <path d="M7 4.2v3.2M7 9.5v0.05" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />

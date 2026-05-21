@@ -4,7 +4,7 @@ export default function NotFound() {
   return (
     <div className="card-surface p-12 text-center max-w-md mx-auto">
       <h1 className="text-2xl font-semibold mb-2">Page not found</h1>
-      <p className="text-sm text-text-secondary mb-6">There is nothing at this URL.</p>
+      <p className="text-sm text-ink-2 mb-6">There is nothing at this URL.</p>
       <Link to="/dashboard" className="btn-primary inline-flex">Go to dashboard</Link>
     </div>
   )

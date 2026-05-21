@@ -1,356 +1,309 @@
 import { useState } from 'react'
-import { useReadContract } from 'wagmi'
 import { isAddress } from 'viem'
+import { useReadContract } from 'wagmi'
 
+import PageHeader from '../components/PageHeader.jsx'
 import ConnectGate from '../components/ConnectGate.jsx'
+import AddressDisplay from '../components/AddressDisplay.jsx'
 import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
+
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
-import { truncateAddr } from '../utils/format.js'
-import { getDomainName, ALL_DOMAIN_NUMBERS } from '../config/chains.js'
+import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
+import { formatUSDC, truncateAddr } from '../utils/format.js'
 
 export default function ProtocolSettings() {
   return (
-    <ConnectGate>
-      <ProtocolSettingsInner />
-    </ConnectGate>
-  )
-}
-
-function ProtocolSettingsInner() {
-  const { roles, isLoading } = useRoles()
-
-  if (isLoading) {
-    return (
-      <div className="max-w-3xl mx-auto flex flex-col gap-8 w-full">
-        <PageHeader />
-        <Skeleton className="h-32" />
-        <Skeleton className="h-32" />
-      </div>
-    )
-  }
-
-  const hasAdminRole =
-    roles.isFeeManager || roles.isDomainManager ||
-    roles.isRecoveryManager || roles.isPauser
-
-  if (!hasAdminRole) {
-    return (
-      <div className="max-w-3xl mx-auto flex flex-col gap-8 w-full">
-        <PageHeader />
-        <AccessDenied />
-      </div>
-    )
-  }
-
-  return (
-    <div className="max-w-3xl mx-auto flex flex-col gap-6 w-full">
-      <PageHeader />
-      <ActiveRoleChips roles={roles} />
-
-      {roles.isFeeManager && (
-        <CollapsibleSection title="Fee manager" description="Protocol fee rate, treasury destination, and CCTP forwarding fee.">
-          <FeeManagerSection />
-        </CollapsibleSection>
-      )}
-      {roles.isDomainManager && (
-        <CollapsibleSection title="Domain manager" description="Add or remove supported destination chains.">
-          <DomainManagerSection />
-        </CollapsibleSection>
-      )}
-      {roles.isRecoveryManager && (
-        <CollapsibleSection title="Recovery manager" description="Transfer refund credit between wallets. This is irreversible.">
-          <RecoveryManagerSection />
-        </CollapsibleSection>
-      )}
-      {roles.isPauser && (
-        <CollapsibleSection title="Pauser" description="Pause or unpause the entire protocol.">
-          <PauserSection />
-        </CollapsibleSection>
-      )}
-    </div>
-  )
-}
-
-function PageHeader() {
-  return (
     <div>
-      <h1 className="text-3xl font-semibold tracking-tight">Protocol Settings</h1>
-      <p className="text-text-secondary text-sm mt-1">
-        Configuration and emergency controls. Only visible to wallets with admin roles.
-      </p>
+      <PageHeader
+        eyebrow="Protocol controls"
+        title="Protocol."
+        kicker="Settings here change the protocol globally for future escrows. In-flight escrows snapshot fees at deposit time and aren't affected."
+      />
+      <ConnectGate><Gate /></ConnectGate>
     </div>
   )
 }
 
-function AccessDenied() {
-  return (
-    <div className="card-surface p-10 text-center max-w-md mx-auto">
-      <div className="w-12 h-12 rounded-full bg-status-error/10 text-status-error flex items-center justify-center mx-auto mb-4">
-        <LockIcon size={20} />
+function Gate() {
+  const { roles, isLoading } = useRoles()
+  if (isLoading) return <Skeleton className="h-48" />
+  const allowed =
+    roles.isDefaultAdmin || roles.isFeeManager ||
+    roles.isDomainManager || roles.isRecoveryManager || roles.isPauser
+  if (!allowed) {
+    return (
+      <div className="max-w-prose flex flex-col gap-4">
+        <p className="text-ink-2 text-[15px] leading-relaxed">
+          This wallet doesn't hold any admin role. The default admin can grant{' '}
+          <span className="num text-[12.5px]">FEE_MANAGER_ROLE</span>,{' '}
+          <span className="num text-[12.5px]">DOMAIN_MANAGER_ROLE</span>,{' '}
+          <span className="num text-[12.5px]">RECOVERY_MANAGER_ROLE</span>, or{' '}
+          <span className="num text-[12.5px]">PAUSER_ROLE</span>.
+        </p>
+        <div><WalletButton /></div>
       </div>
-      <h2 className="text-lg font-semibold text-text-primary mb-2">Access denied</h2>
-      <p className="text-sm text-text-secondary mb-6">
-        Your connected wallet does not hold any admin roles. Switch to an authorised wallet to manage the protocol.
-      </p>
-      <div className="inline-flex justify-center">
-        <WalletButton />
-      </div>
+    )
+  }
+  return <Body roles={roles} />
+}
+
+function Body({ roles }) {
+  return (
+    <div className="pb-20 flex flex-col gap-16">
+      <Snapshot />
+      <div className="rule" />
+      {roles.isFeeManager && (<>
+        <FeeControls />
+        <div className="rule" />
+      </>)}
+      {roles.isDomainManager && (<>
+        <DomainControls />
+        <div className="rule" />
+      </>)}
+      {roles.isRecoveryManager && (<>
+        <RecoveryControls />
+        <div className="rule" />
+      </>)}
+      {roles.isPauser && <PauseControl />}
     </div>
   )
 }
 
-function ActiveRoleChips({ roles }) {
-  const labels = [
-    roles.isFeeManager && 'Fee Manager',
-    roles.isDomainManager && 'Domain Manager',
-    roles.isRecoveryManager && 'Recovery Manager',
-    roles.isPauser && 'Pauser'
-  ].filter(Boolean)
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {labels.map((r) => (
-        <span
-          key={r}
-          className="inline-flex items-center rounded-full border border-border-subtle bg-background-tertiary px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] font-medium text-text-secondary"
-        >
-          {r}
-        </span>
-      ))}
-    </div>
-  )
-}
+/* ---------- Snapshot ---------- */
+function Snapshot() {
+  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
+  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
+  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
+  const paused = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'paused' })
 
-/* ---------- Collapsible section card ---------- */
-function CollapsibleSection({ title, description, children }) {
-  const [open, setOpen] = useState(false)
   return (
-    <section className="bg-background-secondary rounded-2xl border border-border-subtle shadow-sm">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="w-full flex items-start justify-between gap-3 p-6 text-left"
-      >
-        <div>
-          <h2 className="text-lg font-semibold">{title}</h2>
-          {description && <p className="text-sm text-text-secondary mt-1">{description}</p>}
-        </div>
-        <ChevronIcon open={open} />
-      </button>
-      {open && (
-        <div className="px-6 pb-6 pt-0 flex flex-col gap-4 border-t border-border-subtle">
-          <div className="pt-4 flex flex-col gap-4">{children}</div>
-        </div>
-      )}
+    <section className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-8 pt-2">
+      <Stat
+        label="Protocol fee"
+        value={
+          <span className="num">
+            {fee.data !== undefined ? `${(Number(fee.data) / 100).toFixed(2)}%` : '—'}
+          </span>
+        }
+      />
+      <Stat
+        label="CCTP forward fee"
+        value={
+          <span className="num">
+            {cctp.data !== undefined ? formatUSDC(cctp.data) : '—'}
+          </span>
+        }
+      />
+      <Stat
+        label="Paused"
+        value={
+          <span className={paused.data ? 'text-bad' : 'text-ok'}>
+            {paused.data === undefined ? '—' : paused.data ? 'Yes' : 'No'}
+          </span>
+        }
+      />
+      <Stat
+        label="Treasury"
+        value={treasury.data ? <AddressDisplay address={treasury.data} /> : <span className="text-ink-3">—</span>}
+      />
     </section>
   )
 }
 
-/* ---------- Fee Manager ---------- */
-function FeeManagerSection() {
-  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
-  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
-  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
-
+function Stat({ label, value, hint }) {
   return (
-    <>
-      <CurrentValueRow label="Current fee">
-        <span className="font-mono tabular-nums text-base text-text-primary">
-          {fee.data !== undefined ? `${(Number(fee.data) / 100).toFixed(2)}%` : '—'}
-        </span>
-      </CurrentValueRow>
-      <WriteForm
-        placeholder="New fee in basis points (e.g. 199 = 1.99%)"
-        validate={(v) => /^\d+$/.test(v) && Number(v) <= 1000}
-        label="Update fee"
-        fn="setProtocolFee"
-        toArgs={(v) => [BigInt(v)]}
-        onSuccess={() => fee.refetch?.()}
-      />
-
-      <Divider />
-
-      <CurrentValueRow label="Treasury">
-        <span className="font-mono tabular-nums text-sm text-text-primary">
-          {treasury.data ? truncateAddr(treasury.data) : '—'}
-        </span>
-      </CurrentValueRow>
-      <WriteForm
-        placeholder="New treasury address (0x…)"
-        validate={(v) => isAddress(v)}
-        label="Update treasury"
-        fn="setProtocolTreasury"
-        toArgs={(v) => [v]}
-        onSuccess={() => treasury.refetch?.()}
-      />
-
-      <Divider />
-
-      <CurrentValueRow label="CCTP forwarding fee">
-        <span className="font-mono tabular-nums text-base text-text-primary">
-          {cctp.data !== undefined ? `${(Number(cctp.data) / 1_000_000).toFixed(6)} USDC` : '—'}
-        </span>
-      </CurrentValueRow>
-      <WriteForm
-        placeholder="USDC base units (6 decimals, e.g. 1000000 = 1 USDC)"
-        validate={(v) => /^\d+$/.test(v)}
-        label="Update forwarding fee"
-        fn="setCctpForwardFee"
-        toArgs={(v) => [BigInt(v)]}
-        onSuccess={() => cctp.refetch?.()}
-      />
-    </>
-  )
-}
-
-/* ---------- Domain Manager ---------- */
-function DomainManagerSection() {
-  const { supported, refetch } = useSupportedDomains()
-  return (
-    <>
-      <div className="flex flex-col gap-2">
-        {supported.length === 0 ? (
-          <div className="text-xs text-text-tertiary italic">No destination chains added yet.</div>
-        ) : (
-          supported.map((d) => <SupportedDomainRow key={d} domain={d} onRemoved={refetch} />)
-        )}
-      </div>
-
-      <Divider />
-
-      <WriteForm
-        placeholder="CCTP domain ID (e.g. 6 for Base Sepolia)"
-        validate={(v) => /^\d+$/.test(v) && ALL_DOMAIN_NUMBERS.includes(Number(v))}
-        label="Add chain"
-        fn="addSupportedDomain"
-        toArgs={(v) => [Number(v)]}
-        onSuccess={() => refetch?.()}
-      />
-    </>
-  )
-}
-
-function SupportedDomainRow({ domain, onRemoved }) {
-  const tx = useTx({ onConfirmed: () => onRemoved?.() })
-  const remove = () => tx.run(
-    escrowWrite('removeSupportedDomain', [Number(domain)]),
-    { loadingMessage: `Removing ${getDomainName(domain)}…` }
-  )
-  return (
-    <div className="flex items-center justify-between rounded-xl border border-border-subtle bg-background-tertiary pl-3 pr-1 py-1 text-sm">
-      <span className="font-mono tabular-nums text-text-primary">
-        {getDomainName(domain)} <span className="text-text-tertiary">#{domain}</span>
-      </span>
-      <button
-        type="button"
-        onClick={remove}
-        disabled={tx.isBusy}
-        aria-label={`Remove ${getDomainName(domain)}`}
-        className="inline-flex items-center justify-center h-11 min-w-[5rem] px-3 rounded-lg text-xs font-medium text-status-error hover:bg-status-error/10 transition-colors disabled:opacity-50 disabled:hover:bg-transparent focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
-      >
-        {tx.isBusy ? 'Removing…' : 'Remove'}
-      </button>
+    <div>
+      <p className="eyebrow mb-1.5">{label}</p>
+      <div className="text-[16px] text-ink">{value}</div>
+      {hint && <p className="text-[12px] text-ink-3 mt-0.5">{hint}</p>}
     </div>
   )
 }
 
-/* ---------- Recovery Manager ---------- */
-function RecoveryManagerSection() {
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
-  const [confirmOpen, setConfirmOpen] = useState(false)
+/* ---------- Fee Controls ---------- */
+function FeeControls() {
+  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
+  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
+  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
 
-  const tx = useTx({
-    onConfirmed: () => { setFrom(''); setTo(''); setConfirmOpen(false) }
-  })
+  const [bps, setBps] = useState('')
+  const [tr, setTr] = useState('')
+  const [cctpVal, setCctpVal] = useState('')
 
-  const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
+  const feeTx  = useTx({ onConfirmed: () => { fee.refetch?.(); setBps('') } })
+  const trTx   = useTx({ onConfirmed: () => { treasury.refetch?.(); setTr('') } })
+  const cctpTx = useTx({ onConfirmed: () => { cctp.refetch?.(); setCctpVal('') } })
 
-  const execute = () => tx.run(
-    escrowWrite('adminTransferRefundCredit', [from, to]),
-    { loadingMessage: 'Executing emergency recovery…' }
-  )
+  const bpsValid = /^\d+$/.test(bps) && Number(bps) <= 1000
+  const trValid = isAddress(tr)
+  const cctpValid = /^\d+$/.test(cctpVal)
 
   return (
-    <>
-      <div className="rounded-xl border border-status-error/30 bg-status-error/5 px-3 py-2.5 text-xs text-status-error font-medium">
-        Emergency action — only use when a wallet has lost access to its refund credit.
+    <section className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-10">
+      <div className="flex flex-col gap-4 max-w-prose">
+        <h2 className="display text-[28px] leading-tight text-ink">Protocol fee</h2>
+        <p className="text-[13.5px] text-ink-2 leading-relaxed">
+          Basis points (199 = 1.99%). Applies only to escrows created after this call.
+        </p>
+        <Field label="New fee (bps)" helper="0–1000">
+          {(p) => <input {...p} type="number" min="0" max="1000" className="input num" value={bps} onChange={(e) => setBps(e.target.value.trim())} />}
+        </Field>
+        <div>
+          <button
+            className="btn-primary"
+            disabled={!bpsValid || feeTx.isBusy}
+            onClick={() => feeTx.run(escrowWrite('setProtocolFee', [BigInt(bps || 0)]), { loadingMessage: 'Set protocol fee.' })}
+          >
+            {feeTx.isBusy ? 'Working…' : 'Update fee'}
+          </button>
+        </div>
       </div>
+
+      <div className="flex flex-col gap-4 max-w-prose">
+        <h2 className="display text-[28px] leading-tight text-ink">Treasury</h2>
+        <p className="text-[13.5px] text-ink-2 leading-relaxed">
+          Where new escrow fees are sent on release. Affects new escrows only.
+        </p>
+        <Field label="Treasury address">
+          {(p) => <input {...p} className="input num" placeholder="0x…" value={tr} onChange={(e) => setTr(e.target.value.trim())} />}
+        </Field>
+        <div>
+          <button
+            className="btn-primary"
+            disabled={!trValid || trTx.isBusy}
+            onClick={() => trTx.run(escrowWrite('setProtocolTreasury', [tr]), { loadingMessage: 'Set treasury.' })}
+          >
+            {trTx.isBusy ? 'Working…' : 'Update treasury'}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 max-w-prose md:col-span-2">
+        <h2 className="display text-[28px] leading-tight text-ink">CCTP forwarding fee</h2>
+        <p className="text-[13.5px] text-ink-2 leading-relaxed">
+          Floor the contract uses for cross-chain releases. USDC base units (6 decimals; 1000000 = 1 USDC). Keep in sync with Circle's published forwarding fee.
+        </p>
+        <Field label="Fee (USDC base units)">
+          {(p) => <input {...p} type="number" min="0" className="input num" value={cctpVal} onChange={(e) => setCctpVal(e.target.value.trim())} />}
+        </Field>
+        <div>
+          <button
+            className="btn-primary"
+            disabled={!cctpValid || cctpTx.isBusy}
+            onClick={() => cctpTx.run(escrowWrite('setCctpForwardFee', [BigInt(cctpVal || 0)]), { loadingMessage: 'Set CCTP fee.' })}
+          >
+            {cctpTx.isBusy ? 'Working…' : 'Update CCTP fee'}
+          </button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/* ---------- Domain Controls ---------- */
+function DomainControls() {
+  const { supported, refetch } = useSupportedDomains()
+  const supportedSet = new Set(supported)
+  const addTx = useTx({ onConfirmed: () => refetch?.() })
+  const removeTx = useTx({ onConfirmed: () => refetch?.() })
+
+  return (
+    <section className="flex flex-col gap-5">
+      <h2 className="display text-[28px] leading-tight text-ink">Supported destination domains</h2>
+      <p className="text-[13.5px] text-ink-2 max-w-prose leading-relaxed">
+        CCTP domains the contract will accept as a destination. Arc ({ARC_DOMAIN}) is always accepted on-chain.
+      </p>
+      <ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1">
+        {ALL_DOMAIN_NUMBERS.map((d) => {
+          const on = supportedSet.has(d)
+          return (
+            <li key={d} className="flex items-baseline justify-between gap-3 py-2 border-b border-rule">
+              <span className="text-[13.5px] text-ink">
+                <span className="seq text-[11px] text-ink-3 mr-2">D{String(d).padStart(2, '0')}</span>
+                {getDomainName(d)}
+              </span>
+              <button
+                className={on ? 'btn-quiet text-bad hover:text-bad' : 'btn-quiet text-clay hover:text-clay'}
+                disabled={(on ? removeTx.isBusy : addTx.isBusy)}
+                onClick={() => (on
+                  ? removeTx.run(escrowWrite('removeSupportedDomain', [d]), { loadingMessage: `Remove ${getDomainName(d)}.` })
+                  : addTx.run(escrowWrite('addSupportedDomain', [d]), { loadingMessage: `Add ${getDomainName(d)}.` })
+                )}
+              >
+                {on ? 'Disable' : 'Enable'}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
+/* ---------- Recovery Controls ---------- */
+function RecoveryControls() {
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [confirm, setConfirm] = useState(false)
+  const tx = useTx({ onConfirmed: () => { setFrom(''); setTo(''); setConfirm(false) } })
+  const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
+
+  return (
+    <section className="flex flex-col gap-4 max-w-prose">
+      <h2 className="display text-[28px] leading-tight text-ink">Recovery</h2>
+      <p className="text-[13.5px] text-ink-2 leading-relaxed">
+        Emergency action: transfer refund credit between wallets when one has lost access. Irreversible once confirmed.
+      </p>
 
       <Field
         label="Restricted wallet"
         error={from && !isAddress(from) ? 'Not a valid address.' : undefined}
       >
-        {(props) => (
-          <input
-            {...props}
-            className="input-field font-mono text-sm"
-            placeholder="0x… (current credit holder)"
-            autoComplete="off"
-            spellCheck={false}
-            value={from}
-            onChange={(e) => setFrom(e.target.value.trim())}
-            disabled={tx.isBusy}
+        {(p) => (
+          <input {...p} className="input num" placeholder="0x… (current credit holder)"
+            autoComplete="off" spellCheck={false}
+            value={from} onChange={(e) => setFrom(e.target.value.trim())} disabled={tx.isBusy}
           />
         )}
       </Field>
-
       <Field
         label="Replacement wallet"
         error={
-          to && !isAddress(to)
-            ? 'Not a valid address.'
+          to && !isAddress(to) ? 'Not a valid address.'
             : isAddress(from) && isAddress(to) && from.toLowerCase() === to.toLowerCase()
-              ? 'Replacement must differ from the restricted wallet.'
-              : undefined
+              ? 'Replacement must differ from the restricted wallet.' : undefined
         }
       >
-        {(props) => (
-          <input
-            {...props}
-            className="input-field font-mono text-sm"
-            placeholder="0x… (replacement)"
-            autoComplete="off"
-            spellCheck={false}
-            value={to}
-            onChange={(e) => setTo(e.target.value.trim())}
-            disabled={tx.isBusy}
+        {(p) => (
+          <input {...p} className="input num" placeholder="0x… (replacement)"
+            autoComplete="off" spellCheck={false}
+            value={to} onChange={(e) => setTo(e.target.value.trim())} disabled={tx.isBusy}
           />
         )}
       </Field>
 
-      {!confirmOpen ? (
-        <button
-          className="btn-danger"
-          disabled={!valid || tx.isBusy}
-          onClick={() => setConfirmOpen(true)}
-        >
-          Transfer credit
-        </button>
+      {!confirm ? (
+        <div>
+          <button className="btn-danger" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
+            Transfer credit
+          </button>
+        </div>
       ) : (
-        <div className="flex flex-col gap-3 rounded-xl border border-status-error/30 bg-status-error/5 p-4">
-          <div className="text-xs uppercase tracking-[0.18em] text-status-error font-medium animate-pulse">
-            Confirm transfer
-          </div>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            Move refund credit from <span className="font-mono tabular-nums">{truncateAddr(from)}</span> to <span className="font-mono tabular-nums">{truncateAddr(to)}</span>. This cannot be undone.
+        <div className="panel border-bad p-4 flex flex-col gap-3">
+          <p className="eyebrow text-bad">Confirm transfer</p>
+          <p className="text-[13px] text-ink-2 leading-relaxed">
+            Move refund credit from <span className="num">{truncateAddr(from)}</span> to <span className="num">{truncateAddr(to)}</span>. This cannot be undone.
           </p>
           <div className="flex gap-2">
+            <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
-              className="btn-secondary text-sm py-2 flex-1"
-              onClick={() => setConfirmOpen(false)}
-              disabled={tx.isBusy}
-            >
-              Cancel
-            </button>
-            <button
-              className="btn-danger text-sm py-2 flex-1"
-              onClick={execute}
+              className="btn-danger"
+              onClick={() => tx.run(escrowWrite('adminTransferRefundCredit', [from, to]), { loadingMessage: 'Executing emergency recovery.' })}
               disabled={tx.isBusy}
             >
               {tx.isBusy ? 'Executing…' : 'Confirm execution'}
@@ -358,160 +311,46 @@ function RecoveryManagerSection() {
           </div>
         </div>
       )}
-    </>
+    </section>
   )
 }
 
-/* ---------- Pauser ---------- */
-function PauserSection() {
+/* ---------- Pause Control ---------- */
+function PauseControl() {
   const paused = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'paused' })
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const tx = useTx({
-    onConfirmed: () => { paused.refetch?.(); setConfirmOpen(false) }
-  })
+  const tx = useTx({ onConfirmed: () => paused.refetch?.() })
   const isPaused = !!paused.data
 
-  const execute = () => tx.run(
-    escrowWrite(isPaused ? 'unpause' : 'pause', []),
-    { loadingMessage: isPaused ? 'Unpausing…' : 'Pausing…' }
-  )
-
   return (
-    <>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-xs text-text-secondary mb-1">Protocol status</div>
-          <div className={`font-mono uppercase tracking-[0.18em] text-lg ${isPaused ? 'text-status-error' : 'text-status-success'}`}>
-            {paused.data === undefined ? '—' : isPaused ? 'Paused' : 'Active'}
-          </div>
-        </div>
-        <span
-          className={`h-2 w-2 rounded-full ${isPaused ? 'bg-status-error' : 'bg-status-success animate-pulse'}`}
-          aria-hidden
-        />
+    <section className="flex flex-col gap-4 max-w-prose">
+      <h2 className="display text-[28px] leading-tight text-ink">Kill switch</h2>
+      <p className="text-[13.5px] text-ink-2 leading-relaxed">
+        Pause blocks new deposits but not release, refund, or dispute paths. Money never gets stuck behind it.
+      </p>
+      <div className="flex items-center gap-3">
+        <span className={`status ${isPaused ? 'status-bad' : 'status-ok'}`}>
+          {paused.data === undefined ? '—' : isPaused ? 'Paused' : 'Active'}
+        </span>
       </div>
-
-      {!confirmOpen ? (
-        <button
-          onClick={() => setConfirmOpen(true)}
-          disabled={tx.isBusy || paused.data === undefined}
-          className={isPaused ? 'btn-primary' : 'btn-danger'}
-        >
-          {isPaused ? 'Unpause protocol' : 'Pause protocol'}
-        </button>
-      ) : (
-        <div className="flex flex-col gap-3 rounded-xl border border-status-error/30 bg-status-error/5 p-4">
-          <div className="text-xs uppercase tracking-[0.18em] text-status-error font-medium animate-pulse">
-            {isPaused ? 'Confirm unpause' : 'Confirm pause'}
-          </div>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            {isPaused
-              ? 'Unpausing lets users create new escrows again.'
-              : 'Pausing blocks new escrow creation across the entire protocol.'}
-          </p>
-          <div className="flex gap-2">
-            <button
-              className="btn-secondary text-sm py-2 flex-1"
-              onClick={() => setConfirmOpen(false)}
-              disabled={tx.isBusy}
-            >
-              Cancel
-            </button>
-            <button
-              className={`text-sm py-2 flex-1 ${isPaused ? 'btn-primary' : 'btn-danger'}`}
-              onClick={execute}
-              disabled={tx.isBusy}
-            >
-              {tx.isBusy ? 'Executing…' : 'Confirm'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {isPaused && !confirmOpen && (
-        <p className="text-xs text-status-error">
-          Protocol is paused. New escrows can't be created until you unpause.
-        </p>
-      )}
-    </>
-  )
-}
-
-/* ---------- Admin primitives ---------- */
-function CurrentValueRow({ label, children }) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-sm">
-      <span className="text-text-secondary">{label}</span>
-      <div>{children}</div>
-    </div>
-  )
-}
-
-function Divider() {
-  return <div className="h-px bg-border-subtle/60" aria-hidden />
-}
-
-function WriteForm({ label, fn, placeholder, validate, toArgs, onSuccess }) {
-  const [value, setValue] = useState('')
-  const tx = useTx({
-    onConfirmed: () => { onSuccess?.(); setValue('') }
-  })
-  const valid = validate(value)
-  // Only surface the invalid state once the user has actually typed something;
-  // empty inputs aren't "errors", they're starting state.
-  const showInvalid = value.length > 0 && !valid
-
-  return (
-    <Field
-      label={label}
-      error={showInvalid ? 'Value does not satisfy the expected format.' : undefined}
-    >
-      {(props) => (
-        <div className="flex flex-col gap-2">
-          <input
-            {...props}
-            className="input-field font-mono text-sm"
-            placeholder={placeholder}
-            autoComplete="off"
-            spellCheck={false}
-            value={value}
-            onChange={(e) => setValue(e.target.value.trim())}
-            disabled={tx.isBusy}
-          />
+      <div>
+        {isPaused ? (
           <button
-            type="button"
-            className="btn-primary text-sm py-2.5 self-start"
-            onClick={() => tx.run(
-              escrowWrite(fn, toArgs(value)),
-              { loadingMessage: `${label}. Check your wallet.` }
-            )}
-            disabled={!valid || tx.isBusy}
+            className="btn-primary"
+            disabled={tx.isBusy || paused.data === undefined}
+            onClick={() => tx.run(escrowWrite('unpause', []), { loadingMessage: 'Unpause.' })}
           >
-            {tx.isBusy ? 'Submitting…' : label}
+            {tx.isBusy ? 'Working…' : 'Unpause deposits'}
           </button>
-        </div>
-      )}
-    </Field>
-  )
-}
-
-function ChevronIcon({ open = false }) {
-  return (
-    <svg
-      width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden
-      className={`shrink-0 text-text-tertiary transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-    >
-      <polyline points="6 9 12 15 18 9"/>
-    </svg>
-  )
-}
-
-function LockIcon({ size = 20 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-    </svg>
+        ) : (
+          <button
+            className="btn-danger"
+            disabled={tx.isBusy || paused.data === undefined}
+            onClick={() => tx.run(escrowWrite('pause', []), { loadingMessage: 'Pause.' })}
+          >
+            {tx.isBusy ? 'Working…' : 'Pause deposits'}
+          </button>
+        )}
+      </div>
+    </section>
   )
 }

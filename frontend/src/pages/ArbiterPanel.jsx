@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 
+import PageHeader from '../components/PageHeader.jsx'
 import ConnectGate from '../components/ConnectGate.jsx'
+import AddressDisplay from '../components/AddressDisplay.jsx'
+import Modal from '../components/Modal.jsx'
 import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
@@ -9,558 +13,276 @@ import { useRoles } from '../hooks/useRoles.jsx'
 import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { isValidBytes32 } from '../utils/encode.js'
-import {
-  formatUSDC, formatUSDCNumber, timeAgo, truncateAddr, explorerAddr
-} from '../utils/format.js'
+import { formatUSDC, formatUSDCNumber, formatTimestamp, truncateAddr } from '../utils/format.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
-const POLL_MS = 12_000
 
 export default function ArbiterPanel() {
   return (
-    <ConnectGate>
-      <ArbiterInner />
-    </ConnectGate>
+    <div>
+      <PageHeader
+        eyebrow="Arbiter queue"
+        title="Open disputes."
+        kicker="Each escrow below has at least one milestone in dispute. Open a row to read the evidence and resolve."
+      />
+      <ConnectGate><Gate /></ConnectGate>
+    </div>
   )
 }
 
-function ArbiterInner() {
-  const { address } = useAccount()
+function Gate() {
   const { isArbiter, isLoading } = useRoles()
-  useTick(15_000)
-
-  if (isLoading) {
-    return (
-      <div className="flex flex-col gap-6">
-        <PageHeader />
-        <Skeleton className="h-32" />
-        <Skeleton className="h-64" />
-      </div>
-    )
-  }
-
+  if (isLoading) return <Skeleton className="h-48" />
   if (!isArbiter) {
     return (
-      <div className="flex flex-col gap-6">
-        <PageHeader />
-        <AccessDenied />
+      <div className="max-w-prose flex flex-col gap-4">
+        <p className="text-ink-2 text-[15px] leading-relaxed">
+          This wallet doesn't hold the arbiter role. If you should have it, contact a default admin to grant{' '}
+          <span className="num text-[12.5px]">ARBITER_ROLE</span>.
+        </p>
+        <div><WalletButton /></div>
       </div>
     )
   }
-
-  return (
-    <div className="flex flex-col gap-6">
-      <PageHeader />
-      <DisputeQueue userAddress={address} />
-    </div>
-  )
+  return <Body />
 }
 
-function PageHeader() {
-  return (
-    <div className="flex flex-col gap-2">
-      <h1 className="text-3xl font-semibold tracking-tight">Arbiter Panel</h1>
-      <p className="text-text-secondary text-sm">
-        Dispute resolution console. Only visible to wallets holding ARBITER_ROLE.
-      </p>
-    </div>
-  )
-}
-
-function AccessDenied() {
-  return (
-    <div className="card-surface p-10 text-center max-w-md mx-auto">
-      <div className="w-12 h-12 rounded-full bg-status-error/10 text-status-error flex items-center justify-center mx-auto mb-4">
-        <ShieldIcon size={20} />
-      </div>
-      <h2 className="text-lg font-semibold text-text-primary mb-2">Access denied</h2>
-      <p className="text-sm text-text-secondary mb-6">
-        Your connected wallet does not hold the ARBITER_ROLE. Switch to an authorised wallet to view open cases.
-      </p>
-      <div className="inline-flex justify-center">
-        <WalletButton />
-      </div>
-    </div>
-  )
-}
-
-/* ---------- Open disputes queue ---------- */
-function DisputeQueue({ userAddress }) {
+function Body() {
+  useTick(20_000)
   const { escrows, isLoading, refetch } = useDisputedEscrows()
-  const open = useMemo(
-    () => escrows.filter((e) => e && Number(e.disputedMilestoneCount) > 0),
-    [escrows]
-  )
-  const [selectedId, setSelectedId] = useState(null)
-
-  useEffect(() => {
-    if (selectedId == null && open.length > 0) {
-      setSelectedId(open[0].id)
-    }
-    if (selectedId != null && !open.find((e) => e.id === selectedId)) {
-      setSelectedId(open[0]?.id ?? null)
-    }
-  }, [open, selectedId])
-
-  if (isLoading) {
-    return <Skeleton className="h-64" />
-  }
-
-  if (open.length === 0) {
-    return (
-      <div className="card-surface p-12 text-center">
-        <div className="w-12 h-12 rounded-full bg-background-tertiary border border-border-subtle flex items-center justify-center mx-auto mb-4 text-text-tertiary">
-          <ShieldIcon size={20} />
-        </div>
-        <h2 className="text-lg font-semibold text-text-primary mb-1">No open disputes</h2>
-        <p className="text-sm text-text-secondary">When a payer or freelancer halts a contract, it shows up here for review.</p>
-      </div>
-    )
-  }
+  const [openId, setOpenId] = useState(null)
+  const open = (escrows || []).filter((e) => e && Number(e.disputedMilestoneCount) > 0)
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-      <aside className="lg:col-span-1 flex flex-col gap-3">
-        <div className="flex items-baseline justify-between mb-1">
-          <h2 className="text-base font-semibold text-text-primary tracking-tight">Open cases</h2>
-          <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-            {open.length} pending
-          </span>
-        </div>
-        {open.map((e) => (
-          <CaseCard
-            key={e.id}
-            summary={e}
-            active={e.id === selectedId}
-            onSelect={() => setSelectedId(e.id)}
-          />
-        ))}
-      </aside>
-
-      <section className="lg:col-span-2">
-        {selectedId != null && (
-          <CaseDetail
-            key={selectedId}
-            escrowId={selectedId}
-            userAddress={userAddress}
-            onResolved={refetch}
-          />
-        )}
-      </section>
-    </div>
-  )
-}
-
-function CaseCard({ summary, active, onSelect }) {
-  const inv = summary.invoiceHash && summary.invoiceHash !== ZERO_BYTES32
-    ? `INV-${summary.invoiceHash.slice(2, 6).toUpperCase()}`
-    : `ESC-${summary.id}`
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={`text-left rounded-2xl border p-4 flex flex-col gap-3
-                  transition-[border-color,background-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                  focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
-        active
-          ? 'border-status-error/40 bg-status-error/5'
-          : 'border-border-subtle bg-background-secondary hover:border-border-medium'
-      }`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-sm font-semibold text-text-primary">{inv}</span>
-        <span className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-status-error font-mono">
-          <span className="h-1.5 w-1.5 rounded-full bg-status-error animate-pulse" aria-hidden />
-          {summary.disputedMilestoneCount} open
-        </span>
-      </div>
-      <div className="font-mono tabular-nums text-lg font-bold text-text-primary">
-        {formatUSDCNumber(summary.totalAmount)}
-        <span className="text-xs font-sans font-medium text-text-secondary ml-1.5">USDC locked</span>
-      </div>
-      <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
-        <span>Payer · <span className="font-mono text-text-secondary">{truncateAddr(summary.depositor)}</span></span>
-        <span>Freelancer · <span className="font-mono text-text-secondary">{truncateAddr(summary.recipient)}</span></span>
-      </div>
-    </button>
-  )
-}
-
-/* ---------- Selected case detail ---------- */
-function CaseDetail({ escrowId, userAddress, onResolved }) {
-  const { detail, isLoading, error, refetch } = useEscrowDetail(escrowId, userAddress, { pollMs: POLL_MS })
-
-  if (isLoading) return <Skeleton className="h-96" />
-  if (error || !detail) {
-    return (
-      <div className="card-surface p-8 text-center">
-        <h2 className="text-lg font-semibold text-text-primary mb-1">Couldn't load case #{escrowId}</h2>
-        <p className="text-sm text-text-secondary">Try again in a moment.</p>
-      </div>
-    )
-  }
-
-  const { escrow, milestones, disputes } = detail
-  const disputedMilestones = milestones.filter((m) => m.state === 2)
-
-  if (disputedMilestones.length === 0) {
-    return (
-      <div className="card-surface p-8 text-center">
-        <h2 className="text-lg font-semibold text-text-primary mb-1">No active disputes</h2>
-        <p className="text-sm text-text-secondary">This escrow has no milestones in dispute right now.</p>
-      </div>
-    )
-  }
-
-  return (
-    <ActiveDisputeDesk
-      escrow={escrow}
-      disputedMilestones={disputedMilestones}
-      disputes={disputes}
-      userAddress={userAddress}
-      onChange={() => { refetch?.(); onResolved?.() }}
-    />
-  )
-}
-
-/* ---------- Active dispute desk (moved from EscrowDetail) ---------- */
-function ActiveDisputeDesk({
-  escrow, disputedMilestones, disputes, userAddress, onChange
-}) {
-  const [selectedIdx, setSelectedIdx] = useState(disputedMilestones[0].index)
-
-  useEffect(() => {
-    if (!disputedMilestones.find((m) => m.index === selectedIdx)) {
-      setSelectedIdx(disputedMilestones[0]?.index ?? null)
-    }
-  }, [disputedMilestones, selectedIdx])
-
-  const activeMilestone = disputedMilestones.find((m) => m.index === selectedIdx)
-  if (!activeMilestone) return null
-  const dispute = disputes[activeMilestone.index]
-
-  return (
-    <div className="flex flex-col gap-6">
-      <header className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3">
-          <span className="relative inline-flex h-2 w-2">
-            <span className="absolute inset-0 rounded-full bg-status-error opacity-70 animate-ping" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-status-error" />
-          </span>
-          <h3 className="text-base font-semibold text-text-primary tracking-tight">
-            Active Dispute Resolution
-          </h3>
-        </div>
-        <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-          {disputedMilestones.length} open case{disputedMilestones.length === 1 ? '' : 's'}
-        </span>
-      </header>
-
-      {disputedMilestones.length > 1 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          {disputedMilestones.map((m) => {
-            const active = m.index === selectedIdx
-            return (
-              <button
-                key={m.index}
-                type="button"
-                onClick={() => setSelectedIdx(m.index)}
-                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                  active
-                    ? 'border-status-error/40 bg-status-error/10 text-status-error'
-                    : 'border-border-subtle bg-background-tertiary text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                M{m.index + 1}
-                <span className="font-mono tabular-nums text-[10px] opacity-80">
-                  {formatUSDC(m.amount).replace(' USDC', '')}
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      )}
-
-      <DisputeCaseDesk
-        escrow={escrow}
-        milestone={activeMilestone}
-        dispute={dispute}
-        userAddress={userAddress}
-        onChange={onChange}
-      />
-    </div>
-  )
-}
-
-function DisputeCaseDesk({ escrow, milestone, dispute, userAddress, onChange }) {
-  const disputedBy = dispute?.disputedBy
-
-  const payerIsDisputer = disputedBy?.toLowerCase() === escrow.depositor?.toLowerCase()
-  const payerEvidence = payerIsDisputer
-    ? { reason: dispute?.reason, uri: dispute?.evidenceURI, hash: dispute?.evidenceHash, kind: 'opening' }
-    : (dispute?.counterEvidenceURI || (dispute?.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32)
-        ? { reason: null, uri: dispute.counterEvidenceURI, hash: dispute.counterEvidenceHash, kind: 'counter' }
-        : null)
-  const freelancerEvidence = !payerIsDisputer
-    ? { reason: dispute?.reason, uri: dispute?.evidenceURI, hash: dispute?.evidenceHash, kind: 'opening' }
-    : (dispute?.counterEvidenceURI || (dispute?.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32)
-        ? { reason: null, uri: dispute.counterEvidenceURI, hash: dispute.counterEvidenceHash, kind: 'counter' }
-        : null)
-
-  return (
-    <div className="flex flex-col gap-6">
-      {/* Per-case header */}
-      <div className="rounded-2xl border border-border-subtle bg-background-secondary p-5 flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-              Amount in dispute · M{milestone.index + 1}
-            </span>
-            <div className="font-mono tabular-nums text-2xl font-bold text-text-primary">
-              {formatUSDCNumber(milestone.amount)}
-              <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
-            </div>
-          </div>
-          {dispute?.disputedBy && (
-            <div className="flex flex-col items-end gap-1">
-              <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-                Raised by
-              </span>
-              <AddressInline address={dispute.disputedBy} />
-            </div>
-          )}
-        </div>
-        {dispute?.raisedAt && Number(dispute.raisedAt) > 0 && (
-          <div className="flex items-center justify-between gap-3 pt-3 border-t border-border-subtle">
-            <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-              Arbiter timeout
-            </span>
-            <span className="font-mono tabular-nums text-sm text-text-primary">
-              Pending {timeAgo(dispute.raisedAt).replace(' ago', '')}
-            </span>
-          </div>
-        )}
+    <div className="pb-20 flex flex-col gap-10">
+      <div className="flex items-baseline justify-between">
+        <p className="eyebrow">Queue · {open.length}</p>
+        <button className="btn-quiet" onClick={() => refetch()}>Refresh</button>
       </div>
 
-      {/* Split evidence */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <EvidenceBox
-          title="Payer Evidence"
-          who={escrow.depositor}
-          evidence={payerEvidence}
-          waiting={payerEvidence === null}
-        />
-        <EvidenceBox
-          title="Freelancer Evidence"
-          who={escrow.recipient}
-          evidence={freelancerEvidence}
-          waiting={freelancerEvidence === null}
-        />
-      </div>
-
-      {/* Arbiter-only resolution block with double-confirmation */}
-      <ArbiterDecisionBlock
-        escrowId={escrow.id}
-        milestoneIdx={milestone.index}
-        onResolved={onChange}
-      />
-    </div>
-  )
-}
-
-function EvidenceBox({ title, who, evidence, waiting }) {
-  return (
-    <div className="bg-background-tertiary border border-border-subtle rounded-xl p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">
-          {title}
-        </div>
-        <AddressInline address={who} />
-      </div>
-
-      {waiting || !evidence ? (
-        <div className="rounded-xl border border-dashed border-border-subtle bg-background-tertiary/40 px-4 py-8 flex flex-col items-center justify-center text-center gap-2">
-          <div className="w-8 h-8 rounded-full border border-dashed border-border-medium flex items-center justify-center text-text-tertiary">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <circle cx="12" cy="12" r="10"/>
-              <polyline points="12 6 12 12 16 14"/>
-            </svg>
-          </div>
-          <span className="text-xs text-text-tertiary">Waiting for Counter-Evidence</span>
-        </div>
+      {isLoading ? (
+        <div className="flex flex-col gap-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14" />)}</div>
+      ) : open.length === 0 ? (
+        <p className="text-ink-3 text-[14.5px] py-12">No open disputes. The queue is clear.</p>
       ) : (
-        <div className="flex flex-col gap-3">
-          <div className="text-[10px] uppercase tracking-[0.15em] text-text-tertiary">
-            {evidence.kind === 'opening' ? 'Opening statement' : 'Counter-evidence'}
+        <ul className="flex flex-col">
+          <div className="rule" />
+          {open.map((s) => (
+            <li key={s.id}>
+              <button
+                onClick={() => setOpenId(s.id)}
+                className="w-full grid grid-cols-12 items-center gap-3 py-4 px-2 -mx-2 rounded-md hover:bg-sunk transition-colors text-left"
+              >
+                <span className="col-span-1 seq text-[12px] text-ink-3">#{s.id}</span>
+                <span className="col-span-3 flex items-center gap-2 min-w-0 truncate">
+                  <span className="text-[10.5px] text-ink-3 uppercase tracking-[0.12em] shrink-0">Payer</span>
+                  <AddressDisplay address={s.depositor} />
+                </span>
+                <span className="col-span-3 flex items-center gap-2 min-w-0 truncate">
+                  <span className="text-[10.5px] text-ink-3 uppercase tracking-[0.12em] shrink-0">Freelancer</span>
+                  <AddressDisplay address={s.recipient} />
+                </span>
+                <span className="col-span-2 num text-[14px] text-ink min-w-0 truncate">{formatUSDCNumber(s.totalAmount)} USDC</span>
+                <span className="col-span-2 justify-self-end status-bad shrink-0">{s.disputedMilestoneCount} disputed</span>
+                <span className="col-span-1 justify-self-end text-ink-3 shrink-0">→</span>
+              </button>
+              <div className="rule" />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <ResolutionDrawer id={openId} onClose={() => setOpenId(null)} onResolved={() => { refetch() }} />
+    </div>
+  )
+}
+
+function ResolutionDrawer({ id, onClose, onResolved }) {
+  const { address } = useAccount()
+  const { detail, refetch } = useEscrowDetail(id, address, { pollMs: 0 })
+  if (!id) return null
+  if (!detail) {
+    return (
+      <Modal open={true} onClose={onClose} title={`Escrow #${id}`} size="lg">
+        <Skeleton className="h-32" />
+      </Modal>
+    )
+  }
+
+  const disputedIndexes = detail.milestones
+    .map((m, i) => (m.state === 2 ? i : null))
+    .filter((x) => x !== null)
+
+  return (
+    <Modal
+      open={true} onClose={onClose}
+      title={`Escrow #${id} · Resolve disputes`} size="lg"
+      footer={<button className="btn-quiet" onClick={onClose}>Close</button>}
+    >
+      <div className="flex flex-col gap-7 max-h-[68vh] overflow-y-auto pr-2 -mr-2">
+        <div className="flex items-baseline justify-between">
+          <div>
+            <p className="eyebrow mb-1">Total locked</p>
+            <p className="num text-[20px] text-ink">
+              {formatUSDCNumber(detail.escrow.totalAmount)}
+              <span className="text-ink-3 text-[13px] font-sans"> USDC</span>
+            </p>
           </div>
-          {evidence.reason && (
-            <p className="text-sm font-sans text-text-primary leading-relaxed">{evidence.reason}</p>
-          )}
-          {evidence.uri && (
-            <a
-              href={evidence.uri}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 font-mono tabular-nums text-sm text-accent-blue hover:opacity-80 break-all"
-            >
-              {evidence.uri}
-              <ExternalLinkIcon size={12} />
-            </a>
-          )}
-          {evidence.hash && evidence.hash !== ZERO_BYTES32 && (
-            <div className="border-t border-border-subtle pt-3 flex flex-col gap-1">
-              <span className="text-[10px] uppercase tracking-[0.15em] text-text-tertiary">Evidence hash</span>
-              <span className="font-mono tabular-nums text-xs text-text-secondary break-all">
-                {evidence.hash}
-              </span>
-            </div>
-          )}
+          <Link to={`/escrow/${id}`} className="btn-secondary" target="_blank">Open full view ↗</Link>
         </div>
+
+        <ul className="flex flex-col gap-7">
+          {disputedIndexes.map((i) => (
+            <DisputeBlock key={i} detail={detail} index={i} refetch={() => { refetch(); onResolved() }} />
+          ))}
+        </ul>
+      </div>
+    </Modal>
+  )
+}
+
+function DisputeBlock({ detail, index, refetch }) {
+  const m = detail.milestones[index]
+  const d = detail.disputes[index]
+  const e = detail.escrow
+  const timeoutAt = Number(d.raisedAt) + 30 * 86400
+  const now = Math.floor(Date.now() / 1000)
+  const canTimeout = now > timeoutAt
+
+  return (
+    <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="flex items-baseline gap-3">
+          <span className="seq text-[12px] text-ink-3">M{index + 1}</span>
+          <p className="display text-[22px] text-ink leading-tight">
+            {`Milestone ${index + 1}: ${formatUSDC(m.amount).replace(' USDC', '')} USDC`}
+          </p>
+        </div>
+        <span className="status-bad">Disputed</span>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <Side
+          label="Opened by"
+          who={d.disputedBy}
+          when={d.raisedAt}
+          reason={d.reason}
+          uri={d.evidenceURI}
+        />
+        {d.counterEvidenceHash && d.counterEvidenceHash !== ZERO_BYTES32 ? (
+          <Side
+            label="Counter-evidence"
+            who={d.disputedBy?.toLowerCase() === e.depositor.toLowerCase() ? e.recipient : e.depositor}
+            uri={d.counterEvidenceURI}
+          />
+        ) : (
+          <div>
+            <p className="eyebrow mb-1">Counter-evidence</p>
+            <p className="text-[13px] text-ink-3">Not submitted.</p>
+          </div>
+        )}
+      </div>
+
+      <ResolveForm
+        id={detail.id} index={index}
+        refetch={refetch}
+        canTimeout={canTimeout}
+      />
+    </li>
+  )
+}
+
+function Side({ label, who, when, reason, uri }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-baseline justify-between">
+        <p className="eyebrow">{label}</p>
+        {when && Number(when) > 0 && <p className="text-[11.5px] text-ink-3">{formatTimestamp(when)}</p>}
+      </div>
+      {who ? <AddressDisplay address={who} /> : <span className="text-[13px] text-ink-3">—</span>}
+      {reason && <p className="text-[13.5px] text-ink-2 leading-relaxed mt-1">{reason}</p>}
+      {uri && (
+        <a href={uri} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all">
+          {uri}
+        </a>
       )}
     </div>
   )
 }
 
-function ArbiterDecisionBlock({ escrowId, milestoneIdx, onResolved }) {
-  const [resolutionHash, setResolutionHash] = useState('')
-  const [pending, setPending] = useState(null) // null | 'release' | 'refund'
+function ResolveForm({ id, index, refetch, canTimeout }) {
+  const [decision, setDecision] = useState('') // 'release' | 'refund'
+  const [resolution, setResolution] = useState('')
+  const [err, setErr] = useState('')
+  const tx = useTx({ onConfirmed: () => { refetch(); setDecision(''); setResolution('') } })
+  const timeoutTx = useTx({ onConfirmed: refetch })
 
-  const tx = useTx({
-    onConfirmed: () => { onResolved?.(); setPending(null); setResolutionHash('') }
-  })
+  const hashValid = isValidBytes32(resolution)
 
-  const hashValid = isValidBytes32(resolutionHash)
-  const execute = (releaseToRecipient) => tx.run(
-    escrowWrite('resolveDispute', [BigInt(escrowId), BigInt(milestoneIdx), releaseToRecipient, resolutionHash, 0n]),
-    { loadingMessage: 'Recording decision. Check your wallet.' }
-  )
+  const submit = () => {
+    if (!decision) { setErr('Pick a resolution.'); return }
+    if (!hashValid) { setErr('Resolution hash must be 0x followed by 64 hex characters.'); return }
+    setErr('')
+    tx.run(
+      escrowWrite('resolveDispute', [BigInt(id), BigInt(index), decision === 'release', resolution, 0n]),
+      { loadingMessage: 'Sign to resolve.' }
+    )
+  }
 
   return (
-    <div className="flex flex-col gap-4 mt-2 p-6 bg-background-secondary border border-border-subtle rounded-xl">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-mono">
-            Arbiter decision
-          </span>
-          <span className="text-sm text-text-primary">
-            Choose how this milestone resolves. The decision is permanent.
-          </span>
-        </div>
-        <span className="text-[10px] uppercase tracking-[0.18em] text-status-error font-mono">
-          Irreversible
-        </span>
+    <div className="flex flex-col gap-3 pt-2">
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          className={decision === 'release' ? 'btn-primary' : 'btn-secondary'}
+          onClick={() => setDecision('release')}
+        >
+          Release to freelancer
+        </button>
+        <button
+          className={decision === 'refund' ? 'btn-danger' : 'btn-secondary'}
+          onClick={() => setDecision('refund')}
+        >
+          Refund to payer
+        </button>
       </div>
-
       <Field
         label="Resolution hash"
+        error={err}
         helper="bytes32 reference to the decision rationale stored off-chain."
-        error={resolutionHash && !hashValid ? 'Must be 0x followed by 64 hex characters.' : undefined}
       >
-        {(props) => (
-          <input
-            {...props}
-            className="input-field font-mono tabular-nums text-sm"
-            placeholder="0x… resolution hash (bytes32)"
+        {(p) => (
+          <input {...p}
+            className="input num"
+            placeholder="0x… (64 hex chars)"
             autoComplete="off"
             spellCheck={false}
             maxLength={66}
-            value={resolutionHash}
-            onChange={(e) => setResolutionHash(e.target.value.trim())}
-            disabled={!!pending || tx.isBusy}
+            value={resolution}
+            onChange={(e) => setResolution(e.target.value.trim())}
           />
         )}
       </Field>
-
-      {!pending ? (
-        <div className="flex flex-col sm:flex-row gap-3">
+      <div className="flex items-center gap-2">
+        <button
+          className={decision === 'refund' ? 'btn-danger' : 'btn-primary'}
+          onClick={submit}
+          disabled={tx.isBusy || !decision || !hashValid}
+        >
+          {tx.isBusy ? 'Working…' : decision ? `Resolve · ${decision}` : 'Resolve'}
+        </button>
+        {canTimeout && (
           <button
-            type="button"
-            onClick={() => setPending('refund')}
-            disabled={!hashValid || tx.isBusy}
-            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-status-error text-status-error hover:bg-status-error/10 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            className="btn-quiet"
+            onClick={() => timeoutTx.run(
+              escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
+              { loadingMessage: 'Force refund by timeout.' }
+            )}
+            disabled={timeoutTx.isBusy}
           >
-            Resolve in favor of Payer
+            Force refund (timeout)
           </button>
-          <button
-            type="button"
-            onClick={() => setPending('release')}
-            disabled={!hashValid || tx.isBusy}
-            className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-accent-blue text-white shadow-sm hover:bg-accent-hover transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
-          >
-            Resolve in favor of Freelancer
-          </button>
-        </div>
-      ) : (
-        <div className="rounded-xl border border-status-error/40 bg-status-error/5 p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-xs uppercase tracking-[0.18em] font-medium text-status-error animate-pulse">
-              {pending === 'release' ? 'Confirm release to freelancer' : 'Confirm refund to payer'}
-            </span>
-            <span className="font-mono tabular-nums text-[10px] text-text-tertiary">
-              ESC-{escrowId} / M{milestoneIdx + 1}
-            </span>
-          </div>
-          <p className="text-xs text-text-secondary leading-relaxed">
-            Funds will move immediately when this transaction confirms on Arc.
-            There is no second chance.
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setPending(null)}
-              disabled={tx.isBusy}
-              className="btn-secondary text-sm py-2 flex-1"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => execute(pending === 'release')}
-              disabled={tx.isBusy}
-              className={`text-sm py-2 flex-1 ${
-                pending === 'release' ? 'btn-primary' : 'btn-danger'
-              }`}
-            >
-              {tx.isBusy ? 'Executing…' : 'Confirm execution'}
-            </button>
-          </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
-  )
-}
-
-/* ---------- Small primitives ---------- */
-function AddressInline({ address }) {
-  if (!address) return <span className="text-text-tertiary">—</span>
-  return (
-    <a
-      href={explorerAddr(address)}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex items-center gap-1.5 font-mono text-sm text-text-primary hover:text-accent transition-colors"
-      title={address}
-    >
-      {truncateAddr(address)}
-      <ExternalLinkIcon size={12} />
-    </a>
-  )
-}
-
-function ExternalLinkIcon({ size = 12 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-      <polyline points="15 3 21 3 21 9"/>
-      <line x1="10" y1="14" x2="21" y2="3"/>
-    </svg>
-  )
-}
-
-function ShieldIcon({ size = 14 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-    </svg>
   )
 }

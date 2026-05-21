@@ -99,31 +99,36 @@ function useMobileNavLinks() {
 function TopNav() {
   const navLinks = useNavLinks()
   return (
-    <header className="sticky top-0 z-50 w-full bg-background-primary/80 backdrop-blur-md border-b border-border-subtle h-16 flex items-center px-6 md:px-12 justify-between">
-      {/* Left — Branding & Environment */}
+    <header className="sticky top-0 z-50 w-full bg-paper/85 backdrop-blur-md border-b border-rule h-16 flex items-center px-6 md:px-12 justify-between">
+      {/* Left — Branding & Environment.
+          Below sm the full wordmark would overlap the utility cluster, so we
+          fall back to the "C" badge (same glyph used on the marketing nav).
+          The Arc Testnet chip is held at lg+ — at md it competes with the
+          center nav links for the same horizontal space. */}
       <div className="flex items-center min-w-0">
-        <Link to="/" className="font-bold text-text-primary tracking-tight whitespace-nowrap">
-          CrossChainEscrow
+        <Link to="/" className="flex items-center gap-2 group" aria-label="CrossChainEscrow home">
+          <span className="inline-flex lg:hidden items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold text-[15px]">C</span>
+          <span className="hidden lg:inline display text-[24px] tracking-tightest leading-none">CrossChainEscrow</span>
         </Link>
-        <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 ml-4 rounded-md bg-background-tertiary border border-border-subtle">
+        <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 ml-4 rounded-sm bg-sunk border border-rule">
           <span className="relative flex items-center">
-            <span className="absolute inline-flex h-2 w-2 rounded-full bg-status-success/30 animate-ping" />
-            <span className="relative w-1.5 h-1.5 bg-status-success rounded-full" />
+            <span className="absolute inline-flex h-2 w-2 rounded-full bg-ok/30 animate-ping" />
+            <span className="relative w-1.5 h-1.5 bg-ok rounded-full" />
           </span>
-          <span className="text-[11px] font-mono text-text-secondary uppercase tracking-wider">Arc Testnet</span>
+          <span className="text-[10.5px] num text-ink-2 uppercase tracking-[0.18em]">Arc Testnet</span>
         </div>
       </div>
 
       {/* Center — Navigation Links */}
-      <nav className="hidden md:flex items-center gap-8">
+      <nav className="hidden md:flex items-center gap-7">
         {navLinks.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             className={({ isActive }) =>
               isActive
-                ? "text-sm font-medium text-text-primary relative after:content-[''] after:absolute after:-bottom-[22px] after:left-0 after:right-0 after:h-0.5 after:bg-accent-blue"
-                : 'text-sm font-medium text-text-secondary hover:text-text-primary transition-colors'
+                ? 'text-sm font-medium text-ink'
+                : 'text-sm font-medium text-ink-2 hover:text-ink transition-colors'
             }
           >
             {item.label}
@@ -166,7 +171,7 @@ function BottomNav() {
   const mobileLinks = useMobileNavLinks()
   if (mobileLinks.length === 0) return null
   return (
-    <nav className="flex md:hidden fixed bottom-0 inset-x-0 z-50 h-16 w-full border-t border-border-subtle bg-background-secondary justify-around items-stretch">
+    <nav className="flex md:hidden fixed bottom-0 inset-x-0 z-50 h-16 w-full border-t border-rule bg-paper justify-around items-stretch">
       {mobileLinks.map((item) => (
         <NavLink
           key={item.to}
@@ -174,8 +179,8 @@ function BottomNav() {
           className={({ isActive }) =>
             `flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium px-2 pt-1 pb-1 transition-colors ${
               isActive
-                ? 'text-accent border-t-2 border-accent-blue -mt-[1px]'
-                : 'text-text-secondary border-t-2 border-transparent -mt-[1px]'
+                ? 'text-clay border-t-2 border-clay -mt-[1px]'
+                : 'text-ink-2 border-t-2 border-transparent -mt-[1px]'
             }`
           }
         >
@@ -190,10 +195,10 @@ function BottomNav() {
 export default function AppShell({ children, maxWidth = 'content' }) {
   const mainCls =
     maxWidth === 'full'
-      ? 'flex-1 w-full px-6 md:px-12 py-12 pb-28 md:pb-12 flex flex-col gap-8'
-      : 'w-full max-w-7xl mx-auto px-6 md:px-12 py-12 pb-28 md:pb-12 flex flex-col gap-8 flex-1'
+      ? 'flex-1 w-full px-6 lg:px-10 pb-28 md:pb-20 flex flex-col gap-8'
+      : 'w-full max-w-page mx-auto px-6 lg:px-10 pb-28 md:pb-20 flex flex-col gap-8 flex-1'
   return (
-    <div className="min-h-screen bg-background-primary flex flex-col text-text-primary">
+    <div className="min-h-screen bg-paper flex flex-col text-ink">
       <TopNav />
       <main className={mainCls}>{children}</main>
       <BottomNav />

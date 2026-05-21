@@ -65,11 +65,11 @@ export default function CustomSelect({
         aria-invalid={ariaInvalid}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`input-field flex items-center justify-between text-left active:scale-[0.99] ${open ? 'border-border-focused' : ''}`}
+        className={`input-field flex items-center justify-between text-left active:scale-[0.99] ${open ? 'border-clay' : ''}`}
         onClick={() => !disabled && setOpen((o) => !o)}
         disabled={disabled}
       >
-        <span className={selected ? '' : 'text-text-tertiary'}>
+        <span className={selected ? '' : 'text-ink-3'}>
           {selected ? selected.label : placeholder}
         </span>
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
@@ -93,7 +93,7 @@ export default function CustomSelect({
           )}
           <ul role="listbox" className="flex flex-col gap-0.5">
             {filtered.length === 0 && (
-              <li className="px-3 py-2 text-sm text-text-tertiary">No matches</li>
+              <li className="px-3 py-2 text-sm text-ink-3">No matches</li>
             )}
             {filtered.map((o, idx) => {
               const isSel = o.value === value
@@ -104,8 +104,8 @@ export default function CustomSelect({
                   role="option"
                   aria-selected={isSel}
                   className={`flex items-center justify-between px-3 py-2 rounded-md cursor-pointer text-sm transition-colors ${
-                    isSel ? 'text-accent' : 'text-text-primary'
-                  } ${isActive ? 'bg-background-tertiary' : ''}`}
+                    isSel ? 'text-clay' : 'text-ink'
+                  } ${isActive ? 'bg-sunk' : ''}`}
                   onMouseEnter={() => setActive(idx)}
                   onClick={() => { onChange(o.value); setOpen(false); setQuery('') }}
                 >

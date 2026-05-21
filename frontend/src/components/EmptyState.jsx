@@ -27,15 +27,15 @@ export default function EmptyState({
     <div className="card-surface px-6 py-16 sm:py-20 flex flex-col items-center text-center gap-5">
       <div
         aria-hidden
-        className="relative w-20 h-20 rounded-2xl bg-background-tertiary text-text-secondary flex items-center justify-center"
+        className="relative w-20 h-20 rounded-2xl bg-sunk text-ink-2 flex items-center justify-center"
       >
         {/* Soft outer ring to give the icon a deliberate, anchored feel. */}
-        <span className="absolute inset-0 rounded-2xl ring-1 ring-border-subtle" />
+        <span className="absolute inset-0 rounded-2xl ring-1 ring-rule" />
         {icon}
       </div>
       <div className="flex flex-col gap-2 max-w-sm">
-        <h3 className="text-lg font-semibold text-text-primary">{title}</h3>
-        <p className="text-sm text-text-secondary leading-relaxed">{message}</p>
+        <h3 className="text-lg font-semibold text-ink">{title}</h3>
+        <p className="text-sm text-ink-2 leading-relaxed">{message}</p>
       </div>
       {ctaTo && ctaLabel && (
         <Link to={ctaTo} className="btn-primary text-sm py-2.5 mt-2">

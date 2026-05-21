@@ -5,44 +5,45 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: {
-          primary: 'var(--bg-primary)',
-          secondary: 'var(--bg-secondary)',
-          tertiary: 'var(--bg-tertiary)'
-        },
-        text: {
-          primary: 'var(--text-primary)',
-          secondary: 'var(--text-secondary)',
-          tertiary: 'var(--text-tertiary)'
-        },
-        border: {
-          subtle: 'var(--border-subtle)',
-          medium: 'var(--border-medium)',
-          focused: 'var(--border-focused)'
-        },
-        accent: {
-          DEFAULT: 'var(--accent-blue)',
-          blue: 'var(--accent-blue)',
-          hover: 'var(--accent-hover)',
-          muted: 'var(--accent-muted)'
-        },
-        status: {
-          success: 'var(--status-success)',
-          warning: 'var(--status-warning)',
-          error: 'var(--status-error)'
-        }
+        /* Tranche tokens */
+        paper:        'var(--paper)',
+        sunk:         'var(--sunk)',
+        ink:          'var(--ink)',
+        'ink-2':      'var(--ink-2)',
+        'ink-3':      'var(--ink-3)',
+        rule:         'var(--rule)',
+        'rule-2':     'var(--rule-2)',
+        clay:         'var(--clay)',
+        'clay-hover': 'var(--clay-hover)',
+        'clay-soft':  'var(--clay-soft)',
+        ok:           'var(--ok)',
+        warn:         'var(--warn)',
+        bad:          'var(--bad)'
       },
       fontFamily: {
-        sans: ['Geist', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
-        geist: ['Geist', 'ui-sans-serif', 'system-ui', 'sans-serif']
+        sans:    ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono:    ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        display: ['"Instrument Serif"', 'ui-serif', 'Georgia', 'serif'],
+        geist:   ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
       },
-      borderRadius: {
-        xl: '0.75rem',
-        '2xl': '1rem'
+      letterSpacing: {
+        tightest: '-0.045em'
       },
       maxWidth: {
-        content: '1200px'
+        prose:   '68ch',
+        content: '1200px',
+        page:    '1320px'
+      },
+      borderRadius: {
+        /* Tranche radii — flatter, crisper than the old 0.75/1rem feel.
+           We deliberately downgrade xl/2xl so existing components shed
+           pillowy edges without code changes. */
+        xs: '0.25rem',
+        sm: '0.375rem',
+        md: '0.5rem',
+        lg: '0.5rem',
+        xl: '0.5rem',
+        '2xl': '0.5rem'
       },
       boxShadow: {
         'lift-sm':     'var(--shadow-lift-sm)',

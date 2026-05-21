@@ -19,7 +19,7 @@ export default function AddressDisplay({ address, full = false, size = 'md', cla
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 font-mono max-w-full rounded-md bg-background-tertiary text-text-secondary hover:text-text-primary cursor-pointer transition-colors ${sizeCls} ${className}`}
+      className={`inline-flex items-center gap-1.5 font-mono max-w-full rounded-md bg-sunk text-ink-2 hover:text-ink cursor-pointer transition-colors ${sizeCls} ${className}`}
       onClick={onClick}
       title={address}
       role="button"
@@ -27,7 +27,7 @@ export default function AddressDisplay({ address, full = false, size = 'md', cla
       onKeyDown={(e) => { if (e.key === 'Enter') onClick(e) }}
     >
       <span className={full ? 'break-all' : ''}>{display}</span>
-      {copied && <span className="text-status-success text-xs shrink-0">Copied</span>}
+      {copied && <span className="text-ok text-xs shrink-0">Copied</span>}
     </span>
   )
 }

@@ -8,7 +8,7 @@ export default function Tooltip({ content }) {
       <button
         type="button"
         aria-label="More info"
-        className="inline-flex items-center justify-center h-4 w-4 ml-1 text-text-tertiary hover:text-text-primary"
+        className="inline-flex items-center justify-center h-4 w-4 ml-1 text-ink-3 hover:text-ink"
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
         onFocus={() => setOpen(true)}
@@ -21,7 +21,7 @@ export default function Tooltip({ content }) {
         </svg>
       </button>
       {open && (
-        <span className="absolute z-50 left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 card-surface px-3 py-2 text-xs text-text-secondary shadow-lg">
+        <span className="absolute z-50 left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 card-surface px-3 py-2 text-xs text-ink-2 shadow-lg">
           {content}
         </span>
       )}

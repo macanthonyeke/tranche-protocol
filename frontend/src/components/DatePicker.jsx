@@ -60,10 +60,10 @@ export default function DatePicker({
         aria-invalid={ariaInvalid}
         aria-haspopup="dialog"
         aria-expanded={open}
-        className={`input-field flex items-center justify-between text-left font-mono ${open ? 'border-border-focused' : ''}`}
+        className={`input-field flex items-center justify-between text-left font-mono ${open ? 'border-clay' : ''}`}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className={value ? 'text-text-primary' : 'text-text-tertiary'}>
+        <span className={value ? 'text-ink' : 'text-ink-3'}>
           {value ? formatDisplay(startOfDay(value)) : placeholder}
         </span>
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -90,7 +90,7 @@ export default function DatePicker({
             </IconButton>
           </div>
 
-          <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-text-tertiary mb-1">
+          <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-ink-3 mb-1">
             {DOW.map((d) => <span key={d}>{d}</span>)}
           </div>
 
@@ -106,12 +106,12 @@ export default function DatePicker({
                   type="button"
                   className={`h-8 text-xs font-mono rounded-md transition-colors ${
                     isPast
-                      ? 'text-text-tertiary cursor-not-allowed'
+                      ? 'text-ink-3 cursor-not-allowed'
                       : isSelected
-                      ? 'bg-accent text-white'
+                      ? 'bg-clay text-paper'
                       : isToday
-                      ? 'border border-accent text-accent hover:bg-accent-muted'
-                      : 'text-text-primary hover:bg-background-tertiary'
+                      ? 'border border-clay text-clay hover:bg-clay-soft'
+                      : 'text-ink hover:bg-sunk'
                   }`}
                   disabled={isPast}
                   onClick={() => { onChange(d); setOpen(false) }}

@@ -48,7 +48,7 @@ function DetailInner() {
     return (
       <div className="card-surface p-12 text-center">
         <h2 className="text-xl font-semibold mb-2">Escrow not found</h2>
-        <p className="text-sm text-text-secondary">There is no escrow with ID #{id}.</p>
+        <p className="text-sm text-ink-2">There is no escrow with ID #{id}.</p>
       </div>
     )
   }
@@ -118,14 +118,14 @@ function InspectionHeader({ escrow, inv }) {
       <button
         type="button"
         onClick={() => navigate('/dashboard')}
-        className="flex items-center gap-2 text-sm text-text-secondary hover:text-text-primary transition-colors mb-6"
+        className="flex items-center gap-2 text-sm text-ink-2 hover:text-ink transition-colors mb-6"
       >
         <ArrowLeft size={16} /> Back to Escrows
       </button>
 
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3 min-w-0">
-          <h1 className="text-3xl font-mono font-bold text-text-primary tracking-tight truncate">
+          <h1 className="text-3xl font-mono font-bold text-ink tracking-tight truncate">
             {inv}
           </h1>
           <IconButton
@@ -146,10 +146,10 @@ function InspectionHeader({ escrow, inv }) {
 function StateGlowPill({ state }) {
   const verb = ESCROW_LABELS[state] ?? 'Active'
   const tone = state === 1
-    ? { dot: 'bg-status-success', text: 'text-status-success', ring: 'border-status-success/30 bg-status-success/10' }
+    ? { dot: 'bg-ok', text: 'text-ok', ring: 'border-ok/30 bg-ok/10' }
     : state === 2
-    ? { dot: 'bg-text-tertiary', text: 'text-text-tertiary', ring: 'border-border-subtle bg-background-tertiary' }
-    : { dot: 'bg-accent-blue', text: 'text-accent-blue', ring: 'border-accent/30 bg-accent-muted/40' }
+    ? { dot: 'bg-ink-3', text: 'text-ink-3', ring: 'border-rule bg-sunk' }
+    : { dot: 'bg-clay', text: 'text-clay', ring: 'border-clay/30 bg-clay-soft/40' }
   const pulse = state === 0 ? 'animate-pulse' : ''
   return (
     <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium ${tone.ring} ${tone.text}`}>
@@ -166,12 +166,12 @@ function StateGlowPill({ state }) {
 function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   return (
     <aside className="lg:col-span-1 flex flex-col gap-6">
-      <div className="bg-background-secondary border border-border-subtle rounded-2xl p-6 h-fit flex flex-col gap-6">
+      <div className="bg-paper border border-rule rounded-2xl p-6 h-fit flex flex-col gap-6">
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Total Locked</span>
-          <div className="font-mono tabular-nums font-bold text-3xl text-text-primary leading-tight">
+          <span className="text-[10px] uppercase tracking-[0.18em] text-ink-3 font-medium">Total Locked</span>
+          <div className="font-mono tabular-nums font-bold text-3xl text-ink leading-tight">
             {formatUSDCNumber(escrow.totalAmount)}
-            <span className="text-base font-sans font-medium text-text-secondary ml-2">USDC</span>
+            <span className="text-base font-sans font-medium text-ink-2 ml-2">USDC</span>
           </div>
         </div>
 
@@ -183,22 +183,22 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
             <AddressInline address={escrow.recipient} />
           </ParamRow>
           <ParamRow label="Arbiter Status">
-            <span className="text-sm text-text-primary">Decentralized Panel</span>
+            <span className="text-sm text-ink">Decentralized Panel</span>
           </ParamRow>
           <ParamRow label="Gas Asset">
-            <span className="text-sm text-text-primary">{gasAssetLabel(escrow.destinationDomain)}</span>
+            <span className="text-sm text-ink">{gasAssetLabel(escrow.destinationDomain)}</span>
           </ParamRow>
           <ParamRow label="Destination">
-            <span className="text-sm text-text-primary">{getDomainName(escrow.destinationDomain)}</span>
+            <span className="text-sm text-ink">{getDomainName(escrow.destinationDomain)}</span>
           </ParamRow>
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
           </ParamRow>
           <ParamRow label="Dispute Window">
-            <span className="text-sm text-text-primary">{formatWindow(escrow.disputeWindow)}</span>
+            <span className="text-sm text-ink">{formatWindow(escrow.disputeWindow)}</span>
           </ParamRow>
           <ParamRow label="Contract Suffix" last>
-            <span className="font-mono text-xs text-text-secondary tracking-tight">
+            <span className="font-mono text-xs text-ink-2 tracking-tight">
               {contractSuffix(escrow.invoiceHash)}
             </span>
           </ParamRow>
@@ -209,7 +209,7 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
             href={escrow.invoiceURI}
             target="_blank"
             rel="noreferrer"
-            className="self-start text-sm text-accent hover:text-accent-hover transition-colors inline-flex items-center gap-1"
+            className="self-start text-sm text-clay hover:text-clay-hover transition-colors inline-flex items-center gap-1"
           >
             View invoice ↗
           </a>
@@ -231,21 +231,21 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
 
 function ParamRow({ label, last = false, children }) {
   return (
-    <div className={`flex justify-between items-center py-3 text-sm ${last ? '' : 'border-b border-border-subtle/50'}`}>
-      <span className="text-text-secondary">{label}</span>
+    <div className={`flex justify-between items-center py-3 text-sm ${last ? '' : 'border-b border-rule/50'}`}>
+      <span className="text-ink-2">{label}</span>
       <div className="text-right min-w-0">{children}</div>
     </div>
   )
 }
 
 function AddressInline({ address }) {
-  if (!address) return <span className="text-text-tertiary">—</span>
+  if (!address) return <span className="text-ink-3">—</span>
   return (
     <a
       href={explorerAddr(address)}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-1.5 font-mono text-sm text-text-primary hover:text-accent transition-colors"
+      className="inline-flex items-center gap-1.5 font-mono text-sm text-ink hover:text-clay transition-colors"
       title={address}
     >
       {truncateAddr(address)}
@@ -258,8 +258,8 @@ function DeadlineCell({ deadline }) {
   const passed = Number(deadline) * 1000 < Date.now()
   return (
     <div className="flex flex-col items-end gap-0.5">
-      <span className="font-mono tabular-nums text-sm text-text-primary">{formatDeadline(deadline)}</span>
-      <span className={`text-xs font-mono tabular-nums ${passed ? 'text-status-error' : 'text-text-tertiary'}`}>
+      <span className="font-mono tabular-nums text-sm text-ink">{formatDeadline(deadline)}</span>
+      <span className={`text-xs font-mono tabular-nums ${passed ? 'text-bad' : 'text-ink-3'}`}>
         {countdown(deadline)}
       </span>
     </div>
@@ -285,7 +285,7 @@ function contractSuffix(invoiceHash) {
 /* ---------- Column 2 — Milestone stack ----------
    Each milestone is a vertical card. Left side carries title, copy, and the
    release value. Right side carries the single most relevant action button —
-   premium glowing accent when actionable, solid success checkmark when
+   premium glowing clay when actionable, solid success checkmark when
    released, muted dash when refunded/cancelled. Open disputes drop the inline
    dispute resolution UI directly below the action area so evidence and
    counter-evidence stay attached to their milestone. */
@@ -296,18 +296,18 @@ function MilestoneStack({
 }) {
   const hasDispute = milestones.some((m) => m.state === 2)
   return (
-    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-6 shadow-sm">
+    <div className="bg-paper border border-rule rounded-2xl p-6">
       <div className="flex items-baseline justify-between mb-5">
-        <h2 className="text-base font-semibold text-text-primary tracking-tight">
+        <h2 className="text-base font-semibold text-ink tracking-tight">
           Milestones
           {hasDispute && (
-            <span className="ml-3 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono uppercase tracking-[0.18em] text-status-warning bg-status-warning/10 align-middle">
-              <span className="h-1.5 w-1.5 rounded-full bg-status-warning animate-pulse" />
+            <span className="ml-3 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono uppercase tracking-[0.18em] text-warn bg-warn/10 align-middle">
+              <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse" />
               In Tribunal
             </span>
           )}
         </h2>
-        <span className="text-xs font-mono tabular-nums text-text-tertiary uppercase tracking-widest">
+        <span className="text-xs font-mono tabular-nums text-ink-3 uppercase tracking-widest">
           {milestones.filter((m) => m.state === 3).length} / {milestones.length} released
         </span>
       </div>
@@ -374,45 +374,45 @@ function MilestoneRow({
 
   const inDispute = milestone.state === 2
   const rowCls = inDispute
-    ? 'border border-status-warning/40 bg-status-warning/[0.04] rounded-xl p-5 relative'
-    : 'border border-border-subtle bg-background-primary rounded-xl p-5 relative'
+    ? 'border border-warn/40 bg-warn/[0.04] rounded-xl p-5 relative'
+    : 'border border-rule bg-paper rounded-xl p-5 relative'
   return (
     <div className={rowCls}>
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-2 min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`font-mono text-[10px] uppercase tracking-[0.18em] ${inDispute ? 'text-status-warning' : 'text-text-tertiary'}`}>
+            <span className={`font-mono text-[10px] uppercase tracking-[0.18em] ${inDispute ? 'text-warn' : 'text-ink-3'}`}>
               M{milestone.index + 1}
             </span>
-            <h3 className="text-base font-semibold text-text-primary truncate">{title}</h3>
+            <h3 className="text-base font-semibold text-ink truncate">{title}</h3>
             {optimisticBadge && (
-              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-accent/30 bg-accent-muted text-accent">
+              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-clay/30 bg-clay-soft text-clay">
                 {optimisticBadge}
               </span>
             )}
           </div>
 
           {description && (
-            <p className="text-sm text-text-secondary leading-relaxed">{description}</p>
+            <p className="text-sm text-ink-2 leading-relaxed">{description}</p>
           )}
 
-          <div className="font-mono tabular-nums text-xl font-bold text-text-primary mt-1">
+          <div className="font-mono tabular-nums text-xl font-bold text-ink mt-1">
             {formatUSDCNumber(milestone.amount)}
-            <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
+            <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
           </div>
 
           {(deliverySignaled && Number(milestone.deliveredAt) > 0) || Number(milestone.conditionMetTimestamp) > 0 ? (
             <div className="flex flex-wrap gap-4 text-xs mt-1">
               {deliverySignaled && Number(milestone.deliveredAt) > 0 && (
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-text-tertiary text-[10px] uppercase tracking-wider">Delivered</span>
-                  <span className="font-mono tabular-nums text-text-secondary">{formatTimestamp(milestone.deliveredAt)}</span>
+                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
+                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.deliveredAt)}</span>
                 </div>
               )}
               {Number(milestone.conditionMetTimestamp) > 0 && (
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-text-tertiary text-[10px] uppercase tracking-wider">Approved</span>
-                  <span className="font-mono tabular-nums text-text-secondary">{formatTimestamp(milestone.conditionMetTimestamp)}</span>
+                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Approved</span>
+                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.conditionMetTimestamp)}</span>
                 </div>
               )}
             </div>
@@ -444,7 +444,7 @@ function MilestoneRow({
       </div>
 
       {milestone.state === 2 && (
-        <div className="mt-4 pt-4 border-t border-status-warning/30 text-xs uppercase tracking-[0.18em] font-medium text-status-warning">
+        <div className="mt-4 pt-4 border-t border-warn/30 text-xs uppercase tracking-[0.18em] font-medium text-warn">
           In review by the arbiter panel
         </div>
       )}
@@ -466,8 +466,8 @@ function describeMilestone(m, { deliverySignaled, disputeWindowExpired }) {
 function MilestoneStateGlyph({ state }) {
   if (state === 3) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-status-success text-xs font-medium">
-        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-status-success/15 border border-status-success/30">
+      <span className="inline-flex items-center gap-1.5 text-ok text-xs font-medium">
+        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-ok/15 border border-ok/30">
           <svg width="10" height="10" viewBox="0 0 14 14" fill="none" aria-hidden>
             <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -478,8 +478,8 @@ function MilestoneStateGlyph({ state }) {
   }
   if (state === 4) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-text-tertiary text-xs font-medium">
-        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-background-tertiary border border-border-subtle">
+      <span className="inline-flex items-center gap-1.5 text-ink-3 text-xs font-medium">
+        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sunk border border-rule">
           <svg width="10" height="10" viewBox="0 0 14 14" fill="none" aria-hidden>
             <path d="M3 7h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
           </svg>
@@ -489,14 +489,14 @@ function MilestoneStateGlyph({ state }) {
     )
   }
   return (
-    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-border-subtle bg-background-tertiary text-text-secondary tracking-wide">
+    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-rule bg-sunk text-ink-2 tracking-wide">
       {MILESTONE_LABELS[state]}
     </span>
   )
 }
 
 /* ----- Premium milestone action -----
-   Single most relevant action per role/state. Glowing accent for primary
+   Single most relevant action per role/state. Glowing clay for primary
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
 function MilestoneAction({
@@ -550,14 +550,14 @@ function MilestoneAction({
       onClick={run}
       disabled={tx.isBusy}
       className="inline-flex items-center justify-center gap-2 px-4 py-2
-                 bg-accent-blue text-white rounded-xl font-medium text-sm shadow-sm
-                 hover:bg-accent-hover
+                 bg-clay text-paper rounded-xl font-medium text-sm
+                 hover:bg-clay-hover
                  transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
                  disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
-                 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
     >
       {isLoading && (
-        <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" aria-hidden />
+        <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" aria-hidden />
       )}
       {isLoading ? 'Pending…' : action.label}
     </button>
@@ -565,16 +565,16 @@ function MilestoneAction({
 }
 
 /* Live countdown — pulses the digits subtly to feel active without being noisy.
-   Smaller than the amount, monospace, muted accent. */
+   Smaller than the amount, monospace, muted clay. */
 function Countdown({ label, target, tone = 'warning' }) {
-  const toneCls = tone === 'warning' ? 'text-status-warning' : 'text-accent'
-  const dotCls = tone === 'warning' ? 'bg-status-warning' : 'bg-accent'
+  const toneCls = tone === 'warning' ? 'text-warn' : 'text-clay'
+  const dotCls = tone === 'warning' ? 'bg-warn' : 'bg-clay'
   const value = countdown(target).replace(' remaining', '')
   return (
-    <div className="rounded-xl bg-background-tertiary px-3 py-2.5 flex items-center justify-between gap-3 mt-2">
+    <div className="rounded-xl bg-sunk px-3 py-2.5 flex items-center justify-between gap-3 mt-2">
       <div className="flex items-center gap-2">
         <span className={`h-1.5 w-1.5 rounded-full ${dotCls} animate-pulse`} aria-hidden />
-        <span className="text-xs text-text-secondary">{label}</span>
+        <span className="text-xs text-ink-2">{label}</span>
       </div>
       <span className={`font-mono tabular-nums text-sm font-semibold ${toneCls}`}>{value}</span>
     </div>
@@ -602,10 +602,10 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   const freelancerApproved = (role === 'freelancer' && optApproved) || escrow.recipientApproveCancel
 
   return (
-    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-3">
-      <h3 className="text-[11px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Cancel by mutual agreement</h3>
-      <p className="text-xs text-text-secondary leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
-      <div className="flex flex-col gap-2 bg-background-tertiary rounded-xl px-3 py-2.5">
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
+      <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Cancel by mutual agreement</h3>
+      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
+      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
         <ApprovalRow label="Payer" approved={payerApproved} />
         <ApprovalRow label="Freelancer" approved={freelancerApproved} />
       </div>
@@ -623,8 +623,8 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
 function ApprovalRow({ label, approved }) {
   return (
     <div className="flex items-center justify-between text-sm">
-      <span className="text-text-secondary">{label}</span>
-      <span className={`inline-flex items-center gap-1.5 font-medium ${approved ? 'text-status-success' : 'text-text-tertiary'}`}>
+      <span className="text-ink-2">{label}</span>
+      <span className={`inline-flex items-center gap-1.5 font-medium ${approved ? 'text-ok' : 'text-ink-3'}`}>
         {approved && (
           <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
             <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
@@ -672,13 +672,13 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
   }
 
   return (
-    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-4">
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] uppercase tracking-[0.18em] text-text-tertiary font-medium">Receiving address</h3>
+        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Receiving address</h3>
         {!editing && (
           <button
             type="button"
-            className="text-xs text-accent hover:text-accent-hover transition-colors"
+            className="text-xs text-clay hover:text-clay-hover transition-colors"
             onClick={() => { setEditing(true); setSuccessInfo(null); setDomain(currentDomain || ARC_DOMAIN) }}
           >
             Edit
@@ -686,16 +686,16 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
         )}
       </div>
 
-      <div className="flex flex-col gap-2 bg-background-tertiary rounded-xl px-3 py-3">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-text-tertiary">Current</div>
-        {currentAddress ? <AddressInline address={currentAddress} /> : <span className="text-sm text-text-tertiary">—</span>}
-        <div className="text-xs text-text-secondary font-mono">{getDomainName(currentDomain)}</div>
+      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-3">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
+        {currentAddress ? <AddressInline address={currentAddress} /> : <span className="text-sm text-ink-3">—</span>}
+        <div className="text-xs text-ink-2 font-mono">{getDomainName(currentDomain)}</div>
       </div>
 
-      <p className="text-xs text-text-secondary leading-relaxed">Where approved milestone payments get sent. You can update this anytime before the escrow is completed or cancelled.</p>
+      <p className="text-xs text-ink-2 leading-relaxed">Where approved milestone payments get sent. You can update this anytime before the escrow is completed or cancelled.</p>
 
       {successInfo && !editing && (
-        <div className="rounded-xl border border-status-success/40 bg-status-success/10 px-3 py-2.5 text-xs text-status-success flex items-start gap-2">
+        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
             <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -714,7 +714,7 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
             className="flex flex-col gap-3 overflow-hidden"
           >
             <div className="flex flex-col gap-1.5">
-              <label htmlFor={addrId} className="text-xs font-medium text-text-secondary">New address</label>
+              <label htmlFor={addrId} className="text-xs font-medium text-ink-2">New address</label>
               <input
                 id={addrId}
                 className="input-field font-mono text-sm"
@@ -727,7 +727,7 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <label htmlFor={chainId} className="text-xs font-medium text-text-secondary">Receiving chain</label>
+              <label htmlFor={chainId} className="text-xs font-medium text-ink-2">Receiving chain</label>
               <CustomSelect
                 id={chainId}
                 value={Number(domain)}

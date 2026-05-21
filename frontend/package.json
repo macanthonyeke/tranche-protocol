@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "e2e:responsive": "node e2e/responsive.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.0.0",

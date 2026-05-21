@@ -3,81 +3,75 @@
 @tailwind utilities;
 
 /* ============================================================
-   CROSSCHAINESCROW — DESIGN TOKENS
+   CROSSCHAINESCROW — Design tokens (Tranche palette).
+   Restrained, warm paper + terracotta clay accent. No pure
+   black/white; every neutral carries a faint warm hue.
    ============================================================ */
 
 @layer base {
-  /* Neutrals run on a single hue rail (256, leaning toward the accent blue) at
-     low chroma. Pure #fff / #000 are banned: every surface carries a faint
-     trace of the brand so light mode doesn't read sterile and dark mode
-     doesn't read like a generic terminal. */
   :root {
-    /* Surfaces */
-    --bg-primary: oklch(98.5% 0.005 256);
-    --bg-secondary: oklch(99.6% 0.003 256);
-    --bg-tertiary: oklch(96.4% 0.008 256);
+    /* Surfaces — warm tinted paper */
+    --paper:  oklch(97% 0.008 60);
+    --sunk:   oklch(94% 0.012 60);
 
-    /* Text */
-    --text-primary: oklch(22% 0.022 256);
-    --text-secondary: oklch(46% 0.018 256);
-    --text-tertiary: oklch(58% 0.016 256);
+    /* Text — high-contrast ink, never pure black.
+       ink-3 is the universal "deemphasize" rung; held at ~52% L on a 97% L
+       paper to keep helper/eyebrow text above WCAG AA contrast at small
+       sizes. Adjust both halves of the palette together. */
+    --ink:    oklch(22% 0.020 40);
+    --ink-2:  oklch(44% 0.018 40);
+    --ink-3:  oklch(52% 0.016 40);
 
-    /* Borders */
-    --border-subtle: oklch(91% 0.008 256);
-    --border-medium: oklch(82% 0.012 256);
-    --border-focused: oklch(50.6% 0.247 264);
+    /* Rules / borders */
+    --rule:   oklch(88% 0.012 50);
+    --rule-2: oklch(78% 0.018 50);
 
-    /* Accent */
-    --accent-blue: oklch(50.6% 0.247 264);
-    --accent-hover: oklch(43% 0.247 264);
-    --accent-muted: oklch(94.5% 0.04 264);
+    /* Accent — terracotta. The one saturated color in the system. */
+    --clay:        oklch(58% 0.165 38);
+    --clay-hover:  oklch(52% 0.175 38);
+    --clay-soft:   oklch(92% 0.040 38);
 
     /* Status */
-    --status-success: oklch(56% 0.135 162);
-    --status-warning: oklch(63% 0.18 45);
-    --status-error: oklch(58% 0.22 25);
+    --ok:    oklch(50% 0.13  155);
+    --warn:  oklch(68% 0.165 60);
+    --bad:   oklch(54% 0.20  25);
 
-    /* Elevation. Subtle on light, deeper on dark; all run through color-mix so
-       the cast picks up the brand hue rather than reading as flat gray. */
-    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, var(--text-primary) 8%, transparent);
-    --shadow-lift-md: 0 4px 12px color-mix(in oklch, var(--text-primary) 10%, transparent);
-    --shadow-lift-lg: 0 12px 32px color-mix(in oklch, var(--text-primary) 12%, transparent);
-    --shadow-glow-accent: 0 0 16px color-mix(in oklch, var(--accent-blue) 60%, transparent);
+    /* Elevation tuned for the tranche aesthetic — almost flat */
+    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, var(--ink) 6%, transparent);
+    --shadow-lift-md: 0 2px 6px color-mix(in oklch, var(--ink) 7%, transparent);
+    --shadow-lift-lg: 0 6px 18px color-mix(in oklch, var(--ink) 9%, transparent);
+    --shadow-glow-accent: 0 0 14px color-mix(in oklch, var(--clay) 55%, transparent);
 
     color-scheme: light;
   }
 
   .dark {
-    --bg-primary: oklch(14% 0.01 256);
-    --bg-secondary: oklch(17.5% 0.012 256);
-    --bg-tertiary: oklch(22% 0.014 256);
+    --paper:  oklch(15% 0.010 40);
+    --sunk:   oklch(19% 0.012 40);
 
-    --text-primary: oklch(95% 0.005 256);
-    --text-secondary: oklch(70% 0.015 256);
-    --text-tertiary: oklch(54% 0.018 256);
+    --ink:    oklch(94% 0.008 40);
+    --ink-2:  oklch(70% 0.012 40);
+    --ink-3:  oklch(56% 0.014 40);
 
-    --border-subtle: oklch(26% 0.014 256);
-    --border-medium: oklch(34% 0.018 256);
-    --border-focused: oklch(63% 0.22 264);
+    --rule:   oklch(26% 0.014 40);
+    --rule-2: oklch(34% 0.018 40);
 
-    --accent-blue: oklch(63% 0.22 264);
-    --accent-hover: oklch(72% 0.19 264);
-    --accent-muted: oklch(28% 0.08 264);
+    --clay:        oklch(72% 0.155 38);
+    --clay-hover:  oklch(78% 0.140 38);
+    --clay-soft:   oklch(30% 0.080 38);
 
-    --status-success: oklch(70% 0.16 162);
-    --status-warning: oklch(72% 0.18 45);
-    --status-error: oklch(66% 0.22 25);
+    --ok:    oklch(72% 0.13  155);
+    --warn:  oklch(76% 0.165 60);
+    --bad:   oklch(68% 0.20  25);
 
-    /* Dark mode runs the elevation deeper since the ambient surface is darker. */
-    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, black 35%, transparent);
-    --shadow-lift-md: 0 6px 16px color-mix(in oklch, black 45%, transparent);
-    --shadow-lift-lg: 0 16px 40px color-mix(in oklch, black 55%, transparent);
-    --shadow-glow-accent: 0 0 18px color-mix(in oklch, var(--accent-blue) 70%, transparent);
+    --shadow-lift-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
+    --shadow-lift-md: 0 3px 10px color-mix(in oklch, black 38%, transparent);
+    --shadow-lift-lg: 0 10px 28px color-mix(in oklch, black 48%, transparent);
+    --shadow-glow-accent: 0 0 16px color-mix(in oklch, var(--clay) 65%, transparent);
 
     color-scheme: dark;
   }
 
-  /* Respect reduced-motion across all animations and transitions. */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
@@ -93,202 +87,255 @@
     max-width: 100%;
     overflow-x: hidden;
   }
+  html { -webkit-text-size-adjust: 100%; }
 
   body {
-    @apply bg-background-primary text-text-primary font-sans antialiased;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    @apply bg-paper text-ink font-sans antialiased;
+    font-feature-settings: 'ss01', 'cv11';
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   ::selection {
-    background-color: var(--accent-muted);
-    color: var(--text-primary);
+    background-color: var(--clay-soft);
+    color: var(--ink);
   }
 
-  /* Strip native browser styling on form controls.
-     Force tertiary bg so old muddy/brownish system tints can't bleed through. */
-  input[type='text'],
-  input[type='number'],
-  input[type='email'],
-  input[type='url'],
-  input[type='search'],
-  input[type='password'],
-  input:not([type]),
-  textarea,
-  select {
+  /* Form controls: strip native chrome, force the sunk surface so OS
+     tinting never bleeds through on Chromium / WebKit autofill. */
+  input[type='text'], input[type='number'], input[type='email'],
+  input[type='url'], input[type='search'], input[type='password'],
+  input:not([type]), textarea, select {
     -webkit-appearance: none;
     -moz-appearance: none;
     appearance: none;
-    background-color: var(--bg-tertiary);
-    color: var(--text-primary);
+    background-color: var(--sunk);
+    color: var(--ink);
     box-shadow: none;
   }
-
-  /* Kill iOS / macOS auto-fill yellow tint */
   input:-webkit-autofill,
   input:-webkit-autofill:hover,
   input:-webkit-autofill:focus,
   textarea:-webkit-autofill,
   select:-webkit-autofill {
-    -webkit-box-shadow: 0 0 0px 1000px var(--bg-tertiary) inset !important;
-    -webkit-text-fill-color: var(--text-primary) !important;
-    caret-color: var(--text-primary);
+    -webkit-box-shadow: 0 0 0 1000px var(--sunk) inset !important;
+    -webkit-text-fill-color: var(--ink) !important;
+    caret-color: var(--ink);
   }
 
-  /* Scrollbars */
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: var(--border-medium);
+    background: var(--rule-2);
     border-radius: 9999px;
-    border: 2px solid var(--bg-primary);
+    border: 2px solid var(--paper);
   }
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--text-tertiary);
-  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
 }
 
 @layer components {
-  /* ----- Buttons: tactile press, focus ring, soft shadow.
-     Transitions are scoped to the properties that actually change on hover/press
-     so unrelated paints don't get caught in the animation budget. */
-  .btn-primary {
-    @apply inline-flex items-center justify-center bg-accent text-white hover:bg-accent-hover rounded-xl font-medium px-6 py-3
-           shadow-lift-sm
-           transition-[background-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-           active:scale-[0.98]
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
+  /* ---------- Display (Instrument Serif) ----------
+     Used sparingly: landing hero, page-titles, section numerals.
+     Default body and UI stay in Inter; the serif is the brand voice
+     moment, not the workhorse face. */
+  .display {
+    font-family: 'Instrument Serif', ui-serif, Georgia, serif;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    line-height: 1.04;
+  }
+  .display-italic { @apply display; font-style: italic; }
+
+  /* ---------- Section eyebrow ---------- */
+  .eyebrow {
+    @apply text-[10.5px] uppercase font-medium text-ink-3;
+    letter-spacing: 0.18em;
+  }
+
+  /* Form-control label. Eyebrow scale fails legibility for transactional
+     inputs; this rung is mixed-case, larger, and closer-tracked so a screen
+     reader and a low-vision user both get a properly weighted label. */
+  .field-label {
+    @apply text-[12.5px] font-medium text-ink-2;
+    letter-spacing: 0.005em;
+  }
+
+  /* ---------- Buttons (tranche) ---------- */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2
+           font-medium rounded-md px-4 h-10 text-sm
+           transition-[background-color,color,border-color,opacity,transform] duration-200
+           ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.99]
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper
            disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
+  .btn-primary   { @apply btn bg-clay text-paper hover:bg-clay-hover; }
+  .btn-secondary { @apply btn bg-transparent text-ink border border-rule-2 hover:bg-sunk; }
+  .btn-quiet     { @apply btn bg-transparent text-ink-2 hover:text-ink hover:bg-sunk; }
+  .btn-danger    { @apply btn bg-bad text-paper hover:opacity-90; }
+  .btn-lg        { @apply h-12 px-6 text-base; }
 
-  .btn-secondary {
-    @apply inline-flex items-center justify-center bg-background-tertiary text-text-primary hover:bg-border-subtle rounded-xl px-6 py-3 font-medium
-           transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-           active:scale-[0.98]
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
-           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
+  /* ---------- Form inputs ---------- */
+  .input {
+    @apply bg-sunk text-ink placeholder:text-ink-3
+           border border-rule rounded-md w-full
+           h-11 px-3 text-[15px]
+           transition-[border-color,background-color] duration-200
+           ease-[cubic-bezier(0.22,1,0.36,1)]
+           focus:outline-none focus:border-clay focus:bg-paper;
+  }
+  .input-multiline { @apply input h-auto py-2.5 leading-relaxed; }
+
+  /* Native chevron is stripped via appearance:none in the base layer above.
+     Paint a chevron back on selects so they read as dropdowns. Light + dark
+     get their own SVG so the stroke matches --ink-3 in both themes;
+     <select> elements don't reliably support pseudo-elements or mask-image,
+     so a theme-swapped background-image is the robust path. */
+  select.input,
+  select.input-field {
+    padding-right: 2.25rem;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'><path d='M1 1.5 6 6.5 11 1.5' stroke='%23857461' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.85rem center;
+    background-size: 12px 8px;
+  }
+  .dark select.input,
+  .dark select.input-field {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'><path d='M1 1.5 6 6.5 11 1.5' stroke='%23857565' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   }
 
-  .btn-danger {
-    @apply inline-flex items-center justify-center bg-status-error text-white hover:opacity-90 rounded-xl font-medium px-6 py-3
-           shadow-lift-sm
-           transition-[opacity,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-           active:scale-[0.98]
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary
-           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
-  }
-
-  /* ----- Surfaces ----- */
-  .card-surface {
-    @apply bg-background-secondary border border-border-subtle rounded-2xl shadow-lift-sm;
-  }
-
-  /* Interactive card: subtle lift on hover. Only transforms and elevation
-     animate; layout properties stay still. */
-  .card-clickable {
-    @apply card-surface transition-[box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-           hover:shadow-lift-md hover:-translate-y-0.5
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
-  }
-
-  /* ----- Inputs: solid bg, h-12, flat, focus ring ----- */
+  /* Legacy form-input classes that already exist across the codebase.
+     They alias to the new tranche input so we don't have to rewrite
+     every existing field call-site. */
   .input-field {
-    @apply bg-background-tertiary border border-border-subtle text-text-primary placeholder:text-text-tertiary
-           rounded-xl px-4 h-12 w-full appearance-none
-           transition-[border-color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-           focus:outline-none focus:border-border-focused
-           focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary;
+    @apply bg-sunk text-ink placeholder:text-ink-3
+           border border-rule rounded-md w-full
+           h-12 px-3 text-[15px] appearance-none
+           transition-[border-color,background-color] duration-200
+           ease-[cubic-bezier(0.22,1,0.36,1)]
+           focus:outline-none focus:border-clay focus:bg-paper
+           focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper;
+  }
+  .input-field-multiline { @apply input-field h-auto py-3; }
+
+  /* ---------- Rules ----------
+     Sections separated by horizontal rules, not boxed in. */
+  .rule    { @apply border-t border-rule; }
+  .rule-2  { @apply border-t border-rule-2; }
+
+  /* ---------- Surface (used sparingly) ---------- */
+  .panel {
+    @apply bg-paper border border-rule rounded-md;
+  }
+  .panel-sunk {
+    @apply bg-sunk border border-rule rounded-md;
+  }
+  /* Legacy aliases so existing card-surface markup picks up the new
+     editorial paper-on-paper feel. */
+  .card-surface {
+    @apply bg-paper border border-rule rounded-md;
+  }
+  .card-clickable {
+    @apply card-surface transition-[border-color,background-color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+           hover:border-rule-2 hover:bg-sunk
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper;
   }
 
-  /* Textarea variant — same look but auto height */
-  .input-field-multiline {
-    @apply input-field h-auto py-3;
+  /* ---------- Status pill ---------- */
+  .status {
+    @apply inline-flex items-center gap-1.5 px-2 h-6 rounded-sm
+           text-[10.5px] font-medium uppercase tracking-[0.12em]
+           border border-rule-2 text-ink-2 bg-paper;
   }
+  .status::before {
+    content: ''; width: 6px; height: 6px; border-radius: 9999px;
+    background: currentColor; opacity: 0.85;
+  }
+  .status-ok      { @apply status; color: var(--ok); }
+  .status-warn    { @apply status; color: var(--warn); }
+  .status-bad     { @apply status; color: var(--bad); }
+  .status-active  { @apply status; color: var(--clay); }
+  .status-muted   { @apply status; color: var(--ink-3); }
 
   .hash {
-    @apply font-mono text-text-secondary bg-background-tertiary rounded-md px-2 py-1 text-sm;
+    @apply font-mono text-ink-2 bg-sunk rounded-sm px-2 py-1 text-sm;
   }
-
   .label-muted {
-    @apply text-text-secondary text-sm;
+    @apply text-ink-2 text-sm;
   }
 }
 
 @layer utilities {
-  .scrollbar-thin {
-    scrollbar-width: thin;
+  .tabular { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+  .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  .seq {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
   }
 
+  .underline-clay {
+    background-image: linear-gradient(var(--clay), var(--clay));
+    background-position: 0 100%;
+    background-size: 100% 2px;
+    background-repeat: no-repeat;
+    padding-bottom: 0.06em;
+  }
+
+  .scrollbar-thin { scrollbar-width: thin; }
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
-  }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
 
-  /* Tabular numerals — required everywhere USDC amounts render so digits align. */
-  .tabular {
-    font-variant-numeric: tabular-nums;
-    font-feature-settings: 'tnum';
-  }
-
-  /* Skeleton primitive — animate-pulse + tertiary bg + rounded-xl */
   .skeleton {
-    @apply animate-pulse bg-background-tertiary rounded-xl;
+    background: var(--sunk);
+    border-radius: 0.375rem;
+    position: relative; overflow: hidden;
+  }
+  .skeleton::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, var(--rule), transparent);
+    transform: translateX(-100%);
+    animation: tranche-shimmer 1.6s ease-in-out infinite;
+  }
+  @keyframes tranche-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
   }
 
-  /* Slow gradient sweep for loading skeletons. Uses muted tokens so it doesn't
-     flash. Opacity is dialed back in dark mode where the base is darker. */
   .skeleton-shimmer {
     position: relative;
     overflow: hidden;
-    background-color: var(--bg-tertiary);
-    border-radius: 0.75rem;
+    background-color: var(--sunk);
+    border-radius: 0.375rem;
   }
   .skeleton-shimmer::after {
     content: '';
     position: absolute;
     inset: 0;
-    background-image: linear-gradient(
-      90deg,
-      transparent 0%,
-      var(--border-subtle) 50%,
-      transparent 100%
-    );
+    background-image: linear-gradient(90deg, transparent 0%, var(--rule) 50%, transparent 100%);
     transform: translateX(-100%);
     animation: shimmer-sweep 1.8s ease-in-out infinite;
     opacity: 0.7;
   }
-  .dark .skeleton-shimmer::after {
-    opacity: 0.45;
-  }
+  .dark .skeleton-shimmer::after { opacity: 0.45; }
   @keyframes shimmer-sweep {
     0%   { transform: translateX(-100%); }
     100% { transform: translateX(100%); }
   }
 
-  /* Soft fade-in used by success states for a tiny payoff moment. */
   @keyframes tx-success-pop {
-    0%   { opacity: 0; transform: scale(0.6); }
-    60%  { opacity: 1; transform: scale(1.08); }
+    0%   { opacity: 0; transform: scale(0.85); }
     100% { opacity: 1; transform: scale(1); }
   }
-  .tx-success-pop {
-    animation: tx-success-pop 0.45s ease-out both;
-  }
+  .tx-success-pop { animation: tx-success-pop 0.24s cubic-bezier(0.22, 1, 0.36, 1) both; }
   @keyframes tx-success-ring {
     0%   { opacity: 0.6; transform: scale(0.8); }
     100% { opacity: 0;   transform: scale(1.6); }
   }
-  .tx-success-ring {
-    animation: tx-success-ring 0.8s ease-out both;
-  }
+  .tx-success-ring { animation: tx-success-ring 0.8s ease-out both; }
 }

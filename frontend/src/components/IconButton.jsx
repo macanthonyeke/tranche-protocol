@@ -16,20 +16,22 @@ const SIZE = {
 
 const TONE = {
   ghost:
-    'text-text-tertiary hover:text-text-primary hover:bg-background-tertiary',
+    'text-ink-3 hover:text-ink hover:bg-sunk',
   bordered:
-    'border border-border-subtle text-text-secondary hover:text-text-primary hover:bg-background-tertiary',
+    'border border-rule text-ink-2 hover:text-ink hover:bg-sunk',
   danger:
-    'text-status-error hover:bg-status-error/10'
+    'text-bad hover:bg-bad/10',
+  'ghost-danger':
+    'text-ink-3 hover:text-bad hover:bg-sunk'
 }
 
 const BASE =
-  'inline-flex items-center justify-center rounded-xl ' +
+  'inline-flex items-center justify-center rounded-md ' +
   'transition-[color,background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ' +
   'active:scale-[0.96] ' +
   'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent ' +
-  'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue ' +
-  'focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary'
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-clay ' +
+  'focus-visible:ring-offset-2 focus-visible:ring-offset-paper'
 
 const IconButton = forwardRef(function IconButton(
   { as = 'button', label, size = 'md', tone = 'ghost', className = '', children, ...rest },

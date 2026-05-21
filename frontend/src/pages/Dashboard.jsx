@@ -106,7 +106,7 @@ function DashboardInner() {
   return (
     <div className="flex flex-col gap-10 md:gap-14">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight text-text-primary">Dashboard</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-ink">Dashboard</h1>
         <Link to="/create" className="btn-primary text-sm py-2.5 self-start sm:self-auto whitespace-nowrap">
           + New Escrow
         </Link>
@@ -140,21 +140,21 @@ function DashboardInner() {
 
       <section>
         <div className="flex items-center justify-between gap-4">
-          <h2 className="text-2xl font-bold text-text-primary tracking-tight">Your Escrows</h2>
-          <div className="flex items-center gap-2 px-3 py-1 bg-background-tertiary border border-border-subtle rounded-md shrink-0">
-            <span className="w-1.5 h-1.5 bg-status-success rounded-full animate-pulse" />
-            <span className="text-xs font-mono tabular-nums text-text-secondary tracking-widest uppercase whitespace-nowrap">
+          <h2 className="text-2xl font-bold text-ink tracking-tight">Your Escrows</h2>
+          <div className="flex items-center gap-2 px-3 py-1 bg-sunk border border-rule rounded-md shrink-0">
+            <span className="w-1.5 h-1.5 bg-ok rounded-full animate-pulse" />
+            <span className="text-xs font-mono tabular-nums text-ink-2 tracking-widest uppercase whitespace-nowrap">
               {mySummaries.length} Total On-Chain
             </span>
           </div>
         </div>
-        <p className="text-sm text-text-secondary mt-1">Manage your deposits, incoming payments, and refunds.</p>
+        <p className="text-sm text-ink-2 mt-1">Manage your deposits, incoming payments, and refunds.</p>
 
         <div className="w-full mt-10 flex items-center justify-between gap-3 flex-wrap">
           <div
             role="tablist"
             aria-label="Filter escrows"
-            className="inline-flex items-center gap-1 p-1 bg-background-tertiary rounded-xl border border-border-subtle overflow-x-auto scrollbar-hide max-w-full snap-x snap-mandatory"
+            className="inline-flex items-center gap-1 p-1 bg-sunk rounded-xl border border-rule overflow-x-auto scrollbar-hide max-w-full snap-x snap-mandatory"
           >
             {LEDGER_TABS.map((tab) => {
               const isActive = tab.key === activeTab
@@ -168,10 +168,10 @@ function DashboardInner() {
                   className={
                     `inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
                     `transition-[background-color,color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ` +
-                    `focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-tertiary ` +
+                    `focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk ` +
                     (isActive
-                      ? 'text-text-primary bg-background-primary shadow-sm'
-                      : 'text-text-secondary hover:text-text-primary')
+                      ? 'text-ink bg-paper shadow-sm'
+                      : 'text-ink-2 hover:text-ink')
                   }
                 >
                   {tab.label}
@@ -184,14 +184,14 @@ function DashboardInner() {
             onClick={handleRefresh}
             disabled={isRefreshing}
             aria-label="Refresh escrow list"
-            className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+            className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink-2 hover:text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
           >
             <RefreshCwIcon size={14} spinning={isRefreshing} />
             <span className="hidden sm:inline">Refresh</span>
             <span className="sm:hidden sr-only">Refresh</span>
           </button>
         </div>
-        <div className="w-full mt-3 border-b border-border-subtle/50" aria-hidden="true" />
+        <div className="w-full mt-3 border-b border-rule/50" aria-hidden="true" />
 
         {isLoading ? (
           <DashboardSkeleton />
@@ -219,15 +219,15 @@ function DashboardInner() {
             </div>
 
             <nav aria-label="Escrow list pagination" className="mt-10">
-              <div className="h-px w-full bg-border-subtle/60" aria-hidden="true" />
+              <div className="h-px w-full bg-rule/60" aria-hidden="true" />
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pt-6">
                 <span
                   aria-live="polite"
-                  className="font-mono text-xs uppercase tracking-wider text-text-tertiary tabular-nums"
+                  className="font-mono text-xs uppercase tracking-wider text-ink-3 tabular-nums"
                 >
                   Showing{' '}
-                  <span className="text-text-primary tabular-nums">{pageStart + 1}–{pageEnd}</span>{' '}
-                  of <span className="text-text-primary tabular-nums">{filteredEscrows.length}</span> escrows
+                  <span className="text-ink tabular-nums">{pageStart + 1}–{pageEnd}</span>{' '}
+                  of <span className="text-ink tabular-nums">{filteredEscrows.length}</span> escrows
                 </span>
                 <div className="flex items-center gap-2 self-end sm:self-auto">
                   <button
@@ -235,13 +235,13 @@ function DashboardInner() {
                     onClick={() => setPage((p) => Math.max(0, p - 1))}
                     disabled={safePage === 0}
                     aria-label="Previous page"
-                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
                   >
                     <ChevronLeftIcon size={14} />
                     Prev
                   </button>
                   <span
-                    className="px-2 text-text-secondary tabular-nums font-mono text-xs uppercase tracking-wider"
+                    className="px-2 text-ink-2 tabular-nums font-mono text-xs uppercase tracking-wider"
                     aria-current="page"
                   >
                     {safePage + 1} / {totalPages}
@@ -251,7 +251,7 @@ function DashboardInner() {
                     onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
                     disabled={safePage >= totalPages - 1}
                     aria-label="Next page"
-                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-text-primary bg-background-primary border border-border-subtle hover:bg-background-tertiary rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
                   >
                     Next
                     <ChevronRightIcon size={14} />
@@ -284,33 +284,33 @@ function PremiumEscrowCard({ summary }) {
     <Link
       to={`/escrow/${summary.id}`}
       className="group block relative rounded-2xl p-6
-                 bg-background-secondary border border-border-subtle
+                 bg-paper border border-rule
                  transition-[transform,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]
                  hover:-translate-y-0.5 hover:shadow-md
-                 hover:border-border-medium
-                 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                 hover:border-rule-2
+                 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
     >
       <div className="flex justify-between items-start mb-4">
-        <span className="text-sm font-mono tabular-nums text-text-secondary">{inv}</span>
-        <span className="px-2 py-1 text-[11px] font-mono uppercase tracking-wider bg-background-tertiary border border-border-subtle rounded-md text-text-secondary">
+        <span className="text-sm font-mono tabular-nums text-ink-2">{inv}</span>
+        <span className="px-2 py-1 text-[11px] font-mono uppercase tracking-wider bg-sunk border border-rule rounded-md text-ink-2">
           {roleLabel}
         </span>
       </div>
 
-      <div className="text-3xl font-mono font-bold tracking-tight text-text-primary mt-3 tabular-nums">
+      <div className="text-3xl font-mono font-bold tracking-tight text-ink mt-3 tabular-nums">
         {formatUSDCNumber(summary.totalAmount)}{' '}
-        <span className="text-base font-sans font-normal text-text-secondary ml-1">USDC</span>
+        <span className="text-base font-sans font-normal text-ink-2 ml-1">USDC</span>
       </div>
 
-      <div className="h-px w-full bg-border-subtle/70 my-5" />
+      <div className="h-px w-full bg-rule/70 my-5" />
 
       <div className="flex justify-between items-end gap-4">
         <div className="flex flex-col min-w-0">
-          <span className="text-xs font-mono tabular-nums text-text-secondary mb-1.5 block">
+          <span className="text-xs font-mono tabular-nums text-ink-2 mb-1.5 block">
             {releasedCount} / {milestoneCount} Released
           </span>
           <div
-            className="w-full max-w-[120px] h-1.5 bg-background-tertiary rounded-full overflow-hidden mb-1.5"
+            className="w-full max-w-[120px] h-1.5 bg-sunk rounded-full overflow-hidden mb-1.5"
             role="progressbar"
             aria-valuenow={Math.round(progressPct)}
             aria-valuemin={0}
@@ -318,7 +318,7 @@ function PremiumEscrowCard({ summary }) {
             aria-label={`${releasedCount} of ${milestoneCount} milestones released`}
           >
             <div
-              className="h-full w-full bg-accent-blue origin-left transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              className="h-full w-full bg-clay origin-left transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
               style={{ transform: `scaleX(${progressPct / 100})` }}
             />
           </div>
@@ -327,7 +327,7 @@ function PremiumEscrowCard({ summary }) {
               {Array.from({ length: dotCount }).map((_, i) => (
                 <div
                   key={i}
-                  className={`w-1.5 h-1.5 rounded-full ${i < releasedCount ? 'bg-accent-blue' : 'bg-background-tertiary dark:bg-white/10'}`}
+                  className={`w-1.5 h-1.5 rounded-full ${i < releasedCount ? 'bg-clay' : 'bg-sunk dark:bg-ink/10'}`}
                 />
               ))}
             </div>
@@ -343,12 +343,12 @@ function PremiumEscrowCard({ summary }) {
         </span>
       </div>
 
-      <div className="mt-5 pt-4 border-t border-border-subtle/70 flex items-center justify-end">
+      <div className="mt-5 pt-4 border-t border-rule/70 flex items-center justify-end">
         <span
           className="inline-flex items-center gap-1.5 text-xs font-medium font-mono uppercase tracking-wider
-                     px-3 py-1.5 rounded-lg border border-border-subtle text-text-secondary
+                     px-3 py-1.5 rounded-lg border border-rule text-ink-2
                      bg-transparent transition-colors duration-200
-                     group-hover:bg-background-tertiary group-hover:text-text-primary group-hover:border-border-medium"
+                     group-hover:bg-sunk group-hover:text-ink group-hover:border-rule-2"
         >
           View Details
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -365,43 +365,43 @@ function deriveStatus(summary) {
   if (summary.disputedMilestoneCount > 0) {
     return {
       label: 'Disputed',
-      badgeCls: 'bg-status-warning/10 text-status-warning border border-status-warning/20',
-      dotCls: 'bg-status-warning',
+      badgeCls: 'bg-warn/10 text-warn border border-warn/20',
+      dotCls: 'bg-warn',
       pulse: true
     }
   }
   if (summary.state === 1) {
     return {
       label: 'Completed',
-      badgeCls: 'bg-status-success/10 text-status-success border border-status-success/20',
-      dotCls: 'bg-status-success',
+      badgeCls: 'bg-ok/10 text-ok border border-ok/20',
+      dotCls: 'bg-ok',
       pulse: false
     }
   }
   if (summary.state === 2) {
     return {
       label: 'Cancelled',
-      badgeCls: 'bg-background-tertiary text-text-tertiary border border-border-subtle',
-      dotCls: 'bg-text-tertiary',
+      badgeCls: 'bg-sunk text-ink-3 border border-rule',
+      dotCls: 'bg-ink-3',
       pulse: false
     }
   }
   return {
     label: 'Active',
-    badgeCls: 'bg-accent-blue/10 text-accent-blue border border-accent-blue/20',
-    dotCls: 'bg-accent-blue',
+    badgeCls: 'bg-clay/10 text-clay border border-clay/20',
+    dotCls: 'bg-clay',
     pulse: true
   }
 }
 
 function LedgerEmptyState() {
   return (
-    <div className="w-full bg-background-secondary border border-border-subtle rounded-2xl p-16 flex flex-col items-center justify-center">
-      <div className="w-16 h-16 rounded-2xl bg-accent-muted text-accent-blue flex items-center justify-center mb-6">
+    <div className="w-full bg-paper border border-rule rounded-2xl p-16 flex flex-col items-center justify-center">
+      <div className="w-16 h-16 rounded-2xl bg-clay-soft text-clay flex items-center justify-center mb-6">
         <InboxIcon size={24} />
       </div>
-      <h3 className="text-lg font-semibold text-text-primary">No escrows found</h3>
-      <p className="text-sm text-text-secondary mt-2 max-w-sm text-center leading-relaxed">
+      <h3 className="text-lg font-semibold text-ink">No escrows found</h3>
+      <p className="text-sm text-ink-2 mt-2 max-w-sm text-center leading-relaxed">
         You haven't interacted with any contracts yet. Create a new escrow above to secure your first cross-chain payment.
       </p>
     </div>
@@ -444,10 +444,10 @@ function RefreshCwIcon({ size = 14, spinning = false }) {
    Tone shifts the value color when something needs attention. Loading uses a
    width-pegged skeleton so the row doesn't reflow when data arrives. */
 function StatTile({ label, sublabel, children, tone = 'default', loading = false }) {
-  const sublabelCls = tone === 'warning' ? 'text-status-warning' : 'text-text-tertiary'
+  const sublabelCls = tone === 'warning' ? 'text-warn' : 'text-ink-3'
   return (
-    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
-      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-tertiary">
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
+      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
         {label}
       </span>
       <div className="min-h-[2.25rem] flex items-baseline">
@@ -464,15 +464,15 @@ function StatTile({ label, sublabel, children, tone = 'default', loading = false
 
 function UsdcValue({ value }) {
   return (
-    <span className="font-mono tabular-nums text-2xl font-semibold tracking-tight text-text-primary leading-none">
+    <span className="font-mono tabular-nums text-2xl font-semibold tracking-tight text-ink leading-none">
       {formatUSDCNumber(value)}
-      <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
+      <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
     </span>
   )
 }
 
 function CountValue({ value, tone = 'default' }) {
-  const cls = tone === 'warning' ? 'text-status-warning' : 'text-text-primary'
+  const cls = tone === 'warning' ? 'text-warn' : 'text-ink'
   return (
     <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${cls}`}>
       {value}
@@ -489,11 +489,11 @@ function ClaimableTile({ balance, loading }) {
   const inner = (
     <>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-text-tertiary">
+        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
           Claimable Balance
         </span>
         {hasFunds && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.18em] text-accent-blue">
+          <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.18em] text-clay">
             Withdraw
             <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
               <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -505,13 +505,13 @@ function ClaimableTile({ balance, loading }) {
         {loading ? (
           <Skeleton className="h-7 w-24" />
         ) : (
-          <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-accent-blue' : 'text-text-primary'}`}>
+          <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-clay' : 'text-ink'}`}>
             {formatUSDCNumber(balance)}
-            <span className="text-sm font-sans font-medium text-text-secondary ml-1.5">USDC</span>
+            <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
           </span>
         )}
       </div>
-      <span className={`text-xs ${hasFunds ? 'text-accent-blue' : 'text-text-tertiary'}`}>
+      <span className={`text-xs ${hasFunds ? 'text-clay' : 'text-ink-3'}`}>
         {hasFunds ? 'Ready to withdraw' : 'Nothing to claim'}
       </span>
     </>
@@ -522,10 +522,10 @@ function ClaimableTile({ balance, loading }) {
       <Link
         to="/settings"
         aria-label={`Withdraw ${formatUSDC(balance)} USDC from your refund balance`}
-        className="group bg-background-secondary border border-accent-blue/40 rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm
+        className="group bg-paper border border-clay/40 rounded-2xl p-5 flex flex-col gap-2
                    transition-[border-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                   hover:-translate-y-0.5 hover:shadow-lift-md hover:border-accent-blue
-                   focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+                   hover:-translate-y-0.5 hover:shadow-lift-md hover:border-clay
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
       >
         {inner}
       </Link>
@@ -533,7 +533,7 @@ function ClaimableTile({ balance, loading }) {
   }
 
   return (
-    <div className="bg-background-secondary border border-border-subtle rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2">
       {inner}
     </div>
   )
@@ -545,19 +545,19 @@ function DashboardSkeleton() {
       {Array.from({ length: 6 }).map((_, i) => (
         <div
           key={i}
-          className="bg-background-secondary border border-border-subtle rounded-2xl p-6"
+          className="bg-paper border border-rule rounded-2xl p-6"
         >
           <div className="flex justify-between items-start mb-4">
             <Skeleton className="h-4 w-20" />
             <Skeleton className="h-6 w-24 rounded-md" />
           </div>
           <Skeleton className="h-9 w-40 mt-3" />
-          <div className="h-px w-full bg-border-subtle/70 my-5" />
+          <div className="h-px w-full bg-rule/70 my-5" />
           <div className="flex justify-between items-end">
             <Skeleton className="h-4 w-24" />
             <Skeleton className="h-4 w-20" />
           </div>
-          <div className="mt-5 pt-4 border-t border-border-subtle/70 flex justify-end">
+          <div className="mt-5 pt-4 border-t border-rule/70 flex justify-end">
             <Skeleton className="h-7 w-28 rounded-lg" />
           </div>
         </div>

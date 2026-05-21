@@ -25,7 +25,7 @@ function SettingsInner() {
     <div className="max-w-xl mx-auto flex flex-col gap-8 w-full">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-text-secondary text-sm mt-1">Withdraw your refund balance and manage your preferences.</p>
+        <p className="text-ink-2 text-sm mt-1">Withdraw your refund balance and manage your preferences.</p>
       </div>
 
       <RefundSection />
@@ -76,8 +76,8 @@ function RefundSection() {
     <Section title="Refund balance" description="USDC that was returned to you from cancelled or disputed escrows. Withdraw it to any address you control.">
       <div className="flex items-end justify-between gap-3">
         <div>
-          <div className="text-xs text-text-secondary mb-1">Available to withdraw</div>
-          <div className="font-mono text-2xl text-accent">{formatUSDC(balance)}</div>
+          <div className="text-xs text-ink-2 mb-1">Available to withdraw</div>
+          <div className="font-mono text-2xl text-clay">{formatUSDC(balance)}</div>
         </div>
       </div>
 
@@ -142,10 +142,10 @@ function ThemeOption({ active, onClick, label }) {
       role="radio"
       aria-checked={active}
       onClick={onClick}
-      className={`p-4 rounded-xl border text-sm font-medium transition-[background-color,border-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary ${
+      className={`p-4 rounded-xl border text-sm font-medium transition-[background-color,border-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper ${
         active
-          ? 'border-accent-blue bg-accent-muted text-accent'
-          : 'border-border-subtle bg-background-tertiary text-text-secondary hover:bg-border-subtle'
+          ? 'border-clay bg-clay-soft text-clay'
+          : 'border-rule bg-sunk text-ink-2 hover:bg-rule'
       }`}
     >
       {label}
@@ -159,7 +159,7 @@ function AccountSection() {
   return (
     <Section title="Connected wallet" description="The wallet you are currently connected with.">
       <div className="flex items-center justify-between">
-        <span className="text-sm text-text-secondary">Wallet address</span>
+        <span className="text-sm text-ink-2">Wallet address</span>
         <AddressDisplay address={address} full size="sm" />
       </div>
     </Section>
@@ -169,10 +169,10 @@ function AccountSection() {
 /* ---------- Section wrapper ---------- */
 function Section({ title, description, children }) {
   return (
-    <section className="bg-background-secondary p-6 rounded-2xl border border-border-subtle shadow-sm flex flex-col gap-4">
+    <section className="bg-paper p-6 rounded-2xl border border-rule flex flex-col gap-4">
       <header>
         <h2 className="text-lg font-semibold">{title}</h2>
-        {description && <p className="text-sm text-text-secondary mt-1">{description}</p>}
+        {description && <p className="text-sm text-ink-2 mt-1">{description}</p>}
       </header>
       {children}
     </section>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { toast } from 'sonner'
 import ThemeToggle from '../components/ThemeToggle.jsx'
 import WalletButton from '../components/WalletButton.jsx'
@@ -18,30 +18,30 @@ function ContractPill({ address }) {
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(address)
-      toast.success('Contract address copied!')
+      toast.success('Contract address copied')
     } catch {
       toast.error('Copy failed')
     }
   }
   const explorerUrl = `${arcTestnet.blockExplorers.default.url}/address/${address}`
   return (
-    <div className="flex items-center gap-2 bg-background-tertiary border border-border-subtle rounded-full p-1 pl-4">
+    <div className="flex items-center gap-2 bg-sunk border border-rule rounded-full p-1 pl-4">
       <button
         type="button"
         onClick={onCopy}
         title="Copy contract address"
-        className="flex items-center gap-2 hover:text-text-primary text-text-secondary transition-colors cursor-pointer bg-transparent border-0 p-0 font-inherit"
+        className="flex items-center gap-2 hover:text-ink text-ink-2 transition-colors cursor-pointer bg-transparent border-0 p-0 font-sans"
       >
-        <span className="text-[10px] uppercase tracking-wider text-text-tertiary">Contract</span>
-        <span className="font-mono text-xs">{truncateAddr(address)}</span>
+        <span className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Contract</span>
+        <span className="num text-xs">{truncateAddr(address)}</span>
       </button>
-      <span aria-hidden className="w-px h-4 bg-border-subtle mx-1" />
+      <span aria-hidden className="w-px h-4 bg-rule mx-1" />
       <a
         href={explorerUrl}
         target="_blank"
         rel="noopener noreferrer"
         title="View on Arc Explorer"
-        className="group w-8 h-8 flex items-center justify-center rounded-full bg-background-secondary hover:bg-accent-blue/10 hover:text-accent-blue text-text-tertiary transition-[background-color,color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
+        className="group w-8 h-8 flex items-center justify-center rounded-full bg-paper hover:bg-clay-soft hover:text-clay text-ink-3 transition-[background-color,color] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
       >
         <ExternalLinkIcon />
       </a>
@@ -135,44 +135,57 @@ const DESTINATIONS = [
 ]
 
 function HeroVisual() {
+  const reduceMotion = useReducedMotion()
   const [destIndex, setDestIndex] = useState(0)
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setDestIndex((i) => (i + 1) % DESTINATIONS.length)
-    }, 3000)
-    return () => clearInterval(id)
-  }, [])
+    if (reduceMotion) return
+    let id
+    const start = () => {
+      if (id || document.visibilityState !== 'visible') return
+      id = setInterval(() => {
+        setDestIndex((i) => (i + 1) % DESTINATIONS.length)
+      }, 3000)
+    }
+    const stop = () => { if (id) { clearInterval(id); id = undefined } }
+    const onVisibility = () => (document.visibilityState === 'visible' ? start() : stop())
+    start()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [reduceMotion])
 
   const destination = DESTINATIONS[destIndex]
 
   return (
     <motion.div
-      animate={{ y: [-8, 8, -8] }}
-      transition={{ repeat: Infinity, duration: 5, ease: 'easeInOut' }}
-      className="bg-background-secondary border border-border-subtle rounded-2xl p-6 w-full max-w-md mx-auto"
+      animate={reduceMotion ? undefined : { y: [-8, 8, -8] }}
+      transition={reduceMotion ? undefined : { repeat: Infinity, duration: 5, ease: 'easeInOut' }}
+      className="bg-paper border border-rule rounded-md p-6 w-full max-w-md mx-auto"
     >
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-status-success animate-pulse" />
-          <span className="font-mono text-xs text-text-secondary">ESCROW #1042</span>
+          <span className="h-2 w-2 rounded-full bg-ok animate-pulse" />
+          <span className="num text-xs text-ink-2">ESCROW #1042</span>
         </div>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-text-tertiary px-2 py-1 rounded-md bg-background-tertiary border border-border-subtle">
+        <span className="num text-[10px] uppercase tracking-[0.18em] text-ink-3 px-2 py-1 rounded-sm bg-sunk border border-rule">
           Locked
         </span>
       </div>
 
-      <div className="text-xs text-text-secondary uppercase tracking-widest mb-2">Locked amount</div>
+      <div className="eyebrow mb-2">Locked amount</div>
       <div className="mb-6 flex items-baseline">
-        <span className="font-mono text-4xl font-bold text-text-primary">25,000.00</span>
-        <span className="text-xl text-text-secondary font-sans ml-2">USDC</span>
+        <span className="num text-5xl text-ink">25,000.00</span>
+        <span className="display text-xl text-ink-2 font-sans ml-2">USDC</span>
       </div>
 
       {/* Route */}
-      <div className="bg-background-tertiary border border-border-subtle rounded-xl p-5 flex flex-col gap-3 relative overflow-hidden mb-4">
+      <div className="bg-sunk border border-rule rounded-md p-5 flex flex-col gap-3 relative overflow-hidden mb-4">
         <div className="flex items-center justify-between gap-4">
           <div className="flex flex-col">
-            <span className="text-xs text-text-secondary uppercase tracking-wider">From</span>
+            <span className="text-[10px] text-ink-3 uppercase tracking-[0.18em]">From</span>
             <div className="h-7 mt-1 flex items-center gap-2">
               <img
                 src="/icons/arc.svg"
@@ -180,22 +193,24 @@ function HeroVisual() {
                 className="w-5 h-5 object-contain pointer-events-none select-none flex-shrink-0"
                 draggable="false"
               />
-              <span className="font-medium text-text-primary">Arc</span>
+              <span className="font-medium text-ink">Arc</span>
             </div>
           </div>
 
           <div className="flex-1 relative h-7 flex items-center">
-            <div className="bg-gradient-to-r from-transparent via-black/20 dark:via-white/20 to-transparent w-full h-[1px]" />
-            <motion.div
-              initial={{ left: '5%', opacity: 0 }}
-              animate={{ left: ['5%', '50%', '95%'], opacity: [0, 1, 0] }}
-              transition={{ duration: 2, times: [0, 0.5, 1], repeat: Infinity, repeatDelay: 1, ease: 'easeInOut' }}
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 bg-accent-blue rounded-full shadow-glow-accent z-10"
-            />
+            <div className="bg-rule-2 w-full h-[1px]" />
+            {!reduceMotion && (
+              <motion.div
+                initial={{ left: '5%', opacity: 0 }}
+                animate={{ left: ['5%', '50%', '95%'], opacity: [0, 1, 0] }}
+                transition={{ duration: 2, times: [0, 0.5, 1], repeat: Infinity, repeatDelay: 1, ease: 'easeInOut' }}
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2 h-2 bg-clay rounded-full shadow-glow-clay z-10"
+              />
+            )}
           </div>
 
           <div className="flex flex-col items-end">
-            <span className="text-xs text-text-secondary uppercase tracking-wider">To</span>
+            <span className="text-[10px] text-ink-3 uppercase tracking-[0.18em]">To</span>
             <div className="relative h-7 mt-1 min-w-[7rem] flex justify-end items-center">
               <AnimatePresence mode="wait">
                 <motion.div
@@ -212,7 +227,7 @@ function HeroVisual() {
                     className="w-5 h-5 object-contain pointer-events-none select-none flex-shrink-0"
                     draggable="false"
                   />
-                  <span className="font-medium text-text-primary">{destination.name}</span>
+                  <span className="font-medium text-ink">{destination.name}</span>
                 </motion.div>
               </AnimatePresence>
             </div>
@@ -221,22 +236,22 @@ function HeroVisual() {
       </div>
 
       {/* Milestones */}
-      <div className="border-l border-black/10 dark:border-white/10 ml-2 pl-4 flex flex-col gap-3 mt-6">
+      <div className="border-l border-rule ml-2 pl-4 flex flex-col gap-3 mt-6">
         {[
           { label: 'Milestone 1', state: 'Released', tone: 'success' },
           { label: 'Milestone 2', state: 'In review', tone: 'pending' },
           { label: 'Milestone 3', state: 'Pending', tone: 'idle' }
         ].map((m) => (
-          <div key={m.label} className="relative flex items-center justify-between text-sm text-text-secondary">
-            <div className="absolute -left-[21px] top-2 w-2 h-2 rounded-full bg-black/20 dark:bg-white/20" />
+          <div key={m.label} className="relative flex items-center justify-between text-sm text-ink-2">
+            <div className="absolute -left-[21px] top-2 w-2 h-2 rounded-full bg-rule-2" />
             <span>{m.label}</span>
             <span
               className={
                 m.tone === 'success'
-                  ? 'text-status-success font-medium'
+                  ? 'text-ok font-medium'
                   : m.tone === 'pending'
-                  ? 'text-status-warning font-medium'
-                  : 'text-text-tertiary'
+                  ? 'text-warn font-medium'
+                  : 'text-ink-3'
               }
             >
               {m.state}
@@ -252,21 +267,22 @@ function HeroVisual() {
    LIVE PROTOCOL TICKER: infinite auto-scrolling marquee
    ------------------------------------------------------------ */
 function ProtocolTicker() {
-  const loop = [...TICKER_ITEMS, ...TICKER_ITEMS]
+  const reduceMotion = useReducedMotion()
+  const loop = reduceMotion ? TICKER_ITEMS : [...TICKER_ITEMS, ...TICKER_ITEMS]
   return (
-    <section className="bg-background-secondary border-y border-border-subtle py-3 overflow-hidden">
+    <section className="bg-sunk border-y border-rule py-3 overflow-hidden">
       <motion.div
         className="flex gap-10 whitespace-nowrap"
-        animate={{ x: ['0%', '-50%'] }}
-        transition={{ repeat: Infinity, duration: 40, ease: 'linear' }}
+        animate={reduceMotion ? undefined : { x: ['0%', '-50%'] }}
+        transition={reduceMotion ? undefined : { repeat: Infinity, duration: 40, ease: 'linear' }}
       >
         {loop.map((item, i) => (
-          <span key={i} className="font-mono text-sm text-text-secondary flex items-center gap-10">
+          <span key={i} className="num text-sm text-ink-2 flex items-center gap-10">
             <span className="inline-flex items-center gap-2">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent-blue/70" />
+              <span className="h-1.5 w-1.5 rounded-full bg-clay/70" />
               {item}
             </span>
-            <span className="text-text-tertiary">•</span>
+            <span className="text-ink-3">•</span>
           </span>
         ))}
       </motion.div>
@@ -279,118 +295,118 @@ function ProtocolTicker() {
    ------------------------------------------------------------ */
 function CodeEditor() {
   return (
-    <div className="bg-background-primary border border-border-subtle rounded-xl overflow-hidden max-w-4xl mx-auto">
+    <div className="bg-paper border border-rule rounded-md overflow-hidden max-w-4xl mx-auto">
       {/* macOS terminal header */}
-      <div className="h-10 bg-background-secondary border-b border-border-subtle flex items-center px-4 gap-2">
+      <div className="h-10 bg-sunk border-b border-rule flex items-center px-4 gap-2">
         <span className="w-3 h-3 rounded-full bg-[#FF5F56]" />
         <span className="w-3 h-3 rounded-full bg-[#FFBD2E]" />
         <span className="w-3 h-3 rounded-full bg-[#27C93F]" />
-        <span className="ml-4 font-mono text-xs text-text-tertiary">CrossChainEscrow.sol</span>
+        <span className="ml-4 num text-xs text-ink-3">CrossChainEscrow.sol</span>
       </div>
 
       {/* Code body */}
-      <pre className="font-mono text-sm leading-relaxed text-text-primary p-6 overflow-x-auto">
+      <pre className="font-mono text-sm leading-relaxed text-ink p-6 overflow-x-auto">
         <code>
-          <span className="text-text-tertiary">{'// Lock USDC into a milestone-bound, dispute-aware escrow'}</span>
+          <span className="text-ink-3">{'// Lock USDC into a milestone-bound, dispute-aware escrow'}</span>
           {'\n'}
-          <span className="text-accent-blue">function</span>{' '}
-          <span className="text-text-primary">createEscrow</span>
-          <span className="text-text-secondary">(</span>
+          <span className="text-clay">function</span>{' '}
+          <span className="text-ink">createEscrow</span>
+          <span className="text-ink-2">(</span>
           {'\n    '}
-          <span className="text-accent-blue">address</span>{' '}
-          <span className="text-text-primary">freelancer</span>
-          <span className="text-text-secondary">,</span>
+          <span className="text-clay">address</span>{' '}
+          <span className="text-ink">freelancer</span>
+          <span className="text-ink-2">,</span>
           {'\n    '}
-          <span className="text-accent-blue">uint256</span>{' '}
-          <span className="text-text-primary">amount</span>
-          <span className="text-text-secondary">,</span>
+          <span className="text-clay">uint256</span>{' '}
+          <span className="text-ink">amount</span>
+          <span className="text-ink-2">,</span>
           {'\n    '}
-          <span className="text-accent-blue">uint32</span>{' '}
-          <span className="text-text-primary">destinationDomain</span>
-          <span className="text-text-secondary">,</span>
+          <span className="text-clay">uint32</span>{' '}
+          <span className="text-ink">destinationDomain</span>
+          <span className="text-ink-2">,</span>
           {'\n    '}
-          <span className="text-accent-blue">bytes32</span>{' '}
-          <span className="text-text-primary">receivingAddress</span>
-          <span className="text-text-secondary">,</span>
+          <span className="text-clay">bytes32</span>{' '}
+          <span className="text-ink">receivingAddress</span>
+          <span className="text-ink-2">,</span>
           {'\n    '}
-          <span className="text-accent-blue">uint64</span>{' '}
-          <span className="text-text-primary">deadline</span>
-          <span className="text-text-secondary">,</span>
+          <span className="text-clay">uint64</span>{' '}
+          <span className="text-ink">deadline</span>
+          <span className="text-ink-2">,</span>
           {'\n    '}
-          <span className="text-accent-blue">uint256</span>
-          <span className="text-text-secondary">[]</span>{' '}
-          <span className="text-accent-blue">calldata</span>{' '}
-          <span className="text-text-primary">milestoneAmounts</span>
+          <span className="text-clay">uint256</span>
+          <span className="text-ink-2">[]</span>{' '}
+          <span className="text-clay">calldata</span>{' '}
+          <span className="text-ink">milestoneAmounts</span>
           {'\n'}
-          <span className="text-text-secondary">{')'}</span>{' '}
-          <span className="text-accent-blue">external</span>{' '}
-          <span className="text-accent-blue">returns</span>{' '}
-          <span className="text-text-secondary">(</span>
-          <span className="text-accent-blue">uint256</span>{' '}
-          <span className="text-text-primary">escrowId</span>
-          <span className="text-text-secondary">{') {'}</span>
+          <span className="text-ink-2">{')'}</span>{' '}
+          <span className="text-clay">external</span>{' '}
+          <span className="text-clay">returns</span>{' '}
+          <span className="text-ink-2">(</span>
+          <span className="text-clay">uint256</span>{' '}
+          <span className="text-ink">escrowId</span>
+          <span className="text-ink-2">{') {'}</span>
           {'\n    '}
-          <span className="text-text-primary">require</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-text-primary">amount </span>
-          <span className="text-text-secondary">{'>'}</span>
-          <span className="text-status-warning"> 0</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-status-success">"zero amount"</span>
-          <span className="text-text-secondary">);</span>
+          <span className="text-ink">require</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-ink">amount </span>
+          <span className="text-ink-2">{'>'}</span>
+          <span className="text-warn"> 0</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ok">"zero amount"</span>
+          <span className="text-ink-2">);</span>
           {'\n    '}
-          <span className="text-text-primary">require</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-text-primary">deadline </span>
-          <span className="text-text-secondary">{'>'}</span>
-          <span className="text-text-primary"> block</span>
-          <span className="text-text-secondary">.</span>
-          <span className="text-text-primary">timestamp</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-status-success">"past deadline"</span>
-          <span className="text-text-secondary">);</span>
+          <span className="text-ink">require</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-ink">deadline </span>
+          <span className="text-ink-2">{'>'}</span>
+          <span className="text-ink"> block</span>
+          <span className="text-ink-2">.</span>
+          <span className="text-ink">timestamp</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ok">"past deadline"</span>
+          <span className="text-ink-2">);</span>
           {'\n\n    '}
-          <span className="text-text-tertiary">{'// Pull USDC from the payer into the escrow'}</span>
+          <span className="text-ink-3">{'// Pull USDC from the payer into the escrow'}</span>
           {'\n    '}
-          <span className="text-text-primary">USDC</span>
-          <span className="text-text-secondary">.</span>
-          <span className="text-text-primary">safeTransferFrom</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-text-primary">msg</span>
-          <span className="text-text-secondary">.</span>
-          <span className="text-text-primary">sender</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-accent-blue">address</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-accent-blue">this</span>
-          <span className="text-text-secondary">),</span>{' '}
-          <span className="text-text-primary">amount</span>
-          <span className="text-text-secondary">);</span>
+          <span className="text-ink">USDC</span>
+          <span className="text-ink-2">.</span>
+          <span className="text-ink">safeTransferFrom</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-ink">msg</span>
+          <span className="text-ink-2">.</span>
+          <span className="text-ink">sender</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-clay">address</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-clay">this</span>
+          <span className="text-ink-2">),</span>{' '}
+          <span className="text-ink">amount</span>
+          <span className="text-ink-2">);</span>
           {'\n\n    '}
-          <span className="text-text-primary">escrowId </span>
-          <span className="text-text-secondary">=</span>{' '}
-          <span className="text-text-primary">_storeEscrow</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-text-primary">freelancer</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-text-primary">milestoneAmounts</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-text-primary">deadline</span>
-          <span className="text-text-secondary">);</span>
+          <span className="text-ink">escrowId </span>
+          <span className="text-ink-2">=</span>{' '}
+          <span className="text-ink">_storeEscrow</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-ink">freelancer</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ink">milestoneAmounts</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ink">deadline</span>
+          <span className="text-ink-2">);</span>
           {'\n    '}
-          <span className="text-text-primary">emit </span>
-          <span className="text-text-primary">EscrowCreated</span>
-          <span className="text-text-secondary">(</span>
-          <span className="text-text-primary">escrowId</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-text-primary">msg</span>
-          <span className="text-text-secondary">.</span>
-          <span className="text-text-primary">sender</span>
-          <span className="text-text-secondary">,</span>{' '}
-          <span className="text-text-primary">freelancer</span>
-          <span className="text-text-secondary">);</span>
+          <span className="text-ink">emit </span>
+          <span className="text-ink">EscrowCreated</span>
+          <span className="text-ink-2">(</span>
+          <span className="text-ink">escrowId</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ink">msg</span>
+          <span className="text-ink-2">.</span>
+          <span className="text-ink">sender</span>
+          <span className="text-ink-2">,</span>{' '}
+          <span className="text-ink">freelancer</span>
+          <span className="text-ink-2">);</span>
           {'\n'}
-          <span className="text-text-secondary">{'}'}</span>
+          <span className="text-ink-2">{'}'}</span>
         </code>
       </pre>
     </div>
@@ -402,17 +418,17 @@ function CodeEditor() {
    ------------------------------------------------------------ */
 export default function Home() {
   return (
-    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-hidden bg-background-primary text-text-primary transition-colors duration-300">
+    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-hidden bg-paper text-ink transition-colors duration-300">
       {/* Marketing top nav */}
-      <header className="h-16 border-b border-border-subtle relative z-10">
+      <header className="h-16 border-b border-rule relative z-10">
         <div className="max-w-content mx-auto h-full flex items-center justify-between px-4 md:px-8">
-          <Link to="/" className="flex items-center gap-2">
-            <span className="inline-flex items-center justify-center h-8 w-8 rounded-lg bg-accent text-white font-semibold">C</span>
-            <span className="font-semibold tracking-tight">CrossChainEscrow</span>
+          <Link to="/" className="flex items-center gap-2" aria-label="CrossChainEscrow home">
+            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold">C</span>
+            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">CrossChainEscrow</span>
           </Link>
           <div className="flex items-center gap-2">
             <ThemeToggle />
-            <Link to="/dashboard" className="hidden sm:inline-flex btn-secondary text-sm px-4 py-2">Open app</Link>
+            <Link to="/dashboard" className="hidden sm:inline-flex btn-secondary text-sm">Open app</Link>
             <WalletButton />
           </div>
         </div>
@@ -428,26 +444,21 @@ export default function Home() {
             transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
             className="flex flex-col items-start text-left"
           >
-            <span className="inline-flex items-center gap-2 rounded-full border border-border-subtle bg-background-secondary px-3 py-1 text-xs text-text-secondary mb-6">
-              <span className="h-1.5 w-1.5 rounded-full bg-status-success" />
+            <span className="inline-flex items-center gap-2 rounded-full border border-rule bg-paper px-3 py-1 text-xs text-ink-2 mb-6">
+              <span className="h-1.5 w-1.5 rounded-full bg-ok" />
               Live on Arc Testnet
             </span>
-            <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight text-text-primary">
-              USDC escrow that enforces the agreement.
+            <h1 className="display text-4xl sm:text-5xl md:text-6xl lg:text-7xl leading-[1.02] text-ink">
+              USDC escrow that <span className="underline-clay">enforces</span> the agreement.
             </h1>
-            <p className="mt-6 max-w-xl text-lg md:text-xl text-text-secondary">
+            <p className="mt-6 max-w-xl text-lg md:text-xl text-ink-2 leading-relaxed">
               Lock funds into milestones. The contract holds them until work is approved, a dispute is resolved, or both sides agree to cancel. No trust required on either side.
             </p>
             <div className="mt-10 flex flex-col sm:flex-row gap-3">
-              <Link
-                to="/create"
-                className="inline-flex items-center justify-center rounded-xl px-6 py-3 font-medium bg-accent-blue text-white shadow-lift-md hover:shadow-lift-lg hover:-translate-y-0.5 transition-[box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-primary"
-              >
-                Create an Escrow
-              </Link>
-              <Link to="/dashboard" className="btn-secondary">View Dashboard</Link>
+              <Link to="/create" className="btn-primary btn-lg">Create an Escrow</Link>
+              <Link to="/dashboard" className="btn-secondary btn-lg">View Dashboard</Link>
             </div>
-            <p className="mt-8 font-mono text-xs text-text-tertiary">
+            <p className="mt-8 num text-xs text-ink-3">
               Live on Arc Testnet · Powered by Circle CCTP V2
             </p>
           </motion.div>
@@ -470,8 +481,8 @@ export default function Home() {
       {/* Developer flex */}
       <section className="max-w-content mx-auto w-full px-4 md:px-8 py-24">
         <div className="text-center mb-12">
-          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">Built so neither side has to trust the other</h2>
-          <p className="mt-3 text-text-secondary max-w-2xl mx-auto">
+          <h2 className="display text-4xl md:text-5xl text-ink">Built so neither side has to trust the other</h2>
+          <p className="mt-3 text-ink-2 max-w-2xl mx-auto leading-relaxed">
             Every escrow is a single on-chain record. Milestone amounts, deadlines, and dispute rules are set at the start and cannot be changed mid-way.
           </p>
         </div>
@@ -485,26 +496,24 @@ export default function Home() {
           rhythm survives the breakpoint. */}
       <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
         <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
-          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight">How it works</h2>
-          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-tertiary">
-            Three on-chain steps
-          </span>
+          <h2 className="display text-4xl md:text-5xl text-ink">How it works</h2>
+          <span className="eyebrow">Three on-chain steps</span>
         </div>
         <ol className="grid grid-cols-1 md:grid-cols-3 gap-y-10 md:gap-x-10">
           {STEPS.map((s, i) => (
             <li key={s.n} className="relative flex flex-col gap-3">
               <div className="flex items-center gap-4">
-                <span className="font-mono text-text-primary text-5xl md:text-6xl font-semibold tabular-nums tracking-tight leading-none">
+                <span className="display text-ink text-6xl md:text-7xl leading-none">
                   {s.n}
                 </span>
                 {/* Hairline connector to the next step. Hidden on the last item
                     and on mobile (the stepper collapses to a vertical stack). */}
                 {i < STEPS.length - 1 && (
-                  <span aria-hidden className="hidden md:flex flex-1 h-px bg-border-subtle" />
+                  <span aria-hidden className="hidden md:flex flex-1 h-px bg-rule" />
                 )}
               </div>
-              <h3 className="text-lg font-semibold text-text-primary">{s.title}</h3>
-              <p className="text-sm text-text-secondary leading-relaxed max-w-prose">{s.text}</p>
+              <h3 className="text-lg font-medium text-ink">{s.title}</h3>
+              <p className="text-sm text-ink-2 leading-relaxed max-w-prose">{s.text}</p>
             </li>
           ))}
         </ol>
@@ -517,10 +526,8 @@ export default function Home() {
           hierarchy. */}
       <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
         <div className="flex flex-col gap-3 mb-12 md:mb-16">
-          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-accent-blue">
-            Built for Arc
-          </span>
-          <h2 className="text-3xl md:text-4xl font-semibold tracking-tight max-w-2xl">
+          <span className="eyebrow text-clay">Built for Arc</span>
+          <h2 className="display text-4xl md:text-5xl text-ink max-w-2xl">
             Built for how Arc is designed to work
           </h2>
         </div>
@@ -528,15 +535,15 @@ export default function Home() {
         {/* Lead feature: no card wrapper, hero-scale headline, generous air. */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-6 md:gap-10 items-start mb-16 md:mb-20">
           <div className="md:col-span-1 flex md:justify-center">
-            <div className="w-14 h-14 flex items-center justify-center rounded-xl bg-accent-muted text-accent-blue">
+            <div className="w-14 h-14 flex items-center justify-center rounded-md bg-clay-soft text-clay">
               <LEAD_FEATURE.Icon />
             </div>
           </div>
           <div className="md:col-span-11 md:pl-2">
-            <h3 className="text-2xl md:text-3xl lg:text-[2.5rem] font-semibold text-text-primary leading-tight tracking-tight max-w-3xl">
+            <h3 className="display text-3xl md:text-4xl lg:text-[2.75rem] text-ink leading-tight max-w-3xl">
               {LEAD_FEATURE.title}
             </h3>
-            <p className="mt-4 text-base md:text-lg text-text-secondary leading-relaxed max-w-2xl">
+            <p className="mt-4 text-base md:text-lg text-ink-2 leading-relaxed max-w-2xl">
               {LEAD_FEATURE.text}
             </p>
           </div>
@@ -544,18 +551,18 @@ export default function Home() {
 
         {/* Supporting features: typographic two-column list, rows separated by
             hairlines instead of card chrome. */}
-        <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-12 md:gap-x-16 border-t border-border-subtle">
+        <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-12 md:gap-x-16 border-t border-rule">
           {FEATURES.map(({ title, text, Icon }) => (
             <li
               key={title}
-              className="flex gap-4 py-7 border-b border-border-subtle md:[&:nth-last-child(2):nth-child(odd)]:border-b-0"
+              className="flex gap-4 py-7 border-b border-rule md:[&:nth-last-child(2):nth-child(odd)]:border-b-0"
             >
-              <span className="shrink-0 mt-1 text-accent-blue">
+              <span className="shrink-0 mt-1 text-clay">
                 <Icon />
               </span>
               <div className="flex flex-col gap-2 min-w-0">
-                <h4 className="text-base font-semibold text-text-primary">{title}</h4>
-                <p className="text-sm text-text-secondary leading-relaxed">{text}</p>
+                <h4 className="text-base font-medium text-ink">{title}</h4>
+                <p className="text-sm text-ink-2 leading-relaxed">{text}</p>
               </div>
             </li>
           ))}
@@ -564,15 +571,15 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="mt-auto">
-        <div className="h-px w-full bg-gradient-to-r from-transparent via-border-medium to-transparent opacity-50" />
+        <div className="rule" />
         <div className="max-w-content mx-auto px-4 md:px-8 py-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <ContractPill address={CONTRACT_ADDRESS} />
           <div className="flex gap-6">
-            <Link to="/dashboard" className="text-sm text-text-secondary font-medium hover:text-text-primary transition-colors">Dashboard</Link>
-            <Link to="/create" className="text-sm text-text-secondary font-medium hover:text-text-primary transition-colors">Create</Link>
-            <Link to="/settings" className="text-sm text-text-secondary font-medium hover:text-text-primary transition-colors">Settings</Link>
+            <Link to="/dashboard" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Dashboard</Link>
+            <Link to="/create" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Create</Link>
+            <Link to="/settings" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Settings</Link>
           </div>
-          <div className="text-sm text-text-tertiary">© CrossChainEscrow</div>
+          <div className="text-sm text-ink-3">© CrossChainEscrow</div>
         </div>
       </footer>
     </div>

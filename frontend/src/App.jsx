@@ -1,24 +1,42 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, useLocation } from 'react-router-dom'
 import { AnimatePresence } from 'framer-motion'
 
 import AppShell from './components/AppShell.jsx'
 import ToastViewport from './components/Toast.jsx'
 import PageTransition from './components/PageTransition.jsx'
+import Skeleton from './components/Skeleton.jsx'
 
+// Landing is the first-paint surface for unauthenticated visitors and
+// should ship in the entry chunk. Everything behind the app shell is
+// authenticated/role-gated and can stream in on navigation.
 import Home from './pages/Home.jsx'
-import CreateEscrow from './pages/CreateEscrow.jsx'
-import Dashboard from './pages/Dashboard.jsx'
-import EscrowDetail from './pages/EscrowDetail.jsx'
-import Settings from './pages/Settings.jsx'
-import Ledger from './pages/Ledger.jsx'
-import ArbiterPanel from './pages/ArbiterPanel.jsx'
-import ProtocolSettings from './pages/ProtocolSettings.jsx'
-import NotFound from './pages/NotFound.jsx'
+
+const CreateEscrow     = lazy(() => import('./pages/CreateEscrow.jsx'))
+const Dashboard        = lazy(() => import('./pages/Dashboard.jsx'))
+const EscrowDetail     = lazy(() => import('./pages/EscrowDetail.jsx'))
+const Settings         = lazy(() => import('./pages/Settings.jsx'))
+const Ledger           = lazy(() => import('./pages/Ledger.jsx'))
+const ArbiterPanel     = lazy(() => import('./pages/ArbiterPanel.jsx'))
+const ProtocolSettings = lazy(() => import('./pages/ProtocolSettings.jsx'))
+const NotFound         = lazy(() => import('./pages/NotFound.jsx'))
+
+function RouteFallback() {
+  return (
+    <div className="flex flex-col gap-3 pt-12">
+      <Skeleton className="h-10 w-2/3" />
+      <Skeleton className="h-4 w-1/2" />
+      <Skeleton className="h-48 w-full" />
+    </div>
+  )
+}
 
 function Shelled({ children, maxWidth }) {
   return (
     <AppShell maxWidth={maxWidth}>
-      <PageTransition>{children}</PageTransition>
+      <PageTransition>
+        <Suspense fallback={<RouteFallback />}>{children}</Suspense>
+      </PageTransition>
     </AppShell>
   )
 }

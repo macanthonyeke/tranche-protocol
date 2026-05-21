@@ -3,17 +3,17 @@ import { MILESTONE_LABELS, ESCROW_LABELS } from '../utils/format'
 const BASE = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium border'
 
 const MILESTONE_STYLE = {
-  0: 'bg-background-tertiary text-text-secondary border-border-subtle',
-  1: 'bg-accent-muted text-accent border-accent/30',
-  2: 'bg-status-warning/10 text-status-warning border-status-warning/30',
-  3: 'bg-status-success/10 text-status-success border-status-success/30',
-  4: 'bg-background-tertiary text-text-tertiary border-border-subtle'
+  0: 'bg-sunk text-ink-2 border-rule',
+  1: 'bg-clay-soft text-clay border-clay/30',
+  2: 'bg-warn/10 text-warn border-warn/30',
+  3: 'bg-ok/10 text-ok border-ok/30',
+  4: 'bg-sunk text-ink-3 border-rule'
 }
 
 const ESCROW_STYLE = {
-  0: 'bg-accent-muted text-accent border-accent/30',
-  1: 'bg-status-success/10 text-status-success border-status-success/30',
-  2: 'bg-background-tertiary text-text-tertiary border-border-subtle'
+  0: 'bg-clay-soft text-clay border-clay/30',
+  1: 'bg-ok/10 text-ok border-ok/30',
+  2: 'bg-sunk text-ink-3 border-rule'
 }
 
 export function MilestoneBadge({ state }) {
@@ -28,8 +28,8 @@ export function EscrowBadge({ state }) {
 
 export function RoleBadge({ role }) {
   if (role === 'payer')
-    return <span className={`${BASE} bg-background-tertiary text-text-secondary border-border-subtle`}>You're Paying</span>
+    return <span className={`${BASE} bg-sunk text-ink-2 border-rule`}>You're Paying</span>
   if (role === 'freelancer')
-    return <span className={`${BASE} bg-background-tertiary text-text-secondary border-border-subtle`}>You're Receiving</span>
+    return <span className={`${BASE} bg-sunk text-ink-2 border-rule`}>You're Receiving</span>
   return null
 }

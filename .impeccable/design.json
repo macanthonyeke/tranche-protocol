@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-20T00:00:00Z",
+  "title": "Design System: CrossChainEscrow",
+  "extensions": {
+    "colorMeta": {
+      "paper":       { "role": "neutral", "displayName": "Warm Paper Cream",  "canonical": "oklch(97% 0.008 60)", "tonalRamp": ["oklch(97% 0.008 60)","oklch(94% 0.012 60)","oklch(88% 0.012 50)","oklch(78% 0.018 50)","oklch(60% 0.018 40)","oklch(44% 0.018 40)","oklch(30% 0.020 40)","oklch(22% 0.020 40)"] },
+      "sunk":        { "role": "neutral", "displayName": "Sunken Bone",       "canonical": "oklch(94% 0.012 60)" },
+      "ink":         { "role": "neutral", "displayName": "Deep Ink",          "canonical": "oklch(22% 0.020 40)" },
+      "ink-2":       { "role": "neutral", "displayName": "Mid Ink",           "canonical": "oklch(44% 0.018 40)" },
+      "ink-3":       { "role": "neutral", "displayName": "Faint Ink",         "canonical": "oklch(52% 0.016 40)" },
+      "rule":        { "role": "neutral", "displayName": "Rule Hairline",     "canonical": "oklch(88% 0.012 50)" },
+      "rule-2":      { "role": "neutral", "displayName": "Rule Hairline 2",   "canonical": "oklch(78% 0.018 50)" },
+      "clay":        { "role": "primary", "displayName": "Terracotta Clay",   "canonical": "oklch(58% 0.165 38)", "tonalRamp": ["oklch(22% 0.090 38)","oklch(34% 0.130 38)","oklch(46% 0.160 38)","oklch(52% 0.175 38)","oklch(58% 0.165 38)","oklch(72% 0.155 38)","oklch(85% 0.080 38)","oklch(92% 0.040 38)"] },
+      "clay-hover":  { "role": "primary", "displayName": "Terracotta Deep",   "canonical": "oklch(52% 0.175 38)" },
+      "clay-soft":   { "role": "primary", "displayName": "Clay Wash",         "canonical": "oklch(92% 0.040 38)" },
+      "ok":          { "role": "status",  "displayName": "Verdant Approval",  "canonical": "oklch(50% 0.13 155)" },
+      "warn":        { "role": "status",  "displayName": "Cautionary Amber",  "canonical": "oklch(68% 0.165 60)" },
+      "bad":         { "role": "status",  "displayName": "Signal Red",        "canonical": "oklch(54% 0.20 25)" }
+    },
+    "typographyMeta": {
+      "display":  { "displayName": "Display",  "purpose": "Hero headlines, page titles, modal titles, section numerals. Instrument Serif. Sparse." },
+      "headline": { "displayName": "Headline", "purpose": "Operator-workspace section heads (Protocol Settings, Arbiter resolutions)." },
+      "title":    { "displayName": "Title",    "purpose": "Step titles, primary list-item labels. Inter, not serif." },
+      "body":     { "displayName": "Body",     "purpose": "All prose, helpers, descriptions. Capped 65–75ch." },
+      "label":    { "displayName": "Label",    "purpose": "Form-control labels via .field-label (mixed-case, not uppercase)." },
+      "eyebrow":  { "displayName": "Eyebrow",  "purpose": "Section eyebrows and ledger-row labels. Never on form inputs." },
+      "mono":     { "displayName": "Mono",     "purpose": "All figures, addresses, hashes, escrow IDs. Tabular numerals." }
+    },
+    "shadows": [
+      { "name": "lift-sm",     "value": "0 1px 2px color-mix(in oklch, var(--ink) 6%, transparent)",  "purpose": "Sticky-nav under-shadow on scroll if needed; rarely used." },
+      { "name": "lift-md",     "value": "0 2px 6px color-mix(in oklch, var(--ink) 7%, transparent)",  "purpose": "Hover lift on interactive cards; not a default." },
+      { "name": "lift-lg",     "value": "0 6px 18px color-mix(in oklch, var(--ink) 9%, transparent)", "purpose": "Modal dialog panels; the only obvious depth." },
+      { "name": "glow-accent", "value": "0 0 14px color-mix(in oklch, var(--clay) 55%, transparent)", "purpose": "Single use — the animated route-ball on the landing hero. Never on text or controls." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Ease-out-quart. Default for every state and layout transition." },
+      { "name": "duration-fast", "value": "180ms",                         "purpose": "Hover, focus, color transitions." },
+      { "name": "duration-base", "value": "220ms",                         "purpose": "Modal open, page transitions, step transitions." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" },
+      { "name": "xl", "value": "1280px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The primary action. Used once per primary action context. Terracotta Clay fill, never gradient.",
+      "html": "<button class=\"ds-btn-primary\">Create an Escrow</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; padding: 0 1rem; font: 500 0.875rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(97% 0.008 60); background: oklch(58% 0.165 38); border: 0; border-radius: 0.5rem; cursor: pointer; transition: background-color 200ms cubic-bezier(0.22,1,0.36,1), transform 200ms cubic-bezier(0.22,1,0.36,1); } .ds-btn-primary:hover { background: oklch(52% 0.175 38); } .ds-btn-primary:focus-visible { outline: 0; box-shadow: 0 0 0 2px oklch(97% 0.008 60), 0 0 0 4px oklch(58% 0.165 38); } .ds-btn-primary:active { transform: scale(0.99); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "The quiet counterpart. Transparent with hairline border. Hovers into Sunken Bone fill.",
+      "html": "<button class=\"ds-btn-secondary\">View Dashboard</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 2.5rem; padding: 0 1rem; font: 500 0.875rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(22% 0.020 40); background: transparent; border: 1px solid oklch(78% 0.018 50); border-radius: 0.5rem; cursor: pointer; transition: background-color 200ms cubic-bezier(0.22,1,0.36,1); } .ds-btn-secondary:hover { background: oklch(94% 0.012 60); } .ds-btn-secondary:focus-visible { outline: 0; box-shadow: 0 0 0 2px oklch(97% 0.008 60), 0 0 0 4px oklch(58% 0.165 38); }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Sunken Bone fill, hairline border. On focus, border switches to Clay and fill swaps to Paper. Native chrome stripped.",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"0x…\" />",
+      "css": ".ds-input { width: 100%; height: 2.75rem; padding: 0 0.75rem; font: 400 0.9375rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(22% 0.020 40); background: oklch(94% 0.012 60); border: 1px solid oklch(88% 0.012 50); border-radius: 0.5rem; -webkit-appearance: none; appearance: none; transition: border-color 200ms cubic-bezier(0.22,1,0.36,1), background-color 200ms cubic-bezier(0.22,1,0.36,1); } .ds-input::placeholder { color: oklch(52% 0.016 40); } .ds-input:focus { outline: 0; border-color: oklch(58% 0.165 38); background: oklch(97% 0.008 60); }"
+    },
+    {
+      "name": "Select",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Same chassis as the text input. Native chevron is stripped, then a token-tinted SVG chevron is painted in the right gutter — the chevron is mandatory.",
+      "html": "<select class=\"ds-select\"><option>Arc Testnet</option><option>Arbitrum</option><option>Base</option></select>",
+      "css": ".ds-select { width: 100%; height: 2.75rem; padding: 0 2.25rem 0 0.75rem; font: 400 0.9375rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(22% 0.020 40); background-color: oklch(94% 0.012 60); background-image: url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'><path d='M1 1.5 6 6.5 11 1.5' stroke='%23737373' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/></svg>\"); background-repeat: no-repeat; background-position: right 0.85rem center; background-size: 12px 8px; border: 1px solid oklch(88% 0.012 50); border-radius: 0.5rem; -webkit-appearance: none; appearance: none; transition: border-color 200ms cubic-bezier(0.22,1,0.36,1); } .ds-select:focus { outline: 0; border-color: oklch(58% 0.165 38); background-color: oklch(97% 0.008 60); }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "Always carries a leading dot in the state color and a text label. Color never carries meaning alone.",
+      "html": "<span class=\"ds-pill ds-pill-ok\"><span class=\"ds-pill-dot\"></span>Released</span>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; gap: 0.375rem; height: 1.5rem; padding: 0 0.5rem; font: 500 0.65625rem/1 Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; color: oklch(44% 0.018 40); background: oklch(97% 0.008 60); border: 1px solid oklch(78% 0.018 50); border-radius: 0.25rem; } .ds-pill-dot { width: 6px; height: 6px; border-radius: 9999px; background: currentColor; opacity: 0.85; } .ds-pill-ok { color: oklch(50% 0.13 155); } .ds-pill-bad { color: oklch(54% 0.20 25); } .ds-pill-active { color: oklch(58% 0.165 38); }"
+    },
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Paper fill, hairline Rule border, 0.5rem radius. Flat at rest. Reach for this only when content needs containment — most regions are hairline-separated instead.",
+      "html": "<div class=\"ds-panel\"><div class=\"ds-eyebrow\">Escrow ledger</div><div class=\"ds-panel-row\"><span>Payer</span><span class=\"ds-num\">0xab12…ef34</span></div><div class=\"ds-panel-row\"><span>Amount</span><span class=\"ds-num\">25,000.00 USDC</span></div></div>",
+      "css": ".ds-panel { background: oklch(97% 0.008 60); border: 1px solid oklch(88% 0.012 50); border-radius: 0.5rem; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; } .ds-eyebrow { font: 500 0.65625rem/1 Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.18em; text-transform: uppercase; color: oklch(52% 0.016 40); } .ds-panel-row { display: flex; align-items: baseline; justify-content: space-between; font: 400 0.875rem/1.4 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(44% 0.018 40); } .ds-num { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; color: oklch(22% 0.020 40); }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "panel",
+      "description": "Sticky, 4rem tall, Paper-with-85%-opacity backdrop with 4px blur. Wordmark left, links center, utility right. Active link is Deep Ink, inactive is Mid Ink.",
+      "html": "<header class=\"ds-nav\"><a class=\"ds-nav-brand\" href=\"#\">CrossChainEscrow</a><nav class=\"ds-nav-links\"><a class=\"ds-nav-link ds-nav-link-active\" href=\"#\">Dashboard</a><a class=\"ds-nav-link\" href=\"#\">Create</a><a class=\"ds-nav-link\" href=\"#\">History</a></nav><div class=\"ds-nav-utility\"><button class=\"ds-btn-secondary\">Connect Wallet</button></div></header>",
+      "css": ".ds-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; height: 4rem; padding: 0 3rem; background: color-mix(in oklch, oklch(97% 0.008 60) 85%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-bottom: 1px solid oklch(88% 0.012 50); } .ds-nav-brand { font: 400 1.5rem/1 'Instrument Serif', ui-serif, Georgia, serif; letter-spacing: -0.045em; color: oklch(22% 0.020 40); text-decoration: none; } .ds-nav-links { display: flex; gap: 1.75rem; } .ds-nav-link { font: 500 0.875rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(44% 0.018 40); text-decoration: none; transition: color 200ms cubic-bezier(0.22,1,0.36,1); } .ds-nav-link:hover { color: oklch(22% 0.020 40); } .ds-nav-link-active { color: oklch(22% 0.020 40); } .ds-nav-utility { display: flex; align-items: center; gap: 0.5rem; }"
+    },
+    {
+      "name": "Page Header",
+      "kind": "custom",
+      "refersTo": "panel",
+      "description": "Editorial page header: tracked uppercase eyebrow, Instrument Serif title, optional body kicker. No card chrome, no shadow. Sets the voice of every operator workspace.",
+      "html": "<header class=\"ds-page-header\"><p class=\"ds-eyebrow\">Create a new escrow</p><h1 class=\"ds-page-title\">Lock funds into milestones.</h1><p class=\"ds-page-kicker\">The ledger on the right is what the contract sees. Fill in the form on the left and watch it build.</p></header>",
+      "css": ".ds-page-header { display: flex; flex-direction: column; gap: 0.5rem; max-width: 68ch; padding: 2.5rem 0 2rem; } .ds-eyebrow { font: 500 0.65625rem/1 Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.18em; text-transform: uppercase; color: oklch(52% 0.016 40); margin: 0; } .ds-page-title { font: 400 3.5rem/1.02 'Instrument Serif', ui-serif, Georgia, serif; letter-spacing: -0.02em; color: oklch(22% 0.020 40); margin: 0; } .ds-page-kicker { font: 400 0.9375rem/1.55 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(44% 0.018 40); margin: 0; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Ledger Sheet",
+    "overview": "CrossChainEscrow reads like a primary-source financial document, not a SaaS app. Warm paper, decisive serif headlines, monospaced figures in tabular columns, hairline rules separating sections instead of card chrome. The system shows the mechanism of the escrow — milestone state, dispute windows, CCTP path, protocol fees — in the same way a printed ledger or a type specimen shows its own structure: composed, legible, nothing decorative. The product is on-chain financial infrastructure for two parties moving real USDC. Confidence is the conversion. The visual register has to earn that confidence on first paint, then sustain it across every operator surface.",
+    "keyCharacteristics": [
+      "Warm paper canvas (oklch(97% 0.008 60)), never pure white. Dark mode is a tinted near-black, never #000.",
+      "One committed accent — terracotta clay (oklch(58% 0.165 38)) — used sparingly, never as gradient or glow.",
+      "Editorial type pairing: Instrument Serif display + Inter body + JetBrains Mono for figures.",
+      "Flat by default. Borders and hairlines do the work shadows usually do.",
+      "Mechanism on display: states, windows, fees, paths shown as data, not hidden behind progress bars."
+    ],
+    "rules": [
+      { "name": "The Tinted-Neutral Rule", "section": "colors",     "body": "No pure black, no pure white, ever. Every neutral carries chroma between 0.008 and 0.018 in the 40-hue family. #000 and #fff are bugs in the design tokens, not options." },
+      { "name": "The One Accent Rule",     "section": "colors",     "body": "Terracotta Clay is the only saturated color. Status colors appear in narrow contexts and never compete with Clay for emphasis. Stacking accents is forbidden." },
+      { "name": "The Independent Theme Rule", "section": "colors",  "body": "Light and dark mode are separately tuned palettes, not lightness inversions." },
+      { "name": "The Sparse Serif Rule",   "section": "typography", "body": "Instrument Serif appears only at hero headlines, page titles, modal titles, and section numerals. Body, UI, helper text, and form labels are always Inter." },
+      { "name": "The Tabular Figures Rule", "section": "typography","body": "Any number that could ever sit in a column is rendered with font-variant-numeric: tabular-nums. Proportional figures in tables are a bug." },
+      { "name": "The No Gradient Text Rule", "section": "typography","body": "Headlines never use background-clip: text. Emphasis comes from weight, size, or the .underline-clay solid accent." },
+      { "name": "The Mixed-Case Label Rule", "section": "typography","body": "Form input labels use .field-label (mixed-case 12.5px Inter), not .eyebrow." },
+      { "name": "The Flat-By-Default Rule", "section": "elevation", "body": "Surfaces are flat at rest. Cards have hairline borders, not shadows. Shadow appears only on modal dialogs and (sparingly) on hover-lift cards." },
+      { "name": "The Hairline-Over-Card Rule", "section": "elevation","body": "When two regions need separation, use a 1px Rule line. Nested cards are forbidden." }
+    ],
+    "dos": [
+      "Do use Terracotta Clay as the only saturated color. One accent, ≤10% of any product surface.",
+      "Do use hairline Rule lines to separate sections; reach for a panel only when content needs containment.",
+      "Do render every figure with tabular numerals (use .num or .tabular utilities).",
+      "Do use .field-label (12.5px mixed-case) for form input labels. .eyebrow is for sections and marketing only.",
+      "Do wrap every form control in <Field> so labels, helpers, errors, and aria attributes wire up correctly.",
+      "Do use <IconButton size=\"md\"> (44px) for every icon-only trigger.",
+      "Do pair every state color with a text label. Color never carries meaning alone.",
+      "Do respect prefers-reduced-motion via MotionConfig reducedMotion=\"user\" and useReducedMotion() on every infinite animation.",
+      "Do default the theme to dark per PRODUCT.md; honor stored user preference when present."
+    ],
+    "donts": [
+      "Don't use #000 or #fff. Every neutral must carry chroma 0.008–0.018 in the 40-hue family.",
+      "Don't use gradient text. Emphasis comes from weight, size, or the .underline-clay solid accent.",
+      "Don't use glassmorphism as decoration. The single permitted blur is the 4px sticky-nav backdrop.",
+      "Don't ship the hero-metric template (big-number + small-label + supporting-stats card grid).",
+      "Don't ship identical card grids (icon + heading + text, repeated). Use typographic two-column lists separated by hairlines.",
+      "Don't nest cards. A card inside a card is always a structural failure.",
+      "Don't use border-left or border-right greater than 1px as a colored accent stripe on cards, list items, or alerts.",
+      "Don't use bounce or elastic motion curves. Ease-out-quart / quint / expo only.",
+      "Don't use em dashes (—) in user-facing prose. The — glyph is permitted only as an empty-value placeholder.",
+      "Don't use exclamation marks in toasts, error messages, or operator copy.",
+      "Don't ship the neon-on-black DeFi casino aesthetic, the generic SaaS-indigo dashboard, the lime/cyan web3 dev-tools clone, or the navy/gold legacy-fintech look.",
+      "Don't strip native form chrome without replacement. Selects must always carry the token-tinted chevron.",
+      "Don't use Instrument Serif on body copy, helper text, or form labels."
+    ]
+  }
+}

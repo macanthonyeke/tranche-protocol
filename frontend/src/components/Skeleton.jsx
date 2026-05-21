@@ -31,8 +31,8 @@ export function SkeletonCard({ height = 140 }) {
 export function SkeletonMilestoneCard() {
   return (
     <div className="relative pl-8">
-      <span className="absolute left-[7px] top-6 h-3 w-3 rounded-full bg-background-tertiary" aria-hidden />
-      <div className="rounded-2xl border border-border-subtle bg-background-secondary p-5 flex flex-col gap-4 pl-7">
+      <span className="absolute left-[7px] top-6 h-3 w-3 rounded-full bg-sunk" aria-hidden />
+      <div className="rounded-2xl border border-rule bg-paper p-5 flex flex-col gap-4 pl-7">
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-col gap-2">
             <Skeleton className="h-3 w-8" />
@@ -72,7 +72,7 @@ export function SkeletonEscrowCard() {
           <Skeleton className="h-4 w-24" />
         </div>
       </div>
-      <div className="pt-2 border-t border-border-subtle flex items-center justify-between">
+      <div className="pt-2 border-t border-rule flex items-center justify-between">
         <Skeleton className="h-3 w-16" />
         <Skeleton className="h-3 w-12" />
       </div>

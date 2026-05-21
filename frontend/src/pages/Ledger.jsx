@@ -78,7 +78,7 @@ function LedgerInner() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">History</h1>
-        <p className="text-text-secondary text-sm mt-1">Every escrow tied to your wallet, from the beginning.</p>
+        <p className="text-ink-2 text-sm mt-1">Every escrow tied to your wallet, from the beginning.</p>
       </div>
 
       <CommandBar
@@ -97,14 +97,14 @@ function LedgerInner() {
         />
       ) : filtered.length === 0 ? (
         <div className="card-surface px-6 py-16 sm:py-20 text-center flex flex-col items-center gap-3">
-          <div className="w-14 h-14 rounded-2xl bg-background-tertiary text-text-secondary flex items-center justify-center ring-1 ring-border-subtle">
+          <div className="w-14 h-14 rounded-2xl bg-sunk text-ink-2 flex items-center justify-center ring-1 ring-rule">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
               <circle cx="10" cy="10" r="6" stroke="currentColor" strokeWidth="1.6"/>
               <path d="M15 15l5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
             </svg>
           </div>
-          <h2 className="text-base font-semibold text-text-primary">No results for those filters</h2>
-          <p className="text-sm text-text-secondary max-w-xs">Try clearing the filters or searching by a different address.</p>
+          <h2 className="text-base font-semibold text-ink">No results for those filters</h2>
+          <p className="text-sm text-ink-2 max-w-xs">Try clearing the filters or searching by a different address.</p>
         </div>
       ) : (
         <>
@@ -134,7 +134,7 @@ function LedgerInner() {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0 }}
                         transition={{ duration: 0.18 }}
-                        className="hover:bg-background-tertiary/50 transition-colors"
+                        className="hover:bg-sunk/50 transition-colors"
                       >
                         <Td><span className="font-mono tabular text-sm">#{e.id}</span></Td>
                         <Td><span className="text-sm">{e.isPayer ? "You're the payer" : "You're the freelancer"}</span></Td>
@@ -142,10 +142,10 @@ function LedgerInner() {
                         <Td className="text-right">
                           <span className="font-mono tabular">{formatUSDC(e.totalAmount)}</span>
                         </Td>
-                        <Td><span className="font-mono tabular text-sm text-text-secondary">{formatDeadline(e.deadline)}</span></Td>
+                        <Td><span className="font-mono tabular text-sm text-ink-2">{formatDeadline(e.deadline)}</span></Td>
                         <Td><EscrowBadge state={e.state} /></Td>
                         <Td className="text-right">
-                          <Link to={`/escrow/${e.id}`} className="text-sm text-accent">Open →</Link>
+                          <Link to={`/escrow/${e.id}`} className="text-sm text-clay">Open →</Link>
                         </Td>
                       </motion.tr>
                     )
@@ -178,14 +178,14 @@ function LedgerInner() {
                       <div className="flex flex-col gap-2">
                         <div className="flex items-start justify-between gap-2">
                           <div>
-                            <div className="font-mono tabular text-xs text-text-tertiary">#{e.id}</div>
+                            <div className="font-mono tabular text-xs text-ink-3">#{e.id}</div>
                             <div className="text-sm">{e.isPayer ? "You're the payer" : "You're the freelancer"}</div>
                           </div>
                           <EscrowBadge state={e.state} />
                         </div>
                         <AddressDisplay address={counterparty} size="sm" />
                         <div className="flex items-end justify-between">
-                          <div className="text-xs text-text-secondary">
+                          <div className="text-xs text-ink-2">
                             Deadline · <span className="font-mono tabular">{formatDeadline(e.deadline)}</span>
                           </div>
                           <span className="font-mono tabular text-lg">{formatUSDC(e.totalAmount)}</span>
@@ -219,7 +219,7 @@ function CommandBar({ search, onSearch, filter, onFilter }) {
   return (
     <div className="card-surface p-3 flex flex-col md:flex-row gap-3 items-stretch md:items-center">
       <div role="search" className="relative flex-1">
-        <span aria-hidden className="absolute inset-y-0 left-3 inline-flex items-center text-text-tertiary pointer-events-none">
+        <span aria-hidden className="absolute inset-y-0 left-3 inline-flex items-center text-ink-3 pointer-events-none">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
             <path d="M10.5 10.5L13 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -234,18 +234,18 @@ function CommandBar({ search, onSearch, filter, onFilter }) {
           autoComplete="off"
           spellCheck={false}
           enterKeyHint="search"
-          className="bg-background-tertiary border border-border-subtle rounded-xl pl-9 pr-4 h-12 w-full appearance-none
-                     text-sm text-text-primary placeholder:text-text-tertiary
+          className="bg-sunk border border-rule rounded-xl pl-9 pr-4 h-12 w-full appearance-none
+                     text-sm text-ink placeholder:text-ink-3
                      transition-[border-color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                     focus:outline-none focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-background-primary
-                     focus:border-border-focused"
+                     focus:outline-none focus:ring-2 focus:ring-clay focus:ring-offset-2 focus:ring-offset-paper
+                     focus:border-clay"
         />
       </div>
 
       <div
         role="tablist"
         aria-label="Filter by status"
-        className="inline-flex items-center rounded-xl bg-background-tertiary p-1 gap-1 self-start md:self-auto"
+        className="inline-flex items-center rounded-xl bg-sunk p-1 gap-1 self-start md:self-auto"
       >
         {FILTERS.map((f) => {
           const active = filter === f.value
@@ -259,9 +259,9 @@ function CommandBar({ search, onSearch, filter, onFilter }) {
               className={`px-3 py-2 rounded-lg text-xs font-medium
                 transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98]
                 ${active
-                  ? 'bg-background-secondary text-text-primary shadow-sm'
-                  : 'text-text-secondary hover:text-text-primary'}
-                focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-background-tertiary`}
+                  ? 'bg-paper text-ink shadow-sm'
+                  : 'text-ink-2 hover:text-ink'}
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk`}
             >
               [{f.label}]
             </button>
@@ -274,7 +274,7 @@ function CommandBar({ search, onSearch, filter, onFilter }) {
 
 function Th({ children, className = '' }) {
   return (
-    <th className={`border-b border-border-subtle p-4 text-text-secondary font-medium text-xs uppercase tracking-wide ${className}`}>
+    <th className={`border-b border-rule p-4 text-ink-2 font-medium text-xs uppercase tracking-wide ${className}`}>
       {children}
     </th>
   )
@@ -282,7 +282,7 @@ function Th({ children, className = '' }) {
 
 function Td({ children, className = '' }) {
   return (
-    <td className={`border-b border-border-subtle p-4 ${className}`}>
+    <td className={`border-b border-rule p-4 ${className}`}>
       {children}
     </td>
   )
