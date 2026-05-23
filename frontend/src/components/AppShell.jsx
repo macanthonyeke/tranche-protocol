@@ -195,8 +195,8 @@ function BottomNav() {
 export default function AppShell({ children, maxWidth = 'content' }) {
   const mainCls =
     maxWidth === 'full'
-      ? 'flex-1 w-full px-6 lg:px-10 pb-28 md:pb-20 flex flex-col gap-8'
-      : 'w-full max-w-page mx-auto px-6 lg:px-10 pb-28 md:pb-20 flex flex-col gap-8 flex-1'
+      ? 'flex-1 w-full px-6 lg:px-10 pt-10 pb-28 md:pb-20 flex flex-col gap-8'
+      : 'w-full max-w-page mx-auto px-6 lg:px-10 pt-10 pb-28 md:pb-20 flex flex-col gap-8 flex-1'
   return (
     <div className="min-h-screen bg-paper flex flex-col text-ink">
       <TopNav />

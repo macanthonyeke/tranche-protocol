@@ -2,16 +2,16 @@
 name: CrossChainEscrow
 description: Editorial-typographic, primitive-grade design system for milestone-based USDC escrow.
 colors:
-  paper:        "oklch(97% 0.008 60)"
-  sunk:         "oklch(94% 0.012 60)"
+  paper:        "oklch(96% 0.018 80)"
+  sunk:         "oklch(93% 0.022 80)"
   ink:          "oklch(22% 0.020 40)"
   ink-2:        "oklch(44% 0.018 40)"
-  ink-3:        "oklch(52% 0.016 40)"
-  rule:         "oklch(88% 0.012 50)"
-  rule-2:       "oklch(78% 0.018 50)"
+  ink-3:        "oklch(50% 0.016 40)"
+  rule:         "oklch(87% 0.020 76)"
+  rule-2:       "oklch(77% 0.026 70)"
   clay:         "oklch(58% 0.165 38)"
   clay-hover:   "oklch(52% 0.175 38)"
-  clay-soft:   "oklch(92% 0.040 38)"
+  clay-soft:    "oklch(90% 0.045 38)"
   ok:           "oklch(50% 0.13  155)"
   warn:         "oklch(68% 0.165 60)"
   bad:          "oklch(54% 0.20  25)"
@@ -21,48 +21,51 @@ colors:
   clay-dark:    "oklch(72% 0.155 38)"
 typography:
   display:
-    fontFamily: "Instrument Serif, ui-serif, Georgia, serif"
+    fontFamily: "Fraunces, ui-serif, Georgia, serif"
     fontSize:   "clamp(2.25rem, 6vw, 4.5rem)"
-    fontWeight: 400
-    lineHeight: 1.04
-    letterSpacing: "-0.02em"
+    fontWeight: 420
+    lineHeight: 1.02
+    letterSpacing: "-0.022em"
+    fontVariation: "'opsz' 96, 'SOFT' 40, 'WONK' 0"
   headline:
-    fontFamily: "Instrument Serif, ui-serif, Georgia, serif"
+    fontFamily: "Fraunces, ui-serif, Georgia, serif"
     fontSize:   "1.75rem"
-    fontWeight: 400
-    lineHeight: 1.15
-    letterSpacing: "-0.015em"
+    fontWeight: 420
+    lineHeight: 1.12
+    letterSpacing: "-0.018em"
+    fontVariation: "'opsz' 48, 'SOFT' 30, 'WONK' 0"
   title:
-    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Switzer, ui-sans-serif, system-ui, sans-serif"
     fontSize:   "1.0625rem"
     fontWeight: 500
     lineHeight: 1.4
-    letterSpacing: "normal"
+    letterSpacing: "-0.005em"
   body:
-    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Switzer, ui-sans-serif, system-ui, sans-serif"
     fontSize:   "0.9375rem"
     fontWeight: 400
     lineHeight: 1.55
     letterSpacing: "normal"
-    fontFeature: "'ss01', 'cv11'"
+    fontFeature: "'kern', 'liga', 'calt', 'ss01'"
   label:
-    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Switzer, ui-sans-serif, system-ui, sans-serif"
     fontSize:   "0.78125rem"
     fontWeight: 500
     lineHeight: 1.3
     letterSpacing: "0.005em"
   eyebrow:
-    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Switzer, ui-sans-serif, system-ui, sans-serif"
     fontSize:   "0.65625rem"
     fontWeight: 500
     lineHeight: 1.2
     letterSpacing: "0.18em"
   mono:
-    fontFamily: "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+    fontFamily: "Geist Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
     fontSize:   "0.875rem"
     fontWeight: 400
     lineHeight: 1.4
-    fontVariation: "tabular-nums"
+    fontVariation: "tabular-nums slashed-zero"
+    fontFeature: "'tnum', 'zero', 'ss03'"
 rounded:
   xs: "0.25rem"
   sm: "0.375rem"
@@ -141,9 +144,9 @@ The product is on-chain financial infrastructure for two parties moving real USD
 This system explicitly rejects the four anti-references in PRODUCT.md: neon-on-black DeFi casino, generic SaaS dashboard, web3 dev-tools clone (lime/cyan terminal on black), and bank/legacy fintech (navy/gold). If a viewer could guess the aesthetic from the category alone ("on-chain escrow → black + neon green terminal"), the spec has failed.
 
 **Key Characteristics:**
-- Warm paper canvas (`oklch(97% 0.008 60)`), never pure white. Dark mode is a tinted near-black, never `#000`.
+- Warm paper canvas (`oklch(96% 0.018 80)`), never pure white. Reads as cream, not "off-by-one #fff." Dark mode is a tinted near-black, never `#000`.
 - One committed accent — terracotta clay (`oklch(58% 0.165 38)`) — used sparingly, never as gradient or glow.
-- Editorial type pairing: Instrument Serif display + Inter body + JetBrains Mono for figures.
+- Editorial type pairing: Fraunces display + Switzer body + Geist Mono for figures.
 - Flat by default. Borders and hairlines do the work shadows usually do.
 - Mechanism on display: states, windows, fees, paths shown as data, not hidden behind progress bars.
 
@@ -154,15 +157,15 @@ The palette is a single saturated terracotta accent committed against a warm tin
 ### Primary
 - **Terracotta Clay** (`oklch(58% 0.165 38)` light / `oklch(72% 0.155 38)` dark): The one saturated color in the system. Applied to primary CTAs, the focus-ring color, the "active" tab indicator, totals in the live ledger, the underline accent in the hero headline, and milestone progress fill. Carries ≤10% of any given screen on product surfaces and up to ~20% on the landing-page hero only.
 - **Terracotta Deep** (`oklch(52% 0.175 38)`): Hover state for the primary button.
-- **Clay Wash** (`oklch(92% 0.040 38)` light / `oklch(30% 0.080 38)` dark): The accent's pale companion. Selection background, lead-feature icon container, hover halo on contract-pill external-link button.
+- **Clay Wash** (`oklch(90% 0.045 38)` light / `oklch(30% 0.080 38)` dark): The accent's pale companion. Selection background, hover halo on contract-pill external-link button, status accents that need a tinted fill.
 
 ### Neutral
-- **Warm Paper Cream** (`oklch(97% 0.008 60)`): The primary canvas. Walls of the app.
-- **Sunken Bone** (`oklch(94% 0.012 60)`): One step darker than Paper. Form-input fill, code-editor chrome, status pill background, hover-row background.
+- **Warm Paper Cream** (`oklch(96% 0.018 80)`): The primary canvas. Walls of the app. Visibly off-white; reads as cream on every display, not "almost #fff."
+- **Sunken Bone** (`oklch(93% 0.022 80)`): One step darker than Paper. Form-input fill, code-editor chrome, status pill background, hover-row background.
 - **Deep Ink** (`oklch(22% 0.020 40)`): Headlines, primary body text, total-amount figures.
 - **Mid Ink** (`oklch(44% 0.018 40)`): Secondary text, helper copy under inputs, ledger labels.
-- **Faint Ink** (`oklch(52% 0.016 40)`): The "deemphasize" rung. Eyebrows, placeholders, empty-value glyphs, supplementary metadata. Held at ~52% L so small text still clears WCAG AA contrast against Paper.
-- **Rule Hairline** (`oklch(88% 0.012 50)`) and **Rule Hairline 2** (`oklch(78% 0.018 50)`): The two stroke weights that replace card chrome. Use Rule for ambient section separation, Rule 2 for emphasized borders (input focus, ledger total separator).
+- **Faint Ink** (`oklch(50% 0.016 40)`): The "deemphasize" rung. Eyebrows, placeholders, empty-value glyphs, supplementary metadata. Held at ~50% L so small uppercase eyebrow text and helpers clear WCAG AA Large against the 96% Paper canvas.
+- **Rule Hairline** (`oklch(87% 0.020 76)`) and **Rule Hairline 2** (`oklch(77% 0.026 70)`): The two stroke weights that replace card chrome. Hue rotated to match Paper's warmth so hairlines never look cool/grey on the cream canvas. Use Rule for ambient section separation, Rule 2 for emphasized borders (input focus, ledger total separator).
 
 ### Status
 - **Verdant Approval** (`oklch(50% 0.13 155)`): Released milestones, approved states, "Active" pause status.
@@ -179,31 +182,35 @@ The palette is a single saturated terracotta accent committed against a warm tin
 
 ## 3. Typography
 
-**Display Font:** Instrument Serif (with ui-serif, Georgia, serif fallback)
-**Body / UI Font:** Inter (with ui-sans-serif, system-ui, sans-serif fallback)
-**Mono Font:** JetBrains Mono (with ui-monospace, SFMono-Regular, Menlo fallback)
+**Display Font:** Fraunces (variable; opsz, wght, SOFT, WONK axes; ui-serif, Georgia, serif fallback)
+**Body / UI Font:** Switzer (Fontshare variable; ui-sans-serif, system-ui, sans-serif fallback)
+**Mono Font:** Geist Mono (variable; ui-monospace, SFMono-Regular, Menlo fallback)
 
-**Character:** Instrument Serif carries the editorial-primitive voice — it's the brand moment, applied sparingly to landing hero, page titles, and section numerals. Inter is the workhorse for all body, UI, and form copy. JetBrains Mono handles every figure that needs to align in columns: USDC amounts, addresses, hashes, escrow IDs, step counters.
+**Character:** Fraunces carries the editorial-primitive voice. Held at `opsz 96, SOFT 40, WONK 0` for headlines, it reads composed and contemporary, never whimsical. Switzer is the workhorse — a Suisse-adjacent grotesk with tighter apertures and more personality than Inter; it does headings, buttons, labels, and body in a single variable file. Geist Mono handles every figure that needs to align in columns: USDC amounts, addresses, hashes, escrow IDs, step counters. Slashed zero (`ss03` / `zero`) is enabled by default in the `.num` and `.seq` utilities so `0` never collides with `O` in addresses.
+
+**Choice rationale.** The previous Inter + Instrument Serif + JetBrains Mono trio satisfied the brief on paper but tripped every category reflex: Inter reads as generic-SaaS; Instrument Serif has become the design-twitter default; JetBrains Mono reads as devtools. Switzer + Fraunces + Geist Mono lands in the same editorial-primitive register without the reflex tells. None of the three carry a category aroma that the anti-references in PRODUCT.md call out.
+
+**Loading.** All three are variable fonts served with `font-display: swap`. Fallback `@font-face` definitions in `globals.css` use `size-adjust` and `ascent-override` against `local('Arial')` / `local('Times New Roman')` / `local('Menlo')` so first paint renders at near-identical metrics — CLS stays near zero while the web fonts arrive.
 
 ### Hierarchy
 
-- **Display** (400, clamped 2.25rem–4.5rem, line-height 1.04, letter-spacing -0.02em): Landing hero, page titles, modal titles, single-feature lead lines. Instrument Serif.
-- **Headline** (400, 1.75rem, line-height 1.15): Section heads inside operator workspaces (Protocol Settings sub-sections, Arbiter resolution headings). Instrument Serif.
-- **Title** (500 Inter, 1.0625rem): Step titles inside the create-escrow flow, primary list-item labels. Sans, not serif.
-- **Body** (400 Inter, 0.9375rem, line-height 1.55): All prose, helper text, descriptions. Capped at 65–75ch via the `prose` max-width.
-- **Label** (500 Inter, 0.78125rem / 12.5px, letter-spacing 0.005em): Form-control labels. Mixed case, not uppercase. Use `.field-label` class.
-- **Eyebrow** (500 Inter, 0.65625rem / 10.5px, uppercase, letter-spacing 0.18em): Section eyebrows in marketing and dashboard surfaces, ledger-row labels. Never on transactional form inputs.
-- **Mono** (400 JetBrains Mono, 0.875rem, tabular figures): All figures, addresses, hashes, escrow IDs. Use the `.num` utility.
+- **Display** (Fraunces, weight 420, clamped 2.25rem–4.5rem, line-height 1.02, letter-spacing -0.022em, `opsz 96 SOFT 40 WONK 0`): Landing hero, page titles, modal titles, single-feature lead lines.
+- **Headline** (Fraunces, weight 420, 1.75rem, line-height 1.12, `opsz 48 SOFT 30 WONK 0`): Section heads inside operator workspaces (Protocol Settings sub-sections, Arbiter resolution headings).
+- **Title** (Switzer 500, 1.0625rem, letter-spacing -0.005em): Step titles inside the create-escrow flow, primary list-item labels. Sans, not serif.
+- **Body** (Switzer 400, 0.9375rem, line-height 1.55): All prose, helper text, descriptions. Capped at 65–75ch via the `prose` max-width.
+- **Label** (Switzer 500, 0.78125rem / 12.5px, letter-spacing 0.005em): Form-control labels. Mixed case, not uppercase. Use `.field-label` class.
+- **Eyebrow** (Switzer 500, 0.65625rem / 10.5px, uppercase, letter-spacing 0.18em): Section eyebrows in marketing and dashboard surfaces, ledger-row labels. Never on transactional form inputs.
+- **Mono** (Geist Mono 400, 0.875rem, tabular figures + slashed zero): All figures, addresses, hashes, escrow IDs. Use the `.num` utility.
 
 ### Named Rules
 
-**The Sparse Serif Rule.** Instrument Serif appears only at the four moments it earns: hero headlines, page titles, modal titles, and section numerals (e.g. the "01 / 05" step counters). Body, UI, helper text, and form labels are always Inter. Decorative serif elsewhere is forbidden.
+**The Sparse Serif Rule.** Fraunces appears only at the four moments it earns: hero headlines, page titles, modal titles, and section numerals (e.g. the "01 / 05" step counters). Body, UI, helper text, and form labels are always Switzer. Decorative serif elsewhere is forbidden.
 
 **The Tabular Figures Rule.** Any number that could ever sit in a column — USDC amounts, fees, milestone counts, escrow IDs, percentages, deadlines — is rendered with `font-variant-numeric: tabular-nums`. Use the `.tabular` or `.num` utility. Proportional figures in tables are a bug.
 
 **The No Gradient Text Rule.** Headlines never use `background-clip: text`. Emphasis comes from weight, size, or the `.underline-clay` accent line (a 2px solid clay rule sitting under the text, not a gradient).
 
-**The Mixed-Case Label Rule.** Form input labels use `.field-label` (mixed-case 12.5px Inter), not `.eyebrow` (uppercase 10.5px Inter). Eyebrows belong on sections and marketing; labels on inputs.
+**The Mixed-Case Label Rule.** Form input labels use `.field-label` (mixed-case 12.5px Switzer), not `.eyebrow` (uppercase 10.5px Switzer). Eyebrows belong on sections and marketing; labels on inputs.
 
 ## 4. Elevation
 
@@ -258,12 +265,12 @@ This system is flat by default. Depth is conveyed through hairline rules, surfac
 - **Always includes a leading dot** in `currentColor` (the color that conveys state). The dot reinforces the state but the text label is what carries meaning — color never carries meaning alone.
 
 ### Navigation
-- **Top nav:** Sticky, 4rem tall, Paper-with-85%-opacity backdrop with 4px blur. Wordmark left (Instrument Serif), nav links center (Inter 14px 500), utility/wallet right.
+- **Top nav:** Sticky, 4rem tall, Paper-with-85%-opacity backdrop with 4px blur. Wordmark left (Fraunces), nav links center (Switzer 14px 500), utility/wallet right.
 - **Active link:** Deep Ink color. Inactive: Mid Ink with hover to Deep Ink. No underline, no pill, no background.
 - **Mobile bottom nav:** 4rem tall, full-width fixed, icon-over-label. Active item gets a 2px Clay top-border indicator.
 
 ### Live Ledger (Signature Component)
-The right-pane ledger on the Create Escrow flow is the system's signature surface. It mirrors what the contract sees — payer, freelancer, amount, deadline, windows, milestones, fees, total — and updates as the user fills in the left-pane form. Built as a Paper panel with rows of `label : value` separated by hairline rules. Empty values render as italic Faint Ink placeholders showing the source step ("— step 01 / Parties"). Total is the only place Clay appears in the ledger, set at 22px JetBrains Mono with `USDC` rendered in Faint Ink Inter alongside. This component is the proof of "show the mechanism, don't hide it."
+The right-pane ledger on the Create Escrow flow is the system's signature surface. It mirrors what the contract sees — payer, freelancer, amount, deadline, windows, milestones, fees, total — and updates as the user fills in the left-pane form. Built as a Paper panel with rows of `label : value` separated by hairline rules. Empty values render as italic Faint Ink placeholders showing the source step ("— step 01 / Parties"). Total is the only place Clay appears in the ledger, set at 22px Geist Mono with `USDC` rendered in Faint Ink Switzer alongside. This component is the proof of "show the mechanism, don't hide it."
 
 ## 6. Do's and Don'ts
 
@@ -291,4 +298,4 @@ The right-pane ledger on the Create Escrow flow is the system's signature surfac
 - **Don't** use exclamation marks in toasts, error messages, or operator copy. PRODUCT voice is "calm under pressure," not consumer-app enthusiasm.
 - **Don't** ship the neon-on-black DeFi casino aesthetic, the generic SaaS-indigo dashboard, the lime/cyan web3 dev-tools clone, or the navy/gold legacy-fintech look. All four are explicit anti-references in PRODUCT.md.
 - **Don't** strip native form chrome without replacement. Selects must always carry the token-tinted chevron.
-- **Don't** use Instrument Serif on body copy, helper text, or form labels. The serif appears only at hero headlines, page titles, modal titles, and section numerals.
+- **Don't** use Fraunces on body copy, helper text, or form labels. The serif appears only at hero headlines, page titles, modal titles, and section numerals.

@@ -21,10 +21,10 @@ export default {
         bad:          'var(--bad)'
       },
       fontFamily: {
-        sans:    ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono:    ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
-        display: ['"Instrument Serif"', 'ui-serif', 'Georgia', 'serif'],
-        geist:   ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
+        sans:    ['Switzer', 'Switzer Fallback', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono:    ['"Geist Mono"', 'Geist Mono Fallback', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        display: ['Fraunces', 'Fraunces Fallback', 'ui-serif', 'Georgia', 'serif'],
+        geist:   ['Switzer', 'Switzer Fallback', 'ui-sans-serif', 'system-ui', 'sans-serif']
       },
       letterSpacing: {
         tightest: '-0.045em'

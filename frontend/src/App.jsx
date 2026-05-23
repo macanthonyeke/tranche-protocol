@@ -23,7 +23,7 @@ const NotFound         = lazy(() => import('./pages/NotFound.jsx'))
 
 function RouteFallback() {
   return (
-    <div className="flex flex-col gap-3 pt-12">
+    <div className="flex flex-col gap-3">
       <Skeleton className="h-10 w-2/3" />
       <Skeleton className="h-4 w-1/2" />
       <Skeleton className="h-48 w-full" />
@@ -47,8 +47,11 @@ export default function App() {
     <>
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname}>
-          {/* Landing: outside app shell */}
-          <Route path="/" element={<PageTransition>{<Home />}</PageTransition>} />
+          {/* Landing: outside app shell. Home runs its own entrance animation
+              internally (below its sticky header) — wrapping the whole page in
+              PageTransition here would put a transform ancestor above the
+              header and silently break its position: sticky. */}
+          <Route path="/" element={<Home />} />
 
           {/* App routes: wrapped in shell */}
           <Route path="/dashboard" element={<Shelled><Dashboard /></Shelled>} />

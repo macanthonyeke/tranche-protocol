@@ -23,6 +23,7 @@ import {
 } from '../utils/format.js'
 
 const DRAFT_KEY = 'escrow-draft'
+const MAX_DEADLINE_SECONDS = 5 * 365 * 86400
 
 const STEPS = [
   { num: 1, label: 'Parties',    head: 'Who are you paying?', kicker: 'Approved milestones go directly to this address on the chain they choose.' },
@@ -42,6 +43,8 @@ const DISPUTE_OPTS = [
   { value: 72, label: '3 days' }, { value: 168, label: '7 days' }, { value: 336, label: '14 days' }
 ]
 
+const emptyMilestone = () => ({ title: 'Upfront payment', customTitle: '', amount: '' })
+
 const emptyState = () => ({
   freelancer: '',
   destinationDomain: ARC_DOMAIN,
@@ -53,8 +56,25 @@ const emptyState = () => ({
   deadline: '',
   noticeWindowDays: 7,
   disputeWindowHours: 72,
-  milestones: [{ title: 'Upfront payment', customTitle: '', amount: '' }]
+  milestones: [emptyMilestone()]
 })
+
+const sanitizeMilestone = (m) => {
+  if (!m || typeof m !== 'object') return emptyMilestone()
+  const title = typeof m.title === 'string' && TITLE_PRESETS.includes(m.title) ? m.title : TITLE_PRESETS[0]
+  const customTitle = typeof m.customTitle === 'string' ? m.customTitle.slice(0, 80) : ''
+  const amount = typeof m.amount === 'string' ? m.amount : ''
+  return { title, customTitle, amount }
+}
+
+const sanitizeDraft = (raw) => {
+  const base = emptyState()
+  if (!raw || typeof raw !== 'object') return base
+  const merged = { ...base, ...raw }
+  const arr = Array.isArray(raw.milestones) ? raw.milestones : []
+  const milestones = arr.length === 0 ? [emptyMilestone()] : arr.slice(0, 10).map(sanitizeMilestone)
+  return { ...merged, milestones }
+}
 
 export default function CreateEscrow() {
   return (
@@ -74,16 +94,13 @@ export default function CreateEscrow() {
 function Flow() {
   const navigate = useNavigate()
   const { address } = useAccount()
-  const { supported, isLoading: loadingDomains } = useSupportedDomains()
+  const { supported, isLoading: loadingDomains, refetch: refetchDomains } = useSupportedDomains()
 
   const [step, setStep] = useState(1)
   const [state, setState] = useState(() => {
     try {
       const raw = localStorage.getItem(DRAFT_KEY)
-      if (raw) {
-        const obj = JSON.parse(raw)
-        return { ...emptyState(), ...obj }
-      }
+      if (raw) return sanitizeDraft(JSON.parse(raw))
     } catch {}
     return emptyState()
   })
@@ -97,22 +114,34 @@ function Flow() {
     try { return usdcToBaseUnits(state.totalAmount) } catch { return 0n }
   }, [state.totalAmount])
 
-  const { data: allowance, refetch: refetchAllowance } = useReadContract({
+  const {
+    data: allowance,
+    refetch: refetchAllowance,
+    isError: allowanceIsError,
+    isLoading: allowanceLoading
+  } = useReadContract({
     address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'allowance',
     args: address && CONTRACT_ADDRESS ? [address, CONTRACT_ADDRESS] : undefined,
     query: { enabled: !!address }
   })
   const approved = allowance !== undefined && totalBaseUnits > 0n && BigInt(allowance) >= totalBaseUnits
 
-  const milestoneSum = useMemo(
-    () => state.milestones.reduce((acc, m) => acc + (parseFloat(m.amount) || 0), 0),
+  const milestoneAmountsBigInt = useMemo(
+    () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
     [state.milestones]
   )
-  const totalAmountNum = parseFloat(state.totalAmount) || 0
-  const remaining = +(totalAmountNum - milestoneSum).toFixed(6)
-  const exactMatch = totalAmountNum > 0 && Math.abs(remaining) < 1e-9
+  const milestoneSumBaseUnits = useMemo(
+    () => milestoneAmountsBigInt.reduce((a, b) => a + b, 0n),
+    [milestoneAmountsBigInt]
+  )
+  const exactMatch = totalBaseUnits > 0n && milestoneSumBaseUnits === totalBaseUnits
+  const overBaseUnits = milestoneSumBaseUnits > totalBaseUnits
+  const remainingBaseUnits = totalBaseUnits - milestoneSumBaseUnits
+  const milestoneSum = Number(milestoneSumBaseUnits) / 1e6
+  const totalAmountNum = Number(totalBaseUnits) / 1e6
 
   const supportedSet = useMemo(() => new Set(supported), [supported])
+  const domainsFailed = !loadingDomains && supported.length === 0
 
   const validate = (s) => {
     const e = {}
@@ -134,8 +163,9 @@ function Flow() {
       if (!state.deadline) e.deadline = 'Set a project deadline.'
       else {
         const ts = Math.floor(new Date(state.deadline).getTime() / 1000)
-        if (!ts || ts <= Math.floor(Date.now() / 1000) + 3600)
-          e.deadline = 'Deadline must be at least 1 hour from now.'
+        const now = Math.floor(Date.now() / 1000)
+        if (!ts || ts <= now + 3600) e.deadline = 'Deadline must be at least 1 hour from now.'
+        else if (ts - now > MAX_DEADLINE_SECONDS) e.deadline = 'Deadline can be at most 5 years from now.'
       }
     }
     if (s === 4) {
@@ -157,10 +187,6 @@ function Flow() {
   }
   const back = () => setStep((s) => Math.max(s - 1, 1))
 
-  const milestoneAmountsBigInt = useMemo(
-    () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
-    [state.milestones]
-  )
   const protocolFee = totalBaseUnits * 199n / 10_000n
 
   const approveTx = useTx({ onConfirmed: () => refetchAllowance() })
@@ -187,18 +213,22 @@ function Flow() {
     }
   })
 
-  const onApprove = () => approveTx.run({
-    address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'approve',
-    args: [CONTRACT_ADDRESS, totalBaseUnits]
-  }, { loadingMessage: 'Approve USDC in your wallet.' })
+  const onApprove = () => {
+    if (!address) return
+    approveTx.run({
+      address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'approve',
+      args: [CONTRACT_ADDRESS, totalBaseUnits]
+    }, { loadingMessage: 'Approve USDC in your wallet.' }).catch(() => {})
+  }
 
   const onDeposit = () => {
+    if (!address) return
     const invoiceHash = state.useCustomHash ? state.customInvoiceHash : hashDescription(state.description)
     const mintRecipient = addressToBytes32(state.freelancer)
     const deadline = BigInt(Math.floor(new Date(state.deadline).getTime() / 1000))
     const disputeWindow = BigInt(hoursToSeconds(state.disputeWindowHours))
     const noticeWindow = BigInt(daysToSeconds(state.noticeWindowDays))
-    return depositTx.run(escrowWrite('deposit', [
+    depositTx.run(escrowWrite('deposit', [
       state.freelancer,
       '0x0000000000000000000000000000000000000000',
       totalBaseUnits,
@@ -211,7 +241,7 @@ function Flow() {
       milestoneAmountsBigInt,
       deadline,
       []
-    ]), { loadingMessage: 'Sign to create the escrow.' })
+    ]), { loadingMessage: 'Sign to create the escrow.' }).catch(() => {})
   }
 
   const reset = () => { setState(emptyState()); setStep(1); setErrors({}); try { localStorage.removeItem(DRAFT_KEY) } catch {} }
@@ -232,17 +262,17 @@ function Flow() {
             className="flex flex-col gap-7 max-w-[640px]"
           >
             <StepHeading step={STEPS[step - 1]} />
-            {step === 1 && <Step1 state={state} setState={setState} errors={errors} supported={supported} loadingDomains={loadingDomains} />}
+            {step === 1 && <Step1 state={state} setState={setState} errors={errors} supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains} />}
             {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
             {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
-            {step === 4 && <Step4 state={state} setState={setState} errors={errors} milestoneSum={milestoneSum} totalAmountNum={totalAmountNum} remaining={remaining} exactMatch={exactMatch} />}
-            {step === 5 && <Step5 approved={approved} approveTx={approveTx} depositTx={depositTx} onApprove={onApprove} onDeposit={onDeposit} totalBaseUnits={totalBaseUnits} />}
+            {step === 4 && <Step4 state={state} setState={setState} errors={errors} milestoneSum={milestoneSum} totalAmountNum={totalAmountNum} overBaseUnits={overBaseUnits} remainingBaseUnits={remainingBaseUnits} exactMatch={exactMatch} />}
+            {step === 5 && <Step5 approved={approved} approveTx={approveTx} depositTx={depositTx} onApprove={onApprove} onDeposit={onDeposit} totalBaseUnits={totalBaseUnits} address={address} allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance} />}
 
             <div className="rule mt-2" />
             <div className="flex items-center justify-between pt-1">
               <button className="btn-quiet" onClick={back} disabled={step === 1 || approveTx.isBusy || depositTx.isBusy}>← Back</button>
               <div className="flex items-center gap-2">
-                <button className="btn-quiet" onClick={reset}>Reset draft</button>
+                <button className="btn-quiet" onClick={reset} disabled={approveTx.isBusy || depositTx.isBusy}>Reset draft</button>
                 {step < STEPS.length && <button className="btn-primary" onClick={next}>Continue</button>}
               </div>
             </div>
@@ -304,9 +334,14 @@ function StepHeading({ step }) {
 }
 
 /* ------- Step 1 ------- */
-function Step1({ state, setState, errors, supported, loadingDomains }) {
+function Step1({ state, setState, errors, supported, loadingDomains, domainsFailed, refetchDomains }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
   const evmDomains = supported.filter(isEvmDomain)
+  const domainHelper = loadingDomains
+    ? 'Loading supported chains.'
+    : domainsFailed
+      ? "Couldn't reach the contract. Check your RPC and retry."
+      : 'Same-chain Arc has no forwarding fee.'
   return (
     <div className="flex flex-col gap-6">
       <Field label="Freelancer address" error={errors.freelancer}
@@ -322,18 +357,27 @@ function Step1({ state, setState, errors, supported, loadingDomains }) {
       </Field>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <Field label="Destination chain" error={errors.destinationDomain}
-          helper={loadingDomains ? 'Loading…' : 'Same-chain Arc has no forwarding fee.'}>
+        <Field label="Destination chain" error={errors.destinationDomain} helper={domainHelper}>
           {(p) => (
-            <select {...p} className="input"
-              value={Number(state.destinationDomain)}
-              onChange={(e) => set('destinationDomain')(Number(e.target.value))}
-            >
-              {evmDomains.length === 0 && <option>Loading…</option>}
-              {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
-                <option key={d} value={d}>{getDomainName(d)}</option>
-              ))}
-            </select>
+            <div className="flex flex-col gap-2">
+              <select {...p} className="input"
+                disabled={domainsFailed}
+                value={Number(state.destinationDomain)}
+                onChange={(e) => set('destinationDomain')(Number(e.target.value))}
+              >
+                {evmDomains.length === 0 && (
+                  <option>{loadingDomains ? 'Loading…' : 'No chains available'}</option>
+                )}
+                {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
+                  <option key={d} value={d}>{getDomainName(d)}</option>
+                ))}
+              </select>
+              {domainsFailed && (
+                <button type="button" className="btn-quiet self-start px-0 text-[12.5px]" onClick={() => refetchDomains?.()}>
+                  Retry
+                </button>
+              )}
+            </div>
           )}
         </Field>
 
@@ -422,12 +466,23 @@ function Step2({ state, setState, errors }) {
 /* ------- Step 3 ------- */
 function Step3({ state, setState, errors }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
+  const dlBounds = useMemo(() => {
+    const fmt = (d) => {
+      const pad = (n) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+    const now = new Date()
+    const min = new Date(now.getTime() + 3600 * 1000)
+    const max = new Date(now.getTime() + MAX_DEADLINE_SECONDS * 1000)
+    return { min: fmt(min), max: fmt(max) }
+  }, [])
   return (
     <div className="flex flex-col gap-6">
       <Field label="Project deadline" error={errors.deadline}
         helper="Past this date, the freelancer can escalate any pending milestone to arbiter.">
         {(p) => (
           <input {...p} type="datetime-local" className="input"
+            min={dlBounds.min} max={dlBounds.max}
             value={state.deadline}
             onChange={(e) => set('deadline')(e.target.value)}
           />
@@ -463,7 +518,7 @@ function Step3({ state, setState, errors }) {
 }
 
 /* ------- Step 4 ------- */
-function Step4({ state, setState, errors, milestoneSum, totalAmountNum, remaining, exactMatch }) {
+function Step4({ state, setState, errors, milestoneSum, totalAmountNum, overBaseUnits, remainingBaseUnits, exactMatch }) {
   const update = (i, field, val) => setState((s) => {
     const next = [...s.milestones]
     next[i] = { ...next[i], [field]: val }
@@ -476,8 +531,10 @@ function Step4({ state, setState, errors, milestoneSum, totalAmountNum, remainin
     ...s, milestones: s.milestones.filter((_, idx) => idx !== i)
   }))
 
-  const over = milestoneSum > totalAmountNum + 1e-9
+  const over = overBaseUnits
   const pct = totalAmountNum > 0 ? Math.min(100, (milestoneSum / totalAmountNum) * 100) : 0
+  const absRemaining = Math.abs(Number(remainingBaseUnits)) / 1e6
+  const remainingText = absRemaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
   return (
     <div className="flex flex-col gap-7">
@@ -561,9 +618,9 @@ function Step4({ state, setState, errors, milestoneSum, totalAmountNum, remainin
         <p className={`text-[12.5px] ${exactMatch ? 'text-ok' : over ? 'text-bad' : 'text-ink-3'}`}>
           {totalAmountNum === 0
             ? 'Set a total in step 1 before allocating milestones.'
-            : over ? `Over by ${Math.abs(remaining).toFixed(2)} USDC.`
+            : over ? `Over by ${remainingText} USDC.`
               : exactMatch ? 'All funds allocated.'
-                : `${Math.abs(remaining).toFixed(2)} USDC left to allocate.`}
+                : `${remainingText} USDC left to allocate.`}
         </p>
         {errors.milestonesTotal && <FieldError text={errors.milestonesTotal} />}
       </div>
@@ -572,7 +629,9 @@ function Step4({ state, setState, errors, milestoneSum, totalAmountNum, remainin
 }
 
 /* ------- Step 5 ------- */
-function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBaseUnits }) {
+function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBaseUnits, address, allowanceLoading, allowanceIsError, refetchAllowance }) {
+  const disconnected = !address
+  const busy = approveTx.isBusy || depositTx.isBusy
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3">
@@ -582,6 +641,21 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
         </p>
       </div>
 
+      {disconnected && (
+        <div className="panel-sunk p-4 text-[13px] text-ink-2" role="status">
+          Wallet disconnected. Reconnect to continue from this draft.
+        </div>
+      )}
+
+      {!disconnected && allowanceIsError && (
+        <div className="panel-sunk p-4 flex items-center justify-between gap-3 text-[13px] text-ink-2" role="status">
+          <span>Couldn't read USDC allowance. The network may be down.</span>
+          <button type="button" className="btn-secondary h-9 px-3 text-[13px]" onClick={() => refetchAllowance?.()}>
+            Retry
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FlowStep
           letter="A"
@@ -589,9 +663,9 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
           description="Authorise the escrow contract to move the locked amount."
           done={approved}
           loading={approveTx.isBusy}
-          actionLabel={approved ? 'Approved' : 'Approve'}
+          actionLabel={approved ? 'Approved' : allowanceLoading ? 'Checking…' : 'Approve'}
           onAction={onApprove}
-          disabled={approveTx.isBusy || depositTx.isBusy || totalBaseUnits === 0n}
+          disabled={busy || totalBaseUnits === 0n || disconnected || allowanceLoading}
         />
         <FlowStep
           letter="B"
@@ -601,7 +675,7 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
           loading={depositTx.isBusy}
           actionLabel="Lock funds"
           onAction={onDeposit}
-          disabled={!approved || approveTx.isBusy || depositTx.isBusy}
+          disabled={!approved || busy || disconnected}
           primary
         />
       </div>
@@ -675,8 +749,10 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
             const amount = milestoneAmountsBigInt[i] ?? 0n
             return (
               <li key={i} className="flex items-baseline justify-between gap-3 py-1.5 border-b border-rule last:border-b-0">
-                <span className="text-[13.5px] text-ink-2"><span className="seq text-ink-3 mr-2">M{i + 1}</span>{title}</span>
-                <span className="num text-[13.5px] text-ink">{amount === 0n ? '—' : formatUSDC(amount).replace(' USDC', '')}</span>
+                <span className="text-[13.5px] text-ink-2 min-w-0 flex-1 truncate" title={title}>
+                  <span className="seq text-ink-3 mr-2">M{i + 1}</span>{title}
+                </span>
+                <span className="num text-[13.5px] text-ink shrink-0">{amount === 0n ? '—' : formatUSDC(amount).replace(' USDC', '')}</span>
               </li>
             )
           })}
@@ -711,8 +787,8 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
 function Row({ label, children, placeholder, complete = false, muted = false }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <span className={`text-[12px] ${muted ? 'text-ink-3' : 'text-ink-2'}`}>{label}</span>
-      <div className="text-right min-w-0">
+      <span className={`text-[12px] shrink-0 ${muted ? 'text-ink-3' : 'text-ink-2'}`}>{label}</span>
+      <div className="text-right min-w-0 max-w-full">
         {complete || children ? children : <span className="text-[12px] text-ink-3 italic">{placeholder ? `· ${placeholder}` : '·'}</span>}
       </div>
     </div>
