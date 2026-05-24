@@ -67,12 +67,11 @@ const STEPS = [
   { n: '03', title: 'Payment goes out', text: 'Approved milestones release via Circle CCTP to whichever chain the freelancer set. Disputed milestones go to a neutral arbiter who reviews both sides.' }
 ]
 
-const LEAD_FEATURE = {
-  title: 'One asset, the whole way through',
-  text: 'On most chains you need ETH just to touch your USDC. Arc uses USDC as the gas token, so a contractor anywhere can lock funds, approve milestones, and withdraw payment without ever managing a separate gas token. Every transaction cost is a predictable dollar amount.'
-}
-
-const FEATURES = [
+// Why Arc — one uniform spec list. The gas-token point leads as 01 because
+// it's the strongest differentiator, but it's the same row shape as the rest
+// so the set reads as a single sheet, not a headline plus five footnotes.
+const REASONS = [
+  { title: 'One asset, the whole way through', text: 'On most chains you need ETH just to touch your USDC. Arc uses USDC as the gas token, so a contractor anywhere can lock funds, approve milestones, and withdraw payment without ever managing a separate gas token. Every transaction cost is a predictable dollar amount.' },
   { title: 'Payment release is actually final', text: 'Every action inside the escrow confirms on Arc in under a second and cannot be reversed. Locking funds, approving a milestone, raising a dispute, the contract state is always certain.' },
   { title: 'Disputes need evidence', text: 'You can\'t open a dispute without a reason and a link to your evidence. The other side must submit counter-evidence before the arbiter can rule.' },
   { title: 'No more chasing payers', text: 'If the payer goes silent after a milestone is marked delivered, a timer starts. Once it expires, the payment auto-releases.' },
@@ -481,73 +480,52 @@ export default function Home() {
         </ol>
       </section>
 
-      {/* Why Arc — editorial spec sheet.
-          One hairline-bordered stack of six rows that share a single column
-          grid: a small left rail for an anchor mark, a content column on
-          the right. The lead row is just a taller version of the supporting
-          rows. Anchor mark for the lead is a clay hairline + eyebrow; for
-          the five supporting rows it's a small Fraunces numeral (smaller
-          than STEPS' display numerals above, so they read as spec indices,
-          not duplicate sequence numbers). No icons; whitespace and the
-          shared column grid carry hierarchy. */}
+      {/* Why Arc — one uniform spec sheet. Every reason is the same row: a
+          small Fraunces index in the left rail, title + body on the right,
+          hairline rules between. The gas-token point leads as 01 but earns no
+          special chrome, so the six read as a single ledger of properties
+          rather than a hero claim with five footnotes. Header mirrors the
+          "How it works" section above for cross-section rhythm; the indices
+          stay smaller than that section's display numerals so they read as
+          spec markers, not a second on-chain sequence. No icons: the shared
+          column grid and whitespace carry the hierarchy. */}
       <section
         className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24"
         aria-labelledby="why-arc-heading"
       >
-        <div className="border-y border-rule">
-          {/* Lead row */}
-          <div className="grid grid-cols-1 md:grid-cols-[7rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)] gap-y-6 md:gap-x-8 lg:gap-x-12 py-12 md:py-20">
-            <div className="md:pt-3 lg:pt-4">
-              <span aria-hidden className="block h-px w-10 bg-clay mb-3 md:mb-4" />
-              <span className="eyebrow text-ink-3 block leading-none">Why Arc</span>
-            </div>
-            <div className="max-w-3xl">
-              <h2
-                id="why-arc-heading"
-                className="display text-4xl md:text-5xl lg:text-6xl text-ink leading-[1.04]"
-              >
-                {LEAD_FEATURE.title}.
-                <span className="block text-ink-3 mt-1 md:mt-2">
-                  <em className="display-italic">No gas token to juggle.</em>
-                </span>
-              </h2>
-              <p className="mt-6 md:mt-8 text-base md:text-lg text-ink-2 leading-relaxed max-w-2xl">
-                {LEAD_FEATURE.text}
-              </p>
-            </div>
-          </div>
-
-          {/* Supporting rows — numbered spec sheet, same column grid as lead. */}
-          <ol>
-            {FEATURES.map(({ title, text }, idx) => {
-              const n = String(idx + 1).padStart(2, '0')
-              return (
-                <li
-                  key={title}
-                  className="grid grid-cols-1 md:grid-cols-[7rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)] gap-y-3 md:gap-x-8 lg:gap-x-12 py-8 md:py-10 border-t border-rule"
-                >
-                  <div className="md:pt-1.5 lg:pt-2 flex items-baseline gap-3 md:block">
-                    <span
-                      aria-hidden
-                      className="display text-ink-2 text-[26px] md:text-[28px] leading-none"
-                    >
-                      {n}
-                    </span>
-                    <span className="sr-only">{`Point ${idx + 1} of ${FEATURES.length}.`}</span>
-                  </div>
-                  <div className="max-w-2xl">
-                    <h3 className="text-base md:text-lg font-medium text-ink leading-snug">
-                      {title}
-                    </h3>
-                    <p className="mt-2 text-sm md:text-[15px] text-ink-2 leading-relaxed">
-                      {text}
-                    </p>
-                  </div>
-                </li>
-              )
-            })}
-          </ol>
+        <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
+          <h2 id="why-arc-heading" className="display text-4xl md:text-5xl text-ink">Why Arc</h2>
+          <span className="eyebrow text-ink-3">Six things that hold up</span>
         </div>
+        <ol className="border-b border-rule">
+          {REASONS.map(({ title, text }, idx) => {
+            const n = String(idx + 1).padStart(2, '0')
+            return (
+              <li
+                key={title}
+                className="grid grid-cols-1 md:grid-cols-[7rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)] gap-y-3 md:gap-x-8 lg:gap-x-12 py-8 md:py-10 border-t border-rule"
+              >
+                <div className="md:pt-1.5 lg:pt-2 flex items-baseline gap-3 md:block">
+                  <span
+                    aria-hidden
+                    className="display text-ink-2 text-[26px] md:text-[28px] leading-none"
+                  >
+                    {n}
+                  </span>
+                  <span className="sr-only">{`Reason ${idx + 1} of ${REASONS.length}.`}</span>
+                </div>
+                <div className="max-w-2xl">
+                  <h3 className="text-base md:text-lg font-medium text-ink leading-snug">
+                    {title}
+                  </h3>
+                  <p className="mt-2 text-sm md:text-[15px] text-ink-2 leading-relaxed">
+                    {text}
+                  </p>
+                </div>
+              </li>
+            )
+          })}
+        </ol>
       </section>
 
       {/* Footer */}

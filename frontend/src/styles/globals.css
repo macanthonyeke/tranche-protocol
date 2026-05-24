@@ -120,7 +120,12 @@
     height: 100%;
     width: 100%;
     max-width: 100%;
-    overflow-x: hidden;
+    /* clip, not hidden: `overflow-x: hidden` forces `overflow-y` to compute
+       to `auto`, which would make all three nested vertical scroll containers
+       and lets the wheel scroll-chain past the content into empty space.
+       `clip` suppresses the horizontal scrollbar without creating a scroll
+       container, collapsing the page to a single scroller. */
+    overflow-x: clip;
   }
   html { -webkit-text-size-adjust: 100%; }
 
