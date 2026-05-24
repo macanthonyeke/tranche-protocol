@@ -15,7 +15,7 @@ Context of use: desktop-first, wallet-connected, dark by default. Users often ar
 
 ## Product Purpose
 
-CrossChainEscrow is a milestone-based USDC escrow primitive on Arc Testnet, settling cross-chain via Circle CCTP V2. The product exists so that two parties can agree on work, lock funds upfront, and release them milestone-by-milestone with a credible dispute path — without trusting either party with the funds in flight.
+Tranche Protocol is a milestone-based USDC escrow primitive on Arc Testnet, settling cross-chain via Circle CCTP V2. The product exists so that two parties can agree on work, lock funds upfront, and release them milestone-by-milestone with a credible dispute path — without trusting either party with the funds in flight.
 
 The frontend's job is to make that primitive **legible and trustworthy enough to use**. Success is a first-time visitor who reads the landing, connects a wallet, and creates their first escrow with confidence. Every subsequent surface (dashboard, detail, arbiter, settings) should preserve that confidence as a daily operating tool.
 

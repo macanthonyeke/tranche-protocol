@@ -1,5 +1,5 @@
 ---
-name: CrossChainEscrow
+name: Tranche Protocol
 description: Editorial-typographic, primitive-grade design system for milestone-based USDC escrow.
 colors:
   paper:        "oklch(96% 0.018 80)"
@@ -131,13 +131,13 @@ components:
     height:          "1.5rem"
 ---
 
-# Design System: CrossChainEscrow
+# Design System: Tranche Protocol
 
 ## 1. Overview
 
 **Creative North Star: "The Ledger Sheet"**
 
-CrossChainEscrow reads like a primary-source financial document, not a SaaS app. Warm paper, decisive serif headlines, monospaced figures in tabular columns, hairline rules separating sections instead of card chrome. The system shows the *mechanism* of the escrow — milestone state, dispute windows, CCTP path, protocol fees — in the same way a printed ledger or a type specimen shows its own structure: composed, legible, nothing decorative.
+Tranche Protocol reads like a primary-source financial document, not a SaaS app. Warm paper, decisive serif headlines, monospaced figures in tabular columns, hairline rules separating sections instead of card chrome. The system shows the *mechanism* of the escrow — milestone state, dispute windows, CCTP path, protocol fees — in the same way a printed ledger or a type specimen shows its own structure: composed, legible, nothing decorative.
 
 The product is on-chain financial infrastructure for two parties moving real USDC. Confidence is the conversion. The visual register has to earn that confidence on first paint, before the user has done anything, then sustain it across every operator surface (dashboard, detail, arbiter queue, protocol settings). Editorial confidence beats decorative reassurance every time.
 

@@ -73,7 +73,7 @@ if (process.env.DOMAIN_MANAGER_ADDRESS.toLowerCase() === process.env.DEPLOYER_AD
   process.exit(1);
 }
 
-const artifactPath = path.resolve(__dirname, '../out/CrossChainEscrow.sol/CrossChainEscrow.json');
+const artifactPath = path.resolve(__dirname, '../out/TrancheProtocol.sol/TrancheProtocol.json');
 if (!fs.existsSync(artifactPath)) {
   console.error('Artifact not found. Run forge build first.');
   process.exit(1);
@@ -93,7 +93,7 @@ const constructorTypes = constructorAbi?.inputs?.map((input) => input.type) ?? [
 const expectedConstructorTypes = ['address', 'address', 'address', 'address', 'address', 'address'];
 
 if (constructorTypes.join(',') !== expectedConstructorTypes.join(',')) {
-  console.error('Unexpected CrossChainEscrow constructor signature.');
+  console.error('Unexpected TrancheProtocol constructor signature.');
   console.error('Expected:', expectedConstructorTypes.join(', '));
   console.error('Found:   ', constructorTypes.join(', ') || '(none)');
   process.exit(1);
@@ -118,7 +118,7 @@ const constructorParameters = [
   process.env.PROTOCOL_TREASURY,
 ];
 
-console.log('Deploying CrossChainEscrow V2...');
+console.log('Deploying TrancheProtocol V2...');
 console.log('Blockchain:', ARC_TESTNET_BLOCKCHAIN);
 console.log('USDC:', USDC_ADDRESS);
 console.log('Arbiter:', process.env.ARBITER_ADDRESS);
@@ -132,7 +132,7 @@ console.log('Deployer will receive DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE, RECOVER
 
 const deployResponse = await contractClient.deployContract({
   idempotencyKey: randomUUID(),
-  name: 'CrossChainEscrowV2',
+  name: 'TrancheProtocolV2',
   blockchain: ARC_TESTNET_BLOCKCHAIN,
   walletId: process.env.DEPLOYER_WALLET_ID,
   abiJson: JSON.stringify(abi),

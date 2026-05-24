@@ -1,8 +1,8 @@
-# CrossChainEscrow V2
+# Tranche Protocol V2
 
 A milestone-based USDC escrow system built for Arc Testnet with Circle CCTP V2 settlement, dispute resolution, role-based administration, a React dashboard, Circle deployment scripts, and a Telegram notification bot.
 
-CrossChainEscrow lets a depositor lock USDC upfront, define one or more milestones, and release each milestone to a recipient after approval, silent approval, or arbiter resolution. Released funds are burned through Circle CCTP V2 from Arc and minted to the recipient's selected destination domain.
+Tranche Protocol lets a depositor lock USDC upfront, define one or more milestones, and release each milestone to a recipient after approval, silent approval, or arbiter resolution. Released funds are burned through Circle CCTP V2 from Arc and minted to the recipient's selected destination domain.
 
 > Status: active testnet project. Contracts are not presented as audited production code.
 
@@ -45,7 +45,7 @@ Depositor
   |
   | approve USDC + create escrow
   v
-CrossChainEscrow.sol on Arc Testnet
+TrancheProtocol.sol on Arc Testnet
   |
   | milestone release / arbiter resolution / silent approval
   v
@@ -68,15 +68,15 @@ The project has four main parts:
 ```text
 .
 ├── src/
-│   ├── CrossChainEscrow.sol
+│   ├── TrancheProtocol.sol
 │   └── interface/
 ├── test/
-│   ├── CrossChainEscrow.t.sol
-│   ├── CrossChainEscrow.adversarial.t.sol
-│   ├── CrossChainEscrow.cctp_signal.t.sol
-│   ├── CrossChainEscrow.fuzz.t.sol
-│   ├── CrossChainEscrow.invariant.t.sol
-│   ├── CrossChainEscrow.upgrades.t.sol
+│   ├── TrancheProtocol.t.sol
+│   ├── TrancheProtocol.adversarial.t.sol
+│   ├── TrancheProtocol.cctp_signal.t.sol
+│   ├── TrancheProtocol.fuzz.t.sol
+│   ├── TrancheProtocol.invariant.t.sol
+│   ├── TrancheProtocol.upgrades.t.sol
 │   └── mocks/
 ├── script/
 │   └── Deploy.s.sol
@@ -100,7 +100,7 @@ The project has four main parts:
 
 ## Smart Contract
 
-Main contract: `src/CrossChainEscrow.sol`
+Main contract: `src/TrancheProtocol.sol`
 
 ### Core Concepts
 
@@ -425,8 +425,8 @@ Useful commands:
 ```sh
 forge test
 forge test -vvv
-forge test --match-contract CrossChainEscrowInvariantTest
-forge test --match-contract CrossChainEscrowFuzzTest
+forge test --match-contract TrancheProtocolInvariantTest
+forge test --match-contract TrancheProtocolFuzzTest
 forge coverage
 ```
 

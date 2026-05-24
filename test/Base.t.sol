@@ -2,13 +2,13 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockTokenMessenger} from "./mocks/MockTokenMessenger.sol";
 
-abstract contract Base is Test, ICrossChainEscrow {
-    CrossChainEscrow internal escrow;
+abstract contract Base is Test, ITrancheProtocol {
+    TrancheProtocol internal escrow;
     MockUSDC internal usdc;
     MockTokenMessenger internal tokenMessenger;
 
@@ -35,7 +35,7 @@ abstract contract Base is Test, ICrossChainEscrow {
         usdc = new MockUSDC();
         tokenMessenger = new MockTokenMessenger();
         vm.prank(deployer);
-        escrow = new CrossChainEscrow(
+        escrow = new TrancheProtocol(
             address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury
         );
 

@@ -2,10 +2,10 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 
-contract CrossChainEscrowReceivingAddressTest is Base {
+contract TrancheProtocolReceivingAddressTest is Base {
     uint32 internal constant ARC_DOMAIN = 26;
 
     function setUp() public override {

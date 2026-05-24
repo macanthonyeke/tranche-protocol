@@ -2,26 +2,26 @@
 pragma solidity 0.8.24;
 
 import {Base} from "./Base.t.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /// @notice Regression tests for each audit finding fix.
-contract CrossChainEscrowAuditFixesTest is Base {
+contract TrancheProtocolAuditFixesTest is Base {
     // -----------------------------------------------------------------------
     // H-01: constructor must reject address(0) for arbiter and pauser.
     // -----------------------------------------------------------------------
 
     function test_H01_Constructor_RevertOn_ZeroArbiter() public {
         vm.expectRevert(ZeroAddress.selector);
-        new CrossChainEscrow(
+        new TrancheProtocol(
             address(usdc), address(0), pauser, domainManager, address(tokenMessenger), protocolTreasury
         );
     }
 
     function test_H01_Constructor_RevertOn_ZeroPauser() public {
         vm.expectRevert(ZeroAddress.selector);
-        new CrossChainEscrow(
+        new TrancheProtocol(
             address(usdc), arbiter, address(0), domainManager, address(tokenMessenger), protocolTreasury
         );
     }

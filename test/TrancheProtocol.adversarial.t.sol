@@ -2,8 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -12,13 +12,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// The TokenMessenger is invoked from inside `_executeCCTPRelease`, so a
 /// malicious messenger represents the most realistic re-entry surface.
 contract ReentrancyAttacker {
-    CrossChainEscrow public escrow;
+    TrancheProtocol public escrow;
     bytes public payload;
     bool public attempted;
     bytes public lastRevert;
     bool public lastSucceeded;
 
-    constructor(CrossChainEscrow _escrow) {
+    constructor(TrancheProtocol _escrow) {
         escrow = _escrow;
     }
 
@@ -36,7 +36,7 @@ contract ReentrancyAttacker {
     }
 }
 
-contract CrossChainEscrowAdversarialTest is Base {
+contract TrancheProtocolAdversarialTest is Base {
     // -------------------------------------------------------------------------
     // ACCESS CONTROL -- non-arbiter cannot resolve, non-pauser cannot pause
     // -------------------------------------------------------------------------

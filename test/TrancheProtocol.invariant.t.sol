@@ -3,14 +3,14 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockTokenMessenger} from "./mocks/MockTokenMessenger.sol";
 
 /// @notice Bounded actor handler used for invariant fuzzing.
-contract Handler is Test, ICrossChainEscrow {
-    CrossChainEscrow public escrow;
+contract Handler is Test, ITrancheProtocol {
+    TrancheProtocol public escrow;
     MockUSDC public usdc;
     MockTokenMessenger public tokenMessenger;
 
@@ -41,7 +41,7 @@ contract Handler is Test, ICrossChainEscrow {
     uint256 public cancelCalls;
     uint256 public withdrawCalls;
 
-    constructor(CrossChainEscrow _escrow, MockUSDC _usdc, MockTokenMessenger _tm, address _arbiter, address _pauser) {
+    constructor(TrancheProtocol _escrow, MockUSDC _usdc, MockTokenMessenger _tm, address _arbiter, address _pauser) {
         escrow = _escrow;
         usdc = _usdc;
         tokenMessenger = _tm;
@@ -251,8 +251,8 @@ contract Handler is Test, ICrossChainEscrow {
     }
 }
 
-contract CrossChainEscrowInvariantTest is StdInvariant, Test, ICrossChainEscrow {
-    CrossChainEscrow internal escrow;
+contract TrancheProtocolInvariantTest is StdInvariant, Test, ITrancheProtocol {
+    TrancheProtocol internal escrow;
     MockUSDC internal usdc;
     MockTokenMessenger internal tokenMessenger;
     Handler internal handler;
@@ -265,7 +265,7 @@ contract CrossChainEscrowInvariantTest is StdInvariant, Test, ICrossChainEscrow 
     function setUp() public {
         usdc = new MockUSDC();
         tokenMessenger = new MockTokenMessenger();
-        escrow = new CrossChainEscrow(
+        escrow = new TrancheProtocol(
             address(usdc), arbiter, pauser, domainManager, address(tokenMessenger), protocolTreasury
         );
         // Disable fee + register the domain used by the handler so deposits succeed.

@@ -2,8 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /// @notice Tests for the upgrades introduced in this contract revision:
@@ -11,7 +11,7 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 ///         updateReceivingAddress + parameterised withdrawRefund, refundTo
 ///         default, deposit input validation, DOMAIN_MANAGER_ROLE, and the
 ///         AccessControlEnumerable role helpers.
-contract CrossChainEscrowUpgradesTest is Base {
+contract TrancheProtocolUpgradesTest is Base {
     function _baseDeposit(uint256 _disputeWindow, uint256 _deadline) internal returns (uint256) {
         vm.startPrank(depositor);
         usdc.approve(address(escrow), 100e6);

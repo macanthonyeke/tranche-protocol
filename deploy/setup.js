@@ -97,7 +97,7 @@ if (domainManagerAccount.address.toLowerCase() !== DOMAIN_MANAGER_ADDRESS.toLowe
 
 const artifact = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../out/CrossChainEscrow.sol/CrossChainEscrow.json'),
+    path.resolve(__dirname, '../out/TrancheProtocol.sol/TrancheProtocol.json'),
     'utf8',
   ),
 );
@@ -245,7 +245,7 @@ function updateDownstreamConfig(contractAddress) {
   console.log('\nUpdated bot/.env and frontend/.env with contract address.');
 }
 
-console.log('Setting up CrossChainEscrow V2...');
+console.log('Setting up TrancheProtocol V2...');
 console.log('Contract:', CONTRACT_ADDRESS);
 
 const [arbiterRole, pauserRole, domainManagerRole, feeManagerRole, recoveryManagerRole] = await Promise.all([

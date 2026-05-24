@@ -1,4 +1,4 @@
-# CrossChainEscrow V2 Deployment
+# Tranche Protocol V2 Deployment
 
 This deployment path uses Circle developer-controlled wallets and Circle's Smart Contract Platform for deployment and admin signing. Domain-manager actions are signed by the separate `DOMAIN_MANAGER_PRIVATE_KEY`.
 

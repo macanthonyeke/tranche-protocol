@@ -2,13 +2,13 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 /// @notice Tests for: dynamic CCTP forwarding fee, FORWARD_HOOK_DATA constant,
 ///         signalDelivery / claimSilentApproval, deliveryNoticeWindow
 ///         validation, and the tightened (14-day) disputeWindow upper bound.
-contract CrossChainEscrowCctpSignalTest is Base {
+contract TrancheProtocolCctpSignalTest is Base {
     bytes32 internal constant CIRCLE_HOOK = 0x636374702d666f72776172640000000000000000000000000000000000000000;
 
     // -------------------------------------------------------------------------

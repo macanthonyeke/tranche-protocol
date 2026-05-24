@@ -10,7 +10,7 @@ export const USDC_ABI = [
   { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] }
 ]
 
-// Components for ICrossChainEscrow.EscrowSummary, used by several view ABIs below.
+// Components for ITrancheProtocol.EscrowSummary, used by several view ABIs below.
 function ESCROW_SUMMARY_COMPONENTS() {
   return [
     { name: 'escrowId', type: 'uint256' },
@@ -27,7 +27,7 @@ function ESCROW_SUMMARY_COMPONENTS() {
   ]
 }
 
-// CrossChainEscrow ABI
+// TrancheProtocol ABI
 export const ESCROW_ABI = [
   // ----- Roles & admin views -----
   { type: 'function', name: 'ARBITER_ROLE', stateMutability: 'view', inputs: [], outputs: [{ type: 'bytes32' }] },

@@ -8,7 +8,7 @@ pragma solidity 0.8.24;
 bytes32 constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
 bytes32 constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
 
-interface ICrossChainEscrow {
+interface ITrancheProtocol {
     enum EscrowState {
         ACTIVE,
         COMPLETED,

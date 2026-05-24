@@ -8,9 +8,9 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {ITokenMessenger} from "./interface/ITokenMessenger.sol";
-import {ICrossChainEscrow} from "./interface/ICrossChainEscrow.sol";
+import {ITrancheProtocol} from "./interface/ITrancheProtocol.sol";
 
-contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausable, ReentrancyGuard {
+contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant ARBITER_ROLE = keccak256("ARBITER_ROLE");
@@ -437,7 +437,7 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
 
         uint256 effectiveWindow = m.deliveredAt > 0 ? e.disputeWindow / 2 : e.disputeWindow;
         if (block.timestamp < m.conditionMetTimestamp + effectiveWindow) revert DisputeWindowNotExpired();
-        if (_isCrossChainEscrow(escrowId, e) && maxFee < cctpForwardFee) revert MaxFeeBelowFloor();
+        if (_isTrancheProtocol(escrowId, e) && maxFee < cctpForwardFee) revert MaxFeeBelowFloor();
 
         m.state = MilestoneState.RELEASED;
 
@@ -1133,7 +1133,7 @@ contract CrossChainEscrow is ICrossChainEscrow, AccessControlEnumerable, Pausabl
     ///      ARC_DOMAIN, i.e. the burn would actually invoke Circle's
     ///      Forwarding Service. Used by {releaseAfterWindow} to scope the
     ///      `maxFee` floor to the path that can be griefed.
-    function _isCrossChainEscrow(uint256 escrowId, Escrow storage e) internal view returns (bool) {
+    function _isTrancheProtocol(uint256 escrowId, Escrow storage e) internal view returns (bool) {
         SplitRecipient[] storage s = splits[escrowId];
         if (s.length == 0) {
             return e.destinationDomain != ARC_DOMAIN;

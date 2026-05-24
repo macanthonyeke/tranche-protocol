@@ -30,7 +30,7 @@ const EXPECTED_PROTOCOL_FEE_BPS = 199n;
 
 const artifact = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../out/CrossChainEscrow.sol/CrossChainEscrow.json'),
+    path.resolve(__dirname, '../out/TrancheProtocol.sol/TrancheProtocol.json'),
     'utf8',
   ),
 );
@@ -129,7 +129,7 @@ const [
   getRoleMembers(recoveryManagerRole),
 ]);
 
-console.log('CrossChainEscrow V2 Deployment Verification');
+console.log('TrancheProtocol V2 Deployment Verification');
 console.log('===========================================');
 console.log('Contract:', CONTRACT_ADDRESS);
 console.log('USDC:', usdc);

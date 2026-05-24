@@ -256,7 +256,7 @@ function CodeEditor() {
         <span className="w-3 h-3 rounded-full bg-[#FF5F56]" />
         <span className="w-3 h-3 rounded-full bg-[#FFBD2E]" />
         <span className="w-3 h-3 rounded-full bg-[#27C93F]" />
-        <span className="ml-4 num text-xs text-ink-3">CrossChainEscrow.sol</span>
+        <span className="ml-4 num text-xs text-ink-3">TrancheProtocol.sol</span>
       </div>
 
       {/* Code body */}
@@ -379,9 +379,9 @@ export default function Home() {
           scroll container and silently break this header's sticky positioning. */}
       <header className="sticky top-0 z-50 h-16 border-b border-rule bg-paper/85 backdrop-blur-md">
         <div className="max-w-content mx-auto h-full flex items-center justify-between px-4 md:px-8">
-          <Link to="/" className="flex items-center gap-2" aria-label="CrossChainEscrow home">
-            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold">C</span>
-            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">CrossChainEscrow</span>
+          <Link to="/" className="flex items-center gap-2" aria-label="Tranche Protocol home">
+            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold">T</span>
+            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">Tranche Protocol</span>
           </Link>
           <div className="flex items-center gap-2">
             <ThemeToggle />
@@ -538,7 +538,7 @@ export default function Home() {
             <Link to="/create" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Create</Link>
             <Link to="/settings" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Settings</Link>
           </div>
-          <div className="text-sm text-ink-3">© CrossChainEscrow</div>
+          <div className="text-sm text-ink-3">© Tranche Protocol</div>
         </div>
       </footer>
       </PageTransition>

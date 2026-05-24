@@ -2,9 +2,9 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 
-contract CrossChainEscrowFuzzTest is Base {
+contract TrancheProtocolFuzzTest is Base {
     function testFuzz_Deposit_ValidAmounts(uint256 a, uint256 b, uint256 c, uint256 disputeWindow) public {
         a = bound(a, 1, 1e12);
         b = bound(b, 1, 1e12);

@@ -2,12 +2,12 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
+import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
-contract CrossChainEscrowUnitTest is Base {
+contract TrancheProtocolUnitTest is Base {
     // =========================================================================
     // 1. DEPOSIT
     // =========================================================================
