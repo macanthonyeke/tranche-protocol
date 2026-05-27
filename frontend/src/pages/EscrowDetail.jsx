@@ -6,13 +6,16 @@ import { motion, AnimatePresence } from 'framer-motion'
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
 import IconButton from '../components/IconButton.jsx'
+import Modal from '../components/Modal.jsx'
+import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
 import { useEscrowDetail, useTick } from '../hooks/useEscrows.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { bytes32ToAddress } from '../utils/encode.js'
+import { bytes32ToAddress, hashDescription } from '../utils/encode.js'
 import {
-  isValidAddress, formatUSDCNumber, formatDeadline, formatTimestamp,
+  isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS
 } from '../utils/format.js'
 import { getDomainName, ARC_DOMAIN, isEvmDomain } from '../config/chains.js'
@@ -54,7 +57,7 @@ function DetailInner() {
   }
 
   const {
-    escrow, milestones, disputeWindowExpired, deliverySignaled,
+    escrow, milestones, disputes, splits, disputeWindowExpired, deliverySignaled,
     effectiveDisputeDeadlines, isPayer, isFreelancer
   } = detail
   const role = isPayer ? 'payer' : isFreelancer ? 'freelancer' : null
@@ -70,6 +73,7 @@ function DetailInner() {
         <LedgerColumn
           escrow={escrow}
           role={role}
+          splits={splits}
           onChange={refetch}
           optimistic={optimistic}
           setOpt={setOpt}
@@ -80,6 +84,7 @@ function DetailInner() {
           <MilestoneStack
             escrow={escrow}
             milestones={milestones}
+            disputes={disputes}
             role={role}
             userAddress={address}
             disputeWindowExpired={disputeWindowExpired}
@@ -163,7 +168,7 @@ function StateGlowPill({ state }) {
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
-function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
+function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
   return (
     <aside className="lg:col-span-1 flex flex-col gap-6">
       <div className="bg-paper border border-rule rounded-2xl p-6 h-fit flex flex-col gap-6">
@@ -216,6 +221,8 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
         )}
       </div>
 
+      {splits?.length > 0 && <SplitRecipients splits={splits} />}
+
       {role && escrow.state === 0 && (
         <CancelCard
           escrow={escrow} role={role} onChange={onChange}
@@ -226,6 +233,39 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
         <UpdateReceivingAddressCard escrow={escrow} onChange={onChange} />
       )}
     </aside>
+  )
+}
+
+/* ---------- Split recipients ----------
+   Only present when the escrow was created with a multi-party split. Each
+   released milestone's remainder (after the protocol fee) is divided across
+   these recipients by their bps share, each on its own CCTP destination. */
+function SplitRecipients({ splits }) {
+  return (
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
+      <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
+      <p className="text-xs text-ink-2 leading-relaxed">
+        Released funds are divided across these wallets by share, each on its own destination chain.
+      </p>
+      <div className="flex flex-col">
+        {splits.map((s, i) => {
+          const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+          const pct = (Number(s.bps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+          return (
+            <div
+              key={i}
+              className={`flex items-center justify-between gap-3 py-3 text-sm ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
+            >
+              <div className="flex flex-col gap-0.5 min-w-0">
+                {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
+                <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
+              </div>
+              <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -290,7 +330,7 @@ function contractSuffix(invoiceHash) {
    dispute resolution UI directly below the action area so evidence and
    counter-evidence stay attached to their milestone. */
 function MilestoneStack({
-  escrow, milestones, role,
+  escrow, milestones, disputes, role, userAddress,
   disputeWindowExpired, deliverySignaled, effectiveDisputeDeadlines,
   optimistic, onChange, setOpt, clearOpt
 }) {
@@ -328,7 +368,9 @@ function MilestoneStack({
                 <MilestoneRow
                   escrow={escrow}
                   milestone={m}
+                  dispute={disputes?.[i]}
                   role={role}
+                  userAddress={userAddress}
                   disputeWindowExpired={!!disputeWindowExpired[i]}
                   deliverySignaled={!!deliverySignaled[i] || opt?.signaledDelivery}
                   effectiveDisputeDeadline={Number(effectiveDisputeDeadlines[i] || 0n)}
@@ -355,7 +397,7 @@ function loadMilestoneTitles(escrowId) {
 }
 
 function MilestoneRow({
-  escrow, milestone, role,
+  escrow, milestone, dispute, role, userAddress,
   disputeWindowExpired, deliverySignaled, effectiveDisputeDeadline,
   optimisticBadge, onChange, setOpt, clearOpt
 }) {
@@ -440,6 +482,16 @@ function MilestoneRow({
             clearOpt={clearOpt}
             onChange={onChange}
           />
+          <DisputeActions
+            escrow={escrow}
+            milestone={milestone}
+            dispute={dispute}
+            role={role}
+            userAddress={userAddress}
+            deadlinePassed={deadlinePassed}
+            disputeWindowExpired={disputeWindowExpired}
+            onChange={onChange}
+          />
         </div>
       </div>
 
@@ -509,6 +561,13 @@ function MilestoneAction({
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
 
+  // Live CCTP forwarding fee — releaseAfterWindow enforces a floor of
+  // `cctpForwardFee` for cross-chain burns, so passing it (rather than 0)
+  // keeps the permissionless release path working for non-Arc destinations.
+  // Same-chain (Arc) burns force maxFee = 0 inside the contract regardless.
+  const { config } = useProtocolConfig()
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+
   const id = BigInt(escrow.id)
   const idx = BigInt(milestone.index)
   const now = Math.floor(Date.now() / 1000)
@@ -527,7 +586,7 @@ function MilestoneAction({
     }
   } else if (milestone.state === 1) {
     if (disputeWindowExpired) {
-      action = { key: 'release', label: 'Release Payment', fn: 'releaseAfterWindow', args: [id, idx, 0n], optimistic: { badge: 'Releasing…' } }
+      action = { key: 'release', label: 'Release Payment', fn: 'releaseAfterWindow', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Releasing…' } }
     }
   }
 
@@ -561,6 +620,184 @@ function MilestoneAction({
       )}
       {isLoading ? 'Pending…' : action.label}
     </button>
+  )
+}
+
+/* ----- Dispute portal -----
+   Secondary, warning-toned actions that a participant can take on a milestone:
+   raise a dispute (FULFILLED, window still open), submit counter-evidence
+   (DISPUTED, you didn't raise it and none submitted yet), or escalate to the
+   arbiter (PENDING, escrow deadline passed — recipient only). At most one of
+   these is reachable for any given milestone state. */
+function DisputeActions({
+  escrow, milestone, dispute, role, userAddress,
+  deadlinePassed, disputeWindowExpired, onChange
+}) {
+  const [modal, setModal] = useState(null) // 'raise' | 'counter' | 'escalate' | null
+
+  const isParticipant = role === 'payer' || role === 'freelancer'
+  if (!isParticipant) return null
+
+  const state = milestone.state
+  const counterExists =
+    dispute && dispute.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
+  const raisedByMe =
+    dispute?.disputedBy && userAddress &&
+    dispute.disputedBy.toLowerCase() === userAddress.toLowerCase()
+
+  const canRaise = state === 1 && !disputeWindowExpired
+  const canCounter = state === 2 && !!dispute?.disputedBy && !raisedByMe && !counterExists
+  const canEscalate = state === 0 && role === 'freelancer' && deadlinePassed
+
+  if (!canRaise && !canCounter && !canEscalate) return null
+
+  const btnCls =
+    'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ' +
+    'border border-warn/40 text-warn hover:bg-warn/10 transition-colors ' +
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-warn focus-visible:ring-offset-2 focus-visible:ring-offset-paper'
+
+  return (
+    <>
+      {canRaise && (
+        <button type="button" className={btnCls} onClick={() => setModal('raise')}>
+          Raise Dispute
+        </button>
+      )}
+      {canCounter && (
+        <button type="button" className={btnCls} onClick={() => setModal('counter')}>
+          Submit Counter Evidence
+        </button>
+      )}
+      {canEscalate && (
+        <button type="button" className={btnCls} onClick={() => setModal('escalate')}>
+          Escalate to Arbiter
+        </button>
+      )}
+      <EvidenceModal
+        open={!!modal}
+        mode={modal}
+        escrowId={escrow.id}
+        milestoneIndex={milestone.index}
+        onClose={() => setModal(null)}
+        onConfirmed={() => { setModal(null); onChange?.() }}
+      />
+    </>
+  )
+}
+
+const EVIDENCE_MODES = {
+  raise: {
+    title: 'Raise a dispute',
+    fn: 'raiseDispute',
+    needsReason: true,
+    submitLabel: 'Submit dispute',
+    evidenceLabel: 'Evidence link',
+    blurb: 'Freezes this milestone for the arbiter panel to review. Provide a reason and a link to your evidence.'
+  },
+  escalate: {
+    title: 'Escalate to arbiter',
+    fn: 'escalateAfterDeadline',
+    needsReason: true,
+    submitLabel: 'Escalate',
+    evidenceLabel: 'Evidence link',
+    blurb: 'The escrow deadline has passed with this milestone undelivered. Escalate it to the arbiter panel with a reason and evidence.'
+  },
+  counter: {
+    title: 'Submit counter-evidence',
+    fn: 'submitCounterEvidence',
+    needsReason: false,
+    submitLabel: 'Submit counter-evidence',
+    evidenceLabel: 'Counter-evidence link',
+    blurb: 'Respond to the open dispute with your own evidence. You can only submit this once.'
+  }
+}
+
+/* Shared evidence form for raise / escalate / counter. The evidence link is
+   hashed client-side with keccak256 to produce the bytes32 the contract stores
+   as tamper-proof proof; the link itself is stored as the URI. */
+function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {
+  const meta = mode ? EVIDENCE_MODES[mode] : null
+  const [reason, setReason] = useState('')
+  const [uri, setUri] = useState('')
+  const tx = useTx({ onConfirmed: () => { setReason(''); setUri(''); onConfirmed?.() } })
+
+  useEffect(() => { if (!open) { setReason(''); setUri('') } }, [open])
+
+  if (!open || !meta) return null
+
+  const uriValid = isValidUrl(uri)
+  const reasonValid = !meta.needsReason || reason.trim().length > 0
+  const canSubmit = uriValid && reasonValid && !tx.isBusy
+  const evidenceHash = uriValid ? hashDescription(uri) : null
+
+  const submit = () => {
+    if (!canSubmit) return
+    const id = BigInt(escrowId)
+    const idx = BigInt(milestoneIndex)
+    const args = meta.needsReason
+      ? [id, idx, reason.trim(), evidenceHash, uri]
+      : [id, idx, evidenceHash, uri]
+    tx.run(escrowWrite(meta.fn, args), { loadingMessage: 'Check your wallet.' })
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={tx.isBusy ? () => {} : onClose}
+      title={meta.title}
+      footer={
+        <>
+          <button className="btn-quiet" onClick={onClose} disabled={tx.isBusy}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={!canSubmit}>
+            {tx.isBusy ? 'Working…' : meta.submitLabel}
+          </button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-ink-2 leading-relaxed">{meta.blurb}</p>
+
+        {meta.needsReason && (
+          <Field label="Reason" helper="A short explanation, stored on-chain.">
+            {(p) => (
+              <textarea
+                {...p}
+                rows={3}
+                className="input-multiline"
+                placeholder="Briefly explain the issue"
+                maxLength={500}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            )}
+          </Field>
+        )}
+
+        <Field
+          label={meta.evidenceLabel}
+          error={uri && !uriValid ? "That doesn't look like a valid URL." : undefined}
+          helper="Link to your evidence (URL or IPFS gateway). Hashed locally; the hash is stored on-chain."
+        >
+          {(p) => (
+            <input
+              {...p}
+              type="url"
+              className="input"
+              placeholder="https://…"
+              autoComplete="off"
+              spellCheck={false}
+              value={uri}
+              onChange={(e) => setUri(e.target.value.trim())}
+            />
+          )}
+        </Field>
+
+        <div>
+          <p className="eyebrow mb-1.5">Evidence hash</p>
+          <p className="num text-[12px] text-ink-2 break-all">{evidenceHash || '—'}</p>
+        </div>
+      </div>
+    </Modal>
   )
 }
 

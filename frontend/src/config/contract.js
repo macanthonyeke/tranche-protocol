@@ -372,7 +372,12 @@ export const ESCROW_ABI = [
   { type: 'function', name: 'claimSilentApproval', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint256' }], outputs: [] },
   { type: 'function', name: 'addSupportedDomain', stateMutability: 'nonpayable', inputs: [{ type: 'uint32' }], outputs: [] },
   { type: 'function', name: 'removeSupportedDomain', stateMutability: 'nonpayable', inputs: [{ type: 'uint32' }], outputs: [] },
+  { type: 'function', name: 'setProtocolFee', stateMutability: 'nonpayable', inputs: [{ name: '_newFeeBps', type: 'uint256' }], outputs: [] },
+  { type: 'function', name: 'setProtocolTreasury', stateMutability: 'nonpayable', inputs: [{ name: '_newTreasury', type: 'address' }], outputs: [] },
   { type: 'function', name: 'setCctpForwardFee', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }], outputs: [] },
+  { type: 'function', name: 'resolveDisputeByTimeout', stateMutability: 'nonpayable', inputs: [{ name: 'escrowId', type: 'uint256' }, { name: 'milestoneIndex', type: 'uint256' }], outputs: [] },
+  { type: 'function', name: 'transferRefundCredit', stateMutability: 'nonpayable', inputs: [{ name: 'newOwner', type: 'address' }], outputs: [] },
+  { type: 'function', name: 'adminTransferRefundCredit', stateMutability: 'nonpayable', inputs: [{ name: 'blacklistedWallet', type: 'address' }, { name: 'newOwner', type: 'address' }], outputs: [] },
   { type: 'function', name: 'pause', stateMutability: 'nonpayable', inputs: [], outputs: [] },
   { type: 'function', name: 'unpause', stateMutability: 'nonpayable', inputs: [], outputs: [] },
 
@@ -397,6 +402,170 @@ export const ESCROW_ABI = [
       { name: 'newAddress', type: 'bytes32', indexed: false },
       { name: 'oldDomain', type: 'uint32', indexed: false },
       { name: 'newDomain', type: 'uint32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'ConditionFulfilled',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'disputeDeadline', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'DisputeRaised',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'raisedBy', type: 'address', indexed: false },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'reason', type: 'string', indexed: false },
+      { name: 'evidenceHash', type: 'bytes32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'CounterEvidenceSubmitted',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'counteredBy', type: 'address', indexed: false },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'counterEvidenceHash', type: 'bytes32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscrowReleased',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'resolutionHash', type: 'bytes32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscrowRefunded',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'resolutionHash', type: 'bytes32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscrowReleasedWithoutDispute',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscrowRefundedViaMutualCancel',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true }
+    ]
+  },
+  {
+    type: 'event', name: 'RefundWithdrawn',
+    inputs: [
+      { name: 'depositor', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscalatedAfterDeadline',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'escalatedBy', type: 'address', indexed: false },
+      { name: 'reason', type: 'string', indexed: false },
+      { name: 'evidenceHash', type: 'bytes32', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'SupportedDomainUpdated',
+    inputs: [
+      { name: 'destinationDomain', type: 'uint32', indexed: true },
+      { name: 'supported', type: 'bool', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'SplitsConfigured',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'splitCount', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'ProtocolFeeUpdated',
+    inputs: [
+      { name: 'oldFeeBps', type: 'uint256', indexed: false },
+      { name: 'newFeeBps', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'ProtocolTreasuryUpdated',
+    inputs: [
+      { name: 'oldTreasury', type: 'address', indexed: true },
+      { name: 'newTreasury', type: 'address', indexed: true }
+    ]
+  },
+  {
+    type: 'event', name: 'ProtocolFeeCollected',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'fee', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'CctpForwardFeeUpdated',
+    inputs: [
+      { name: 'newFee', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'DeliverySignaled',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'deliveredAt', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'SilentApprovalClaimed',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false },
+      { name: 'claimedBy', type: 'address', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'SplitConfigured',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'index', type: 'uint256', indexed: false },
+      { name: 'mintRecipient', type: 'bytes32', indexed: false },
+      { name: 'destinationDomain', type: 'uint32', indexed: false },
+      { name: 'bps', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'EscrowTermsSnapshotted',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'protocolFeeBps', type: 'uint256', indexed: false },
+      { name: 'protocolTreasury', type: 'address', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'RefundCreditTransferred',
+    inputs: [
+      { name: 'from', type: 'address', indexed: true },
+      { name: 'to', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false }
+    ]
+  },
+  {
+    type: 'event', name: 'DisputeTimedOutRefunded',
+    inputs: [
+      { name: 'escrowId', type: 'uint256', indexed: true },
+      { name: 'milestoneIndex', type: 'uint256', indexed: false }
     ]
   }
 ]

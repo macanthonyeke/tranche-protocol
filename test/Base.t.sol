@@ -117,8 +117,9 @@ abstract contract Base is Test, ITrancheProtocol {
     }
 
     function _resolveAs(address arb, uint256 escrowId, uint256 idx, bool releaseToRecipient) internal {
+        uint256 recipientBps = releaseToRecipient ? 10_000 : 0;
         vm.prank(arb);
-        escrow.resolveDispute(escrowId, idx, releaseToRecipient, keccak256("res"), 0);
+        escrow.resolveDispute(escrowId, idx, recipientBps, keccak256("res"), "ipfs://res", 0);
     }
 
     function _release(uint256 escrowId, uint256 idx) internal {

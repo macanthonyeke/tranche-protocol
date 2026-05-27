@@ -457,7 +457,7 @@ contract TrancheProtocolUnitTest is Base {
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         _raiseDisputeAs(recipient, id, 0);
-        (address disputedBy,,,,,,,) = escrow.disputes(id, 0);
+        (address disputedBy,,,,,,,,,,) = escrow.disputes(id, 0);
         assertEq(disputedBy, recipient);
     }
 
@@ -552,7 +552,7 @@ contract TrancheProtocolUnitTest is Base {
         vm.prank(recipient);
         escrow.submitCounterEvidence(id, 0, keccak256("counter"), "ipfs://counter");
 
-        (,,,, bytes32 cHash, string memory cURI,,) = escrow.disputes(id, 0);
+        (,,,,,, bytes32 cHash, string memory cURI,,,) = escrow.disputes(id, 0);
         assertEq(cHash, keccak256("counter"));
         assertEq(cURI, "ipfs://counter");
     }
@@ -765,13 +765,16 @@ contract TrancheProtocolUnitTest is Base {
         _raiseDisputeAs(depositor, id, 0);
 
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit EscrowReleased(id, 0, keccak256("res"));
+        emit DisputeResolved(id, 0, 10_000, keccak256("res"), "ipfs://res");
         _resolveAs(arbiter, id, 0, true);
 
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
         assertEq(uint256(_getEscrowState(id)), uint256(EscrowState.COMPLETED));
         assertEq(usdc.balanceOf(address(tokenMessenger)), 100e6);
-        (,,,,,, bytes32 resolutionHash,) = escrow.disputes(id, 0);
+        // recipientBps == 10_000: the whole amount is burned via CCTP and the
+        // refund side is left untouched.
+        assertEq(escrow.refundBalances(refundTo), 0);
+        (,,,,,,,, bytes32 resolutionHash,,) = escrow.disputes(id, 0);
         assertEq(resolutionHash, keccak256("res"));
     }
 
@@ -781,7 +784,7 @@ contract TrancheProtocolUnitTest is Base {
         _raiseDisputeAs(depositor, id, 0);
 
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit EscrowRefunded(id, 0, keccak256("res"));
+        emit DisputeResolved(id, 0, 0, keccak256("res"), "ipfs://res");
         _resolveAs(arbiter, id, 0, false);
 
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.REFUNDED));
@@ -801,7 +804,7 @@ contract TrancheProtocolUnitTest is Base {
         );
         vm.prank(stranger);
         vm.expectRevert(expected);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_ResolveDispute_RevertOn_NotDisputed() public {
@@ -809,7 +812,7 @@ contract TrancheProtocolUnitTest is Base {
         _fulfill(id, 0);
         vm.prank(arbiter);
         vm.expectRevert(NoDispute.selector);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_ResolveDispute_RevertOn_NoResolutionHash() public {
@@ -818,13 +821,403 @@ contract TrancheProtocolUnitTest is Base {
         _raiseDisputeAs(depositor, id, 0);
         vm.prank(arbiter);
         vm.expectRevert(NoResolution.selector);
-        escrow.resolveDispute(id, 0, true, bytes32(0), 0);
+        escrow.resolveDispute(id, 0, 10_000, bytes32(0), "ipfs://res", 0);
     }
 
     function test_ResolveDispute_RevertOn_NonexistentEscrow() public {
         vm.prank(arbiter);
         vm.expectRevert(EscrowDoesNotExist.selector);
-        escrow.resolveDispute(999, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(999, 0, 10_000, keccak256("res"), "ipfs://res", 0);
+    }
+
+    function test_ResolveDispute_ImmediateAfterRaise_NoNegotiationGate() public {
+        uint256 id = _depositSingle(100e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
+
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 100e6);
+    }
+
+    function test_ResolveDispute_5000Bps_SplitsExactlyHalfWithNoFee() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 5000, keccak256("res"), "ipfs://res", 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 500e6);
+        assertEq(escrow.refundBalances(refundTo), 500e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_ResolveDispute_ProtocolFeeOnlyOnRecipientPortion() public {
+        vm.prank(deployer);
+        escrow.setProtocolFee(500); // 5%
+
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 5000, keccak256("res"), "ipfs://res", 0);
+
+        assertEq(escrow.refundBalances(refundTo), 500e6);
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 475e6);
+        assertEq(usdc.balanceOf(protocolTreasury), 25e6);
+    }
+
+    function test_ResolveDispute_ZeroBps_DoesNotCallCCTP() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 0, keccak256("res"), "ipfs://res", 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+        assertEq(escrow.refundBalances(refundTo), 1000e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.REFUNDED));
+    }
+
+    function test_resolveDispute_partialRelease_feeTakenOnRecipientPortionOnly() public {
+        // 5% protocol fee. With recipientBps = 6000 on a $1000 milestone the
+        // fee must be charged on the $600 recipient portion only (5% = $30),
+        // never on the $400 refunded back to the depositor.
+        vm.prank(deployer);
+        escrow.setProtocolFee(500); // 5%
+
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 6000, keccak256("res"), "ipfs://res", 0);
+
+        // Refund is the full $400 with no fee skimmed.
+        assertEq(escrow.refundBalances(refundTo), 400e6);
+        // CCTP gets $600 - 5% = $570; treasury gets the $30 fee on the $600.
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 570e6);
+        assertEq(usdc.balanceOf(protocolTreasury), 30e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_resolveDispute_RevertOn_BpsAboveMax() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(arbiter);
+        vm.expectRevert(InvalidBps.selector);
+        escrow.resolveDispute(id, 0, 10_001, keccak256("res"), "ipfs://res", 0);
+    }
+
+    function test_resolveDispute_partialRelease_withSplits() public {
+        // Two split recipients (70% / 30%). On a partial resolution the splits
+        // divide the *recipient portion* only, not the whole milestone.
+        SplitRecipient[] memory s = new SplitRecipient[](2);
+        s[0] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))), destinationDomain: DEST_DOMAIN, bps: 7000
+        });
+        s[1] = SplitRecipient({
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))), destinationDomain: DEST_DOMAIN, bps: 3000
+        });
+
+        vm.startPrank(depositor);
+        usdc.approve(address(escrow), 1000e6);
+        uint256 id = escrow.deposit(
+            recipient,
+            refundTo,
+            1000e6,
+            DEST_DOMAIN,
+            MINT_RECIPIENT,
+            DISPUTE_WINDOW,
+            DELIVERY_NOTICE_WINDOW,
+            INVOICE_HASH,
+            INVOICE_URI,
+            _singleMilestone(1000e6),
+            block.timestamp + 30 days,
+            s
+        );
+        vm.stopPrank();
+
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        // recipientBps = 6000 -> $600 recipient portion, $400 refunded.
+        vm.prank(arbiter);
+        escrow.resolveDispute(id, 0, 6000, keccak256("res"), "ipfs://res", 0);
+
+        // Two CCTP burns: 70% and 30% of the $600 recipient portion.
+        assertEq(tokenMessenger.callsLength(), 2);
+        (, uint256 amt0,,,,,,,,) = tokenMessenger.calls(0);
+        (, uint256 amt1,,,,,,,,) = tokenMessenger.calls(1);
+        assertEq(amt0, 420e6); // 600 * 70%
+        assertEq(amt1, 180e6); // 600 * 30% (last absorbs dust)
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 600e6);
+        assertEq(escrow.refundBalances(refundTo), 400e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_ResolveDisputeByTimeout_RecipientRaisedGetsFiftyFifty() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(recipient, id, 0);
+
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW());
+        escrow.resolveDisputeByTimeout(id, 0);
+
+        assertEq(escrow.refundBalances(recipient), 500e6);
+        assertEq(escrow.refundBalances(refundTo), 500e6);
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+    }
+
+    function test_ResolveDisputeByTimeout_DepositorRaisedGetsFullRefund() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW());
+        escrow.resolveDisputeByTimeout(id, 0);
+
+        assertEq(escrow.refundBalances(recipient), 0);
+        assertEq(escrow.refundBalances(refundTo), 1000e6);
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+    }
+
+    function test_ResolveDisputeByTimeout_RevertOn_BeforeArbitrationWindow() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(recipient, id, 0);
+
+        // One second short of the normal 14-day arbitration window: still locked.
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW() - 1);
+        vm.expectRevert(ArbiterTimeoutNotReached.selector);
+        escrow.resolveDisputeByTimeout(id, 0);
+    }
+
+    /// @dev Escalations (raised via escalateAfterDeadline) use the shorter
+    ///      ESCALATION_ARBITRATION_WINDOW. Before it elapses the timeout path
+    ///      is still locked even though the dispute is open.
+    function test_ResolveDisputeByTimeout_Escalation_RevertOn_BeforeEscalationWindow() public {
+        uint256 id = _depositSingle(1000e6);
+
+        // Escalation requires the escrow deadline to have passed with the
+        // milestone still PENDING; recipient is the only caller.
+        vm.warp(block.timestamp + 30 days + 1);
+        vm.prank(recipient);
+        escrow.escalateAfterDeadline(id, 0, "missed", keccak256("ev"), "ipfs://ev");
+
+        vm.warp(block.timestamp + escrow.ESCALATION_ARBITRATION_WINDOW() - 1);
+        vm.expectRevert(ArbiterTimeoutNotReached.selector);
+        escrow.resolveDisputeByTimeout(id, 0);
+    }
+
+    /// @dev After the (shorter) escalation window the timeout resolves. The
+    ///      escalation is recipient-raised, so the fair-timeout default is a
+    ///      50/50 split — and it resolves well before the 14-day normal window.
+    function test_ResolveDisputeByTimeout_Escalation_ResolvesAfterEscalationWindow() public {
+        uint256 id = _depositSingle(1000e6);
+
+        vm.warp(block.timestamp + 30 days + 1);
+        vm.prank(recipient);
+        escrow.escalateAfterDeadline(id, 0, "missed", keccak256("ev"), "ipfs://ev");
+
+        // Exactly the escalation window (7 days) — shorter than ARBITRATION_WINDOW.
+        vm.warp(block.timestamp + escrow.ESCALATION_ARBITRATION_WINDOW());
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit DisputeTimedOutSettled(id, 0, 5000);
+        escrow.resolveDisputeByTimeout(id, 0);
+
+        assertEq(escrow.refundBalances(recipient), 500e6);
+        assertEq(escrow.refundBalances(refundTo), 500e6);
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.REFUNDED));
+    }
+
+    function test_ResolveDisputeByTimeout_BothPartiesWithdrawTheirShares() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(recipient, id, 0); // recipient-raised -> 50/50 on timeout
+
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW());
+        escrow.resolveDisputeByTimeout(id, 0);
+
+        // Recipient pulls their half.
+        vm.prank(recipient);
+        escrow.withdrawRefund(recipient);
+        assertEq(usdc.balanceOf(recipient), 500e6);
+        assertEq(escrow.refundBalances(recipient), 0);
+
+        // Depositor's refundTo pulls the other half.
+        vm.prank(refundTo);
+        escrow.withdrawRefund(refundTo);
+        assertEq(usdc.balanceOf(refundTo), 500e6);
+        assertEq(escrow.refundBalances(refundTo), 0);
+    }
+
+    function test_MutualSettle_StoresProposalUntilBothMatch() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 5000, 0);
+
+        (bool exists, uint256 bps) = escrow.settlementProposals(id, 0, depositor);
+        assertTrue(exists);
+        assertEq(bps, 5000);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+        assertEq(escrow.refundBalances(refundTo), 0);
+    }
+
+    function test_mutualSettle_executesWhenBothMatch() public {
+        // Depositor 6000, recipient 6000 -> executes: $600 via CCTP, $400 refund.
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 6000, 0);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit MutualSettlementExecuted(id, 0, 6000);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 6000, 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 600e6);
+        assertEq(escrow.refundBalances(refundTo), 400e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_mutualSettle_doesNotExecuteWhenMismatch() public {
+        // Depositor 6000, recipient 7000 -> does NOT execute; both proposals stored.
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 6000, 0);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 7000, 0);
+
+        (bool depExists, uint256 depBps) = escrow.settlementProposals(id, 0, depositor);
+        (bool recExists, uint256 recBps) = escrow.settlementProposals(id, 0, recipient);
+        assertTrue(depExists);
+        assertTrue(recExists);
+        assertEq(depBps, 6000);
+        assertEq(recBps, 7000);
+
+        // Nothing settled: still DISPUTED, no funds moved.
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+        assertEq(escrow.refundBalances(refundTo), 0);
+    }
+
+    function test_mutualSettle_executesAfterDepositorUpdatesToMatch() public {
+        // Depositor 6000, recipient 7000 (mismatch), depositor updates to 7000 -> executes at 7000.
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 6000, 0);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 7000, 0);
+        // No match yet.
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit MutualSettlementExecuted(id, 0, 7000);
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 7000, 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 700e6);
+        assertEq(escrow.refundBalances(refundTo), 300e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_mutualSettle_fullReleaseAtTenThousandBps() public {
+        // Both submit 10_000 -> full CCTP release, nothing refunded.
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 10_000, 0);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 10_000, 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 1000e6);
+        assertEq(escrow.refundBalances(refundTo), 0);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
+    }
+
+    function test_mutualSettle_RevertOn_NotDisputed() public {
+        // Milestone never disputed (still FULFILLED): the state guard fires.
+        // The contract surfaces MutualSettlementAlreadyExecuted for any
+        // non-DISPUTED state, not InvalidState.
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+
+        vm.prank(depositor);
+        vm.expectRevert(MutualSettlementAlreadyExecuted.selector);
+        escrow.mutualSettle(id, 0, 5000, 0);
+    }
+
+    function test_mutualSettle_RevertOn_ThirdParty() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(stranger);
+        vm.expectRevert(NotEscrowOwnerOrRecipient.selector);
+        escrow.mutualSettle(id, 0, 5000, 0);
+    }
+
+    function test_mutualSettle_RevertOn_BpsAboveMax() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        vm.expectRevert(InvalidBps.selector);
+        escrow.mutualSettle(id, 0, 10_001, 0);
+    }
+
+    function test_MutualSettle_ZeroBpsProposalCanMatch() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 0, 0);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 0, 0);
+
+        assertEq(usdc.balanceOf(address(tokenMessenger)), 0);
+        assertEq(escrow.refundBalances(refundTo), 1000e6);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.REFUNDED));
+    }
+
+    function test_MutualSettle_RevertAfterExecuted() public {
+        uint256 id = _depositSingle(1000e6);
+        _fulfill(id, 0);
+        _raiseDisputeAs(depositor, id, 0);
+
+        vm.prank(depositor);
+        escrow.mutualSettle(id, 0, 5000, 0);
+        vm.prank(recipient);
+        escrow.mutualSettle(id, 0, 5000, 0);
+
+        vm.prank(depositor);
+        vm.expectRevert(MutualSettlementAlreadyExecuted.selector);
+        escrow.mutualSettle(id, 0, 5000, 0);
     }
 
     function test_ResolveDispute_PartialEscrow_DoesNotComplete() public {

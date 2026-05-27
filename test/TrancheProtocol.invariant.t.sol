@@ -162,7 +162,10 @@ contract Handler is Test, ITrancheProtocol {
         if (count == 0) return;
         uint256 idx = idxSeed % count;
         vm.prank(arbiter);
-        try escrow.resolveDispute(id, idx, releaseToRecipient, keccak256(abi.encode(id, idx, releaseToRecipient)), 0) {
+        uint256 recipientBps = releaseToRecipient ? 10_000 : 0;
+        try escrow.resolveDispute(
+            id, idx, recipientBps, keccak256(abi.encode(id, idx, releaseToRecipient)), "ipfs://res", 0
+        ) {
             resolveCalls++;
         } catch {}
     }

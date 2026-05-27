@@ -55,7 +55,7 @@ contract TrancheProtocolAdversarialTest is Base {
             );
             vm.prank(bad[i]);
             vm.expectRevert(expected);
-            escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+            escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
         }
     }
 
@@ -69,7 +69,7 @@ contract TrancheProtocolAdversarialTest is Base {
         );
         vm.prank(deployer);
         vm.expectRevert(expected);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_Adv_OnlyAdminCanGrantArbiter() public {
@@ -112,7 +112,7 @@ contract TrancheProtocolAdversarialTest is Base {
         _fulfill(id, 0);
         vm.prank(arbiter);
         vm.expectRevert(NoDispute.selector);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_Adv_CannotResolveAfterRelease() public {
@@ -122,7 +122,7 @@ contract TrancheProtocolAdversarialTest is Base {
         _release(id, 0);
         vm.prank(arbiter);
         vm.expectRevert(NoDispute.selector);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_Adv_CannotDoubleResolve() public {
@@ -132,7 +132,7 @@ contract TrancheProtocolAdversarialTest is Base {
         _resolveAs(arbiter, id, 0, true);
         vm.prank(arbiter);
         vm.expectRevert(NoDispute.selector);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function test_Adv_CannotRaiseSameDisputeTwice() public {
@@ -392,7 +392,7 @@ contract TrancheProtocolAdversarialTest is Base {
         tokenMessenger.setShouldRevert(true);
         vm.prank(arbiter);
         vm.expectRevert();
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
     }
 
@@ -612,7 +612,7 @@ contract TrancheProtocolAdversarialTest is Base {
         uint256 id = _depositSingle(100e6);
         _fulfill(id, 0);
         _raiseDisputeAs(depositor, id, 0);
-        (address disputedBy, bytes32 evHash,, string memory reason,,,,) = escrow.disputes(id, 0);
+        (address disputedBy,,, bytes32 evHash,, string memory reason,,,,,) = escrow.disputes(id, 0);
         assertEq(disputedBy, depositor);
         assertEq(evHash, keccak256("ev"));
         assertEq(reason, "reason");
@@ -620,7 +620,7 @@ contract TrancheProtocolAdversarialTest is Base {
         // Counter evidence by the other party does not overwrite the original evidence
         vm.prank(recipient);
         escrow.submitCounterEvidence(id, 0, keccak256("counter"), "ipfs://counter");
-        (address disputedBy2, bytes32 evHash2,, string memory reason2,,,,) = escrow.disputes(id, 0);
+        (address disputedBy2,,, bytes32 evHash2,, string memory reason2,,,,,) = escrow.disputes(id, 0);
         assertEq(disputedBy2, depositor);
         assertEq(evHash2, keccak256("ev"));
         assertEq(reason2, "reason");

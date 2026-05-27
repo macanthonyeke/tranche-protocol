@@ -119,7 +119,7 @@ contract TrancheProtocolFuzzTest is Base {
         _raiseDisputeAs(depositor, id, 0);
         vm.prank(caller);
         vm.expectRevert(); // AccessControlUnauthorizedAccount(caller, ARBITER_ROLE)
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
     function testFuzz_ResolveDispute_ReleaseOrRefund(bool release) public {

@@ -11,8 +11,10 @@ import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { isValidBytes32 } from '../utils/encode.js'
+import { isValidBytes32, bytes32ToAddress } from '../utils/encode.js'
+import { getDomainName } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, truncateAddr } from '../utils/format.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -131,6 +133,8 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
           <Link to={`/escrow/${id}`} className="btn-secondary" target="_blank">Open full view ↗</Link>
         </div>
 
+        {detail.splits?.length > 0 && <SplitsPanel splits={detail.splits} />}
+
         <ul className="flex flex-col gap-7">
           {disputedIndexes.map((i) => (
             <DisputeBlock key={i} detail={detail} index={i} refetch={() => { refetch(); onResolved() }} />
@@ -138,6 +142,35 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
         </ul>
       </div>
     </Modal>
+  )
+}
+
+/* Where released funds will actually land. Shown so the arbiter understands
+   that a "release to freelancer" decision fans out to these split recipients,
+   each on its own destination chain, by bps share. */
+function SplitsPanel({ splits }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="eyebrow">Split recipients · {splits.length}</p>
+      <ul className="flex flex-col">
+        {splits.map((s, i) => {
+          const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+          const pct = (Number(s.bps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+          return (
+            <li
+              key={i}
+              className={`flex items-center justify-between gap-3 py-2.5 ${i === splits.length - 1 ? '' : 'border-b border-rule'}`}
+            >
+              <div className="flex flex-col gap-0.5 min-w-0">
+                {addr ? <AddressDisplay address={addr} /> : <span className="text-[13px] text-ink-3">—</span>}
+                <span className="text-[11.5px] text-ink-3 font-mono">{getDomainName(s.destinationDomain)}</span>
+              </div>
+              <span className="num text-[14px] text-ink shrink-0">{pct}%</span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 
@@ -217,6 +250,13 @@ function ResolveForm({ id, index, refetch, canTimeout }) {
   const tx = useTx({ onConfirmed: () => { refetch(); setDecision(''); setResolution('') } })
   const timeoutTx = useTx({ onConfirmed: refetch })
 
+  // Live CCTP forwarding fee. A "release to freelancer" resolution settles via
+  // CCTP; for cross-chain destinations maxFee must cover Circle's forwarding
+  // fee or the mint won't auto-deliver. Arc same-chain burns force maxFee = 0
+  // inside the contract regardless of what we pass.
+  const { config } = useProtocolConfig()
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+
   const hashValid = isValidBytes32(resolution)
 
   const submit = () => {
@@ -224,7 +264,7 @@ function ResolveForm({ id, index, refetch, canTimeout }) {
     if (!hashValid) { setErr('Resolution hash must be 0x followed by 64 hex characters.'); return }
     setErr('')
     tx.run(
-      escrowWrite('resolveDispute', [BigInt(id), BigInt(index), decision === 'release', resolution, 0n]),
+      escrowWrite('resolveDispute', [BigInt(id), BigInt(index), decision === 'release', resolution, cctpForwardFee]),
       { loadingMessage: 'Sign to resolve.' }
     )
   }

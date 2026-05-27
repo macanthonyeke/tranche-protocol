@@ -416,7 +416,7 @@ contract TrancheProtocolUpgradesTest is Base {
         _fulfill(id, 0);
         _raiseDisputeAs(depositor, id, 0);
         vm.prank(newArbiter);
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
 
         vm.prank(deployer);
         escrow.revokeRole(role, newArbiter);
@@ -515,7 +515,7 @@ contract TrancheProtocolUpgradesTest is Base {
         _fulfill(id, 0);
         vm.warp(block.timestamp + 7 hours);
         _raiseDisputeAs(depositor, id, 0);
-        (,,,,,,, uint256 raisedAt) = escrow.disputes(id, 0);
+        (,, uint256 raisedAt,,,,,,,,) = escrow.disputes(id, 0);
         assertEq(raisedAt, block.timestamp);
     }
 
@@ -525,7 +525,7 @@ contract TrancheProtocolUpgradesTest is Base {
         vm.warp(block.timestamp + 31 days);
         vm.prank(recipient);
         escrow.escalateAfterDeadline(id, 0, "missed", keccak256("ev"), "ipfs://ev");
-        (,,,,,,, uint256 raisedAt) = escrow.disputes(id, 0);
+        (,, uint256 raisedAt,,,,,,,,) = escrow.disputes(id, 0);
         assertEq(raisedAt, block.timestamp);
     }
 

@@ -45,11 +45,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     ///         configured `cctpForwardFee`.
     uint32 public constant ARC_DOMAIN = 26;
 
-    /// @notice Maximum time an arbiter may sit on a DISPUTED milestone before
-    ///         either party can force a refund-to-depositor exit (H-02). 30
-    ///         days mirrors traditional chargeback windows and gives the
-    ///         arbiter ample opportunity to act under any plausible workflow.
-    uint256 public constant ARBITER_INACTION_TIMEOUT = 30 days;
+    uint256 public constant ARBITRATION_WINDOW = 14 days;
+    uint256 public constant ESCALATION_ARBITRATION_WINDOW = 7 days;
 
     IERC20 public immutable usdc;
     ITokenMessenger public immutable tokenMessenger;
@@ -77,6 +74,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     mapping(uint256 => mapping(uint256 => DisputeData)) public disputes;
     mapping(uint256 => mapping(uint256 => Milestone)) public milestones;
     mapping(uint256 => SplitRecipient[]) public splits;
+    mapping(uint256 => mapping(uint256 => mapping(address => SettlementProposal))) public settlementProposals;
 
     /// @notice Per-escrow snapshot of `protocolFeeBps` taken at deposit (H-05).
     ///         Releases compute the protocol fee from this snapshot, so an
@@ -238,11 +236,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
                 // M-05: per-recipient events so indexers can reconstruct
                 // splits without an on-chain read.
                 emit SplitConfigured(
-                    escrowId,
-                    i,
-                    _splits[i].mintRecipient,
-                    _splits[i].destinationDomain,
-                    _splits[i].bps
+                    escrowId, i, _splits[i].mintRecipient, _splits[i].destinationDomain, _splits[i].bps
                 );
             }
             emit SplitsConfigured(escrowId, _splits.length);
@@ -309,14 +303,17 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
         if (block.timestamp > m.conditionMetTimestamp + effectiveWindow) revert DisputeWindowExpired();
 
         disputes[escrowId][milestoneIndex] = DisputeData({
-            disputedBy: msg.sender,
+            raisedBy: msg.sender,
+            isEscalation: false,
+            raisedAt: block.timestamp,
             evidenceHash: _evidenceHash,
             evidenceURI: _evidenceURI,
             reason: _reason,
             counterEvidenceHash: bytes32(0),
             counterEvidenceURI: "",
             resolutionHash: bytes32(0),
-            raisedAt: block.timestamp
+            resolutionURI: "",
+            resolvedRecipientBps: 0
         });
 
         m.state = MilestoneState.DISPUTED;
@@ -338,11 +335,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
 
         DisputeData storage d = disputes[escrowId][milestoneIndex];
 
-        if (d.disputedBy == msg.sender) revert CannotRespondToOwnDispute();
+        if (d.raisedBy == msg.sender) revert CannotRespondToOwnDispute();
         if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
         if (_counterEvidenceHash == bytes32(0)) revert NoEvidence();
         if (bytes(_counterEvidenceURI).length == 0) revert NoEvidenceURI();
         if (d.counterEvidenceHash != bytes32(0)) revert CounterEvidenceAlreadySubmitted();
+        if (d.resolutionHash != bytes32(0)) revert DisputeAlreadyResolved();
 
         d.counterEvidenceHash = _counterEvidenceHash;
         d.counterEvidenceURI = _counterEvidenceURI;
@@ -353,15 +351,11 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     function resolveDispute(
         uint256 escrowId,
         uint256 milestoneIndex,
-        bool releaseToRecipient,
+        uint256 _recipientBps,
         bytes32 _resolutionHash,
+        string calldata _resolutionURI,
         uint256 maxFee
     ) external onlyRole(ARBITER_ROLE) nonReentrant {
-        // H-06: nonReentrant added. CEI was already followed (m.state is set
-        // before `_executeCCTPRelease`) but the function makes three external
-        // calls (USDC fee transfer, USDC approve, depositForBurnWithHook); a
-        // malicious treasury or tokenMessenger could otherwise re-enter
-        // mutating views like `getEscrow` mid-call.
         Escrow storage e = escrows[escrowId];
         DisputeData storage d = disputes[escrowId][milestoneIndex];
         Milestone storage m = milestones[escrowId][milestoneIndex];
@@ -369,37 +363,45 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (m.state != MilestoneState.DISPUTED) revert NoDispute();
         if (_resolutionHash == bytes32(0)) revert NoResolution();
+        if (bytes(_resolutionURI).length == 0) revert NoResolutionURI();
+        if (_recipientBps > BPS_DENOMINATOR) revert InvalidBps();
 
         d.resolutionHash = _resolutionHash;
+        d.resolutionURI = _resolutionURI;
+        d.resolvedRecipientBps = _recipientBps;
 
-        uint256 amount = m.amount;
+        _executePartialRelease(escrowId, milestoneIndex, e, m, _recipientBps, maxFee);
 
-        if (releaseToRecipient) {
-            m.state = MilestoneState.RELEASED;
-
-            _executeCCTPRelease(escrowId, milestoneIndex, e, m, maxFee);
-
-            emit EscrowReleased(escrowId, milestoneIndex, _resolutionHash);
-        } else {
-            m.state = MilestoneState.REFUNDED;
-            refundBalances[e.refundTo] += amount;
-
-            emit EscrowRefunded(escrowId, milestoneIndex, _resolutionHash);
-        }
-
-        _checkEscrowCompletion(escrowId);
+        emit DisputeResolved(escrowId, milestoneIndex, _recipientBps, _resolutionHash, _resolutionURI);
     }
 
-    /// @notice Escape hatch (H-02): if the arbiter has not acted on a
-    ///         DISPUTED milestone within {ARBITER_INACTION_TIMEOUT} of the
-    ///         dispute being raised, either party (or anyone) may force the
-    ///         milestone into REFUNDED state, crediting the depositor's
-    ///         refund balance. Refund is the safer default because the
-    ///         depositor's funds were originally theirs.
-    /// @dev    Permissionless on purpose: arbiter inaction must not be able to
-    ///         hold funds hostage. The 30-day window dwarfs any legitimate
-    ///         arbiter SLA. The path is not pausable for the same reason
-    ///         {releaseAfterWindow} is not.
+    function mutualSettle(uint256 escrowId, uint256 milestoneIndex, uint256 _agreedBps, uint256 maxFee)
+        external
+        nonReentrant
+    {
+        Escrow storage e = escrows[escrowId];
+        Milestone storage m = milestones[escrowId][milestoneIndex];
+
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (m.state != MilestoneState.DISPUTED) revert MutualSettlementAlreadyExecuted();
+        if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
+        if (_agreedBps > BPS_DENOMINATOR) revert InvalidBps();
+
+        SettlementProposal storage proposal = settlementProposals[escrowId][milestoneIndex][msg.sender];
+        proposal.exists = true;
+        proposal.bps = _agreedBps;
+
+        emit MutualSettlementProposed(escrowId, milestoneIndex, msg.sender, _agreedBps);
+
+        SettlementProposal storage dep = settlementProposals[escrowId][milestoneIndex][e.depositor];
+        SettlementProposal storage rec = settlementProposals[escrowId][milestoneIndex][e.recipient];
+
+        if (dep.exists && rec.exists && dep.bps == rec.bps) {
+            _executePartialRelease(escrowId, milestoneIndex, e, m, _agreedBps, maxFee);
+            emit MutualSettlementExecuted(escrowId, milestoneIndex, _agreedBps);
+        }
+    }
+
     function resolveDisputeByTimeout(uint256 escrowId, uint256 milestoneIndex) external nonReentrant {
         Escrow storage e = escrows[escrowId];
         Milestone storage m = milestones[escrowId][milestoneIndex];
@@ -407,14 +409,27 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
 
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (m.state != MilestoneState.DISPUTED) revert NoDispute();
-        if (block.timestamp < d.raisedAt + ARBITER_INACTION_TIMEOUT) revert ArbiterTimeoutNotReached();
+
+        uint256 timeout = d.isEscalation ? ESCALATION_ARBITRATION_WINDOW : ARBITRATION_WINDOW;
+        if (block.timestamp < d.raisedAt + timeout) revert ArbiterTimeoutNotReached();
+
+        uint256 defaultBps = d.raisedBy == e.recipient ? 5000 : 0;
+        uint256 recipientShare = (m.amount * defaultBps) / BPS_DENOMINATOR;
+        uint256 depositorShare = m.amount - recipientShare;
 
         m.state = MilestoneState.REFUNDED;
-        refundBalances[e.refundTo] += m.amount;
+        if (recipientShare > 0) {
+            refundBalances[e.recipient] += recipientShare;
+        }
+        if (depositorShare > 0) {
+            refundBalances[e.refundTo] += depositorShare;
+        }
+
+        d.resolvedRecipientBps = defaultBps;
 
         _checkEscrowCompletion(escrowId);
 
-        emit DisputeTimedOutRefunded(escrowId, milestoneIndex);
+        emit DisputeTimedOutSettled(escrowId, milestoneIndex, defaultBps);
     }
 
     /// @notice Permissionless release of a FULFILLED milestone after its
@@ -441,7 +456,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
 
         m.state = MilestoneState.RELEASED;
 
-        _executeCCTPRelease(escrowId, milestoneIndex, e, m, maxFee);
+        _executeCCTPReleaseAmount(escrowId, milestoneIndex, e, m.amount, maxFee);
 
         _checkEscrowCompletion(escrowId);
 
@@ -490,14 +505,17 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
         }
 
         disputes[escrowId][milestoneIndex] = DisputeData({
-            disputedBy: msg.sender,
+            raisedBy: msg.sender,
+            isEscalation: true,
+            raisedAt: block.timestamp,
             evidenceHash: _evidenceHash,
             evidenceURI: _evidenceURI,
             reason: _reason,
             counterEvidenceHash: bytes32(0),
             counterEvidenceURI: "",
             resolutionHash: bytes32(0),
-            raisedAt: block.timestamp
+            resolutionURI: "",
+            resolvedRecipientBps: 0
         });
 
         m.state = MilestoneState.DISPUTED;
@@ -582,10 +600,11 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     /// signed message before calling this function.
     /// @dev Only callable by RECOVERY_MANAGER_ROLE. Does not
     /// move USDC — only re-keys the internal balance mapping.
-    function adminTransferRefundCredit(
-        address blacklistedWallet,
-        address newOwner
-    ) external onlyRole(RECOVERY_MANAGER_ROLE) nonReentrant {
+    function adminTransferRefundCredit(address blacklistedWallet, address newOwner)
+        external
+        onlyRole(RECOVERY_MANAGER_ROLE)
+        nonReentrant
+    {
         if (newOwner == address(0)) revert ZeroAddress();
         if (newOwner == blacklistedWallet) revert InvalidRefundRecipient();
 
@@ -681,7 +700,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
 
         m.state = MilestoneState.RELEASED;
 
-        _executeCCTPRelease(escrowId, milestoneIndex, e, m, cctpForwardFee);
+        _executeCCTPReleaseAmount(escrowId, milestoneIndex, e, m.amount, cctpForwardFee);
 
         _checkEscrowCompletion(escrowId);
 
@@ -931,11 +950,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     }
 
     /// @notice Paginated variant of {getDisputedEscrows} (M-02).
-    function getDisputedEscrowsPaginated(uint256 offset, uint256 limit)
-        external
-        view
-        returns (EscrowSummary[] memory)
-    {
+    function getDisputedEscrowsPaginated(uint256 offset, uint256 limit) external view returns (EscrowSummary[] memory) {
         uint256 total = escrowCount;
         uint256 end = offset + limit;
         if (end > total) end = total;
@@ -1027,26 +1042,55 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     // Internal: CCTP release with protocol fee + optional splits
     // =========================================================================
 
+    function _executePartialRelease(
+        uint256 escrowId,
+        uint256 milestoneIndex,
+        Escrow storage e,
+        Milestone storage m,
+        uint256 recipientBps,
+        uint256 maxFee
+    ) internal {
+        uint256 totalAmount = m.amount;
+        uint256 recipientAmount = (totalAmount * recipientBps) / BPS_DENOMINATOR;
+        uint256 refundAmount = totalAmount - recipientAmount;
+
+        if (recipientBps == 0) {
+            m.state = MilestoneState.REFUNDED;
+        } else {
+            m.state = MilestoneState.RELEASED;
+        }
+
+        if (refundAmount > 0) {
+            refundBalances[e.refundTo] += refundAmount;
+            emit PartialRefundCredited(escrowId, milestoneIndex, e.refundTo, refundAmount);
+        }
+
+        if (recipientAmount > 0) {
+            _executeCCTPReleaseAmount(escrowId, milestoneIndex, e, recipientAmount, maxFee);
+        }
+
+        _checkEscrowCompletion(escrowId);
+    }
+
     /// @dev Each CCTP burn from this contract uses
     ///      {CCTP_MIN_FINALITY_THRESHOLD} = 2000 (Standard Transfer only,
     ///      never Fast Transfer). For cross-chain forwarding, the frontend
     ///      fetches Circle's live fee immediately before release and passes it
     ///      as `cctpMaxFee`; same-chain (Arc) transfers still force maxFee = 0.
-    function _executeCCTPRelease(
+    function _executeCCTPReleaseAmount(
         uint256 escrowId,
         uint256 milestoneIndex,
         Escrow storage e,
-        Milestone storage m,
+        uint256 releaseAmount,
         uint256 cctpMaxFee
     ) internal {
-        uint256 amount = m.amount;
         // H-05: read the fee bps + treasury that were locked in at deposit
         // time, not the live admin-mutable globals. This protects depositors
         // from a mid-flight `setProtocolFee` / `setProtocolTreasury` rug.
         uint256 feeBpsSnap = escrowFeeBps[escrowId];
         address treasurySnap = escrowTreasury[escrowId];
-        uint256 fee = (amount * feeBpsSnap) / BPS_DENOMINATOR;
-        uint256 remainder = amount - fee;
+        uint256 fee = (releaseAmount * feeBpsSnap) / BPS_DENOMINATOR;
+        uint256 remainder = releaseAmount - fee;
 
         if (fee > 0) {
             // Protocol fee stays on Arc; safeTransfer is fine for the precompile
@@ -1088,12 +1132,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControlEnumerable, Pausable,
     // both branches returned `burnable`. Removed entirely; call sites now
     // pass the burn share directly into `_approveAndBurn`.
 
-    function _approveAndBurn(
-        uint256 burnAmount,
-        uint32 destinationDomain,
-        bytes32 mintRecipient,
-        uint256 cctpMaxFee
-    ) internal {
+    function _approveAndBurn(uint256 burnAmount, uint32 destinationDomain, bytes32 mintRecipient, uint256 cctpMaxFee)
+        internal
+    {
         uint256 maxFee;
 
         if (destinationDomain == ARC_DOMAIN) {

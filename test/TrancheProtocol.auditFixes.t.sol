@@ -14,9 +14,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_H01_Constructor_RevertOn_ZeroArbiter() public {
         vm.expectRevert(ZeroAddress.selector);
-        new TrancheProtocol(
-            address(usdc), address(0), pauser, domainManager, address(tokenMessenger), protocolTreasury
-        );
+        new TrancheProtocol(address(usdc), address(0), pauser, domainManager, address(tokenMessenger), protocolTreasury);
     }
 
     function test_H01_Constructor_RevertOn_ZeroPauser() public {
@@ -45,7 +43,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         escrow.resolveDisputeByTimeout(id, 0);
 
         // One second before the threshold also reverts.
-        vm.warp(block.timestamp + escrow.ARBITER_INACTION_TIMEOUT() - 1);
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW() - 1);
         vm.expectRevert(ArbiterTimeoutNotReached.selector);
         escrow.resolveDisputeByTimeout(id, 0);
     }
@@ -55,7 +53,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         _fulfill(id, 0);
         _raiseDisputeAs(depositor, id, 0);
 
-        vm.warp(block.timestamp + escrow.ARBITER_INACTION_TIMEOUT());
+        vm.warp(block.timestamp + escrow.ARBITRATION_WINDOW());
         // Permissionless: a stranger can trigger.
         vm.prank(stranger);
         escrow.resolveDisputeByTimeout(id, 0);
@@ -288,9 +286,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
         vm.prank(stranger);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, recoveryRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, recoveryRole)
         );
         escrow.adminTransferRefundCredit(blacklisted, rescue);
     }
@@ -335,9 +331,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
         // Pre-seed rescue with an existing credit to confirm accumulation, not overwrite.
         address otherSource = makeAddr("otherRefundTo");
-        uint256 other = _depositCustom(
-            depositor, recipient, otherSource, 50e6, _singleMilestone(50e6), DISPUTE_WINDOW
-        );
+        uint256 other = _depositCustom(depositor, recipient, otherSource, 50e6, _singleMilestone(50e6), DISPUTE_WINDOW);
         _fulfill(other, 0);
         _raiseDisputeAs(depositor, other, 0);
         _resolveAs(arbiter, other, 0, false);
@@ -383,9 +377,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
         vm.prank(stranger);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, feeRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, feeRole)
         );
         escrow.setProtocolFee(123);
     }
@@ -395,9 +387,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
         vm.prank(adminOnly);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
         );
         escrow.setProtocolFee(123);
     }
@@ -419,9 +409,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
         vm.prank(adminOnly);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
         );
         escrow.setProtocolTreasury(makeAddr("newTreasury"));
     }
@@ -442,9 +430,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
         vm.prank(adminOnly);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
         );
         escrow.setCctpForwardFee(42_000);
     }
@@ -470,9 +456,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
         vm.prank(adminOnly);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, recoveryRole
-            )
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, recoveryRole)
         );
         escrow.adminTransferRefundCredit(blacklisted, rescue);
     }
@@ -563,14 +547,10 @@ contract TrancheProtocolAuditFixesTest is Base {
         // 70/30 split, total = 100e6 -> shares = 70e6 / 30e6.
         SplitRecipient[] memory splits = new SplitRecipient[](2);
         splits[0] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 7000
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))), destinationDomain: DEST_DOMAIN, bps: 7000
         });
         splits[1] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 3000
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))), destinationDomain: DEST_DOMAIN, bps: 3000
         });
 
         uint256 id = _depositWithSplits(100e6, splits);
@@ -586,14 +566,10 @@ contract TrancheProtocolAuditFixesTest is Base {
     function test_H04_MultiSplit_PerShareMaxFeeJustBelowShare_Succeeds() public {
         SplitRecipient[] memory splits = new SplitRecipient[](2);
         splits[0] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 7000
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split0")))), destinationDomain: DEST_DOMAIN, bps: 7000
         });
         splits[1] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 3000
+            mintRecipient: bytes32(uint256(uint160(makeAddr("split1")))), destinationDomain: DEST_DOMAIN, bps: 3000
         });
 
         uint256 id = _depositWithSplits(100e6, splits);

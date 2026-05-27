@@ -54,14 +54,22 @@ interface ITrancheProtocol {
     }
 
     struct DisputeData {
-        address disputedBy;
+        address raisedBy;
+        bool isEscalation;
+        uint256 raisedAt;
         bytes32 evidenceHash;
         string evidenceURI;
         string reason;
         bytes32 counterEvidenceHash;
         string counterEvidenceURI;
         bytes32 resolutionHash;
-        uint256 raisedAt;
+        string resolutionURI;
+        uint256 resolvedRecipientBps;
+    }
+
+    struct SettlementProposal {
+        bool exists;
+        uint256 bps;
     }
 
     /// @notice Optional multi-party split. Each split recipient may live on a
@@ -150,7 +158,11 @@ interface ITrancheProtocol {
     );
     event ConditionFulfilled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 disputeDeadline);
     event DisputeRaised(
-        uint256 indexed escrowId, address raisedBy, uint256 milestoneIndex, string reason, bytes32 evidenceHash
+        uint256 indexed escrowId,
+        address indexed raisedBy,
+        uint256 indexed milestoneIndex,
+        string reason,
+        bytes32 evidenceHash
     );
     event CounterEvidenceSubmitted(
         uint256 indexed escrowId, address counteredBy, uint256 milestoneIndex, bytes32 counterEvidenceHash
@@ -173,33 +185,33 @@ interface ITrancheProtocol {
     event DeliverySignaled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 deliveredAt);
     event SilentApprovalClaimed(uint256 indexed escrowId, uint256 milestoneIndex, address claimedBy);
     event ReceivingAddressUpdated(
-        uint256 indexed escrowId,
-        bytes32 oldAddress,
-        bytes32 newAddress,
-        uint32 oldDomain,
-        uint32 newDomain
+        uint256 indexed escrowId, bytes32 oldAddress, bytes32 newAddress, uint32 oldDomain, uint32 newDomain
     );
     /// @notice Per-split configuration emitted at deposit so indexers can
     ///         reconstruct splits without an on-chain read (M-05).
     event SplitConfigured(
-        uint256 indexed escrowId,
-        uint256 index,
-        bytes32 mintRecipient,
-        uint32 destinationDomain,
-        uint256 bps
+        uint256 indexed escrowId, uint256 index, bytes32 mintRecipient, uint32 destinationDomain, uint256 bps
     );
     /// @notice Snapshot of fee/treasury captured at deposit (H-05) so
     ///         indexers see the exact terms an escrow was created under.
-    event EscrowTermsSnapshotted(
-        uint256 indexed escrowId,
-        uint256 protocolFeeBps,
-        address protocolTreasury
-    );
+    event EscrowTermsSnapshotted(uint256 indexed escrowId, uint256 protocolFeeBps, address protocolTreasury);
     /// @notice Emitted when a refund credit is moved between owners (M-06).
     event RefundCreditTransferred(address indexed from, address indexed to, uint256 amount);
-    /// @notice Emitted when a stuck dispute is force-resolved by the
-    ///         arbiter-inaction timeout (H-02).
-    event DisputeTimedOutRefunded(uint256 indexed escrowId, uint256 milestoneIndex);
+    event DisputeResolved(
+        uint256 indexed escrowId,
+        uint256 indexed milestoneIndex,
+        uint256 recipientBps,
+        bytes32 resolutionHash,
+        string resolutionURI
+    );
+    event DisputeTimedOutSettled(uint256 indexed escrowId, uint256 indexed milestoneIndex, uint256 defaultBps);
+    event PartialRefundCredited(
+        uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed refundTo, uint256 amount
+    );
+    event MutualSettlementProposed(
+        uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed proposer, uint256 bps
+    );
+    event MutualSettlementExecuted(uint256 indexed escrowId, uint256 indexed milestoneIndex, uint256 bps);
 
     // ---------- errors ----------
 
@@ -261,4 +273,8 @@ interface ITrancheProtocol {
     /// @notice `releaseAfterWindow` caller passed `maxFee` below the
     ///         admin-tracked `cctpForwardFee` floor.
     error MaxFeeBelowFloor();
+
+    error DisputeAlreadyResolved();
+    error NoResolutionURI();
+    error MutualSettlementAlreadyExecuted();
 }

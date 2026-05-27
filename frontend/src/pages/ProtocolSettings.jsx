@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { isAddress } from 'viem'
-import { useReadContract } from 'wagmi'
 
 import PageHeader from '../components/PageHeader.jsx'
 import ConnectGate from '../components/ConnectGate.jsx'
@@ -11,8 +10,8 @@ import WalletButton from '../components/WalletButton.jsx'
 
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
 import { formatUSDC, truncateAddr } from '../utils/format.js'
 
@@ -53,12 +52,13 @@ function Gate() {
 }
 
 function Body({ roles }) {
+  const { config, refetch } = useProtocolConfig()
   return (
     <div className="pb-20 flex flex-col gap-16">
-      <Snapshot />
+      <Snapshot config={config} />
       <div className="rule" />
       {roles.isFeeManager && (<>
-        <FeeControls />
+        <FeeControls config={config} refetch={refetch} />
         <div className="rule" />
       </>)}
       {roles.isDomainManager && (<>
@@ -69,47 +69,56 @@ function Body({ roles }) {
         <RecoveryControls />
         <div className="rule" />
       </>)}
-      {roles.isPauser && <PauseControl />}
+      {roles.isPauser && <PauseControl config={config} refetch={refetch} />}
     </div>
   )
 }
 
-/* ---------- Snapshot ---------- */
-function Snapshot() {
-  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
-  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
-  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
-  const paused = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'paused' })
-
+/* ---------- Snapshot ----------
+   Single source of truth for every protocol-wide setting, from one
+   getProtocolConfig() call (replaces ~7 separate eth_calls). */
+function Snapshot({ config }) {
+  const has = !!config
   return (
     <section className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-8 pt-2">
       <Stat
         label="Protocol fee"
-        value={
-          <span className="num">
-            {fee.data !== undefined ? `${(Number(fee.data) / 100).toFixed(2)}%` : '—'}
-          </span>
-        }
+        value={<span className="num">{has ? `${(Number(config.protocolFeeBps) / 100).toFixed(2)}%` : '—'}</span>}
+      />
+      <Stat
+        label="Max fee ceiling"
+        value={<span className="num">{has ? `${(Number(config.maxProtocolFeeBps) / 100).toFixed(2)}%` : '—'}</span>}
+        hint="Hard cap enforced on-chain"
       />
       <Stat
         label="CCTP forward fee"
-        value={
-          <span className="num">
-            {cctp.data !== undefined ? formatUSDC(cctp.data) : '—'}
-          </span>
-        }
+        value={<span className="num">{has ? formatUSDC(config.cctpForwardFee) : '—'}</span>}
       />
       <Stat
         label="Paused"
         value={
-          <span className={paused.data ? 'text-bad' : 'text-ok'}>
-            {paused.data === undefined ? '—' : paused.data ? 'Yes' : 'No'}
+          <span className={has && config.paused ? 'text-bad' : has ? 'text-ok' : ''}>
+            {!has ? '—' : config.paused ? 'Yes' : 'No'}
           </span>
         }
       />
       <Stat
         label="Treasury"
-        value={treasury.data ? <AddressDisplay address={treasury.data} /> : <span className="text-ink-3">—</span>}
+        value={has ? <AddressDisplay address={config.protocolTreasury} /> : <span className="text-ink-3">—</span>}
+      />
+      <Stat
+        label="USDC token"
+        value={has ? <AddressDisplay address={config.usdc} /> : <span className="text-ink-3">—</span>}
+      />
+      <Stat
+        label="Token messenger"
+        value={has ? <AddressDisplay address={config.tokenMessenger} /> : <span className="text-ink-3">—</span>}
+        hint="CCTP burn router"
+      />
+      <Stat
+        label="Total escrows"
+        value={<span className="num">{has ? String(config.escrowCount) : '—'}</span>}
+        hint={has ? `Arc domain ${config.arcDomain}` : undefined}
       />
     </section>
   )
@@ -126,32 +135,32 @@ function Stat({ label, value, hint }) {
 }
 
 /* ---------- Fee Controls ---------- */
-function FeeControls() {
-  const fee = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolFeeBps' })
-  const treasury = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'protocolTreasury' })
-  const cctp = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'cctpForwardFee' })
-
+function FeeControls({ config, refetch }) {
   const [bps, setBps] = useState('')
   const [tr, setTr] = useState('')
   const [cctpVal, setCctpVal] = useState('')
 
-  const feeTx  = useTx({ onConfirmed: () => { fee.refetch?.(); setBps('') } })
-  const trTx   = useTx({ onConfirmed: () => { treasury.refetch?.(); setTr('') } })
-  const cctpTx = useTx({ onConfirmed: () => { cctp.refetch?.(); setCctpVal('') } })
+  const feeTx  = useTx({ onConfirmed: () => { refetch?.(); setBps('') } })
+  const trTx   = useTx({ onConfirmed: () => { refetch?.(); setTr('') } })
+  const cctpTx = useTx({ onConfirmed: () => { refetch?.(); setCctpVal('') } })
 
-  const bpsValid = /^\d+$/.test(bps) && Number(bps) <= 1000
+  const maxBps = config ? Number(config.maxProtocolFeeBps) : 1000
+  const bpsValid = /^\d+$/.test(bps) && Number(bps) <= maxBps
   const trValid = isAddress(tr)
   const cctpValid = /^\d+$/.test(cctpVal)
+
+  const currentFee = config ? `${(Number(config.protocolFeeBps) / 100).toFixed(2)}%` : '—'
+  const currentCctp = config ? formatUSDC(config.cctpForwardFee) : '—'
 
   return (
     <section className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-10">
       <div className="flex flex-col gap-4 max-w-prose">
         <h2 className="display text-[28px] leading-tight text-ink">Protocol fee</h2>
         <p className="text-[13.5px] text-ink-2 leading-relaxed">
-          Basis points (199 = 1.99%). Applies only to escrows created after this call.
+          Currently <span className="num text-ink">{currentFee}</span>. Basis points (199 = 1.99%). Applies only to escrows created after this call.
         </p>
-        <Field label="New fee (bps)" helper="0–1000">
-          {(p) => <input {...p} type="number" min="0" max="1000" className="input num" value={bps} onChange={(e) => setBps(e.target.value.trim())} />}
+        <Field label="New fee (bps)" helper={`0–${maxBps}`}>
+          {(p) => <input {...p} type="number" min="0" max={maxBps} className="input num" value={bps} onChange={(e) => setBps(e.target.value.trim())} />}
         </Field>
         <div>
           <button
@@ -186,7 +195,7 @@ function FeeControls() {
       <div className="flex flex-col gap-4 max-w-prose md:col-span-2">
         <h2 className="display text-[28px] leading-tight text-ink">CCTP forwarding fee</h2>
         <p className="text-[13.5px] text-ink-2 leading-relaxed">
-          Floor the contract uses for cross-chain releases. USDC base units (6 decimals; 1000000 = 1 USDC). Keep in sync with Circle's published forwarding fee.
+          Currently <span className="num text-ink">{currentCctp}</span>. Floor the contract uses for cross-chain releases. USDC base units (6 decimals; 1000000 = 1 USDC). Keep in sync with Circle's published forwarding fee.
         </p>
         <Field label="Fee (USDC base units)">
           {(p) => <input {...p} type="number" min="0" className="input num" value={cctpVal} onChange={(e) => setCctpVal(e.target.value.trim())} />}
@@ -316,10 +325,10 @@ function RecoveryControls() {
 }
 
 /* ---------- Pause Control ---------- */
-function PauseControl() {
-  const paused = useReadContract({ address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'paused' })
-  const tx = useTx({ onConfirmed: () => paused.refetch?.() })
-  const isPaused = !!paused.data
+function PauseControl({ config, refetch }) {
+  const tx = useTx({ onConfirmed: () => refetch?.() })
+  const loaded = !!config
+  const isPaused = !!config?.paused
 
   return (
     <section className="flex flex-col gap-4 max-w-prose">
@@ -329,14 +338,14 @@ function PauseControl() {
       </p>
       <div className="flex items-center gap-3">
         <span className={`status ${isPaused ? 'status-bad' : 'status-ok'}`}>
-          {paused.data === undefined ? '—' : isPaused ? 'Paused' : 'Active'}
+          {!loaded ? '—' : isPaused ? 'Paused' : 'Active'}
         </span>
       </div>
       <div>
         {isPaused ? (
           <button
             className="btn-primary"
-            disabled={tx.isBusy || paused.data === undefined}
+            disabled={tx.isBusy || !loaded}
             onClick={() => tx.run(escrowWrite('unpause', []), { loadingMessage: 'Unpause.' })}
           >
             {tx.isBusy ? 'Working…' : 'Unpause deposits'}
@@ -344,7 +353,7 @@ function PauseControl() {
         ) : (
           <button
             className="btn-danger"
-            disabled={tx.isBusy || paused.data === undefined}
+            disabled={tx.isBusy || !loaded}
             onClick={() => tx.run(escrowWrite('pause', []), { loadingMessage: 'Pause.' })}
           >
             {tx.isBusy ? 'Working…' : 'Pause deposits'}
