@@ -9,7 +9,7 @@ import IconButton from '../components/IconButton.jsx'
 import Modal from '../components/Modal.jsx'
 import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
-import { useEscrowDetail, useTick } from '../hooks/useEscrows.js'
+import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
@@ -496,10 +496,172 @@ function MilestoneRow({
       </div>
 
       {milestone.state === 2 && (
-        <div className="mt-4 pt-4 border-t border-warn/30 text-xs uppercase tracking-[0.18em] font-medium text-warn">
-          In review by the arbiter panel
+        <div className="mt-4 pt-4 border-t border-warn/30 flex flex-col gap-4">
+          <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
+            In review by the arbiter panel
+          </div>
+          <ArbiterTimeoutNote escrow={escrow} dispute={dispute} />
+          {(role === 'payer' || role === 'freelancer') && (
+            <SettlementPanel
+              escrow={escrow}
+              milestone={milestone}
+              role={role}
+              onChange={onChange}
+            />
+          )}
         </div>
       )}
+
+      {(milestone.state === 3 || milestone.state === 4) &&
+        dispute && dispute.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
+          <ResolutionNote dispute={dispute} />
+        )}
+    </div>
+  )
+}
+
+/* Explains what the permissionless timeout fallback will do if the arbiter
+   never acts. The outcome is no longer always "refund the depositor": it
+   depends on who raised the dispute (contract `resolveDisputeByTimeout`). The
+   countdown uses ARBITRATION_WINDOW or ESCALATION_ARBITRATION_WINDOW read from
+   the contract — never a hardcoded 14d / 7d. */
+function ArbiterTimeoutNote({ escrow, dispute }) {
+  const { arbitrationWindow, escalationArbitrationWindow } = useDisputeConfig()
+  if (!dispute?.raisedBy) return null
+
+  const windowSecs = dispute.isEscalation ? escalationArbitrationWindow : arbitrationWindow
+  const raisedByRecipient = dispute.raisedBy.toLowerCase() === escrow.recipient.toLowerCase()
+  const copy = raisedByRecipient
+    ? 'If the arbiter does not act within the window, funds will be split 50/50 between both parties.'
+    : 'If the arbiter does not act within the window, funds will be refunded to the depositor.'
+
+  const target = Number(dispute.raisedAt) + Number(windowSecs)
+  const now = Math.floor(Date.now() / 1000)
+  const elapsed = windowSecs > 0n && now >= target
+
+  return (
+    <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
+      <p className="text-xs text-ink-2 leading-relaxed">{copy}</p>
+      {windowSecs > 0n && (
+        <p className="font-mono tabular-nums text-[11px] text-ink-3">
+          {elapsed
+            ? 'Arbitration window has elapsed — the timeout outcome can now be triggered.'
+            : `Arbitration window closes in ${countdown(target).replace(' remaining', '')}.`}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/* Mutual settlement (mutualSettle). Either party proposes a recipient share in
+   whole percent; when both parties' proposals match, the contract executes the
+   split automatically. We surface both standing proposals and a one-click
+   "agree to their number" path. */
+function SettlementPanel({ escrow, milestone, role, onChange }) {
+  const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
+    escrow.id, milestone.index, escrow.depositor, escrow.recipient
+  )
+  const { config } = useProtocolConfig()
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
+  // Circle's forwarding fee.
+  const maxFee = Number(escrow.destinationDomain) === ARC_DOMAIN ? 0n : cctpForwardFee
+
+  const mine = role === 'payer' ? depositorProposal : recipientProposal
+  const theirs = role === 'payer' ? recipientProposal : depositorProposal
+
+  const [pct, setPct] = useState('')
+  const tx = useTx({ onConfirmed: () => { setPct(''); refetch(); onChange?.() } })
+
+  const pctNum = pct === '' ? NaN : Number(pct)
+  const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
+  const canSubmit = pctValid && !tx.isBusy
+
+  const propose = (bps) => tx.run(
+    escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+    { loadingMessage: 'Check your wallet.' }
+  )
+
+  const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
+
+  const bpsToPct = (bps) => Number(bps) / 100
+  // Their proposal differs from mine (or I have none): offer to accept it,
+  // which makes both proposals match and settles on-chain.
+  const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
+
+  return (
+    <div className="rounded-xl border border-rule bg-paper p-4 flex flex-col gap-3">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Propose settlement</p>
+
+      <Field label="I propose recipient gets" helper="Whole percent (0–100). Both sides must agree to settle.">
+        {(p) => (
+          <div className="flex items-center gap-2">
+            <input
+              {...p}
+              type="number" min={0} max={100} step={1}
+              className="input num w-24"
+              placeholder="50"
+              value={pct}
+              onChange={(e) => setPct(e.target.value)}
+            />
+            <span className="text-[13px] text-ink-3">%</span>
+          </div>
+        )}
+      </Field>
+
+      <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
+        {tx.isBusy ? 'Working…' : 'Submit Proposal'}
+      </button>
+
+      {(mine.exists || theirs.exists) && (
+        <p className="text-[13px] text-ink-2">
+          {mine.exists ? `You proposed ${bpsToPct(mine.bps)}%` : 'You have not proposed yet'}
+          {' — '}
+          {theirs.exists ? `Counterparty proposed ${bpsToPct(theirs.bps)}%` : 'counterparty has not proposed yet'}
+        </p>
+      )}
+
+      {canAgree && (
+        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-2">
+          <p className="text-[13px] text-ink-2 leading-relaxed">
+            Both parties agree on {bpsToPct(theirs.bps)}%? Confirm to settle: the recipient
+            receives {bpsToPct(theirs.bps)}% and the depositor the remainder.
+          </p>
+          <button
+            className="btn-primary text-sm py-2 self-start"
+            onClick={() => propose(Number(theirs.bps))}
+            disabled={tx.isBusy}
+          >
+            {tx.isBusy ? 'Working…' : `Confirm settlement at ${bpsToPct(theirs.bps)}%`}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* Shown on a resolved (released/refunded) milestone that went through a
+   dispute. Links out to the arbiter's written reasoning and the on-chain
+   resolution hash. */
+function ResolutionNote({ dispute }) {
+  const pct = Number(dispute.resolvedRecipientBps ?? 0n) / 100
+  return (
+    <div className="mt-4 pt-4 border-t border-rule flex flex-col gap-2">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbiter resolution</p>
+      <p className="text-[13px] text-ink-2">Resolved with {pct}% to the recipient.</p>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        {dispute.resolutionURI && (
+          <a
+            href={dispute.resolutionURI}
+            target="_blank"
+            rel="noreferrer"
+            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[13px]"
+          >
+            View Resolution ↗
+          </a>
+        )}
+        <span className="num text-[11px] text-ink-3 break-all">{dispute.resolutionHash}</span>
+      </div>
     </div>
   )
 }
@@ -642,11 +804,11 @@ function DisputeActions({
   const counterExists =
     dispute && dispute.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
   const raisedByMe =
-    dispute?.disputedBy && userAddress &&
-    dispute.disputedBy.toLowerCase() === userAddress.toLowerCase()
+    dispute?.raisedBy && userAddress &&
+    dispute.raisedBy.toLowerCase() === userAddress.toLowerCase()
 
   const canRaise = state === 1 && !disputeWindowExpired
-  const canCounter = state === 2 && !!dispute?.disputedBy && !raisedByMe && !counterExists
+  const canCounter = state === 2 && !!dispute?.raisedBy && !raisedByMe && !counterExists
   const canEscalate = state === 0 && role === 'freelancer' && deadlinePassed
 
   if (!canRaise && !canCounter && !canEscalate) return null

@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
+    "gen-abi": "node scripts/gen-abi.mjs",
     "e2e:responsive": "node e2e/responsive.mjs"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useReadContract } from 'wagmi'
+import { useReadContract, useReadContracts } from 'wagmi'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
 
 // Normalises one Escrow tuple/struct returned by the contract.
@@ -104,6 +104,59 @@ export function useDispute(escrowId, milestoneIndex) {
     query: { enabled }
   })
   return { dispute: data, isLoading, refetch }
+}
+
+// Protocol-wide dispute timing + math constants, read straight from the
+// contract so the frontend never hardcodes the arbitration windows (14d / 7d)
+// or the BPS denominator. Cached indefinitely — these are `constant`.
+export function useDisputeConfig() {
+  const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI }
+  const { data, isLoading } = useReadContracts({
+    contracts: [
+      { ...base, functionName: 'ARBITRATION_WINDOW' },
+      { ...base, functionName: 'ESCALATION_ARBITRATION_WINDOW' },
+      { ...base, functionName: 'BPS_DENOMINATOR' }
+    ],
+    query: { staleTime: Infinity }
+  })
+  return {
+    arbitrationWindow: data?.[0]?.result ?? 0n,
+    escalationArbitrationWindow: data?.[1]?.result ?? 0n,
+    // Sensible non-zero fallback so percentage math never divides by zero
+    // before the read resolves.
+    bpsDenominator: data?.[2]?.result ?? 10_000n,
+    isLoading
+  }
+}
+
+// A single SettlementProposal getter returns (bool exists, uint256 bps). viem
+// hands multi-output getters back as a positional array; normalise to an object.
+function normaliseProposal(result) {
+  if (!result) return { exists: false, bps: 0n }
+  if (Array.isArray(result)) return { exists: !!result[0], bps: result[1] ?? 0n }
+  return { exists: !!result.exists, bps: result.bps ?? 0n }
+}
+
+// Both parties' mutual-settlement proposals for one disputed milestone, read in
+// a single multicall. `bps` is in basis points (0–10,000).
+export function useSettlementProposals(escrowId, milestoneIndex, depositor, recipient) {
+  const enabled =
+    escrowId !== undefined && escrowId !== null &&
+    milestoneIndex !== undefined && milestoneIndex !== null &&
+    !!depositor && !!recipient
+  const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'settlementProposals' }
+  const { data, isLoading, refetch } = useReadContracts({
+    contracts: enabled
+      ? [
+          { ...base, args: [BigInt(escrowId), BigInt(milestoneIndex), depositor] },
+          { ...base, args: [BigInt(escrowId), BigInt(milestoneIndex), recipient] }
+        ]
+      : [],
+    query: { enabled }
+  })
+  const depositorProposal = useMemo(() => normaliseProposal(data?.[0]?.result), [data])
+  const recipientProposal = useMemo(() => normaliseProposal(data?.[1]?.result), [data])
+  return { depositorProposal, recipientProposal, isLoading, refetch }
 }
 
 // Single-call payload for the escrow detail page: escrow + milestones +

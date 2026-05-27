@@ -10,12 +10,12 @@ import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
-import { useDisputedEscrows, useEscrowDetail, useTick } from '../hooks/useEscrows.js'
+import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick } from '../hooks/useEscrows.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { isValidBytes32, bytes32ToAddress } from '../utils/encode.js'
-import { getDomainName } from '../config/chains.js'
-import { formatUSDC, formatUSDCNumber, formatTimestamp, truncateAddr } from '../utils/format.js'
+import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+import { getDomainName, ARC_DOMAIN } from '../config/chains.js'
+import { formatUSDC, formatUSDCNumber, formatTimestamp, countdown } from '../utils/format.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -178,9 +178,21 @@ function DisputeBlock({ detail, index, refetch }) {
   const m = detail.milestones[index]
   const d = detail.disputes[index]
   const e = detail.escrow
-  const timeoutAt = Number(d.raisedAt) + 30 * 86400
+  const { arbitrationWindow, escalationArbitrationWindow, bpsDenominator } = useDisputeConfig()
+
+  // Window length depends on whether this dispute was an escalation. Read from
+  // the contract's ARBITRATION_WINDOW / ESCALATION_ARBITRATION_WINDOW rather
+  // than hardcoding 14d / 7d.
+  const windowSecs = d.isEscalation ? escalationArbitrationWindow : arbitrationWindow
+  const timeoutAt = Number(d.raisedAt) + Number(windowSecs)
   const now = Math.floor(Date.now() / 1000)
-  const canTimeout = now > timeoutAt
+  const canTimeout = windowSecs > 0n && now >= timeoutAt
+
+  // What the timeout fallback will do, decided by who raised the dispute.
+  const raisedByRecipient = d.raisedBy?.toLowerCase() === e.recipient.toLowerCase()
+  const timeoutOutcome = raisedByRecipient
+    ? 'Funds split 50/50 between both parties.'
+    : 'Funds refunded to the depositor.'
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -191,13 +203,13 @@ function DisputeBlock({ detail, index, refetch }) {
             {`Milestone ${index + 1}: ${formatUSDC(m.amount).replace(' USDC', '')} USDC`}
           </p>
         </div>
-        <span className="status-bad">Disputed</span>
+        <span className="status-bad">{d.isEscalation ? 'Escalated' : 'Disputed'}</span>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
         <Side
           label="Opened by"
-          who={d.disputedBy}
+          who={d.raisedBy}
           when={d.raisedAt}
           reason={d.reason}
           uri={d.evidenceURI}
@@ -205,7 +217,7 @@ function DisputeBlock({ detail, index, refetch }) {
         {d.counterEvidenceHash && d.counterEvidenceHash !== ZERO_BYTES32 ? (
           <Side
             label="Counter-evidence"
-            who={d.disputedBy?.toLowerCase() === e.depositor.toLowerCase() ? e.recipient : e.depositor}
+            who={d.raisedBy?.toLowerCase() === e.depositor.toLowerCase() ? e.recipient : e.depositor}
             uri={d.counterEvidenceURI}
           />
         ) : (
@@ -218,8 +230,13 @@ function DisputeBlock({ detail, index, refetch }) {
 
       <ResolveForm
         id={detail.id} index={index}
+        escrow={e}
+        milestone={m}
+        bpsDenominator={bpsDenominator}
         refetch={refetch}
         canTimeout={canTimeout}
+        timeoutAt={timeoutAt}
+        timeoutOutcome={timeoutOutcome}
       />
     </li>
   )
@@ -243,84 +260,152 @@ function Side({ label, who, when, reason, uri }) {
   )
 }
 
-function ResolveForm({ id, index, refetch, canTimeout }) {
-  const [decision, setDecision] = useState('') // 'release' | 'refund'
-  const [resolution, setResolution] = useState('')
+function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, canTimeout, timeoutAt, timeoutOutcome }) {
+  // User works in whole percent (0–100); the contract receives BPS (0–10,000).
+  const [pct, setPct] = useState('50')
+  const [resolutionUri, setResolutionUri] = useState('')
+  const [resolutionHash, setResolutionHash] = useState('')
   const [err, setErr] = useState('')
-  const tx = useTx({ onConfirmed: () => { refetch(); setDecision(''); setResolution('') } })
+  const tx = useTx({
+    onConfirmed: () => { refetch(); setPct('50'); setResolutionUri(''); setResolutionHash('') }
+  })
   const timeoutTx = useTx({ onConfirmed: refetch })
 
-  // Live CCTP forwarding fee. A "release to freelancer" resolution settles via
+  // Live CCTP forwarding fee. A resolution that pays the recipient settles via
   // CCTP; for cross-chain destinations maxFee must cover Circle's forwarding
-  // fee or the mint won't auto-deliver. Arc same-chain burns force maxFee = 0
-  // inside the contract regardless of what we pass.
+  // fee or the mint won't auto-deliver. Arc same-chain burns take maxFee = 0.
   const { config } = useProtocolConfig()
   const cctpForwardFee = config?.cctpForwardFee ?? 0n
+  const maxFee = Number(escrow.destinationDomain) === ARC_DOMAIN ? 0n : cctpForwardFee
 
-  const hashValid = isValidBytes32(resolution)
+  // Percentage → BPS, plus the live split preview.
+  const pctNum = pct === '' ? NaN : Number(pct)
+  const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
+  const bps = pctValid ? Math.round(pctNum * 100) : 0
+  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
+  const recipientAmount = pctValid ? (milestone.amount * BigInt(bps)) / denom : 0n
+  const depositorAmount = pctValid ? milestone.amount - recipientAmount : 0n
+
+  const uriValid = resolutionUri.trim().length > 0
+  // Optional explicit hash; otherwise derive keccak256 of the resolution URI.
+  const explicitHashValid = isValidBytes32(resolutionHash)
+  const effectiveHash = explicitHashValid
+    ? resolutionHash
+    : uriValid ? hashDescription(resolutionUri.trim()) : null
+  const canSubmit = pctValid && uriValid && !tx.isBusy
 
   const submit = () => {
-    if (!decision) { setErr('Pick a resolution.'); return }
-    if (!hashValid) { setErr('Resolution hash must be 0x followed by 64 hex characters.'); return }
+    if (!pctValid) { setErr('Enter a recipient share between 0 and 100%.'); return }
+    if (!uriValid) { setErr('A resolution URI is required.'); return }
+    if (resolutionHash && !explicitHashValid) {
+      setErr('Resolution hash must be 0x followed by 64 hex characters (or leave it blank to auto-compute).')
+      return
+    }
     setErr('')
     tx.run(
-      escrowWrite('resolveDispute', [BigInt(id), BigInt(index), decision === 'release', resolution, cctpForwardFee]),
+      escrowWrite('resolveDispute', [
+        BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
+      ]),
       { loadingMessage: 'Sign to resolve.' }
     )
   }
 
   return (
-    <div className="flex flex-col gap-3 pt-2">
-      <div className="grid grid-cols-2 gap-3">
-        <button
-          className={decision === 'release' ? 'btn-primary' : 'btn-secondary'}
-          onClick={() => setDecision('release')}
-        >
-          Release to freelancer
-        </button>
-        <button
-          className={decision === 'refund' ? 'btn-danger' : 'btn-secondary'}
-          onClick={() => setDecision('refund')}
-        >
-          Refund to payer
-        </button>
+    <div className="flex flex-col gap-4 pt-2">
+      {/* Recipient share slider (0–100%), stored internally as BPS. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-baseline justify-between">
+          <p className="eyebrow">Recipient share</p>
+          <span className="num text-[14px] text-ink">{pctValid ? pctNum : '—'}%</span>
+        </div>
+        <input
+          type="range" min={0} max={100} step={1}
+          value={pctValid ? pctNum : 50}
+          onChange={(e) => setPct(e.target.value)}
+          className="w-full accent-clay"
+          aria-label="Recipient share percent"
+        />
+        <div className="flex items-center gap-2">
+          <input
+            type="number" min={0} max={100} step={1}
+            className="input num w-24"
+            value={pct}
+            onChange={(e) => setPct(e.target.value)}
+            aria-label="Recipient share percent (numeric)"
+          />
+          <span className="text-[13px] text-ink-3">% to the freelancer</span>
+        </div>
+        <div className="rounded-xl bg-sunk px-3 py-2.5 text-[13px] text-ink-2 leading-relaxed">
+          Recipient gets <span className="num text-ink">{formatUSDCNumber(recipientAmount)} USDC</span>,
+          {' '}Depositor gets <span className="num text-ink">{formatUSDCNumber(depositorAmount)} USDC</span>.
+        </div>
       </div>
+
       <Field
-        label="Resolution hash"
+        label="Resolution URI"
+        helper="Required. Link to the written reasoning behind this decision."
+      >
+        {(p) => (
+          <input {...p}
+            className="input"
+            placeholder="IPFS link or URL to written reasoning"
+            autoComplete="off"
+            spellCheck={false}
+            value={resolutionUri}
+            onChange={(e) => setResolutionUri(e.target.value)}
+          />
+        )}
+      </Field>
+
+      <Field
+        label="Resolution hash (optional)"
         error={err}
-        helper="bytes32 reference to the decision rationale stored off-chain."
+        helper="Leave blank to auto-compute keccak256 of the resolution URI."
       >
         {(p) => (
           <input {...p}
             className="input num"
-            placeholder="0x… (64 hex chars)"
+            placeholder={effectiveHash || '0x… (64 hex chars)'}
             autoComplete="off"
             spellCheck={false}
             maxLength={66}
-            value={resolution}
-            onChange={(e) => setResolution(e.target.value.trim())}
+            value={resolutionHash}
+            onChange={(e) => setResolutionHash(e.target.value.trim())}
           />
         )}
       </Field>
+
       <div className="flex items-center gap-2">
         <button
-          className={decision === 'refund' ? 'btn-danger' : 'btn-primary'}
+          className="btn-primary"
           onClick={submit}
-          disabled={tx.isBusy || !decision || !hashValid}
+          disabled={!canSubmit}
         >
-          {tx.isBusy ? 'Working…' : decision ? `Resolve · ${decision}` : 'Resolve'}
+          {tx.isBusy ? 'Working…' : 'Resolve Dispute'}
         </button>
+      </div>
+
+      {/* Permissionless timeout fallback. Outcome is decided by the contract
+          based on who raised the dispute — no longer always a refund. */}
+      <div className="flex flex-col gap-1.5 pt-1 border-t border-rule mt-1">
+        <p className="text-[12px] text-ink-3 leading-relaxed">
+          {canTimeout
+            ? `Arbitration window has elapsed. ${timeoutOutcome}`
+            : `If unresolved, the arbitration window closes in ${countdown(timeoutAt).replace(' remaining', '')}. ${timeoutOutcome}`}
+        </p>
         {canTimeout && (
-          <button
-            className="btn-quiet"
-            onClick={() => timeoutTx.run(
-              escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
-              { loadingMessage: 'Force refund by timeout.' }
-            )}
-            disabled={timeoutTx.isBusy}
-          >
-            Force refund (timeout)
-          </button>
+          <div>
+            <button
+              className="btn-quiet"
+              onClick={() => timeoutTx.run(
+                escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
+                { loadingMessage: 'Settling by timeout.' }
+              )}
+              disabled={timeoutTx.isBusy}
+            >
+              {timeoutTx.isBusy ? 'Working…' : 'Settle by timeout'}
+            </button>
+          </div>
         )}
       </div>
     </div>
