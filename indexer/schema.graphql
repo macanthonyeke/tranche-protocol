@@ -1,0 +1,149 @@
+# Tranche Protocol subgraph schema.
+#
+# Designed around the events the contract ACTUALLY emits (see
+# src/interface/ITrancheProtocol.sol). Two fields the frontend's card summaries
+# want — per-escrow `milestoneCount` and per-milestone `amount` — are NOT emitted
+# on-chain, so they are best-effort / nullable here. See README "Event gaps".
+
+enum EscrowState {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum MilestoneState {
+  PENDING
+  FULFILLED
+  DISPUTED
+  RELEASED
+  REFUNDED
+}
+
+type Escrow @entity(immutable: false) {
+  "Escrow id as a decimal string"
+  id: ID!
+  escrowId: BigInt!
+  depositor: Bytes!
+  recipient: Bytes!
+  totalAmount: BigInt!
+  invoiceHash: Bytes!
+  invoiceURI: String!
+  deadline: BigInt!
+
+  "ACTIVE by default; CANCELLED on mutual cancel. COMPLETED is NOT derivable from events (no event) — hydrate on-chain if needed."
+  state: EscrowState!
+
+  "Captured from EscrowTermsSnapshotted (H-05)."
+  protocolFeeBps: BigInt
+  protocolTreasury: Bytes
+
+  "Number of split recipients (from SplitsConfigured); 0 = single recipient."
+  splitCount: Int!
+
+  "Best-effort = max(milestoneIndex seen) + 1. Not authoritative: a milestone that has emitted no event yet is invisible. See README."
+  milestoneCount: Int!
+  releasedMilestoneCount: Int!
+  refundedMilestoneCount: Int!
+  "Count of milestones with a currently-OPEN dispute."
+  disputedMilestoneCount: Int!
+  "True while any milestone dispute is open — powers the arbiter panel filter."
+  hasOpenDispute: Boolean!
+
+  createdAt: BigInt!
+  createdAtBlock: BigInt!
+  createdTx: Bytes!
+  updatedAt: BigInt!
+
+  milestones: [Milestone!]! @derivedFrom(field: "escrow")
+  splits: [Split!]! @derivedFrom(field: "escrow")
+  disputes: [Dispute!]! @derivedFrom(field: "escrow")
+  refundCredits: [RefundCredit!]! @derivedFrom(field: "escrow")
+}
+
+type Milestone @entity(immutable: false) {
+  "escrowId-milestoneIndex"
+  id: ID!
+  escrow: Escrow!
+  index: Int!
+  state: MilestoneState!
+
+  "NOT emitted on-chain — always null. Hydrate via getMilestones(escrowId) on the detail page."
+  amount: BigInt
+
+  "Deadline to dispute after ConditionFulfilled."
+  disputeDeadline: BigInt
+  fulfilledAt: BigInt
+  "Timestamp the recipient signalled delivery (DeliverySignaled); null if never."
+  deliveredAt: BigInt
+  silentApprovalClaimedBy: Bytes
+
+  "Recipient basis points the milestone settled at (resolution / timeout default / mutual)."
+  resolutionBps: BigInt
+  resolutionURI: String
+  resolutionHash: Bytes
+  "RELEASED_NO_DISPUTE | DISPUTE_RESOLVED | DISPUTE_TIMEOUT | MUTUAL_SETTLEMENT | null"
+  settledVia: String
+
+  dispute: Dispute
+  updatedAt: BigInt!
+}
+
+type Dispute @entity(immutable: false) {
+  "escrowId-milestoneIndex (one dispute record per milestone)"
+  id: ID!
+  escrow: Escrow!
+  milestone: Milestone!
+  milestoneIndex: Int!
+
+  raisedBy: Bytes!
+  isEscalation: Boolean!
+  reason: String
+  evidenceHash: Bytes
+  counteredBy: Bytes
+  counterEvidenceHash: Bytes
+
+  raisedAt: BigInt!
+  raisedTx: Bytes!
+
+  resolved: Boolean!
+  resolvedAt: BigInt
+  "Recipient bps (resolution) / defaultBps (timeout) / agreed bps (mutual)."
+  resolutionBps: BigInt
+  resolutionURI: String
+  resolutionHash: Bytes
+  "RESOLVED | TIMED_OUT | MUTUAL_SETTLED | null"
+  resolutionType: String
+}
+
+type Split @entity(immutable: true) {
+  "escrowId-index"
+  id: ID!
+  escrow: Escrow!
+  index: Int!
+  mintRecipient: Bytes!
+  destinationDomain: Int!
+  bps: BigInt!
+}
+
+"Running per-wallet refund credit balance, mirrored from credit / transfer / withdraw events. On-chain getRefundBalance(addr) remains the source of truth (it is O(1))."
+type RefundBalance @entity(immutable: false) {
+  "wallet address, lowercased"
+  id: ID!
+  wallet: Bytes!
+  balance: BigInt!
+  totalCredited: BigInt!
+  totalWithdrawn: BigInt!
+  updatedAt: BigInt!
+}
+
+"Immutable ledger of partial refund credits (PartialRefundCredited)."
+type RefundCredit @entity(immutable: true) {
+  "txHash-logIndex"
+  id: ID!
+  escrow: Escrow!
+  milestoneIndex: Int!
+  refundTo: Bytes!
+  amount: BigInt!
+  timestamp: BigInt!
+  tx: Bytes!
+}

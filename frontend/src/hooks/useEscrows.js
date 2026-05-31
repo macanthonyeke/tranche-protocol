@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useReadContract, useReadContracts } from 'wagmi'
+import { useQuery } from '@tanstack/react-query'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
+import {
+  GOLDSKY_ENABLED,
+  fetchDashboard,
+  fetchEscrowsByRole,
+  fetchDisputedEscrows
+} from '../lib/goldsky'
 
 // Normalises one Escrow tuple/struct returned by the contract.
 function normaliseEscrow(raw, id) {
@@ -199,17 +206,24 @@ export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
   return { detail, isLoading, error, refetch }
 }
 
-// Single-call payload for the dashboard.
-export function useDashboard(address) {
-  const enabled = !!address
+// ---------------------------------------------------------------------------
+// Bulk / list reads. These previously hit the contract's looping view functions
+// (getDashboard, getDisputedEscrows, getEscrowsFor*), which scan EVERY escrow on
+// each eth_call and will exceed the gas limit as the protocol grows. They now
+// read from the Goldsky subgraph when VITE_GOLDSKY_ENDPOINT is set, falling back
+// to the on-chain views otherwise so the app keeps working pre-deploy.
+// Single-escrow reads above stay on-chain — they are bounded/O(1).
+// ---------------------------------------------------------------------------
+
+// --- Dashboard ---
+function useDashboardOnchain(address, active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'getDashboard',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    args: active ? [address] : undefined,
+    query: { enabled: active }
   })
-
   const dashboard = useMemo(() => {
     if (!data) return null
     return {
@@ -220,45 +234,83 @@ export function useDashboard(address) {
       refundBalance: data.refundBalance ?? 0n
     }
   }, [data])
-
   return { dashboard, isLoading, refetch }
 }
 
-export function useEscrowsForPayer(address) {
-  const enabled = !!address
+function useDashboardGoldsky(address, active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-dashboard', address?.toLowerCase()],
+    queryFn: () => fetchDashboard(address),
+    enabled: active
+  })
+  return { dashboard: data ?? null, isLoading, refetch }
+}
+
+export function useDashboard(address) {
+  const onchain = useDashboardOnchain(address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useDashboardGoldsky(address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
+}
+
+// --- Escrows by participant role ---
+function useEscrowsByRoleOnchain(functionName, address, active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
-    functionName: 'getEscrowsForPayer',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    functionName,
+    args: active ? [address] : undefined,
+    query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
   return { escrows, isLoading, refetch }
+}
+
+function useEscrowsByRoleGoldsky(role, address, active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-escrows', role, address?.toLowerCase()],
+    queryFn: () => fetchEscrowsByRole(role, address),
+    enabled: active
+  })
+  return { escrows: data ?? [], isLoading, refetch }
+}
+
+export function useEscrowsForPayer(address) {
+  const onchain = useEscrowsByRoleOnchain('getEscrowsForPayer', address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useEscrowsByRoleGoldsky('payer', address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
 }
 
 export function useEscrowsForFreelancer(address) {
-  const enabled = !!address
+  const onchain = useEscrowsByRoleOnchain('getEscrowsForFreelancer', address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useEscrowsByRoleGoldsky('freelancer', address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
+}
+
+// --- All disputed escrows across the protocol (arbiter panel) ---
+function useDisputedEscrowsOnchain(active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
-    functionName: 'getEscrowsForFreelancer',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    functionName: 'getDisputedEscrows',
+    query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
   return { escrows, isLoading, refetch }
 }
 
-// All disputed escrows across the protocol (arbiter panel).
-export function useDisputedEscrows() {
-  const { data, isLoading, refetch } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: ESCROW_ABI,
-    functionName: 'getDisputedEscrows'
+function useDisputedEscrowsGoldsky(active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-disputed'],
+    queryFn: () => fetchDisputedEscrows(),
+    enabled: active
   })
-  const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
-  return { escrows, isLoading, refetch }
+  return { escrows: data ?? [], isLoading, refetch }
+}
+
+export function useDisputedEscrows() {
+  const onchain = useDisputedEscrowsOnchain(!GOLDSKY_ENABLED)
+  const goldsky = useDisputedEscrowsGoldsky(GOLDSKY_ENABLED)
+  return GOLDSKY_ENABLED ? goldsky : onchain
 }
 
 export function useRefundBalance(address) {
