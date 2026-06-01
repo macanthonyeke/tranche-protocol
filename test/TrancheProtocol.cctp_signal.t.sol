@@ -61,39 +61,46 @@ contract TrancheProtocolCctpSignalTest is Base {
         assertEq(burnAmount, 100e6);
     }
 
-    function test_CCTP_CrossChainRelease_UsesCallerSuppliedMaxFee() public {
-        uint256 liveForwardFee = 123_456;
-        uint256 id = _depositSingle(100e6); // DEST_DOMAIN = 6 (cross-chain)
+    // M-R3-01: the permissionless release() path IGNORES the caller-supplied
+    // maxFee and burns with the per-escrow snapshotted forwarding fee, so a
+    // griefer cannot inflate the fee on someone else's payout.
+    function test_CCTP_CrossChainRelease_IgnoresCallerMaxFee_UsesSnapshot() public {
+        uint256 id = _depositSingle(100e6); // snapshot fee = CCTP_FORWARD_FEE
         _claimDelivery(id, 0);
         vm.warp(block.timestamp + REVIEW_WINDOW);
-        escrow.release(id, 0, liveForwardFee);
+        escrow.release(id, 0, 123_456); // caller value is ignored
 
         (,,,,,, uint256 maxFee,,,) = _readBurnCall();
-        assertEq(maxFee, liveForwardFee);
+        assertEq(maxFee, CCTP_FORWARD_FEE, "release() must use the snapshot, not the caller value");
     }
 
-    function test_CCTP_CrossChainRelease_UsesCallerValue_NotStoredForwardFee() public {
+    // M-R3-02: the snapshot is taken at deposit; release() uses it regardless of
+    // any later caller value or global fee change.
+    function test_CCTP_CrossChainRelease_UsesSnapshot_NotCallerValue() public {
+        vm.prank(deployer);
+        escrow.setCctpForwardFee(777_777);
+
+        uint256 id = _depositSingle(100e6); // snapshot fee = 777_777
+        _claimDelivery(id, 0);
+        vm.warp(block.timestamp + REVIEW_WINDOW);
+        escrow.release(id, 0, 800_000); // caller value ignored
+
+        (,,,,,, uint256 maxFee,,,) = _readBurnCall();
+        assertEq(maxFee, 777_777, "release() uses the snapshotted fee, not the caller value");
+    }
+
+    // M-R3-01: release() can no longer revert below-floor (it uses the snapshot,
+    // which always clears its own floor). The floor revert is now exercised on
+    // the depositor path, approveRelease(), which still honours a caller value.
+    function test_CCTP_CrossChainApproveRelease_RevertOn_MaxFeeBelowFloor() public {
         vm.prank(deployer);
         escrow.setCctpForwardFee(777_777);
 
         uint256 id = _depositSingle(100e6);
         _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW);
-        escrow.release(id, 0, 800_000); // above floor, distinct from stored
-
-        (,,,,,, uint256 maxFee,,,) = _readBurnCall();
-        assertEq(maxFee, 800_000);
-    }
-
-    function test_CCTP_CrossChainRelease_RevertOn_MaxFeeBelowFloor() public {
-        vm.prank(deployer);
-        escrow.setCctpForwardFee(777_777);
-
-        uint256 id = _depositSingle(100e6);
-        _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW);
+        vm.prank(depositor);
         vm.expectRevert(MaxFeeBelowFloor.selector);
-        escrow.release(id, 0, 777_776);
+        escrow.approveRelease(id, 0, 777_776);
     }
 
     function test_CCTP_CrossChain_RevertOn_ZeroForwardFee() public {

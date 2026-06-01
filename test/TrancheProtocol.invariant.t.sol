@@ -146,7 +146,7 @@ contract Handler is Test, ITrancheProtocol {
         vm.prank(arbiter);
         uint256 recipientBps = releaseToRecipient ? 10_000 : 0;
         try escrow.resolveDispute(
-            id, idx, recipientBps, keccak256(abi.encode(id, idx, releaseToRecipient)), "ipfs://res", 0
+            id, idx, recipientBps, keccak256(abi.encode(id, idx, releaseToRecipient)), "ipfs://res", CCTP_FORWARD_FEE
         ) {
             resolveCalls++;
         } catch {}

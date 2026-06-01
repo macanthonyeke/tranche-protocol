@@ -112,22 +112,25 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     // -----------------------------------------------------------------------
     // H-04: maxFee >= burnAmount must revert (single-recipient path).
+    // M-R3-01: release() no longer accepts a caller maxFee, so the H-04 ceiling
+    // is exercised via approveRelease() (the depositor path that still passes a
+    // caller-supplied value into _approveAndBurn).
     // -----------------------------------------------------------------------
 
     function test_H04_Release_RevertOn_MaxFeeEqualsBurnAmount() public {
         uint256 id = _depositSingle(100e6);
         _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW + 1);
+        vm.prank(depositor);
         vm.expectRevert(MaxFeeExceedsBurnAmount.selector);
-        escrow.release(id, 0, 100e6); // burnAmount = 100e6 (fee 0)
+        escrow.approveRelease(id, 0, 100e6); // burnAmount = 100e6 (fee 0)
     }
 
     function test_H04_Release_RevertOn_MaxFeeGreaterThanBurnAmount() public {
         uint256 id = _depositSingle(100e6);
         _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW + 1);
+        vm.prank(depositor);
         vm.expectRevert(MaxFeeExceedsBurnAmount.selector);
-        escrow.release(id, 0, 100e6 + 1);
+        escrow.approveRelease(id, 0, 100e6 + 1);
     }
 
     function test_H04_Release_MaxFeeJustBelowBurnAmount_Succeeds() public {
@@ -515,11 +518,12 @@ contract TrancheProtocolAuditFixesTest is Base {
     function test_H04_MultiSplit_RevertOn_PerShareMaxFeeEqualsShare() public {
         uint256 id = _depositWithSplits(100e6, _twoSplits());
         _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW + 1);
 
+        // M-R3-01: caller maxFee only flows through the depositor path now.
         // cctpMaxFee = 100e6 -> split0 share == perShareMaxFee == 70e6.
+        vm.prank(depositor);
         vm.expectRevert(MaxFeeExceedsBurnAmount.selector);
-        escrow.release(id, 0, 100e6);
+        escrow.approveRelease(id, 0, 100e6);
     }
 
     function test_H04_MultiSplit_PerShareMaxFeeJustBelowShare_Succeeds() public {

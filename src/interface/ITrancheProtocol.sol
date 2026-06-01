@@ -41,6 +41,11 @@ interface ITrancheProtocol {
         uint256 deadline;
         uint256 milestoneCount;
         EscrowState state;
+        // M-R3-02: snapshot of the global `cctpForwardFee` taken at deposit.
+        // Cross-chain releases use this fixed value as the forwarding-fee
+        // floor / maxFee, so a later admin `setCctpForwardFee` bump cannot push
+        // the fee above an in-flight milestone's burn amount and brick it.
+        uint256 escrowCctpForwardFee;
     }
 
     struct Milestone {
@@ -314,4 +319,11 @@ interface ITrancheProtocol {
     error NotProposedOwner();
     /// @notice `splitIndex` is out of range for the escrow's splits (L-03).
     error InvalidSplitIndex();
+
+    /// @notice More than {MAX_MILESTONES} milestones supplied to {deposit}
+    ///         (L-R3-05); an unbounded count could gas-brick releases.
+    error TooManyMilestones();
+    /// @notice More than {MAX_SPLITS} split recipients supplied to {deposit}
+    ///         (L-R3-05); an unbounded count could gas-brick releases.
+    error TooManySplits();
 }

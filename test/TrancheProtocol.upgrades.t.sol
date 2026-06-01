@@ -305,7 +305,8 @@ contract TrancheProtocolUpgradesTest is Base {
         _claimDelivery(id, 0);
         _raiseDispute(id, 0);
         vm.prank(newArbiter);
-        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
+        // L-R3-03: cross-chain recipient award must clear the fee floor.
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", CCTP_FORWARD_FEE);
 
         vm.prank(deployer);
         escrow.revokeRole(role, newArbiter);
@@ -352,11 +353,12 @@ contract TrancheProtocolUpgradesTest is Base {
         uint256 id = _depositSingle(100e6);
         _claimDelivery(id, 0);
         vm.warp(block.timestamp + REVIEW_WINDOW + 1);
-        uint256 liveFee = CCTP_FORWARD_FEE + 12345;
-        escrow.release(id, 0, liveFee);
+        // M-R3-01: release() ignores the caller value and burns with the
+        // per-escrow snapshotted forwarding fee.
+        escrow.release(id, 0, CCTP_FORWARD_FEE + 12345);
 
         (,,,,,, uint256 maxFee, uint32 minFinality,,) = _readBurnCall();
-        assertEq(maxFee, liveFee, "cross-chain maxFee must equal the caller-supplied fee");
+        assertEq(maxFee, CCTP_FORWARD_FEE, "cross-chain release() uses the snapshotted forward fee");
         assertEq(uint256(minFinality), 2000, "minFinalityThreshold must be 2000 (Standard Transfer)");
         assertEq(uint256(escrow.CCTP_MIN_FINALITY_THRESHOLD()), 2000);
     }

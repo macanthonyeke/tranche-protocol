@@ -22,6 +22,14 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant MAX_PROTOCOL_FEE = 500; // 5%
 
+    /// @notice L-R3-05: hard caps on per-escrow milestone and split counts.
+    ///         Both arrays are iterated on the release / completion paths, so an
+    ///         unbounded array could push a release past the block gas limit and
+    ///         strand the escrow. These bounds keep every path comfortably
+    ///         within gas while staying generous for real invoices.
+    uint256 public constant MAX_MILESTONES = 20;
+    uint256 public constant MAX_SPLITS = 10;
+
     /// @notice Upper bound on {cctpForwardFee} (L-01). The forwarding fee only
     ///         ever has to cover destination-chain gas for the relayed mint, so
     ///         even on the most expensive chains it is dollars, not hundreds.
@@ -218,6 +226,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (_deadline <= block.timestamp + 1 hours) revert DeadlineTooSoon();
         if (_deadline >= block.timestamp + 3650 days) revert DeadlineTooFar();
         if (_milestoneAmounts.length == 0) revert NoMilestones();
+        // L-R3-05: bound both arrays so no release path can be gas-bricked.
+        if (_milestoneAmounts.length > MAX_MILESTONES) revert TooManyMilestones();
+        if (_splits.length > MAX_SPLITS) revert TooManySplits();
 
         // Validate destination domain only when no splits are used; with splits
         // each per-recipient destinationDomain is validated below. We also
@@ -273,7 +284,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             invoiceURI: _invoiceURI,
             deadline: _deadline,
             milestoneCount: _milestoneAmounts.length,
-            state: EscrowState.ACTIVE
+            state: EscrowState.ACTIVE,
+            // M-R3-02: freeze the forwarding fee at deposit so a later admin
+            // bump cannot strand this escrow's cross-chain milestones.
+            escrowCctpForwardFee: cctpForwardFee
         });
 
         for (uint256 i = 0; i < _milestoneAmounts.length; i++) {
@@ -422,6 +436,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (bytes(_resolutionURI).length == 0) revert NoResolutionURI();
         if (_recipientBps > BPS_DENOMINATOR) revert InvalidBps();
 
+        // L-R3-03: a cross-chain recipient share is burned through CCTP here, so
+        // it must clear the same forwarding-fee floor that {release} enforces;
+        // otherwise a maxFee = 0 settlement is accepted on-chain but never
+        // auto-delivered. Only relevant when a recipient share actually burns.
+        if (_recipientBps > 0) _assertCrossChainFee(escrowId, e, maxFee);
+
         d.resolutionHash = _resolutionHash;
         d.resolutionURI = _resolutionURI;
         d.resolvedRecipientBps = _recipientBps;
@@ -453,6 +473,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         SettlementProposal storage rec = settlementProposals[escrowId][milestoneIndex][e.recipient];
 
         if (dep.exists && rec.exists && dep.bps == rec.bps) {
+            // L-R3-03: enforce the cross-chain forwarding-fee floor before the
+            // recipient share is burned, mirroring {release}. Only when a
+            // recipient share actually burns (bps > 0).
+            if (_agreedBps > 0) _assertCrossChainFee(escrowId, e, maxFee);
             _executePartialRelease(escrowId, milestoneIndex, e, m, _agreedBps, maxFee);
             emit MutualSettlementExecuted(escrowId, milestoneIndex, _agreedBps);
         }
@@ -484,7 +508,33 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
 
         // Effects.
         m.state = MilestoneState.REFUNDED;
-        refundBalances[e.recipient] += recipientShare - fee;
+
+        // I-R3-06: distribute the recipient's net share across the escrow's
+        // split configuration (same proportional, last-absorbs-dust pattern as
+        // the CCTP release paths) instead of dumping it all on the single
+        // `recipient`. Timeout payouts stay as Arc refund credits, so a split's
+        // bytes32 `mintRecipient` is credited as its decoded Arc address.
+        uint256 recipientNet = recipientShare - fee;
+        SplitRecipient[] storage s = splits[escrowId];
+        if (s.length == 0) {
+            refundBalances[e.recipient] += recipientNet;
+        } else {
+            uint256 distributed = 0;
+            uint256 last = s.length - 1;
+            for (uint256 i = 0; i < s.length; i++) {
+                uint256 share;
+                if (i == last) {
+                    share = recipientNet - distributed;
+                } else {
+                    share = (recipientNet * s[i].bps) / BPS_DENOMINATOR;
+                    distributed += share;
+                }
+                if (share > 0) {
+                    refundBalances[address(uint160(uint256(s[i].mintRecipient)))] += share;
+                }
+            }
+        }
+
         refundBalances[e.refundTo] += depositorShare;
         d.resolvedRecipientBps = defaultBps;
 
@@ -537,14 +587,23 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (m.state != MilestoneState.IN_REVIEW) revert NotInReview();
         if (block.timestamp < m.claimedAt + e.reviewWindow) revert ReviewWindowNotExpired();
-        _assertCrossChainFee(escrowId, e, maxFee);
+
+        // M-R3-01: this path is permissionless, so the caller-supplied `maxFee`
+        // is NOT trusted — a griefer could set it just below the burn amount and
+        // authorise Circle's forwarder to consume almost the entire payout.
+        // Use the protocol-tracked forwarding fee instead; the caller's `maxFee`
+        // argument is ignored (kept only for ABI compatibility with the frontend
+        // quote). Only {approveRelease}, where the depositor opts in, honours a
+        // caller-supplied value.
+        uint256 burnMaxFee = e.escrowCctpForwardFee;
+        _assertCrossChainFee(escrowId, e, burnMaxFee);
 
         m.state = MilestoneState.RELEASED;
 
         // CEI: finalise escrow state before the external CCTP burn.
         _checkEscrowCompletion(escrowId);
 
-        _executeCCTPReleaseAmount(escrowId, milestoneIndex, e, m.amount, maxFee);
+        _executeCCTPReleaseAmount(escrowId, milestoneIndex, e, m.amount, burnMaxFee);
 
         emit MilestoneReleased(escrowId, milestoneIndex);
     }
@@ -1206,8 +1265,11 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///      and {release}.
     function _assertCrossChainFee(uint256 escrowId, Escrow storage e, uint256 maxFee) internal view {
         if (_isCrossChain(escrowId, e)) {
-            if (cctpForwardFee == 0) revert CctpForwardFeeNotSet();
-            if (maxFee < cctpForwardFee) revert MaxFeeBelowFloor();
+            // M-R3-02: floor against the per-escrow snapshot, not the live
+            // admin-mutable global, so the fee an escrow must clear is fixed
+            // at deposit time.
+            if (e.escrowCctpForwardFee == 0) revert CctpForwardFeeNotSet();
+            if (maxFee < e.escrowCctpForwardFee) revert MaxFeeBelowFloor();
         }
     }
 

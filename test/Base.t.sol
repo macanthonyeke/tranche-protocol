@@ -126,8 +126,12 @@ abstract contract Base is Test, ITrancheProtocol {
 
     function _resolveAs(address arb, uint256 escrowId, uint256 idx, bool releaseToRecipient) internal {
         uint256 recipientBps = releaseToRecipient ? 10_000 : 0;
+        // L-R3-03: a cross-chain recipient award must now clear the forwarding-
+        // fee floor. Pass the fee for the release case; the refund case (bps 0)
+        // burns nothing so the value is ignored.
+        uint256 maxFee = releaseToRecipient ? CCTP_FORWARD_FEE : 0;
         vm.prank(arb);
-        escrow.resolveDispute(escrowId, idx, recipientBps, keccak256("res"), "ipfs://res", 0);
+        escrow.resolveDispute(escrowId, idx, recipientBps, keccak256("res"), "ipfs://res", maxFee);
     }
 
     function _release(uint256 escrowId, uint256 idx) internal {
@@ -155,19 +159,19 @@ abstract contract Base is Test, ITrancheProtocol {
     }
 
     function _getEscrowState(uint256 escrowId) internal view returns (EscrowState) {
-        (,,,,,,,,,,,,, EscrowState s) = escrow.escrows(escrowId);
+        (,,,,,,,,,,,,, EscrowState s,) = escrow.escrows(escrowId);
         return s;
     }
 
     function _getEscrowDepositor(uint256 escrowId) internal view returns (address d) {
-        (d,,,,,,,,,,,,,) = escrow.escrows(escrowId);
+        (d,,,,,,,,,,,,,,) = escrow.escrows(escrowId);
     }
 
     function _getEscrowMilestoneCount(uint256 escrowId) internal view returns (uint256 c) {
-        (,,,,,,,,,,,, c,) = escrow.escrows(escrowId);
+        (,,,,,,,,,,,, c,,) = escrow.escrows(escrowId);
     }
 
     function _getEscrowTotalAmount(uint256 escrowId) internal view returns (uint256 t) {
-        (,,, t,,,,,,,,,,) = escrow.escrows(escrowId);
+        (,,, t,,,,,,,,,,,) = escrow.escrows(escrowId);
     }
 }
