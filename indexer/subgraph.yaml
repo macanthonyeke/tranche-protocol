@@ -5,10 +5,8 @@ schema:
 dataSources:
   - kind: ethereum
     name: TrancheProtocol
-    # NOTE: `network` must match Goldsky's network slug for Arc testnet.
-    # `arc-testnet` is the slug used in deploy/verify.js (chain id 5042002) and by
-    # The Graph. CONFIRM against `goldsky chains list` (or Goldsky docs) before deploy;
-    # if Goldsky names it differently (e.g. arc-sepolia), change it here.
+    # `arc-testnet` is Goldsky's official network slug for Arc Testnet (chain id
+    # 5042002), confirmed against docs.goldsky.com/chains/supported-networks.
     network: arc-testnet
     source:
       # Live Tranche Protocol proxy — from deploy/.env CONTRACT_ADDRESS (matches frontend/.env).
