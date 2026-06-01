@@ -198,7 +198,7 @@ https://iris-api-sandbox.circle.com/v2/burn/USDC/fees/26/{destinationDomain}?for
 
 ### Roles
 
-The contract uses OpenZeppelin `AccessControlEnumerable`.
+The contract uses OpenZeppelin `AccessControl`.
 
 - `DEFAULT_ADMIN_ROLE`: manages protocol fee, treasury, CCTP forward fee, and role grants.
 - `ARBITER_ROLE`: resolves disputes.
