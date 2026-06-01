@@ -2,8 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Base} from "./Base.t.sol";
-import {TrancheProtocol} from "../src/TrancheProtocol.sol";
-import {ITrancheProtocol} from "../src/interface/ITrancheProtocol.sol";
 
 contract TrancheProtocolReceivingAddressTest is Base {
     uint32 internal constant ARC_DOMAIN = 26;
@@ -33,7 +31,7 @@ contract TrancheProtocolReceivingAddressTest is Base {
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newB32, ARC_DOMAIN);
 
-        (,,,,, bytes32 stored,,,,,,,,,) = escrow.escrows(id);
+        bytes32 stored = escrow.getEscrow(id).mintRecipient;
         assertEq(stored, newB32, "stored mintRecipient must match the provided bytes32");
         assertEq(address(uint160(uint256(stored))), newAddr, "decode round-trips to original address");
     }
@@ -47,7 +45,7 @@ contract TrancheProtocolReceivingAddressTest is Base {
         escrow.updateReceivingAddress(id, _toB32(newAddr), ARC_DOMAIN);
 
         bytes32 manual = bytes32(uint256(uint160(newAddr)));
-        (,,,,, bytes32 stored,,,,,,,,,) = escrow.escrows(id);
+        bytes32 stored = escrow.getEscrow(id).mintRecipient;
         assertEq(stored, manual);
     }
 
@@ -58,7 +56,7 @@ contract TrancheProtocolReceivingAddressTest is Base {
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newAddr, ARC_DOMAIN);
 
-        (,,,, uint32 destAfter,,,,,,,,,,) = escrow.escrows(id);
+        uint32 destAfter = escrow.getEscrow(id).destinationDomain;
         assertEq(destAfter, ARC_DOMAIN);
     }
 
@@ -69,7 +67,7 @@ contract TrancheProtocolReceivingAddressTest is Base {
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newAddr, DEST_DOMAIN);
 
-        (,,,, uint32 destAfter,,,,,,,,,,) = escrow.escrows(id);
+        uint32 destAfter = escrow.getEscrow(id).destinationDomain;
         assertEq(destAfter, DEST_DOMAIN);
     }
 
@@ -81,12 +79,12 @@ contract TrancheProtocolReceivingAddressTest is Base {
 
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, a1, ARC_DOMAIN);
-        (,,,, uint32 d1,,,,,,,,,,) = escrow.escrows(id);
+        uint32 d1 = escrow.getEscrow(id).destinationDomain;
         assertEq(d1, ARC_DOMAIN);
 
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, a2, DEST_DOMAIN);
-        (,,,, uint32 d2,,,,,,,,,,) = escrow.escrows(id);
+        uint32 d2 = escrow.getEscrow(id).destinationDomain;
         assertEq(d2, DEST_DOMAIN);
     }
 
@@ -156,26 +154,27 @@ contract TrancheProtocolReceivingAddressTest is Base {
 
     function test_AllowedDuringDisputedMilestone() public {
         uint256 id = _depositMulti();
-        _fulfill(id, 0);
-        _raiseDisputeAs(recipient, id, 0);
+        _claimDelivery(id, 0);
+        _raiseDispute(id, 0);
 
         bytes32 newAddr = _toB32(makeAddr("freshWallet"));
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newAddr, ARC_DOMAIN);
 
-        (,,,, uint32 destAfter, bytes32 mrAfter,,,,,,,,,) = escrow.escrows(id);
+        uint32 destAfter = escrow.getEscrow(id).destinationDomain;
+        bytes32 mrAfter = escrow.getEscrow(id).mintRecipient;
         assertEq(destAfter, ARC_DOMAIN);
         assertEq(mrAfter, newAddr);
     }
 
     function test_RevertOn_CompletedEscrow() public {
         uint256 id = _seed();
-        _fulfill(id, 0);
-        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
-        // Switch to same-chain so releaseAfterWindow uses maxFee = 0.
+        _claimDelivery(id, 0);
+        // Switch to same-chain so release uses maxFee = 0.
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, _toB32(recipient), ARC_DOMAIN);
-        escrow.releaseAfterWindow(id, 0, 0);
+        vm.warp(block.timestamp + REVIEW_WINDOW + 1);
+        escrow.release(id, 0, 0);
         // Escrow is now COMPLETED.
         assertEq(uint256(_getEscrowState(id)), uint256(EscrowState.COMPLETED));
 
@@ -226,7 +225,8 @@ contract TrancheProtocolReceivingAddressTest is Base {
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newAddr, ARC_DOMAIN);
 
-        (,,,, uint32 destAfter, bytes32 mrAfter,,,,,,,,,) = escrow.escrows(id);
+        uint32 destAfter = escrow.getEscrow(id).destinationDomain;
+        bytes32 mrAfter = escrow.getEscrow(id).mintRecipient;
         assertEq(destAfter, ARC_DOMAIN);
         assertEq(mrAfter, newAddr);
     }

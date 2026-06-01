@@ -43,3 +43,6 @@ deploy/.env
 # Vite dep cache
 frontend/.vite/
 frontend/public/
+
+# Local Slither analysis venv
+.slither-venv/

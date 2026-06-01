@@ -17,7 +17,7 @@ interface ITrancheProtocol {
 
     enum MilestoneState {
         PENDING,
-        FULFILLED,
+        IN_REVIEW,
         DISPUTED,
         RELEASED,
         REFUNDED
@@ -30,7 +30,10 @@ interface ITrancheProtocol {
         uint256 totalAmount;
         uint32 destinationDomain;
         bytes32 mintRecipient;
-        uint256 disputeWindow;
+        // Window the depositor has, after the recipient claims delivery, to
+        // approve or dispute. Once it lapses with no action, anyone can call
+        // release() (optimistic auto-release: silence = consent).
+        uint256 reviewWindow;
         bool depositorApproveCancel;
         bool recipientApproveCancel;
         bytes32 invoiceHash;
@@ -38,24 +41,18 @@ interface ITrancheProtocol {
         uint256 deadline;
         uint256 milestoneCount;
         EscrowState state;
-        // Window the depositor has, after the recipient signals delivery, to
-        // raise a dispute or fulfill the milestone. Once expired, anyone can
-        // call claimSilentApproval to release the milestone.
-        uint256 deliveryNoticeWindow;
     }
 
     struct Milestone {
         uint256 amount;
-        uint256 conditionMetTimestamp;
+        // Timestamp at which the recipient claimed delivery via
+        // claimDelivery(); starts the review window. 0 while PENDING.
+        uint256 claimedAt;
         MilestoneState state;
-        // Timestamp at which the recipient signalled delivery via
-        // signalDelivery(). 0 if never signalled.
-        uint256 deliveredAt;
     }
 
     struct DisputeData {
         address raisedBy;
-        bool isEscalation;
         uint256 raisedAt;
         bytes32 evidenceHash;
         string evidenceURI;
@@ -104,9 +101,9 @@ interface ITrancheProtocol {
         Milestone[] milestones;
         DisputeData[] disputes;
         SplitRecipient[] splits;
-        bool[] disputeWindowExpired;
-        bool[] deliverySignaled;
-        uint256[] effectiveDisputeDeadlines;
+        bool[] reviewWindowExpired;
+        bool[] claimed;
+        uint256[] reviewDeadlines;
         bool isPayer;
         bool isFreelancer;
         bool isArbiter;
@@ -156,7 +153,16 @@ interface ITrancheProtocol {
         string invoiceURI,
         uint256 deadline
     );
-    event ConditionFulfilled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 disputeDeadline);
+    /// @notice Recipient claimed delivery; `reviewDeadline` is when the
+    ///         optimistic review window lapses and anyone may call release().
+    event DeliveryClaimed(uint256 indexed escrowId, uint256 milestoneIndex, uint256 reviewDeadline);
+    /// @notice Depositor explicitly approved a claimed milestone (instant release).
+    event MilestoneApproved(uint256 indexed escrowId, uint256 milestoneIndex);
+    /// @notice Milestone released to the recipient (approve or optimistic auto-release).
+    event MilestoneReleased(uint256 indexed escrowId, uint256 milestoneIndex);
+    /// @notice Milestone refunded to the depositor because the recipient never
+    ///         claimed delivery before the escrow deadline.
+    event RefundedAfterDeadline(uint256 indexed escrowId, uint256 milestoneIndex, uint256 amount);
     event DisputeRaised(
         uint256 indexed escrowId,
         address indexed raisedBy,
@@ -169,12 +175,8 @@ interface ITrancheProtocol {
     );
     event EscrowReleased(uint256 indexed escrowId, uint256 milestoneIndex, bytes32 resolutionHash);
     event EscrowRefunded(uint256 indexed escrowId, uint256 milestoneIndex, bytes32 resolutionHash);
-    event EscrowReleasedWithoutDispute(uint256 indexed escrowId, uint256 milestoneIndex);
     event EscrowRefundedViaMutualCancel(uint256 indexed escrowId);
     event RefundWithdrawn(address indexed depositor, uint256 amount);
-    event EscalatedAfterDeadline(
-        uint256 indexed escrowId, uint256 milestoneIndex, address escalatedBy, string reason, bytes32 evidenceHash
-    );
 
     event SupportedDomainUpdated(uint32 indexed destinationDomain, bool supported);
     event SplitsConfigured(uint256 indexed escrowId, uint256 splitCount);
@@ -182,8 +184,6 @@ interface ITrancheProtocol {
     event ProtocolTreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event ProtocolFeeCollected(uint256 indexed escrowId, uint256 milestoneIndex, uint256 fee);
     event CctpForwardFeeUpdated(uint256 newFee);
-    event DeliverySignaled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 deliveredAt);
-    event SilentApprovalClaimed(uint256 indexed escrowId, uint256 milestoneIndex, address claimedBy);
     event ReceivingAddressUpdated(
         uint256 indexed escrowId, bytes32 oldAddress, bytes32 newAddress, uint32 oldDomain, uint32 newDomain
     );
@@ -197,6 +197,22 @@ interface ITrancheProtocol {
     event EscrowTermsSnapshotted(uint256 indexed escrowId, uint256 protocolFeeBps, address protocolTreasury);
     /// @notice Emitted when a refund credit is moved between owners (M-06).
     event RefundCreditTransferred(address indexed from, address indexed to, uint256 amount);
+    /// @notice Step 1 of the two-step recovery (M-03): a RECOVERY_MANAGER has
+    ///         proposed moving `blacklistedWallet`'s credit to
+    ///         `proposedNewOwner`. No balance moves until the proposed wallet
+    ///         self-claims via {claimRefundCreditTransfer}.
+    event RefundCreditTransferProposed(
+        address indexed blacklistedWallet, address indexed proposedNewOwner, uint256 proposedAt
+    );
+    /// @notice Emitted when a split recipient redirects their own entry (L-03).
+    event SplitReceivingAddressUpdated(
+        uint256 indexed escrowId,
+        uint256 splitIndex,
+        bytes32 oldAddress,
+        bytes32 newAddress,
+        uint32 oldDomain,
+        uint32 newDomain
+    );
     event DisputeResolved(
         uint256 indexed escrowId,
         uint256 indexed milestoneIndex,
@@ -212,6 +228,12 @@ interface ITrancheProtocol {
         uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed proposer, uint256 bps
     );
     event MutualSettlementExecuted(uint256 indexed escrowId, uint256 indexed milestoneIndex, uint256 bps);
+    /// @notice A party proposed a milestone-level mutual cancel. The cancel only
+    ///         executes once both parties have proposed for that milestone.
+    event MilestoneCancelProposed(uint256 indexed escrowId, uint256 milestoneIndex, address proposer);
+    /// @notice A milestone was refunded to the payer via milestone-level mutual
+    ///         cancel (both parties agreed; no protocol fee).
+    event MilestoneCancelled(uint256 indexed escrowId, uint256 milestoneIndex, uint256 amount);
 
     // ---------- errors ----------
 
@@ -221,11 +243,11 @@ interface ITrancheProtocol {
     error NotEscrowOwner();
     error NotEscrowOwnerOrRecipient();
     error InvalidState();
-    error DisputeWindowExpired();
-    error DisputeWindowNotExpired();
+    error ReviewWindowExpired();
+    error ReviewWindowNotExpired();
     error NoDispute();
     error EscrowDoesNotExist();
-    error DisputeWindowTooShort();
+    error ReviewWindowTooShort();
     error NothingToWithdraw();
     error NoInvoice();
     error NoInvoiceURI();
@@ -251,15 +273,14 @@ interface ITrancheProtocol {
     error DeadlineRequired();
     error DeadlineTooSoon();
     error DeadlineTooFar();
-    error DisputeWindowTooLong();
+    error ReviewWindowTooLong();
     error InvalidRefundRecipient();
 
-    error NoticeWindowTooShort();
-    error NoticeWindowTooLong();
-    error AlreadySignaled();
-    error SignalTooCloseToDeadline();
-    error NoticeWindowNotExpired();
-    error NotSignaled();
+    /// @notice Milestone is not IN_REVIEW (must be claimed and not yet
+    ///         approved / disputed / released).
+    error NotInReview();
+    /// @notice Recipient tried to claim delivery after the escrow deadline.
+    error DeadlinePassed();
 
     // ---- New errors introduced by audit fixes ----
     /// @notice `maxFee` parameter would let the CCTP forwarder take the
@@ -270,11 +291,27 @@ interface ITrancheProtocol {
     error ArbiterTimeoutNotReached();
     /// @notice The low-level USDC `approve` call did not return success (L-02).
     error UsdcApproveFailed();
-    /// @notice `releaseAfterWindow` caller passed `maxFee` below the
-    ///         admin-tracked `cctpForwardFee` floor.
+    /// @notice A cross-chain {approveRelease}/{release} caller passed `maxFee`
+    ///         below the admin-tracked `cctpForwardFee` floor.
     error MaxFeeBelowFloor();
 
     error DisputeAlreadyResolved();
     error NoResolutionURI();
     error MutualSettlementAlreadyExecuted();
+
+    /// @notice `cctpForwardFee` would exceed {MAX_CCTP_FORWARD_FEE} (L-01).
+    error CctpForwardFeeTooHigh();
+    /// @notice A milestone on a cross-chain escrow does not out-size the
+    ///         current `cctpForwardFee` and could become unreleasable (M-02).
+    error MilestoneBelowForwardFee();
+    /// @notice A cross-chain silent-approval release was attempted while
+    ///         `cctpForwardFee` is 0, which CCTP would not auto-deliver (L-04).
+    error CctpForwardFeeNotSet();
+    /// @notice No pending two-step refund recovery exists for the given source
+    ///         wallet (M-03).
+    error NoPendingRecovery();
+    /// @notice Caller is not the wallet proposed in the pending recovery (M-03).
+    error NotProposedOwner();
+    /// @notice `splitIndex` is out of range for the escrow's splits (L-03).
+    error InvalidSplitIndex();
 }
