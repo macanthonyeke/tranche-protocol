@@ -57,8 +57,8 @@ function DetailInner() {
   }
 
   const {
-    escrow, milestones, disputes, splits, disputeWindowExpired, deliverySignaled,
-    effectiveDisputeDeadlines, isPayer, isFreelancer
+    escrow, milestones, disputes, splits, reviewWindowExpired, claimed,
+    reviewDeadlines, isPayer, isFreelancer
   } = detail
   const role = isPayer ? 'payer' : isFreelancer ? 'freelancer' : null
   const inv = escrow.invoiceHash
@@ -87,9 +87,9 @@ function DetailInner() {
             disputes={disputes}
             role={role}
             userAddress={address}
-            disputeWindowExpired={disputeWindowExpired}
-            deliverySignaled={deliverySignaled}
-            effectiveDisputeDeadlines={effectiveDisputeDeadlines}
+            reviewWindowExpired={reviewWindowExpired}
+            claimed={claimed}
+            reviewDeadlines={reviewDeadlines}
             optimistic={optimistic}
             onChange={refetch}
             setOpt={setOpt}
@@ -199,8 +199,8 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
           </ParamRow>
-          <ParamRow label="Dispute Window">
-            <span className="text-sm text-ink">{formatWindow(escrow.disputeWindow)}</span>
+          <ParamRow label="Review Window">
+            <span className="text-sm text-ink">{formatWindow(escrow.reviewWindow)}</span>
           </ParamRow>
           <ParamRow label="Contract Suffix" last>
             <span className="font-mono text-xs text-ink-2 tracking-tight">
@@ -331,7 +331,7 @@ function contractSuffix(invoiceHash) {
    counter-evidence stay attached to their milestone. */
 function MilestoneStack({
   escrow, milestones, disputes, role, userAddress,
-  disputeWindowExpired, deliverySignaled, effectiveDisputeDeadlines,
+  reviewWindowExpired, claimed, reviewDeadlines,
   optimistic, onChange, setOpt, clearOpt
 }) {
   const hasDispute = milestones.some((m) => m.state === 2)
@@ -371,9 +371,9 @@ function MilestoneStack({
                   dispute={disputes?.[i]}
                   role={role}
                   userAddress={userAddress}
-                  disputeWindowExpired={!!disputeWindowExpired[i]}
-                  deliverySignaled={!!deliverySignaled[i] || opt?.signaledDelivery}
-                  effectiveDisputeDeadline={Number(effectiveDisputeDeadlines[i] || 0n)}
+                  reviewWindowExpired={!!reviewWindowExpired[i]}
+                  claimed={!!claimed[i] || opt?.claimedDelivery}
+                  reviewDeadline={Number(reviewDeadlines[i] || 0n)}
                   optimisticBadge={opt?.badge}
                   onChange={onChange}
                   setOpt={setOpt}
@@ -398,20 +398,17 @@ function loadMilestoneTitles(escrowId) {
 
 function MilestoneRow({
   escrow, milestone, dispute, role, userAddress,
-  disputeWindowExpired, deliverySignaled, effectiveDisputeDeadline,
+  reviewWindowExpired, claimed, reviewDeadline,
   optimisticBadge, onChange, setOpt, clearOpt
 }) {
   const titles = loadMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
 
-  const noticeDeadline = deliverySignaled
-    ? Number(milestone.deliveredAt) + Number(escrow.deliveryNoticeWindow)
-    : 0
   const now = Math.floor(Date.now() / 1000)
   const deadlinePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline)
 
   const description = describeMilestone(milestone, {
-    deliverySignaled, noticeDeadline, disputeWindowExpired, effectiveDisputeDeadline
+    claimed, reviewWindowExpired, deadlinePassed
   })
 
   const inDispute = milestone.state === 2
@@ -443,28 +440,17 @@ function MilestoneRow({
             <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
           </div>
 
-          {(deliverySignaled && Number(milestone.deliveredAt) > 0) || Number(milestone.conditionMetTimestamp) > 0 ? (
+          {claimed && Number(milestone.claimedAt) > 0 ? (
             <div className="flex flex-wrap gap-4 text-xs mt-1">
-              {deliverySignaled && Number(milestone.deliveredAt) > 0 && (
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
-                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.deliveredAt)}</span>
-                </div>
-              )}
-              {Number(milestone.conditionMetTimestamp) > 0 && (
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Approved</span>
-                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.conditionMetTimestamp)}</span>
-                </div>
-              )}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
+                <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.claimedAt)}</span>
+              </div>
             </div>
           ) : null}
 
-          {milestone.state === 1 && effectiveDisputeDeadline > 0 && !disputeWindowExpired && (
-            <Countdown label="Dispute window closes" target={effectiveDisputeDeadline} tone="warning" />
-          )}
-          {milestone.state === 0 && noticeDeadline > 0 && (
-            <Countdown label="Auto-releases in" target={noticeDeadline} tone="warning" />
+          {milestone.state === 1 && reviewDeadline > 0 && !reviewWindowExpired && (
+            <Countdown label="Auto-releases in" target={reviewDeadline} tone="warning" />
           )}
         </div>
 
@@ -475,9 +461,7 @@ function MilestoneRow({
             milestone={milestone}
             role={role}
             deadlinePassed={deadlinePassed}
-            disputeWindowExpired={disputeWindowExpired}
-            deliverySignaled={deliverySignaled}
-            noticeDeadline={noticeDeadline}
+            reviewWindowExpired={reviewWindowExpired}
             setOpt={setOpt}
             clearOpt={clearOpt}
             onChange={onChange}
@@ -489,7 +473,7 @@ function MilestoneRow({
             role={role}
             userAddress={userAddress}
             deadlinePassed={deadlinePassed}
-            disputeWindowExpired={disputeWindowExpired}
+            reviewWindowExpired={reviewWindowExpired}
             onChange={onChange}
           />
         </div>
@@ -500,7 +484,7 @@ function MilestoneRow({
           <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
             In review by the arbiter panel
           </div>
-          <ArbiterTimeoutNote escrow={escrow} dispute={dispute} />
+          <ArbiterTimeoutNote dispute={dispute} />
           {(role === 'payer' || role === 'freelancer') && (
             <SettlementPanel
               escrow={escrow}
@@ -521,19 +505,16 @@ function MilestoneRow({
 }
 
 /* Explains what the permissionless timeout fallback will do if the arbiter
-   never acts. The outcome is no longer always "refund the depositor": it
-   depends on who raised the dispute (contract `resolveDisputeByTimeout`). The
-   countdown uses ARBITRATION_WINDOW or ESCALATION_ARBITRATION_WINDOW read from
-   the contract — never a hardcoded 14d / 7d. */
-function ArbiterTimeoutNote({ escrow, dispute }) {
-  const { arbitrationWindow, escalationArbitrationWindow } = useDisputeConfig()
+   never acts. A DISPUTED milestone always carries both a recipient
+   delivery-claim and a depositor objection, so the contract
+   (`resolveDisputeByTimeout`) settles it as a fixed 50/50 split. The countdown
+   uses ARBITER_WINDOW read from the contract — never a hardcoded 14d. */
+function ArbiterTimeoutNote({ dispute }) {
+  const { arbiterWindow } = useDisputeConfig()
   if (!dispute?.raisedBy) return null
 
-  const windowSecs = dispute.isEscalation ? escalationArbitrationWindow : arbitrationWindow
-  const raisedByRecipient = dispute.raisedBy.toLowerCase() === escrow.recipient.toLowerCase()
-  const copy = raisedByRecipient
-    ? 'If the arbiter does not act within the window, funds will be split 50/50 between both parties.'
-    : 'If the arbiter does not act within the window, funds will be refunded to the depositor.'
+  const windowSecs = arbiterWindow
+  const copy = 'If the arbiter does not act within the window, funds are split 50/50 between both parties.'
 
   const target = Number(dispute.raisedAt) + Number(windowSecs)
   const now = Math.floor(Date.now() / 1000)
@@ -666,11 +647,11 @@ function ResolutionNote({ dispute }) {
   )
 }
 
-function describeMilestone(m, { deliverySignaled, disputeWindowExpired }) {
-  if (m.state === 0 && !deliverySignaled) return 'Awaiting freelancer delivery.'
-  if (m.state === 0 && deliverySignaled) return 'Delivery signaled. Payer review pending.'
-  if (m.state === 1 && !disputeWindowExpired) return 'Approved and queued for release. Dispute window still open.'
-  if (m.state === 1 && disputeWindowExpired) return 'Dispute window closed. Ready to release.'
+function describeMilestone(m, { reviewWindowExpired, deadlinePassed }) {
+  if (m.state === 0 && deadlinePassed) return 'Deadline passed without delivery. Refundable to the payer.'
+  if (m.state === 0) return 'Awaiting freelancer delivery.'
+  if (m.state === 1 && !reviewWindowExpired) return 'Delivered. Payer review window open — approve, dispute, or let it auto-release.'
+  if (m.state === 1 && reviewWindowExpired) return 'Review window lapsed. Ready to auto-release.'
   if (m.state === 2) return 'In review by the arbiter panel. See evidence below.'
   if (m.state === 3) return 'Released to the freelancer.'
   if (m.state === 4) return 'Refunded to the payer.'
@@ -714,8 +695,8 @@ function MilestoneStateGlyph({ state }) {
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
 function MilestoneAction({
-  escrow, milestone, role, deadlinePassed, disputeWindowExpired,
-  deliverySignaled, noticeDeadline, setOpt, clearOpt, onChange
+  escrow, milestone, role, deadlinePassed, reviewWindowExpired,
+  setOpt, clearOpt, onChange
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
@@ -723,32 +704,34 @@ function MilestoneAction({
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
 
-  // Live CCTP forwarding fee — releaseAfterWindow enforces a floor of
-  // `cctpForwardFee` for cross-chain burns, so passing it (rather than 0)
-  // keeps the permissionless release path working for non-Arc destinations.
-  // Same-chain (Arc) burns force maxFee = 0 inside the contract regardless.
+  // Live CCTP forwarding fee. approveRelease honours the caller-supplied maxFee
+  // (depositor opts in), so we quote the published fee for cross-chain burns;
+  // release ignores it and uses the escrow's snapshotted fee, but the arg is
+  // kept for ABI compatibility. Same-chain (Arc) burns force maxFee = 0 inside
+  // the contract regardless.
   const { config } = useProtocolConfig()
   const cctpForwardFee = config?.cctpForwardFee ?? 0n
 
   const id = BigInt(escrow.id)
   const idx = BigInt(milestone.index)
-  const now = Math.floor(Date.now() / 1000)
   const isPayer = role === 'payer'
   const isFreelancer = role === 'freelancer'
 
   // Pick the single highest-priority action available to this caller right now.
+  // Lifecycle: PENDING(0) → IN_REVIEW(1) → RELEASED(3); a missed deadline on a
+  // PENDING milestone is permissionlessly refundable to the payer.
   let action = null
   if (milestone.state === 0) {
-    if (isFreelancer && !deliverySignaled && !deadlinePassed) {
-      action = { key: 'signal', label: 'Mark as Delivered', fn: 'signalDelivery', args: [id, idx], optimistic: { badge: 'Signaled', signaledDelivery: true } }
-    } else if (isPayer && deliverySignaled) {
-      action = { key: 'approve', label: 'Approve & Release', fn: 'fulfillCondition', args: [id, idx], optimistic: { badge: 'Approving…' } }
-    } else if (noticeDeadline > 0 && now > noticeDeadline) {
-      action = { key: 'silent', label: 'Claim Auto-Release', fn: 'claimSilentApproval', args: [id, idx], optimistic: { badge: 'Releasing…' } }
+    if (isFreelancer && !deadlinePassed) {
+      action = { key: 'claim', label: 'Mark as Delivered', fn: 'claimDelivery', args: [id, idx], optimistic: { badge: 'Claiming…', claimedDelivery: true } }
+    } else if (deadlinePassed) {
+      action = { key: 'refund', label: 'Refund (deadline passed)', fn: 'refundAfterDeadline', args: [id, idx], optimistic: { badge: 'Refunding…' } }
     }
   } else if (milestone.state === 1) {
-    if (disputeWindowExpired) {
-      action = { key: 'release', label: 'Release Payment', fn: 'releaseAfterWindow', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Releasing…' } }
+    if (isPayer) {
+      action = { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Approving…' } }
+    } else if (reviewWindowExpired) {
+      action = { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Releasing…' } }
     }
   }
 
@@ -787,15 +770,16 @@ function MilestoneAction({
 
 /* ----- Dispute portal -----
    Secondary, warning-toned actions that a participant can take on a milestone:
-   raise a dispute (FULFILLED, window still open), submit counter-evidence
-   (DISPUTED, you didn't raise it and none submitted yet), or escalate to the
-   arbiter (PENDING, escrow deadline passed — recipient only). At most one of
-   these is reachable for any given milestone state. */
+   raise a dispute (IN_REVIEW, review window still open — depositor only), or
+   submit counter-evidence (DISPUTED, you didn't raise it and none submitted
+   yet). At most one of these is reachable for any given milestone state. A
+   missed-deadline PENDING milestone is no longer escalated — it is refunded via
+   the primary {refundAfterDeadline} action. */
 function DisputeActions({
   escrow, milestone, dispute, role, userAddress,
-  deadlinePassed, disputeWindowExpired, onChange
+  reviewWindowExpired, onChange
 }) {
-  const [modal, setModal] = useState(null) // 'raise' | 'counter' | 'escalate' | null
+  const [modal, setModal] = useState(null) // 'raise' | 'counter' | null
 
   const isParticipant = role === 'payer' || role === 'freelancer'
   if (!isParticipant) return null
@@ -807,11 +791,11 @@ function DisputeActions({
     dispute?.raisedBy && userAddress &&
     dispute.raisedBy.toLowerCase() === userAddress.toLowerCase()
 
-  const canRaise = state === 1 && !disputeWindowExpired
+  // raiseDispute is depositor-only and only from IN_REVIEW within the window.
+  const canRaise = state === 1 && role === 'payer' && !reviewWindowExpired
   const canCounter = state === 2 && !!dispute?.raisedBy && !raisedByMe && !counterExists
-  const canEscalate = state === 0 && role === 'freelancer' && deadlinePassed
 
-  if (!canRaise && !canCounter && !canEscalate) return null
+  if (!canRaise && !canCounter) return null
 
   const btnCls =
     'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ' +
@@ -828,11 +812,6 @@ function DisputeActions({
       {canCounter && (
         <button type="button" className={btnCls} onClick={() => setModal('counter')}>
           Submit Counter Evidence
-        </button>
-      )}
-      {canEscalate && (
-        <button type="button" className={btnCls} onClick={() => setModal('escalate')}>
-          Escalate to Arbiter
         </button>
       )}
       <EvidenceModal
@@ -854,15 +833,7 @@ const EVIDENCE_MODES = {
     needsReason: true,
     submitLabel: 'Submit dispute',
     evidenceLabel: 'Evidence link',
-    blurb: 'Freezes this milestone for the arbiter panel to review. Provide a reason and a link to your evidence.'
-  },
-  escalate: {
-    title: 'Escalate to arbiter',
-    fn: 'escalateAfterDeadline',
-    needsReason: true,
-    submitLabel: 'Escalate',
-    evidenceLabel: 'Evidence link',
-    blurb: 'The escrow deadline has passed with this milestone undelivered. Escalate it to the arbiter panel with a reason and evidence.'
+    blurb: 'Freezes this delivered milestone for the arbiter panel to review. Provide a reason and a link to your evidence.'
   },
   counter: {
     title: 'Submit counter-evidence',
@@ -874,7 +845,7 @@ const EVIDENCE_MODES = {
   }
 }
 
-/* Shared evidence form for raise / escalate / counter. The evidence link is
+/* Shared evidence form for raise / counter. The evidence link is
    hashed client-side with keccak256 to produce the bytes32 the contract stores
    as tamper-proof proof; the link itself is stored as the URI. */
 function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {

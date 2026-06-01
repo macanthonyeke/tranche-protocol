@@ -20,7 +20,7 @@ function normaliseEscrow(raw, id) {
     totalAmount: raw.totalAmount,
     destinationDomain: Number(raw.destinationDomain),
     mintRecipient: raw.mintRecipient,
-    disputeWindow: raw.disputeWindow,
+    reviewWindow: raw.reviewWindow,
     depositorApproveCancel: raw.depositorApproveCancel,
     recipientApproveCancel: raw.recipientApproveCancel,
     invoiceHash: raw.invoiceHash,
@@ -28,7 +28,7 @@ function normaliseEscrow(raw, id) {
     deadline: raw.deadline,
     milestoneCount: Number(raw.milestoneCount),
     state: Number(raw.state),
-    deliveryNoticeWindow: raw.deliveryNoticeWindow
+    escrowCctpForwardFee: raw.escrowCctpForwardFee
   }
 }
 
@@ -37,9 +37,9 @@ function normaliseMilestone(raw, index) {
   return {
     index,
     amount: raw.amount,
-    conditionMetTimestamp: raw.conditionMetTimestamp,
-    state: Number(raw.state),
-    deliveredAt: raw.deliveredAt
+    // Timestamp the recipient claimed delivery (claimDelivery); 0 while PENDING.
+    claimedAt: raw.claimedAt,
+    state: Number(raw.state)
   }
 }
 
@@ -114,24 +114,23 @@ export function useDispute(escrowId, milestoneIndex) {
 }
 
 // Protocol-wide dispute timing + math constants, read straight from the
-// contract so the frontend never hardcodes the arbitration windows (14d / 7d)
-// or the BPS denominator. Cached indefinitely — these are `constant`.
+// contract so the frontend never hardcodes the arbiter window (14d) or the BPS
+// denominator. Cached indefinitely — these are `constant`. The redesign folds
+// the old escalation path away, so there is a single ARBITER_WINDOW now.
 export function useDisputeConfig() {
   const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI }
   const { data, isLoading } = useReadContracts({
     contracts: [
-      { ...base, functionName: 'ARBITRATION_WINDOW' },
-      { ...base, functionName: 'ESCALATION_ARBITRATION_WINDOW' },
+      { ...base, functionName: 'ARBITER_WINDOW' },
       { ...base, functionName: 'BPS_DENOMINATOR' }
     ],
     query: { staleTime: Infinity }
   })
   return {
-    arbitrationWindow: data?.[0]?.result ?? 0n,
-    escalationArbitrationWindow: data?.[1]?.result ?? 0n,
+    arbiterWindow: data?.[0]?.result ?? 0n,
     // Sensible non-zero fallback so percentage math never divides by zero
     // before the read resolves.
-    bpsDenominator: data?.[2]?.result ?? 10_000n,
+    bpsDenominator: data?.[1]?.result ?? 10_000n,
     isLoading
   }
 }
@@ -194,9 +193,9 @@ export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
       milestones,
       disputes: data.disputes || [],
       splits: data.splits || [],
-      disputeWindowExpired: data.disputeWindowExpired || [],
-      deliverySignaled: data.deliverySignaled || [],
-      effectiveDisputeDeadlines: data.effectiveDisputeDeadlines || [],
+      reviewWindowExpired: data.reviewWindowExpired || [],
+      claimed: data.claimed || [],
+      reviewDeadlines: data.reviewDeadlines || [],
       isPayer: !!data.isPayer,
       isFreelancer: !!data.isFreelancer,
       isArbiter: !!data.isArbiter

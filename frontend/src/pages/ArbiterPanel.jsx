@@ -178,21 +178,17 @@ function DisputeBlock({ detail, index, refetch }) {
   const m = detail.milestones[index]
   const d = detail.disputes[index]
   const e = detail.escrow
-  const { arbitrationWindow, escalationArbitrationWindow, bpsDenominator } = useDisputeConfig()
+  const { arbiterWindow, bpsDenominator } = useDisputeConfig()
 
-  // Window length depends on whether this dispute was an escalation. Read from
-  // the contract's ARBITRATION_WINDOW / ESCALATION_ARBITRATION_WINDOW rather
-  // than hardcoding 14d / 7d.
-  const windowSecs = d.isEscalation ? escalationArbitrationWindow : arbitrationWindow
+  // Single ARBITER_WINDOW read from the contract rather than hardcoding 14d.
+  const windowSecs = arbiterWindow
   const timeoutAt = Number(d.raisedAt) + Number(windowSecs)
   const now = Math.floor(Date.now() / 1000)
   const canTimeout = windowSecs > 0n && now >= timeoutAt
 
-  // What the timeout fallback will do, decided by who raised the dispute.
-  const raisedByRecipient = d.raisedBy?.toLowerCase() === e.recipient.toLowerCase()
-  const timeoutOutcome = raisedByRecipient
-    ? 'Funds split 50/50 between both parties.'
-    : 'Funds refunded to the depositor.'
+  // A DISPUTED milestone always carries both a delivery-claim and an objection,
+  // so the contract's timeout fallback settles it as a fixed 50/50 split.
+  const timeoutOutcome = 'Funds split 50/50 between both parties.'
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -203,7 +199,7 @@ function DisputeBlock({ detail, index, refetch }) {
             {`Milestone ${index + 1}: ${formatUSDC(m.amount).replace(' USDC', '')} USDC`}
           </p>
         </div>
-        <span className="status-bad">{d.isEscalation ? 'Escalated' : 'Disputed'}</span>
+        <span className="status-bad">Disputed</span>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">

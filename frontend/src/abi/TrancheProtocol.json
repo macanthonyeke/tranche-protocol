@@ -50,7 +50,7 @@
   },
   {
     "type": "function",
-    "name": "ARBITRATION_WINDOW",
+    "name": "ARBITER_WINDOW",
     "inputs": [],
     "outputs": [
       {
@@ -128,19 +128,6 @@
   },
   {
     "type": "function",
-    "name": "ESCALATION_ARBITRATION_WINDOW",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "FEE_MANAGER_ROLE",
     "inputs": [],
     "outputs": [
@@ -180,7 +167,59 @@
   },
   {
     "type": "function",
+    "name": "MAX_MILESTONES",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_PROTOCOL_FEE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_REVIEW_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_SPLITS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_REVIEW_WINDOW",
     "inputs": [],
     "outputs": [
       {
@@ -232,6 +271,29 @@
   },
   {
     "type": "function",
+    "name": "approveRelease",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "cctpForwardFee",
     "inputs": [],
     "outputs": [
@@ -245,20 +307,7 @@
   },
   {
     "type": "function",
-    "name": "claimRefundCreditTransfer",
-    "inputs": [
-      {
-        "name": "blacklistedWallet",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "claimSilentApproval",
+    "name": "claimDelivery",
     "inputs": [
       {
         "name": "escrowId",
@@ -269,6 +318,19 @@
         "name": "milestoneIndex",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "claimRefundCreditTransfer",
+    "inputs": [
+      {
+        "name": "blacklistedWallet",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -304,12 +366,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "_disputeWindow",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_deliveryNoticeWindow",
+        "name": "_reviewWindow",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -387,11 +444,6 @@
         "internalType": "address"
       },
       {
-        "name": "isEscalation",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
         "name": "raisedAt",
         "type": "uint256",
         "internalType": "uint256"
@@ -438,39 +490,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "escalateAfterDeadline",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_reason",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "_evidenceHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_evidenceURI",
-        "type": "string",
-        "internalType": "string"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -565,7 +584,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "disputeWindow",
+        "name": "reviewWindow",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -605,30 +624,12 @@
         "internalType": "enum ITrancheProtocol.EscrowState"
       },
       {
-        "name": "deliveryNoticeWindow",
+        "name": "escrowCctpForwardFee",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "fulfillCondition",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -923,11 +924,6 @@
             "internalType": "address"
           },
           {
-            "name": "isEscalation",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
             "name": "raisedAt",
             "type": "uint256",
             "internalType": "uint256"
@@ -1024,7 +1020,7 @@
             "internalType": "bytes32"
           },
           {
-            "name": "disputeWindow",
+            "name": "reviewWindow",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -1064,7 +1060,7 @@
             "internalType": "enum ITrancheProtocol.EscrowState"
           },
           {
-            "name": "deliveryNoticeWindow",
+            "name": "escrowCctpForwardFee",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -1135,7 +1131,7 @@
                 "internalType": "bytes32"
               },
               {
-                "name": "disputeWindow",
+                "name": "reviewWindow",
                 "type": "uint256",
                 "internalType": "uint256"
               },
@@ -1175,7 +1171,7 @@
                 "internalType": "enum ITrancheProtocol.EscrowState"
               },
               {
-                "name": "deliveryNoticeWindow",
+                "name": "escrowCctpForwardFee",
                 "type": "uint256",
                 "internalType": "uint256"
               }
@@ -1192,7 +1188,7 @@
                 "internalType": "uint256"
               },
               {
-                "name": "conditionMetTimestamp",
+                "name": "claimedAt",
                 "type": "uint256",
                 "internalType": "uint256"
               },
@@ -1200,11 +1196,6 @@
                 "name": "state",
                 "type": "uint8",
                 "internalType": "enum ITrancheProtocol.MilestoneState"
-              },
-              {
-                "name": "deliveredAt",
-                "type": "uint256",
-                "internalType": "uint256"
               }
             ]
           },
@@ -1217,11 +1208,6 @@
                 "name": "raisedBy",
                 "type": "address",
                 "internalType": "address"
-              },
-              {
-                "name": "isEscalation",
-                "type": "bool",
-                "internalType": "bool"
               },
               {
                 "name": "raisedAt",
@@ -1293,17 +1279,17 @@
             ]
           },
           {
-            "name": "disputeWindowExpired",
+            "name": "reviewWindowExpired",
             "type": "bool[]",
             "internalType": "bool[]"
           },
           {
-            "name": "deliverySignaled",
+            "name": "claimed",
             "type": "bool[]",
             "internalType": "bool[]"
           },
           {
-            "name": "effectiveDisputeDeadlines",
+            "name": "reviewDeadlines",
             "type": "uint256[]",
             "internalType": "uint256[]"
           },
@@ -1501,7 +1487,7 @@
             "internalType": "uint256"
           },
           {
-            "name": "conditionMetTimestamp",
+            "name": "claimedAt",
             "type": "uint256",
             "internalType": "uint256"
           },
@@ -1509,11 +1495,6 @@
             "name": "state",
             "type": "uint8",
             "internalType": "enum ITrancheProtocol.MilestoneState"
-          },
-          {
-            "name": "deliveredAt",
-            "type": "uint256",
-            "internalType": "uint256"
           }
         ]
       }
@@ -1732,7 +1713,7 @@
   },
   {
     "type": "function",
-    "name": "isDeliverySignaled",
+    "name": "isClaimed",
     "inputs": [
       {
         "name": "escrowId",
@@ -1756,7 +1737,7 @@
   },
   {
     "type": "function",
-    "name": "isDisputeWindowExpired",
+    "name": "isReviewWindowExpired",
     "inputs": [
       {
         "name": "escrowId",
@@ -1767,6 +1748,35 @@
         "name": "milestoneIndex",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "milestoneCancelProposals",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
@@ -1800,7 +1810,7 @@
         "internalType": "uint256"
       },
       {
-        "name": "conditionMetTimestamp",
+        "name": "claimedAt",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -1808,11 +1818,6 @@
         "name": "state",
         "type": "uint8",
         "internalType": "enum ITrancheProtocol.MilestoneState"
-      },
-      {
-        "name": "deliveredAt",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1899,6 +1904,24 @@
   },
   {
     "type": "function",
+    "name": "proposeMilestoneCancel",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "proposeRefundCreditTransfer",
     "inputs": [
       {
@@ -1976,6 +1999,24 @@
   },
   {
     "type": "function",
+    "name": "refundAfterDeadline",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "refundBalances",
     "inputs": [
       {
@@ -1995,7 +2036,7 @@
   },
   {
     "type": "function",
-    "name": "releaseAfterWindow",
+    "name": "release",
     "inputs": [
       {
         "name": "escrowId",
@@ -2193,24 +2234,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "signalDelivery",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -2456,31 +2479,6 @@
   },
   {
     "type": "event",
-    "name": "ConditionFulfilled",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "disputeDeadline",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "CounterEvidenceSubmitted",
     "inputs": [
       {
@@ -2512,7 +2510,7 @@
   },
   {
     "type": "event",
-    "name": "DeliverySignaled",
+    "name": "DeliveryClaimed",
     "inputs": [
       {
         "name": "escrowId",
@@ -2527,7 +2525,7 @@
         "internalType": "uint256"
       },
       {
-        "name": "deliveredAt",
+        "name": "reviewDeadline",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -2630,43 +2628,6 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "EscalatedAfterDeadline",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "escalatedBy",
-        "type": "address",
-        "indexed": false,
-        "internalType": "address"
-      },
-      {
-        "name": "reason",
-        "type": "string",
-        "indexed": false,
-        "internalType": "string"
-      },
-      {
-        "name": "evidenceHash",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -2785,25 +2746,6 @@
   },
   {
     "type": "event",
-    "name": "EscrowReleasedWithoutDispute",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "EscrowTermsSnapshotted",
     "inputs": [
       {
@@ -2823,6 +2765,94 @@
         "type": "address",
         "indexed": false,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MilestoneApproved",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MilestoneCancelProposed",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposer",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MilestoneCancelled",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "MilestoneReleased",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -3098,6 +3128,31 @@
   },
   {
     "type": "event",
+    "name": "RefundedAfterDeadline",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "RoleAdminChanged",
     "inputs": [
       {
@@ -3166,31 +3221,6 @@
         "name": "sender",
         "type": "address",
         "indexed": true,
-        "internalType": "address"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "SilentApprovalClaimed",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "milestoneIndex",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "claimedBy",
-        "type": "address",
-        "indexed": false,
         "internalType": "address"
       }
     ],
@@ -3350,11 +3380,6 @@
   },
   {
     "type": "error",
-    "name": "AlreadySignaled",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "ArbiterTimeoutNotReached",
     "inputs": []
   },
@@ -3395,6 +3420,11 @@
   },
   {
     "type": "error",
+    "name": "DeadlinePassed",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "DeadlineRequired",
     "inputs": []
   },
@@ -3411,26 +3441,6 @@
   {
     "type": "error",
     "name": "DisputeAlreadyResolved",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "DisputeWindowExpired",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "DisputeWindowNotExpired",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "DisputeWindowTooLong",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "DisputeWindowTooShort",
     "inputs": []
   },
   {
@@ -3575,6 +3585,11 @@
   },
   {
     "type": "error",
+    "name": "NotInReview",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NotProposedOwner",
     "inputs": []
   },
@@ -3585,27 +3600,7 @@
   },
   {
     "type": "error",
-    "name": "NotSignaled",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "NothingToWithdraw",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "NoticeWindowNotExpired",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "NoticeWindowTooLong",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "NoticeWindowTooShort",
     "inputs": []
   },
   {
@@ -3616,6 +3611,26 @@
   {
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReviewWindowExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReviewWindowNotExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReviewWindowTooLong",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReviewWindowTooShort",
     "inputs": []
   },
   {
@@ -3631,7 +3646,12 @@
   },
   {
     "type": "error",
-    "name": "SignalTooCloseToDeadline",
+    "name": "TooManyMilestones",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooManySplits",
     "inputs": []
   },
   {

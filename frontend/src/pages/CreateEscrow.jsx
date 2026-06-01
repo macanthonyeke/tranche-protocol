@@ -15,7 +15,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { ARC_DOMAIN, getDomainName, isEvmDomain } from '../config/chains.js'
 import { CONTRACT_ADDRESS, USDC_ADDRESS, ESCROW_ABI, USDC_ABI } from '../config/contract.js'
 import {
-  addressToBytes32, hashDescription, daysToSeconds, hoursToSeconds,
+  addressToBytes32, hashDescription, daysToSeconds,
   usdcToBaseUnits, isValidBytes32
 } from '../utils/encode.js'
 import {
@@ -37,11 +37,10 @@ const TITLE_PRESETS = [
   'Upfront payment', 'Kickoff', 'First draft', 'Revision round 1',
   'Revision round 2', 'Final delivery', 'Post-launch support', 'QA', 'Documentation', 'Custom'
 ]
-const NOTICE_OPTS  = [1, 2, 3, 7, 14].map((v) => ({ value: v, label: `${v} day${v === 1 ? '' : 's'}` }))
-const DISPUTE_OPTS = [
-  { value: 24, label: '24 hours' }, { value: 48, label: '48 hours' },
-  { value: 72, label: '3 days' }, { value: 168, label: '7 days' }, { value: 336, label: '14 days' }
-]
+// Optimistic review window: how long the payer has, after the freelancer marks
+// a milestone delivered, to approve or dispute before anyone can auto-release.
+// Bounded to MIN_REVIEW_WINDOW (1 day) .. MAX_REVIEW_WINDOW (7 days) on-chain.
+const REVIEW_OPTS = [1, 2, 3, 5, 7].map((v) => ({ value: v, label: `${v} day${v === 1 ? '' : 's'}` }))
 
 const emptyMilestone = () => ({ title: 'Upfront payment', customTitle: '', amount: '' })
 
@@ -54,8 +53,7 @@ const emptyState = () => ({
   useCustomHash: false,
   customInvoiceHash: '',
   deadline: '',
-  noticeWindowDays: 7,
-  disputeWindowHours: 72,
+  reviewWindowDays: 3,
   milestones: [emptyMilestone()]
 })
 
@@ -226,16 +224,14 @@ function Flow() {
     const invoiceHash = state.useCustomHash ? state.customInvoiceHash : hashDescription(state.description)
     const mintRecipient = addressToBytes32(state.freelancer)
     const deadline = BigInt(Math.floor(new Date(state.deadline).getTime() / 1000))
-    const disputeWindow = BigInt(hoursToSeconds(state.disputeWindowHours))
-    const noticeWindow = BigInt(daysToSeconds(state.noticeWindowDays))
+    const reviewWindow = BigInt(daysToSeconds(state.reviewWindowDays))
     depositTx.run(escrowWrite('deposit', [
       state.freelancer,
       '0x0000000000000000000000000000000000000000',
       totalBaseUnits,
       Number(state.destinationDomain),
       mintRecipient,
-      disputeWindow,
-      noticeWindow,
+      reviewWindow,
       invoiceHash,
       state.invoiceURI,
       milestoneAmountsBigInt,
@@ -479,7 +475,7 @@ function Step3({ state, setState, errors }) {
   return (
     <div className="flex flex-col gap-6">
       <Field label="Project deadline" error={errors.deadline}
-        helper="Past this date, the freelancer can escalate any pending milestone to arbiter.">
+        helper="Past this date, any milestone the freelancer never delivered can be refunded to the payer.">
         {(p) => (
           <input {...p} type="datetime-local" className="input"
             min={dlBounds.min} max={dlBounds.max}
@@ -489,30 +485,17 @@ function Step3({ state, setState, errors }) {
         )}
       </Field>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <Field label="Auto-release window"
-          helper="How long the payer has to respond after delivery.">
-          {(p) => (
-            <select {...p} className="input"
-              value={state.noticeWindowDays}
-              onChange={(e) => set('noticeWindowDays')(Number(e.target.value))}
-            >
-              {NOTICE_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          )}
-        </Field>
-        <Field label="Dispute window"
-          helper="How long either side has to dispute after approval.">
-          {(p) => (
-            <select {...p} className="input"
-              value={state.disputeWindowHours}
-              onChange={(e) => set('disputeWindowHours')(Number(e.target.value))}
-            >
-              {DISPUTE_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          )}
-        </Field>
-      </div>
+      <Field label="Review window"
+        helper="After the freelancer marks a milestone delivered, how long the payer has to approve or dispute before it can auto-release.">
+        {(p) => (
+          <select {...p} className="input"
+            value={state.reviewWindowDays}
+            onChange={(e) => set('reviewWindowDays')(Number(e.target.value))}
+          >
+            {REVIEW_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        )}
+      </Field>
     </div>
   )
 }
@@ -732,11 +715,8 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
       <Row label="Deadline" complete={!!dl} placeholder="step 03 / Timeline">
         {dl > 0 && <span className="num text-[13px] text-ink">{formatDeadline(dl)}</span>}
       </Row>
-      <Row label="Auto-release" complete={!!state.noticeWindowDays}>
-        <span className="text-[13px] text-ink">{formatWindow(daysToSeconds(state.noticeWindowDays))}</span>
-      </Row>
-      <Row label="Dispute window" complete={!!state.disputeWindowHours}>
-        <span className="text-[13px] text-ink">{formatWindow(hoursToSeconds(state.disputeWindowHours))}</span>
+      <Row label="Review window" complete={!!state.reviewWindowDays}>
+        <span className="text-[13px] text-ink">{formatWindow(daysToSeconds(state.reviewWindowDays))}</span>
       </Row>
 
       <div className="rule" />
