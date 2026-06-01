@@ -380,8 +380,15 @@ export default function Home() {
       <header className="sticky top-0 z-50 h-16 border-b border-rule bg-paper/85 backdrop-blur-md">
         <div className="max-w-content mx-auto h-full flex items-center justify-between px-4 md:px-8">
           <Link to="/" className="flex items-center gap-2" aria-label="Tranche Protocol home">
-            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold">T</span>
-            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">Tranche Protocol</span>
+            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay">
+              <svg width="20" height="20" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+                <rect x="5"      y="8"    width="16.572" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="22.372" y="8"    width="12.628" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="7"      y="16.5" width="26"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.78"/>
+                <rect x="9"      y="25"   width="22"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.55"/>
+              </svg>
+            </span>
+            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">Tranche</span>
           </Link>
           <div className="flex items-center gap-2">
             <ThemeToggle />

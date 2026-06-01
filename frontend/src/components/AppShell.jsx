@@ -107,8 +107,27 @@ function TopNav() {
           center nav links for the same horizontal space. */}
       <div className="flex items-center min-w-0">
         <Link to="/" className="flex items-center gap-2 group" aria-label="Tranche Protocol home">
-          <span className="inline-flex lg:hidden items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold text-[15px]">T</span>
-          <span className="hidden lg:inline display text-[24px] tracking-tightest leading-none">Tranche Protocol</span>
+          {/* Mobile: mark tile only */}
+          <span className="inline-flex lg:hidden items-center justify-center h-8 w-8 rounded-md bg-clay">
+            <svg width="20" height="20" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+              <rect x="5"      y="8"    width="16.572" height="5.2" rx="1.2" fill="var(--paper)"/>
+              <rect x="22.372" y="8"    width="12.628" height="5.2" rx="1.2" fill="var(--paper)"/>
+              <rect x="7"      y="16.5" width="26"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.78"/>
+              <rect x="9"      y="25"   width="22"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.55"/>
+            </svg>
+          </span>
+          {/* Desktop: tile + wordmark */}
+          <span className="hidden lg:inline-flex items-center gap-2.5">
+            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay">
+              <svg width="20" height="20" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+                <rect x="5"      y="8"    width="16.572" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="22.372" y="8"    width="12.628" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="7"      y="16.5" width="26"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.78"/>
+                <rect x="9"      y="25"   width="22"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.55"/>
+              </svg>
+            </span>
+            <span className="display text-[22px] tracking-tightest leading-none">Tranche</span>
+          </span>
         </Link>
         <div className="hidden lg:flex items-center gap-2 px-2.5 py-1 ml-4 rounded-sm bg-sunk border border-rule">
           <span className="relative flex items-center">
