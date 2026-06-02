@@ -204,7 +204,7 @@ contract Handler is Test, ITrancheProtocol {
         if (!ok) return;
         address ref = escrow.getEscrow(id).refundTo;
         vm.prank(ref);
-        try escrow.withdrawRefund(ref) {
+        try escrow.withdrawRefund(ref, 0, address(0), 0) {
             withdrawCalls++;
         } catch {}
     }

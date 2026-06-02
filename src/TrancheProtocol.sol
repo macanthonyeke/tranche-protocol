@@ -70,6 +70,13 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         milestone can be settled by the permissionless 50/50 timeout.
     uint256 public constant ARBITER_WINDOW = 14 days;
 
+    /// @notice Grace period appended to a milestone's nominal deadline. The
+    ///         recipient may still {claimDelivery} up to this long after the
+    ///         deadline, and the depositor's {refundAfterDeadline} only opens
+    ///         once it fully elapses. This stops a depositor from front-running
+    ///         a just-late delivery claim with an instant deadline refund.
+    uint256 public constant DELIVERY_GRACE_PERIOD = 72 hours;
+
     IERC20 public immutable usdc;
     ITokenMessenger public immutable tokenMessenger;
 
@@ -335,7 +342,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (msg.sender != e.recipient) revert NotRecipient();
         if (milestoneIndex >= e.milestoneCount) revert InvalidMilestoneIndex();
         if (m.state != MilestoneState.PENDING) revert InvalidState();
-        if (block.timestamp > e.deadline) revert DeadlinePassed();
+        // Delivery may be claimed up to DELIVERY_GRACE_PERIOD past the nominal
+        // deadline, so a recipient who delivers just late is not stranded.
+        if (block.timestamp > e.deadline + DELIVERY_GRACE_PERIOD) revert DeadlinePassed();
 
         if (milestoneIndex > 0) {
             Milestone storage prev = milestones[escrowId][milestoneIndex - 1];
@@ -621,7 +630,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (milestoneIndex >= e.milestoneCount) revert InvalidMilestoneIndex();
         if (m.state != MilestoneState.PENDING) revert InvalidState();
-        if (block.timestamp <= e.deadline) revert DeadlineNotReached();
+        // The depositor's deadline refund only opens once the recipient's
+        // delivery grace period has fully elapsed, so it cannot front-run a
+        // late-but-valid {claimDelivery} inside the grace window.
+        if (block.timestamp <= e.deadline + DELIVERY_GRACE_PERIOD) revert DeadlineNotReached();
 
         // Sequential, like every other path: refund milestones in order so the
         // forward-only, one-terminal-at-a-time invariant holds.
@@ -736,20 +748,56 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         }
     }
 
-    /// @notice Withdraw the caller's accumulated refund credit to an address
-    ///         the caller controls. The destination is parameterised so that
-    ///         a depositor whose original address becomes blacklisted (e.g.
-    ///         Circle freeze) can still recover funds to a different wallet.
-    function withdrawRefund(address recipient) external nonReentrant {
+    /// @notice Withdraw the caller's accumulated refund credit. Two paths:
+    ///
+    ///         - `destinationDomain == 0`: same-chain Arc withdrawal. Behaves
+    ///           exactly as before — the full credit is `safeTransfer`-ed to
+    ///           `recipient`; `mintRecipient` and `maxFee` are ignored.
+    ///         - `destinationDomain != 0`: cross-chain withdrawal via Circle's
+    ///           CCTP Forwarding Service. The credit (less `maxFee`) is burned
+    ///           and minted to `mintRecipient` on the destination chain.
+    ///
+    ///         The destination is parameterised so that a depositor whose
+    ///         original address becomes blacklisted (e.g. Circle freeze) can
+    ///         still recover funds to a different wallet — on Arc or elsewhere.
+    /// @param recipient          Arc-path payout address (always validated).
+    /// @param destinationDomain  0 for Arc; otherwise a CCTP domain.
+    /// @param mintRecipient      Cross-chain payout wallet as a normal address;
+    ///                           converted to bytes32 internally. Ignored on Arc.
+    /// @param maxFee             Forwarding-service fee deducted before the
+    ///                           burn. Ignored on Arc.
+    function withdrawRefund(address recipient, uint32 destinationDomain, address mintRecipient, uint256 maxFee)
+        external
+        nonReentrant
+    {
         if (recipient == address(0)) revert InvalidRefundRecipient();
 
         uint256 amount = refundBalances[msg.sender];
 
         if (amount == 0) revert NothingToWithdraw();
 
+        if (destinationDomain == 0) {
+            // Arc path: unchanged behaviour.
+            refundBalances[msg.sender] = 0;
+            usdc.safeTransfer(recipient, amount);
+            emit RefundWithdrawn(recipient, amount);
+            return;
+        }
+
+        // Cross-chain path: burn through CCTP to a destination wallet.
+        if (maxFee == 0) revert MaxFeeRequired();
+        if (amount <= maxFee) revert RefundBelowMaxFee();
+        if (mintRecipient == address(0)) revert ZeroAddress();
+        if (!supportedDomains[destinationDomain]) revert UnsupportedDomain();
+
+        // Users always pass a normal wallet address; the contract handles the
+        // bytes32 conversion CCTP expects.
+        bytes32 recipientB32 = bytes32(uint256(uint160(mintRecipient)));
+        uint256 burnAmount = amount - maxFee;
+
         refundBalances[msg.sender] = 0;
 
-        usdc.safeTransfer(recipient, amount);
+        _approveAndBurn(burnAmount, destinationDomain, recipientB32, maxFee);
 
         emit RefundWithdrawn(recipient, amount);
     }

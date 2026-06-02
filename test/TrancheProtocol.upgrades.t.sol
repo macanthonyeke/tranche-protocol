@@ -235,7 +235,7 @@ contract TrancheProtocolUpgradesTest is Base {
         emit RefundWithdrawn(altRecipient, 100e6);
 
         vm.prank(refundTo);
-        escrow.withdrawRefund(altRecipient);
+        escrow.withdrawRefund(altRecipient, 0, address(0), 0);
 
         assertEq(usdc.balanceOf(altRecipient), 100e6);
         assertEq(usdc.balanceOf(refundTo), 0);
@@ -250,7 +250,7 @@ contract TrancheProtocolUpgradesTest is Base {
 
         vm.prank(refundTo);
         vm.expectRevert(InvalidRefundRecipient.selector);
-        escrow.withdrawRefund(address(0));
+        escrow.withdrawRefund(address(0), 0, address(0), 0);
     }
 
     // -------------------------------------------------------------------------

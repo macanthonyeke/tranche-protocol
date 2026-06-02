@@ -326,4 +326,13 @@ interface ITrancheProtocol {
     /// @notice More than {MAX_SPLITS} split recipients supplied to {deposit}
     ///         (L-R3-05); an unbounded count could gas-brick releases.
     error TooManySplits();
+
+    /// @notice A cross-chain {withdrawRefund} was called with `maxFee == 0`.
+    ///         Circle's Forwarding Service needs a non-zero fee to relay and
+    ///         mint on the destination chain.
+    error MaxFeeRequired();
+    /// @notice A cross-chain {withdrawRefund} was called with a `maxFee` that
+    ///         is greater than or equal to the caller's refund balance, leaving
+    ///         nothing to burn after the fee is deducted.
+    error RefundBelowMaxFee();
 }

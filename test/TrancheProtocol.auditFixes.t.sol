@@ -216,7 +216,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         assertEq(escrow.refundBalances(newOwner), 100e6);
 
         vm.prank(newOwner);
-        escrow.withdrawRefund(newOwner);
+        escrow.withdrawRefund(newOwner, 0, address(0), 0);
         assertEq(usdc.balanceOf(newOwner), 100e6);
     }
 

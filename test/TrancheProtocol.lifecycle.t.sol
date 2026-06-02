@@ -38,7 +38,8 @@ contract TrancheProtocolLifecycleTest is Base {
 
     function test_Claim_RevertOn_AfterDeadline() public {
         uint256 id = _depositSingle(1000e6);
-        vm.warp(block.timestamp + 30 days + 1);
+        // Past the deadline *and* the delivery grace period.
+        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
         vm.prank(recipient);
         vm.expectRevert(DeadlinePassed.selector);
         escrow.claimDelivery(id, 0);
@@ -103,7 +104,8 @@ contract TrancheProtocolLifecycleTest is Base {
 
     function test_RefundAfterDeadline_RecipientNeverClaimed() public {
         uint256 id = _depositSingle(1000e6);
-        vm.warp(block.timestamp + 30 days + 1);
+        // Refund only opens after the full delivery grace period elapses.
+        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
         vm.prank(stranger); // permissionless
         escrow.refundAfterDeadline(id, 0);
 
@@ -125,6 +127,68 @@ contract TrancheProtocolLifecycleTest is Base {
         // Milestone is IN_REVIEW, not PENDING -> cannot refund-after-deadline.
         vm.expectRevert(InvalidState.selector);
         escrow.refundAfterDeadline(id, 0);
+    }
+
+    // ----------------------------------------------------------------------
+    // Delivery grace period (DELIVERY_GRACE_PERIOD = 72h)
+    // ----------------------------------------------------------------------
+
+    /// @notice The recipient may still claim delivery after the nominal
+    ///         deadline as long as the grace period has not fully elapsed.
+    function test_GracePeriod_Claim_SucceedsWithinGrace() public {
+        uint256 id = _depositSingle(1000e6);
+        // 1 hour past the deadline, well inside the 72h grace window.
+        vm.warp(block.timestamp + 30 days + 1 hours);
+        _claimDelivery(id, 0);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.IN_REVIEW));
+    }
+
+    /// @notice The recipient can claim right up to the last second of grace.
+    function test_GracePeriod_Claim_SucceedsAtGraceEdge() public {
+        uint256 id = _depositSingle(1000e6);
+        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD());
+        _claimDelivery(id, 0);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.IN_REVIEW));
+    }
+
+    /// @notice refundAfterDeadline reverts while the grace period is still
+    ///         active (past the deadline but within the 72h window).
+    function test_GracePeriod_Refund_RevertWhileGraceActive() public {
+        uint256 id = _depositSingle(1000e6);
+        // Past the deadline but still inside the grace window.
+        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD());
+        vm.expectRevert(DeadlineNotReached.selector);
+        escrow.refundAfterDeadline(id, 0);
+    }
+
+    /// @notice refundAfterDeadline succeeds once the full grace period elapses
+    ///         with no delivery claim.
+    function test_GracePeriod_Refund_SucceedsAfterFullGrace() public {
+        uint256 id = _depositSingle(1000e6);
+        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
+        vm.prank(stranger); // permissionless
+        escrow.refundAfterDeadline(id, 0);
+
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.REFUNDED));
+        assertEq(escrow.refundBalances(refundTo), 1000e6);
+    }
+
+    /// @notice A depositor cannot front-run a late-but-valid recipient delivery
+    ///         claim with refundAfterDeadline inside the grace window: the
+    ///         refund reverts, and the recipient can still claim.
+    function test_GracePeriod_DepositorCannotFrontRunClaim() public {
+        uint256 id = _depositSingle(1000e6);
+        // Just past the deadline, inside the grace window.
+        vm.warp(block.timestamp + 30 days + 1);
+
+        // Depositor tries to snatch the funds back early -> blocked.
+        vm.prank(depositor);
+        vm.expectRevert(DeadlineNotReached.selector);
+        escrow.refundAfterDeadline(id, 0);
+
+        // Recipient's delivery claim still goes through.
+        _claimDelivery(id, 0);
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.IN_REVIEW));
     }
 
     // ----------------------------------------------------------------------
