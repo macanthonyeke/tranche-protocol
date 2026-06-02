@@ -30,7 +30,7 @@ const EXPECTED_PROTOCOL_FEE_BPS = 199n;
 
 const artifact = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../out/CrossChainEscrow.sol/CrossChainEscrow.json'),
+    path.resolve(__dirname, '../out/TrancheProtocol.sol/TrancheProtocol.json'),
     'utf8',
   ),
 );
@@ -59,15 +59,6 @@ function readContract(functionName, args = []) {
     functionName,
     args,
   });
-}
-
-async function getRoleMembers(role) {
-  const count = await readContract('getRoleMemberCount', [role]);
-  const members = [];
-  for (let index = 0n; index < count; index++) {
-    members.push(await readContract('getRoleMember', [role, index]));
-  }
-  return members;
 }
 
 const results = [];
@@ -113,23 +104,29 @@ const [
   readContract('supportedDomains', [ARC_DOMAIN]),
 ]);
 
+const expectedArbiter = process.env.ARBITER_ADDRESS;
+const expectedPauser = process.env.PAUSER_ADDRESS;
+const expectedDomainManager = process.env.DOMAIN_MANAGER_ADDRESS;
+const expectedDeployer = process.env.DEPLOYER_ADDRESS;
+const expectedTreasury = process.env.PROTOCOL_TREASURY;
+
 const [
-  defaultAdminMembers,
-  arbiterMembers,
-  pauserMembers,
-  domainManagerMembers,
-  feeManagerMembers,
-  recoveryManagerMembers,
+  deployerIsDefaultAdmin,
+  arbiterHasRole,
+  pauserHasRole,
+  domainManagerHasRole,
+  deployerIsFeeManager,
+  deployerIsRecoveryManager,
 ] = await Promise.all([
-  getRoleMembers(DEFAULT_ADMIN_ROLE),
-  getRoleMembers(arbiterRole),
-  getRoleMembers(pauserRole),
-  getRoleMembers(domainManagerRole),
-  getRoleMembers(feeManagerRole),
-  getRoleMembers(recoveryManagerRole),
+  expectedDeployer ? readContract('hasRole', [DEFAULT_ADMIN_ROLE, expectedDeployer]) : false,
+  expectedArbiter ? readContract('hasRole', [arbiterRole, expectedArbiter]) : false,
+  expectedPauser ? readContract('hasRole', [pauserRole, expectedPauser]) : false,
+  expectedDomainManager ? readContract('hasRole', [domainManagerRole, expectedDomainManager]) : false,
+  expectedDeployer ? readContract('hasRole', [feeManagerRole, expectedDeployer]) : false,
+  expectedDeployer ? readContract('hasRole', [recoveryManagerRole, expectedDeployer]) : false,
 ]);
 
-console.log('CrossChainEscrow V2 Deployment Verification');
+console.log('TrancheProtocol V2 Deployment Verification');
 console.log('===========================================');
 console.log('Contract:', CONTRACT_ADDRESS);
 console.log('USDC:', usdc);
@@ -142,41 +139,35 @@ console.log('escrowCount:', escrowCount.toString());
 console.log('');
 
 // --- Role assignments ---
-const expectedArbiter = process.env.ARBITER_ADDRESS;
-const expectedPauser = process.env.PAUSER_ADDRESS;
-const expectedDomainManager = process.env.DOMAIN_MANAGER_ADDRESS;
-const expectedDeployer = process.env.DEPLOYER_ADDRESS;
-const expectedTreasury = process.env.PROTOCOL_TREASURY;
-
 record(
   'DEFAULT_ADMIN_ROLE held by deployer',
-  expectedDeployer ? defaultAdminMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
-  defaultAdminMembers.join(', ') || '(none)',
+  deployerIsDefaultAdmin === true,
+  `deployer=${expectedDeployer ?? '(unset)'}`,
 );
 record(
   'ARBITER_ROLE held by configured arbiter',
-  expectedArbiter ? arbiterMembers.some((m) => eqAddress(m, expectedArbiter)) : false,
-  arbiterMembers.join(', ') || '(none)',
+  arbiterHasRole === true,
+  `arbiter=${expectedArbiter ?? '(unset)'}`,
 );
 record(
   'PAUSER_ROLE held by configured pauser',
-  expectedPauser ? pauserMembers.some((m) => eqAddress(m, expectedPauser)) : false,
-  pauserMembers.join(', ') || '(none)',
+  pauserHasRole === true,
+  `pauser=${expectedPauser ?? '(unset)'}`,
 );
 record(
   'DOMAIN_MANAGER_ROLE held by configured domain manager',
-  expectedDomainManager ? domainManagerMembers.some((m) => eqAddress(m, expectedDomainManager)) : false,
-  domainManagerMembers.join(', ') || '(none)',
+  domainManagerHasRole === true,
+  `domainManager=${expectedDomainManager ?? '(unset)'}`,
 );
 record(
   'FEE_MANAGER_ROLE held by deployer',
-  expectedDeployer ? feeManagerMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
-  feeManagerMembers.join(', ') || '(none)',
+  deployerIsFeeManager === true,
+  `deployer=${expectedDeployer ?? '(unset)'}`,
 );
 record(
   'RECOVERY_MANAGER_ROLE held by deployer',
-  expectedDeployer ? recoveryManagerMembers.some((m) => eqAddress(m, expectedDeployer)) : false,
-  recoveryManagerMembers.join(', ') || '(none)',
+  deployerIsRecoveryManager === true,
+  `deployer=${expectedDeployer ?? '(unset)'}`,
 );
 
 // --- Pause state ---

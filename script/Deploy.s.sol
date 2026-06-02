@@ -3,9 +3,9 @@ pragma solidity 0.8.24;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
-import {CrossChainEscrow} from "../src/CrossChainEscrow.sol";
+import {TrancheProtocol} from "../src/TrancheProtocol.sol";
 
-/// @notice Deploys CrossChainEscrow to Arc testnet and seeds supported CCTP V2
+/// @notice Deploys TrancheProtocol to Arc testnet and seeds supported CCTP V2
 ///         destination domains.
 ///
 /// Required env vars:
@@ -36,7 +36,7 @@ contract Deploy is Script {
     uint32 internal constant DOMAIN_ARBITRUM = 3;
     uint32 internal constant DOMAIN_BASE = 6;
 
-    function run() external returns (CrossChainEscrow escrow) {
+    function run() external returns (TrancheProtocol escrow) {
         uint256 deployerPk = vm.envUint("PRIVATE_KEY");
         address arbiter = vm.envAddress("ARBITER_ADDRESS");
         address pauser = vm.envAddress("PAUSER_ADDRESS");
@@ -56,11 +56,11 @@ contract Deploy is Script {
 
         vm.startBroadcast(deployerPk);
 
-        escrow = new CrossChainEscrow(usdc, arbiter, pauser, domainManager, tokenMessenger, protocolTreasury);
+        escrow = new TrancheProtocol(usdc, arbiter, pauser, domainManager, tokenMessenger, protocolTreasury);
 
         vm.stopBroadcast();
 
-        console.log("CrossChainEscrow deployed at:", address(escrow));
+        console.log("TrancheProtocol deployed at:", address(escrow));
         console.log("Deployer holds DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE, RECOVERY_MANAGER_ROLE");
         console.log("Supported domains must be seeded by DOMAIN_MANAGER_ADDRESS");
     }

@@ -1,0 +1,72 @@
+specVersion: 1.0.0
+description: Tranche Protocol escrow indexer (Arc testnet)
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: TrancheProtocol
+    # `arc-testnet` is Goldsky's official network slug for Arc Testnet (chain id
+    # 5042002), confirmed against docs.goldsky.com/chains/supported-networks.
+    network: arc-testnet
+    source:
+      # Live Tranche Protocol proxy — from deploy/.env CONTRACT_ADDRESS (matches frontend/.env).
+      address: "0xc6dadd5f4df5089ab4878387aaf44e4d42919765"
+      abi: TrancheProtocol
+      # Proxy deployment block (found via on-chain getCode binary search).
+      startBlock: 44298133
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      file: ./src/mapping.ts
+      entities:
+        - Escrow
+        - Milestone
+        - Dispute
+        - Split
+        - RefundBalance
+        - RefundCredit
+      abis:
+        - name: TrancheProtocol
+          file: ./abis/TrancheProtocol.json
+      eventHandlers:
+        - event: EscrowCreated(indexed uint256,address,address,uint256,bytes32,string,uint256)
+          handler: handleEscrowCreated
+        - event: EscrowTermsSnapshotted(indexed uint256,uint256,address)
+          handler: handleEscrowTermsSnapshotted
+        - event: SplitConfigured(indexed uint256,uint256,bytes32,uint32,uint256)
+          handler: handleSplitConfigured
+        - event: SplitsConfigured(indexed uint256,uint256)
+          handler: handleSplitsConfigured
+        - event: ConditionFulfilled(indexed uint256,uint256,uint256)
+          handler: handleConditionFulfilled
+        - event: DeliverySignaled(indexed uint256,uint256,uint256)
+          handler: handleDeliverySignaled
+        - event: SilentApprovalClaimed(indexed uint256,uint256,address)
+          handler: handleSilentApprovalClaimed
+        - event: DisputeRaised(indexed uint256,indexed address,indexed uint256,string,bytes32)
+          handler: handleDisputeRaised
+        - event: CounterEvidenceSubmitted(indexed uint256,address,uint256,bytes32)
+          handler: handleCounterEvidenceSubmitted
+        - event: EscalatedAfterDeadline(indexed uint256,uint256,address,string,bytes32)
+          handler: handleEscalatedAfterDeadline
+        - event: DisputeResolved(indexed uint256,indexed uint256,uint256,bytes32,string)
+          handler: handleDisputeResolved
+        - event: DisputeTimedOutSettled(indexed uint256,indexed uint256,uint256)
+          handler: handleDisputeTimedOutSettled
+        - event: MutualSettlementExecuted(indexed uint256,indexed uint256,uint256)
+          handler: handleMutualSettlementExecuted
+        - event: EscrowReleased(indexed uint256,uint256,bytes32)
+          handler: handleEscrowReleased
+        - event: EscrowRefunded(indexed uint256,uint256,bytes32)
+          handler: handleEscrowRefunded
+        - event: EscrowReleasedWithoutDispute(indexed uint256,uint256)
+          handler: handleEscrowReleasedWithoutDispute
+        - event: EscrowRefundedViaMutualCancel(indexed uint256)
+          handler: handleEscrowRefundedViaMutualCancel
+        - event: PartialRefundCredited(indexed uint256,indexed uint256,indexed address,uint256)
+          handler: handlePartialRefundCredited
+        - event: RefundWithdrawn(indexed address,uint256)
+          handler: handleRefundWithdrawn
+        - event: RefundCreditTransferred(indexed address,indexed address,uint256)
+          handler: handleRefundCreditTransferred

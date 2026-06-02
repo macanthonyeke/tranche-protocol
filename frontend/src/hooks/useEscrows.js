@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useReadContract } from 'wagmi'
+import { useReadContract, useReadContracts } from 'wagmi'
+import { useQuery } from '@tanstack/react-query'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
+import {
+  GOLDSKY_ENABLED,
+  fetchDashboard,
+  fetchEscrowsByRole,
+  fetchDisputedEscrows
+} from '../lib/goldsky'
 
 // Normalises one Escrow tuple/struct returned by the contract.
 function normaliseEscrow(raw, id) {
@@ -13,7 +20,7 @@ function normaliseEscrow(raw, id) {
     totalAmount: raw.totalAmount,
     destinationDomain: Number(raw.destinationDomain),
     mintRecipient: raw.mintRecipient,
-    disputeWindow: raw.disputeWindow,
+    reviewWindow: raw.reviewWindow,
     depositorApproveCancel: raw.depositorApproveCancel,
     recipientApproveCancel: raw.recipientApproveCancel,
     invoiceHash: raw.invoiceHash,
@@ -21,7 +28,7 @@ function normaliseEscrow(raw, id) {
     deadline: raw.deadline,
     milestoneCount: Number(raw.milestoneCount),
     state: Number(raw.state),
-    deliveryNoticeWindow: raw.deliveryNoticeWindow
+    escrowCctpForwardFee: raw.escrowCctpForwardFee
   }
 }
 
@@ -30,9 +37,9 @@ function normaliseMilestone(raw, index) {
   return {
     index,
     amount: raw.amount,
-    conditionMetTimestamp: raw.conditionMetTimestamp,
-    state: Number(raw.state),
-    deliveredAt: raw.deliveredAt
+    // Timestamp the recipient claimed delivery (claimDelivery); 0 while PENDING.
+    claimedAt: raw.claimedAt,
+    state: Number(raw.state)
   }
 }
 
@@ -106,6 +113,58 @@ export function useDispute(escrowId, milestoneIndex) {
   return { dispute: data, isLoading, refetch }
 }
 
+// Protocol-wide dispute timing + math constants, read straight from the
+// contract so the frontend never hardcodes the arbiter window (14d) or the BPS
+// denominator. Cached indefinitely — these are `constant`. The redesign folds
+// the old escalation path away, so there is a single ARBITER_WINDOW now.
+export function useDisputeConfig() {
+  const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI }
+  const { data, isLoading } = useReadContracts({
+    contracts: [
+      { ...base, functionName: 'ARBITER_WINDOW' },
+      { ...base, functionName: 'BPS_DENOMINATOR' }
+    ],
+    query: { staleTime: Infinity }
+  })
+  return {
+    arbiterWindow: data?.[0]?.result ?? 0n,
+    // Sensible non-zero fallback so percentage math never divides by zero
+    // before the read resolves.
+    bpsDenominator: data?.[1]?.result ?? 10_000n,
+    isLoading
+  }
+}
+
+// A single SettlementProposal getter returns (bool exists, uint256 bps). viem
+// hands multi-output getters back as a positional array; normalise to an object.
+function normaliseProposal(result) {
+  if (!result) return { exists: false, bps: 0n }
+  if (Array.isArray(result)) return { exists: !!result[0], bps: result[1] ?? 0n }
+  return { exists: !!result.exists, bps: result.bps ?? 0n }
+}
+
+// Both parties' mutual-settlement proposals for one disputed milestone, read in
+// a single multicall. `bps` is in basis points (0–10,000).
+export function useSettlementProposals(escrowId, milestoneIndex, depositor, recipient) {
+  const enabled =
+    escrowId !== undefined && escrowId !== null &&
+    milestoneIndex !== undefined && milestoneIndex !== null &&
+    !!depositor && !!recipient
+  const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'settlementProposals' }
+  const { data, isLoading, refetch } = useReadContracts({
+    contracts: enabled
+      ? [
+          { ...base, args: [BigInt(escrowId), BigInt(milestoneIndex), depositor] },
+          { ...base, args: [BigInt(escrowId), BigInt(milestoneIndex), recipient] }
+        ]
+      : [],
+    query: { enabled }
+  })
+  const depositorProposal = useMemo(() => normaliseProposal(data?.[0]?.result), [data])
+  const recipientProposal = useMemo(() => normaliseProposal(data?.[1]?.result), [data])
+  return { depositorProposal, recipientProposal, isLoading, refetch }
+}
+
 // Single-call payload for the escrow detail page: escrow + milestones +
 // disputes + splits + derived flags + caller role.
 // `pollMs` enables periodic refetch so the Workroom updates when the
@@ -134,9 +193,9 @@ export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
       milestones,
       disputes: data.disputes || [],
       splits: data.splits || [],
-      disputeWindowExpired: data.disputeWindowExpired || [],
-      deliverySignaled: data.deliverySignaled || [],
-      effectiveDisputeDeadlines: data.effectiveDisputeDeadlines || [],
+      reviewWindowExpired: data.reviewWindowExpired || [],
+      claimed: data.claimed || [],
+      reviewDeadlines: data.reviewDeadlines || [],
       isPayer: !!data.isPayer,
       isFreelancer: !!data.isFreelancer,
       isArbiter: !!data.isArbiter
@@ -146,17 +205,24 @@ export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
   return { detail, isLoading, error, refetch }
 }
 
-// Single-call payload for the dashboard.
-export function useDashboard(address) {
-  const enabled = !!address
+// ---------------------------------------------------------------------------
+// Bulk / list reads. These previously hit the contract's looping view functions
+// (getDashboard, getDisputedEscrows, getEscrowsFor*), which scan EVERY escrow on
+// each eth_call and will exceed the gas limit as the protocol grows. They now
+// read from the Goldsky subgraph when VITE_GOLDSKY_ENDPOINT is set, falling back
+// to the on-chain views otherwise so the app keeps working pre-deploy.
+// Single-escrow reads above stay on-chain — they are bounded/O(1).
+// ---------------------------------------------------------------------------
+
+// --- Dashboard ---
+function useDashboardOnchain(address, active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'getDashboard',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    args: active ? [address] : undefined,
+    query: { enabled: active }
   })
-
   const dashboard = useMemo(() => {
     if (!data) return null
     return {
@@ -167,45 +233,83 @@ export function useDashboard(address) {
       refundBalance: data.refundBalance ?? 0n
     }
   }, [data])
-
   return { dashboard, isLoading, refetch }
 }
 
-export function useEscrowsForPayer(address) {
-  const enabled = !!address
+function useDashboardGoldsky(address, active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-dashboard', address?.toLowerCase()],
+    queryFn: () => fetchDashboard(address),
+    enabled: active
+  })
+  return { dashboard: data ?? null, isLoading, refetch }
+}
+
+export function useDashboard(address) {
+  const onchain = useDashboardOnchain(address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useDashboardGoldsky(address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
+}
+
+// --- Escrows by participant role ---
+function useEscrowsByRoleOnchain(functionName, address, active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
-    functionName: 'getEscrowsForPayer',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    functionName,
+    args: active ? [address] : undefined,
+    query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
   return { escrows, isLoading, refetch }
+}
+
+function useEscrowsByRoleGoldsky(role, address, active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-escrows', role, address?.toLowerCase()],
+    queryFn: () => fetchEscrowsByRole(role, address),
+    enabled: active
+  })
+  return { escrows: data ?? [], isLoading, refetch }
+}
+
+export function useEscrowsForPayer(address) {
+  const onchain = useEscrowsByRoleOnchain('getEscrowsForPayer', address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useEscrowsByRoleGoldsky('payer', address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
 }
 
 export function useEscrowsForFreelancer(address) {
-  const enabled = !!address
+  const onchain = useEscrowsByRoleOnchain('getEscrowsForFreelancer', address, !GOLDSKY_ENABLED && !!address)
+  const goldsky = useEscrowsByRoleGoldsky('freelancer', address, GOLDSKY_ENABLED && !!address)
+  return GOLDSKY_ENABLED ? goldsky : onchain
+}
+
+// --- All disputed escrows across the protocol (arbiter panel) ---
+function useDisputedEscrowsOnchain(active) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
-    functionName: 'getEscrowsForFreelancer',
-    args: enabled ? [address] : undefined,
-    query: { enabled }
+    functionName: 'getDisputedEscrows',
+    query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
   return { escrows, isLoading, refetch }
 }
 
-// All disputed escrows across the protocol (arbiter panel).
-export function useDisputedEscrows() {
-  const { data, isLoading, refetch } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi: ESCROW_ABI,
-    functionName: 'getDisputedEscrows'
+function useDisputedEscrowsGoldsky(active) {
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['gs-disputed'],
+    queryFn: () => fetchDisputedEscrows(),
+    enabled: active
   })
-  const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
-  return { escrows, isLoading, refetch }
+  return { escrows: data ?? [], isLoading, refetch }
+}
+
+export function useDisputedEscrows() {
+  const onchain = useDisputedEscrowsOnchain(!GOLDSKY_ENABLED)
+  const goldsky = useDisputedEscrowsGoldsky(GOLDSKY_ENABLED)
+  return GOLDSKY_ENABLED ? goldsky : onchain
 }
 
 export function useRefundBalance(address) {

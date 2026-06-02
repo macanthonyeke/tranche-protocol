@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.24;
 
 import {Base} from "./Base.t.sol";
-import {ICrossChainEscrow} from "../src/interface/ICrossChainEscrow.sol";
 
-contract CrossChainEscrowFuzzTest is Base {
-    function testFuzz_Deposit_ValidAmounts(uint256 a, uint256 b, uint256 c, uint256 disputeWindow) public {
-        a = bound(a, 1, 1e12);
-        b = bound(b, 1, 1e12);
-        c = bound(c, 1, 1e12);
-        disputeWindow = bound(disputeWindow, 1 hours, 14 days);
+contract TrancheProtocolFuzzTest is Base {
+    function testFuzz_Deposit_ValidAmounts(uint256 a, uint256 b, uint256 c, uint256 reviewWindow) public {
+        // The suite default DEST_DOMAIN is cross-chain, so each milestone must
+        // out-size CCTP_FORWARD_FEE (M-02 floor enforced at deposit).
+        a = bound(a, CCTP_FORWARD_FEE + 1, 1e12);
+        b = bound(b, CCTP_FORWARD_FEE + 1, 1e12);
+        c = bound(c, CCTP_FORWARD_FEE + 1, 1e12);
+        reviewWindow = bound(reviewWindow, 1 days, 7 days);
 
         uint256 total = a + b + c;
         usdc.mint(depositor, total);
@@ -20,7 +21,7 @@ contract CrossChainEscrowFuzzTest is Base {
         ms[2] = c;
 
         uint256 before = usdc.balanceOf(address(escrow));
-        uint256 id = _depositCustom(depositor, recipient, refundTo, total, ms, disputeWindow);
+        uint256 id = _depositCustom(depositor, recipient, refundTo, total, ms, reviewWindow);
 
         assertEq(_getEscrowTotalAmount(id), total);
         assertEq(_getEscrowMilestoneCount(id), 3);
@@ -51,8 +52,7 @@ contract CrossChainEscrowFuzzTest is Base {
             wrong,
             DEST_DOMAIN,
             MINT_RECIPIENT,
-            DISPUTE_WINDOW,
-            DELIVERY_NOTICE_WINDOW,
+            REVIEW_WINDOW,
             INVOICE_HASH,
             INVOICE_URI,
             ms,
@@ -62,52 +62,52 @@ contract CrossChainEscrowFuzzTest is Base {
         vm.stopPrank();
     }
 
-    function testFuzz_FulfillCondition_OnlyDepositor(address caller) public {
-        vm.assume(caller != depositor);
+    function testFuzz_ClaimDelivery_OnlyRecipient(address caller) public {
+        vm.assume(caller != recipient);
         uint256 id = _depositSingle(100e6);
         vm.prank(caller);
-        vm.expectRevert(NotEscrowOwner.selector);
-        escrow.fulfillCondition(id, 0);
+        vm.expectRevert(NotRecipient.selector);
+        escrow.claimDelivery(id, 0);
     }
 
-    function testFuzz_RaiseDispute_RandomCallers(address caller) public {
-        vm.assume(caller != depositor && caller != recipient);
+    function testFuzz_RaiseDispute_OnlyDepositor(address caller) public {
+        vm.assume(caller != depositor);
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
+        _claimDelivery(id, 0);
         vm.prank(caller);
-        vm.expectRevert(NotEscrowOwnerOrRecipient.selector);
+        vm.expectRevert(NotEscrowOwner.selector);
         escrow.raiseDispute(id, 0, "r", keccak256("ev"), "ipfs://ev");
     }
 
     function testFuzz_RaiseDispute_WithinWindow(uint256 elapsed) public {
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        elapsed = bound(elapsed, 0, DISPUTE_WINDOW);
+        _claimDelivery(id, 0);
+        elapsed = bound(elapsed, 0, REVIEW_WINDOW);
         vm.warp(block.timestamp + elapsed);
-        _raiseDisputeAs(depositor, id, 0);
+        _raiseDispute(id, 0);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.DISPUTED));
     }
 
     function testFuzz_RaiseDispute_OutsideWindow(uint256 elapsed) public {
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        elapsed = bound(elapsed, DISPUTE_WINDOW + 1, DISPUTE_WINDOW + 365 days);
+        _claimDelivery(id, 0);
+        elapsed = bound(elapsed, REVIEW_WINDOW + 1, REVIEW_WINDOW + 20 days);
         vm.warp(block.timestamp + elapsed);
         vm.prank(depositor);
-        vm.expectRevert(DisputeWindowExpired.selector);
+        vm.expectRevert(ReviewWindowExpired.selector);
         escrow.raiseDispute(id, 0, "r", keccak256("ev"), "ipfs://ev");
     }
 
-    function testFuzz_ReleaseAfterWindow_Timing(uint256 elapsed) public {
+    function testFuzz_Release_Timing(uint256 elapsed) public {
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        elapsed = bound(elapsed, 0, DISPUTE_WINDOW * 5);
+        _claimDelivery(id, 0);
+        elapsed = bound(elapsed, 0, REVIEW_WINDOW * 5);
         vm.warp(block.timestamp + elapsed);
-        if (elapsed < DISPUTE_WINDOW) {
-            vm.expectRevert(DisputeWindowNotExpired.selector);
-            escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
+        if (elapsed < REVIEW_WINDOW) {
+            vm.expectRevert(ReviewWindowNotExpired.selector);
+            escrow.release(id, 0, CCTP_FORWARD_FEE);
         } else {
-            escrow.releaseAfterWindow(id, 0, CCTP_FORWARD_FEE);
+            escrow.release(id, 0, CCTP_FORWARD_FEE);
             assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
         }
     }
@@ -115,19 +115,19 @@ contract CrossChainEscrowFuzzTest is Base {
     function testFuzz_ResolveDispute_OnlyArbiter(address caller) public {
         vm.assume(caller != arbiter);
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        _raiseDisputeAs(depositor, id, 0);
+        _claimDelivery(id, 0);
+        _raiseDispute(id, 0);
         vm.prank(caller);
         vm.expectRevert(); // AccessControlUnauthorizedAccount(caller, ARBITER_ROLE)
-        escrow.resolveDispute(id, 0, true, keccak256("res"), 0);
+        escrow.resolveDispute(id, 0, 10_000, keccak256("res"), "ipfs://res", 0);
     }
 
-    function testFuzz_ResolveDispute_ReleaseOrRefund(bool release) public {
+    function testFuzz_ResolveDispute_ReleaseOrRefund(bool releaseToRecipient) public {
         uint256 id = _depositSingle(100e6);
-        _fulfill(id, 0);
-        _raiseDisputeAs(depositor, id, 0);
-        _resolveAs(arbiter, id, 0, release);
-        if (release) {
+        _claimDelivery(id, 0);
+        _raiseDispute(id, 0);
+        _resolveAs(arbiter, id, 0, releaseToRecipient);
+        if (releaseToRecipient) {
             assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
             assertEq(usdc.balanceOf(address(tokenMessenger)), 100e6);
         } else {
@@ -159,19 +159,19 @@ contract CrossChainEscrowFuzzTest is Base {
         uint256 expectedBurn;
         uint256 expectedRefund;
         for (uint256 i = 0; i < 3; i++) {
-            _fulfill(id, i);
+            _claimDelivery(id, i);
             uint256 choice = uint256(keccak256(abi.encode(seed, i))) % 3;
             uint256 amt = _getMilestoneAmount(id, i);
             if (choice == 0) {
-                vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+                vm.warp(block.timestamp + REVIEW_WINDOW);
                 _release(id, i);
                 expectedBurn += amt;
             } else if (choice == 1) {
-                _raiseDisputeAs(depositor, id, i);
+                _raiseDispute(id, i);
                 _resolveAs(arbiter, id, i, true);
                 expectedBurn += amt;
             } else {
-                _raiseDisputeAs(recipient, id, i);
+                _raiseDispute(id, i);
                 _resolveAs(arbiter, id, i, false);
                 expectedRefund += amt;
             }

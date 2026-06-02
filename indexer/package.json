@@ -1,0 +1,17 @@
+{
+  "name": "tranche-protocol-indexer",
+  "version": "0.1.0",
+  "description": "Goldsky subgraph indexing Tranche Protocol on Arc testnet",
+  "license": "MIT",
+  "scripts": {
+    "sync": "node scripts/sync-config.mjs",
+    "codegen": "graph codegen",
+    "build": "graph build",
+    "deploy": "goldsky subgraph deploy tranche-protocol/0.1.0 --path .",
+    "deploy:graph-studio": "graph deploy --studio tranche-protocol"
+  },
+  "devDependencies": {
+    "@graphprotocol/graph-cli": "^0.97.1",
+    "@graphprotocol/graph-ts": "^0.38.1"
+  }
+}

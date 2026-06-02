@@ -4,6 +4,7 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { toast } from 'sonner'
 import ThemeToggle from '../components/ThemeToggle.jsx'
 import WalletButton from '../components/WalletButton.jsx'
+import PageTransition from '../components/PageTransition.jsx'
 import { CONTRACT_ADDRESS, arcTestnet } from '../config/wagmi.js'
 import { truncateAddr } from '../utils/format'
 
@@ -66,62 +67,16 @@ const STEPS = [
   { n: '03', title: 'Payment goes out', text: 'Approved milestones release via Circle CCTP to whichever chain the freelancer set. Disputed milestones go to a neutral arbiter who reviews both sides.' }
 ]
 
-const CoinsIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <circle cx="8" cy="8" r="6" />
-    <path d="M18.09 10.37A6 6 0 1 1 10.34 18" />
-    <path d="M7 6h1v4" />
-    <path d="m16.71 13.88.7.71-2.82 2.82" />
-  </svg>
-)
-const ShieldCheckIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-    <path d="m9 12 2 2 4-4" />
-  </svg>
-)
-const FileSearchIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-    <polyline points="14 2 14 8 20 8" />
-    <circle cx="11.5" cy="14.5" r="2.5" />
-    <path d="M13.25 16.25 15 18" />
-  </svg>
-)
-const TimerIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <line x1="10" x2="14" y1="2" y2="2" />
-    <line x1="12" x2="15" y1="14" y2="11" />
-    <circle cx="12" cy="14" r="8" />
-  </svg>
-)
-const GlobeIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <circle cx="12" cy="12" r="10" />
-    <line x1="2" x2="22" y1="12" y2="12" />
-    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-  </svg>
-)
-const WalletIcon = (props) => (
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
-    <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
-    <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
-    <path d="M18 12a2 2 0 0 0 0 4h4v-4z" />
-  </svg>
-)
-
-const LEAD_FEATURE = {
-  title: 'One asset, the whole way through',
-  text: 'On most chains you need ETH just to touch your USDC. Arc uses USDC as the gas token, so a contractor anywhere can lock funds, approve milestones, and withdraw payment without ever managing a separate gas token. Every transaction cost is a predictable dollar amount.',
-  Icon: CoinsIcon
-}
-
-const FEATURES = [
-  { title: 'Payment release is actually final', text: 'Every action inside the escrow confirms on Arc in under a second and cannot be reversed. Locking funds, approving a milestone, raising a dispute, the contract state is always certain.', Icon: ShieldCheckIcon },
-  { title: 'Disputes need evidence', text: 'You can\'t open a dispute without a reason and a link to your evidence. The other side must submit counter-evidence before the arbiter can rule.', Icon: FileSearchIcon },
-  { title: 'No more chasing payers', text: 'If the payer goes silent after a milestone is marked delivered, a timer starts. Once it expires, the payment auto-releases.', Icon: TimerIcon },
-  { title: 'Get paid on your chain', text: 'Freelancers can receive payment on a completely different chain from where the payer locked funds. Arc is a native USDC issuance chain.', Icon: GlobeIcon },
-  { title: 'Refunds you can actually access', text: 'If an escrow is cancelled or a dispute resolves in your favor, your refund goes into a balance you withdraw yourself. You choose the destination address.', Icon: WalletIcon }
+// Why Arc — one uniform spec list. The gas-token point leads as 01 because
+// it's the strongest differentiator, but it's the same row shape as the rest
+// so the set reads as a single sheet, not a headline plus five footnotes.
+const REASONS = [
+  { title: 'One asset, the whole way through', text: 'On most chains you need ETH just to touch your USDC. Arc uses USDC as the gas token, so a contractor anywhere can lock funds, approve milestones, and withdraw payment without ever managing a separate gas token. Every transaction cost is a predictable dollar amount.' },
+  { title: 'Payment release is actually final', text: 'Every action inside the escrow confirms on Arc in under a second and cannot be reversed. Locking funds, approving a milestone, raising a dispute, the contract state is always certain.' },
+  { title: 'Disputes need evidence', text: 'You can\'t open a dispute without a reason and a link to your evidence. The other side must submit counter-evidence before the arbiter can rule.' },
+  { title: 'No more chasing payers', text: 'If the payer goes silent after a milestone is marked delivered, a timer starts. Once it expires, the payment auto-releases.' },
+  { title: 'Get paid on your chain', text: 'Freelancers can receive payment on a completely different chain from where the payer locked funds. Arc is a native USDC issuance chain.' },
+  { title: 'Refunds you can actually access', text: 'If an escrow is cancelled or a dispute resolves in your favor, your refund goes into a balance you withdraw yourself. You choose the destination address.' }
 ]
 
 /* ------------------------------------------------------------
@@ -301,7 +256,7 @@ function CodeEditor() {
         <span className="w-3 h-3 rounded-full bg-[#FF5F56]" />
         <span className="w-3 h-3 rounded-full bg-[#FFBD2E]" />
         <span className="w-3 h-3 rounded-full bg-[#27C93F]" />
-        <span className="ml-4 num text-xs text-ink-3">CrossChainEscrow.sol</span>
+        <span className="ml-4 num text-xs text-ink-3">TrancheProtocol.sol</span>
       </div>
 
       {/* Code body */}
@@ -418,13 +373,22 @@ function CodeEditor() {
    ------------------------------------------------------------ */
 export default function Home() {
   return (
-    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-hidden bg-paper text-ink transition-colors duration-300">
-      {/* Marketing top nav */}
-      <header className="h-16 border-b border-rule relative z-10">
+    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-clip bg-paper text-ink transition-colors duration-300">
+      {/* Marketing top nav — sticky to match the in-app shell header.
+          The root uses overflow-x-clip (not -hidden) so it doesn't become a
+          scroll container and silently break this header's sticky positioning. */}
+      <header className="sticky top-0 z-50 h-16 border-b border-rule bg-paper/85 backdrop-blur-md">
         <div className="max-w-content mx-auto h-full flex items-center justify-between px-4 md:px-8">
-          <Link to="/" className="flex items-center gap-2" aria-label="CrossChainEscrow home">
-            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay text-paper font-semibold">C</span>
-            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">CrossChainEscrow</span>
+          <Link to="/" className="flex items-center gap-2" aria-label="Tranche Protocol home">
+            <span className="inline-flex items-center justify-center h-8 w-8 rounded-md bg-clay">
+              <svg width="20" height="20" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+                <rect x="5"      y="8"    width="16.572" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="22.372" y="8"    width="12.628" height="5.2" rx="1.2" fill="var(--paper)"/>
+                <rect x="7"      y="16.5" width="26"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.78"/>
+                <rect x="9"      y="25"   width="22"     height="5.2" rx="1.2" fill="var(--paper)" opacity="0.55"/>
+              </svg>
+            </span>
+            <span className="hidden sm:inline display text-[22px] leading-none tracking-tightest">Tranche</span>
           </Link>
           <div className="flex items-center gap-2">
             <ThemeToggle />
@@ -434,6 +398,10 @@ export default function Home() {
         </div>
       </header>
 
+      {/* Entrance animation lives here, not around the whole page, so the
+          sticky header above stays free of a transformed ancestor. flex-1 +
+          flex-col preserves the footer's mt-auto bottom-pin. */}
+      <PageTransition className="flex flex-col flex-1">
       {/* Hero (split layout) */}
       <section className="relative">
         <div className="relative lg:grid lg:grid-cols-2 lg:gap-12 lg:items-center py-16 sm:py-24 px-4 sm:px-6 lg:px-8 max-w-[1200px] mx-auto w-full">
@@ -519,54 +487,52 @@ export default function Home() {
         </ol>
       </section>
 
-      {/* Features — asymmetric editorial.
-          The lead feature lives un-carded at hero scale, breathing on the page
-          background. The remaining five become a typographic 2-column list
-          with small inline icons. No card grid; whitespace and weight carry
-          hierarchy. */}
-      <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
-        <div className="flex flex-col gap-3 mb-12 md:mb-16">
-          <span className="eyebrow text-clay">Built for Arc</span>
-          <h2 className="display text-4xl md:text-5xl text-ink max-w-2xl">
-            Built for how Arc is designed to work
-          </h2>
+      {/* Why Arc — one uniform spec sheet. Every reason is the same row: a
+          small Fraunces index in the left rail, title + body on the right,
+          hairline rules between. The gas-token point leads as 01 but earns no
+          special chrome, so the six read as a single ledger of properties
+          rather than a hero claim with five footnotes. Header mirrors the
+          "How it works" section above for cross-section rhythm; the indices
+          stay smaller than that section's display numerals so they read as
+          spec markers, not a second on-chain sequence. No icons: the shared
+          column grid and whitespace carry the hierarchy. */}
+      <section
+        className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24"
+        aria-labelledby="why-arc-heading"
+      >
+        <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
+          <h2 id="why-arc-heading" className="display text-4xl md:text-5xl text-ink">Why Arc</h2>
+          <span className="eyebrow text-ink-3">Six things that hold up</span>
         </div>
-
-        {/* Lead feature: no card wrapper, hero-scale headline, generous air. */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-6 md:gap-10 items-start mb-16 md:mb-20">
-          <div className="md:col-span-1 flex md:justify-center">
-            <div className="w-14 h-14 flex items-center justify-center rounded-md bg-clay-soft text-clay">
-              <LEAD_FEATURE.Icon />
-            </div>
-          </div>
-          <div className="md:col-span-11 md:pl-2">
-            <h3 className="display text-3xl md:text-4xl lg:text-[2.75rem] text-ink leading-tight max-w-3xl">
-              {LEAD_FEATURE.title}
-            </h3>
-            <p className="mt-4 text-base md:text-lg text-ink-2 leading-relaxed max-w-2xl">
-              {LEAD_FEATURE.text}
-            </p>
-          </div>
-        </div>
-
-        {/* Supporting features: typographic two-column list, rows separated by
-            hairlines instead of card chrome. */}
-        <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-12 md:gap-x-16 border-t border-rule">
-          {FEATURES.map(({ title, text, Icon }) => (
-            <li
-              key={title}
-              className="flex gap-4 py-7 border-b border-rule md:[&:nth-last-child(2):nth-child(odd)]:border-b-0"
-            >
-              <span className="shrink-0 mt-1 text-clay">
-                <Icon />
-              </span>
-              <div className="flex flex-col gap-2 min-w-0">
-                <h4 className="text-base font-medium text-ink">{title}</h4>
-                <p className="text-sm text-ink-2 leading-relaxed">{text}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <ol className="border-b border-rule">
+          {REASONS.map(({ title, text }, idx) => {
+            const n = String(idx + 1).padStart(2, '0')
+            return (
+              <li
+                key={title}
+                className="grid grid-cols-1 md:grid-cols-[7rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)] gap-y-3 md:gap-x-8 lg:gap-x-12 py-8 md:py-10 border-t border-rule"
+              >
+                <div className="md:pt-1.5 lg:pt-2 flex items-baseline gap-3 md:block">
+                  <span
+                    aria-hidden
+                    className="display text-ink-2 text-[26px] md:text-[28px] leading-none"
+                  >
+                    {n}
+                  </span>
+                  <span className="sr-only">{`Reason ${idx + 1} of ${REASONS.length}.`}</span>
+                </div>
+                <div className="max-w-2xl">
+                  <h3 className="text-base md:text-lg font-medium text-ink leading-snug">
+                    {title}
+                  </h3>
+                  <p className="mt-2 text-sm md:text-[15px] text-ink-2 leading-relaxed">
+                    {text}
+                  </p>
+                </div>
+              </li>
+            )
+          })}
+        </ol>
       </section>
 
       {/* Footer */}
@@ -579,9 +545,10 @@ export default function Home() {
             <Link to="/create" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Create</Link>
             <Link to="/settings" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Settings</Link>
           </div>
-          <div className="text-sm text-ink-3">© CrossChainEscrow</div>
+          <div className="text-sm text-ink-3">© Tranche Protocol</div>
         </div>
       </footer>
+      </PageTransition>
     </div>
   )
 }

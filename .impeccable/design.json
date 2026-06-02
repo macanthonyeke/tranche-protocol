@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-05-20T00:00:00Z",
-  "title": "Design System: CrossChainEscrow",
+  "title": "Design System: Tranche Protocol",
   "extensions": {
     "colorMeta": {
       "paper":       { "role": "neutral", "displayName": "Warm Paper Cream",  "canonical": "oklch(97% 0.008 60)", "tonalRamp": ["oklch(97% 0.008 60)","oklch(94% 0.012 60)","oklch(88% 0.012 50)","oklch(78% 0.018 50)","oklch(60% 0.018 40)","oklch(44% 0.018 40)","oklch(30% 0.020 40)","oklch(22% 0.020 40)"] },
@@ -99,7 +99,7 @@
       "kind": "nav",
       "refersTo": "panel",
       "description": "Sticky, 4rem tall, Paper-with-85%-opacity backdrop with 4px blur. Wordmark left, links center, utility right. Active link is Deep Ink, inactive is Mid Ink.",
-      "html": "<header class=\"ds-nav\"><a class=\"ds-nav-brand\" href=\"#\">CrossChainEscrow</a><nav class=\"ds-nav-links\"><a class=\"ds-nav-link ds-nav-link-active\" href=\"#\">Dashboard</a><a class=\"ds-nav-link\" href=\"#\">Create</a><a class=\"ds-nav-link\" href=\"#\">History</a></nav><div class=\"ds-nav-utility\"><button class=\"ds-btn-secondary\">Connect Wallet</button></div></header>",
+      "html": "<header class=\"ds-nav\"><a class=\"ds-nav-brand\" href=\"#\">Tranche Protocol</a><nav class=\"ds-nav-links\"><a class=\"ds-nav-link ds-nav-link-active\" href=\"#\">Dashboard</a><a class=\"ds-nav-link\" href=\"#\">Create</a><a class=\"ds-nav-link\" href=\"#\">History</a></nav><div class=\"ds-nav-utility\"><button class=\"ds-btn-secondary\">Connect Wallet</button></div></header>",
       "css": ".ds-nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; height: 4rem; padding: 0 3rem; background: color-mix(in oklch, oklch(97% 0.008 60) 85%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-bottom: 1px solid oklch(88% 0.012 50); } .ds-nav-brand { font: 400 1.5rem/1 'Instrument Serif', ui-serif, Georgia, serif; letter-spacing: -0.045em; color: oklch(22% 0.020 40); text-decoration: none; } .ds-nav-links { display: flex; gap: 1.75rem; } .ds-nav-link { font: 500 0.875rem/1 Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(44% 0.018 40); text-decoration: none; transition: color 200ms cubic-bezier(0.22,1,0.36,1); } .ds-nav-link:hover { color: oklch(22% 0.020 40); } .ds-nav-link-active { color: oklch(22% 0.020 40); } .ds-nav-utility { display: flex; align-items: center; gap: 0.5rem; }"
     },
     {
@@ -113,7 +113,7 @@
   ],
   "narrative": {
     "northStar": "The Ledger Sheet",
-    "overview": "CrossChainEscrow reads like a primary-source financial document, not a SaaS app. Warm paper, decisive serif headlines, monospaced figures in tabular columns, hairline rules separating sections instead of card chrome. The system shows the mechanism of the escrow — milestone state, dispute windows, CCTP path, protocol fees — in the same way a printed ledger or a type specimen shows its own structure: composed, legible, nothing decorative. The product is on-chain financial infrastructure for two parties moving real USDC. Confidence is the conversion. The visual register has to earn that confidence on first paint, then sustain it across every operator surface.",
+    "overview": "Tranche Protocol reads like a primary-source financial document, not a SaaS app. Warm paper, decisive serif headlines, monospaced figures in tabular columns, hairline rules separating sections instead of card chrome. The system shows the mechanism of the escrow — milestone state, dispute windows, CCTP path, protocol fees — in the same way a printed ledger or a type specimen shows its own structure: composed, legible, nothing decorative. The product is on-chain financial infrastructure for two parties moving real USDC. Confidence is the conversion. The visual register has to earn that confidence on first paint, then sustain it across every operator surface.",
     "keyCharacteristics": [
       "Warm paper canvas (oklch(97% 0.008 60)), never pure white. Dark mode is a tinted near-black, never #000.",
       "One committed accent — terracotta clay (oklch(58% 0.165 38)) — used sparingly, never as gradient or glow.",

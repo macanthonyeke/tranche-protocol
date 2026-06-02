@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-// Minimal ERC20 sufficient to back CrossChainEscrow tests. Returns booleans
+// Minimal ERC20 sufficient to back TrancheProtocol tests. Returns booleans
 // from approve / transfer so the contract's low-level `.call("approve(...)")`
 // path used for the Arc USDC precompile succeeds.
 contract MockUSDC is IERC20 {

@@ -1,5 +1,5 @@
 // viem-based contract event listener with reconnection.
-// Reads the ABI from the Foundry build artifact at out/CrossChainEscrow.sol/CrossChainEscrow.json.
+// Reads the ABI from the Foundry build artifact at out/TrancheProtocol.sol/TrancheProtocol.json.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ import { logger } from './logger.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ARTIFACT_PATH = path.resolve(
   __dirname,
-  '../../out/CrossChainEscrow.sol/CrossChainEscrow.json',
+  '../../out/TrancheProtocol.sol/TrancheProtocol.json',
 );
 
 export function loadAbi() {

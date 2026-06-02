@@ -3,33 +3,68 @@
 @tailwind utilities;
 
 /* ============================================================
-   CROSSCHAINESCROW — Design tokens (Tranche palette).
+   Fallback @font-face definitions with size-adjust metrics.
+   Rendered from local Arial / Times / Menlo before the web fonts
+   arrive, then swapped — keeps cumulative layout shift near zero
+   on first paint. Metrics are tuned to each face's xHeight.
+   ============================================================ */
+@font-face {
+  font-family: 'Switzer Fallback';
+  src: local('Arial');
+  size-adjust: 99%;
+  ascent-override: 92%;
+  descent-override: 23%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Fraunces Fallback';
+  src: local('Times New Roman');
+  size-adjust: 106%;
+  ascent-override: 92%;
+  descent-override: 24%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Geist Mono Fallback';
+  src: local('Menlo'), local('Consolas');
+  size-adjust: 96%;
+  ascent-override: 92%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+/* ============================================================
+   TRANCHEPROTOCOL — Design tokens (Tranche palette).
    Restrained, warm paper + terracotta clay accent. No pure
    black/white; every neutral carries a faint warm hue.
    ============================================================ */
 
 @layer base {
   :root {
-    /* Surfaces — warm tinted paper */
-    --paper:  oklch(97% 0.008 60);
-    --sunk:   oklch(94% 0.012 60);
+    /* Surfaces — warm paper cream. Visibly off-white: L dropped to 96 and
+       chroma roughly doubled vs. the prior near-white token, hue rotated
+       toward 80 (paper-yellow rather than amber). Reads as cream on every
+       display, not "off by 1 LSB from #fff". Sunk steps 3pt darker so the
+       paper→sunk delta stays legible for inputs and the live ledger. */
+    --paper:  oklch(96% 0.018 80);
+    --sunk:   oklch(93% 0.022 80);
 
     /* Text — high-contrast ink, never pure black.
-       ink-3 is the universal "deemphasize" rung; held at ~52% L on a 97% L
-       paper to keep helper/eyebrow text above WCAG AA contrast at small
-       sizes. Adjust both halves of the palette together. */
+       ink-3 is the universal "deemphasize" rung; sits at ~50% L on a 96% L
+       paper to clear WCAG AA Large for small-caps eyebrows and helpers.
+       Adjust both halves of the palette together. */
     --ink:    oklch(22% 0.020 40);
     --ink-2:  oklch(44% 0.018 40);
-    --ink-3:  oklch(52% 0.016 40);
+    --ink-3:  oklch(50% 0.016 40);
 
     /* Rules / borders */
-    --rule:   oklch(88% 0.012 50);
-    --rule-2: oklch(78% 0.018 50);
+    --rule:   oklch(87% 0.020 76);
+    --rule-2: oklch(77% 0.026 70);
 
     /* Accent — terracotta. The one saturated color in the system. */
     --clay:        oklch(58% 0.165 38);
     --clay-hover:  oklch(52% 0.175 38);
-    --clay-soft:   oklch(92% 0.040 38);
+    --clay-soft:   oklch(90% 0.045 38);
 
     /* Status */
     --ok:    oklch(50% 0.13  155);
@@ -85,13 +120,18 @@
     height: 100%;
     width: 100%;
     max-width: 100%;
-    overflow-x: hidden;
+    /* clip, not hidden: `overflow-x: hidden` forces `overflow-y` to compute
+       to `auto`, which would make all three nested vertical scroll containers
+       and lets the wheel scroll-chain past the content into empty space.
+       `clip` suppresses the horizontal scrollbar without creating a scroll
+       container, collapsing the page to a single scroller. */
+    overflow-x: clip;
   }
   html { -webkit-text-size-adjust: 100%; }
 
   body {
     @apply bg-paper text-ink font-sans antialiased;
-    font-feature-settings: 'ss01', 'cv11';
+    font-feature-settings: 'kern', 'liga', 'calt', 'ss01';
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -135,17 +175,29 @@
 }
 
 @layer components {
-  /* ---------- Display (Instrument Serif) ----------
+  /* ---------- Display (Fraunces) ----------
      Used sparingly: landing hero, page-titles, section numerals.
-     Default body and UI stay in Inter; the serif is the brand voice
-     moment, not the workhorse face. */
+     Default body and UI stay in Switzer; the serif is the brand voice
+     moment, not the workhorse face.
+     opsz lifts contrast at headline sizes; SOFT/WONK kept low so the
+     terminals stay composed, not whimsical. */
   .display {
-    font-family: 'Instrument Serif', ui-serif, Georgia, serif;
-    font-weight: 400;
-    letter-spacing: -0.02em;
-    line-height: 1.04;
+    font-family: 'Fraunces', 'Fraunces Fallback', ui-serif, Georgia, serif;
+    font-weight: 420;
+    letter-spacing: -0.022em;
+    line-height: 1.02;
+    font-variation-settings: 'opsz' 96, 'SOFT' 40, 'WONK' 0;
+    font-feature-settings: 'ss01', 'ss02';
   }
-  .display-italic { @apply display; font-style: italic; }
+  .display-italic {
+    @apply display;
+    font-style: italic;
+    font-variation-settings: 'opsz' 96, 'SOFT' 50, 'WONK' 1;
+  }
+  .display-soft {
+    @apply display;
+    font-variation-settings: 'opsz' 144, 'SOFT' 100, 'WONK' 0;
+  }
 
   /* ---------- Section eyebrow ---------- */
   .eyebrow {
@@ -267,13 +319,19 @@
 }
 
 @layer utilities {
-  .tabular { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
-  .num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .tabular { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum', 'ss01'; }
+  .num {
+    font-family: 'Geist Mono', 'Geist Mono Fallback', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: 'tnum', 'zero', 'ss03';
+    letter-spacing: -0.005em;
+  }
 
   .seq {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.04em;
+    font-family: 'Geist Mono', 'Geist Mono Fallback', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: 'tnum', 'zero';
+    letter-spacing: 0.02em;
   }
 
   .underline-clay {

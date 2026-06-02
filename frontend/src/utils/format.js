@@ -108,5 +108,5 @@ export const isValidUrl = (s) => {
   try { new URL(s); return true } catch { return false }
 }
 
-export const explorerTx = (hash) => `https://explorer.testnet.arc.network/tx/${hash}`
-export const explorerAddr = (addr) => `https://explorer.testnet.arc.network/address/${addr}`
+export const explorerTx = (hash) => `https://testnet.arcscan.app/tx/${hash}`
+export const explorerAddr = (addr) => `https://testnet.arcscan.app/address/${addr}`

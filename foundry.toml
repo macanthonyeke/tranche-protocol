@@ -3,7 +3,9 @@ src = "src"
 out = "out"
 libs = ["lib"]
 optimizer = true
-optimizer_runs = 200
+# Tuned for deployed-bytecode size: TrancheProtocol sits near the EIP-170 24KB
+# limit, so we optimize for code size (low runs) over runtime gas.
+optimizer_runs = 1
 via_ir = true
 
 [invariant]

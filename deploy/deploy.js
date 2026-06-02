@@ -9,6 +9,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { isAddress } from 'viem';
+import { getPublicClient, resolveStartBlock, upsertEnvVars } from './lib/deployment.mjs';
 import {
   initiateSmartContractPlatformClient,
 } from '@circle-fin/smart-contract-platform';
@@ -73,7 +74,7 @@ if (process.env.DOMAIN_MANAGER_ADDRESS.toLowerCase() === process.env.DEPLOYER_AD
   process.exit(1);
 }
 
-const artifactPath = path.resolve(__dirname, '../out/CrossChainEscrow.sol/CrossChainEscrow.json');
+const artifactPath = path.resolve(__dirname, '../out/TrancheProtocol.sol/TrancheProtocol.json');
 if (!fs.existsSync(artifactPath)) {
   console.error('Artifact not found. Run forge build first.');
   process.exit(1);
@@ -93,7 +94,7 @@ const constructorTypes = constructorAbi?.inputs?.map((input) => input.type) ?? [
 const expectedConstructorTypes = ['address', 'address', 'address', 'address', 'address', 'address'];
 
 if (constructorTypes.join(',') !== expectedConstructorTypes.join(',')) {
-  console.error('Unexpected CrossChainEscrow constructor signature.');
+  console.error('Unexpected TrancheProtocol constructor signature.');
   console.error('Expected:', expectedConstructorTypes.join(', '));
   console.error('Found:   ', constructorTypes.join(', ') || '(none)');
   process.exit(1);
@@ -118,7 +119,7 @@ const constructorParameters = [
   process.env.PROTOCOL_TREASURY,
 ];
 
-console.log('Deploying CrossChainEscrow V2...');
+console.log('Deploying TrancheProtocol V2...');
 console.log('Blockchain:', ARC_TESTNET_BLOCKCHAIN);
 console.log('USDC:', USDC_ADDRESS);
 console.log('Arbiter:', process.env.ARBITER_ADDRESS);
@@ -130,9 +131,19 @@ console.log('Deployer wallet ID:', process.env.DEPLOYER_WALLET_ID);
 console.log('Deployer address:', process.env.DEPLOYER_ADDRESS);
 console.log('Deployer will receive DEFAULT_ADMIN_ROLE, FEE_MANAGER_ROLE, RECOVERY_MANAGER_ROLE.');
 
+// Head just before submitting — a safe lower bound for the subgraph startBlock
+// if the receipt's exact block can't be fetched later.
+const arcClient = getPublicClient();
+let startBlockFloor = null;
+try {
+  startBlockFloor = await arcClient.getBlockNumber();
+} catch {
+  console.warn('Could not read current block for startBlock floor; will rely on receipt.');
+}
+
 const deployResponse = await contractClient.deployContract({
   idempotencyKey: randomUUID(),
-  name: 'CrossChainEscrowV2',
+  name: 'TrancheProtocolV2',
   blockchain: ARC_TESTNET_BLOCKCHAIN,
   walletId: process.env.DEPLOYER_WALLET_ID,
   abiJson: JSON.stringify(abi),
@@ -200,16 +211,22 @@ if (!contractAddress) {
 }
 
 const envPath = path.resolve(__dirname, '.env');
-let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
-let envLines = envContent.split(/\r?\n/).filter((line) => !/^\s*#?\s*CONTRACT_ADDRESS=/.test(line));
+const startBlock = await resolveStartBlock(arcClient, deploymentTxHash, startBlockFloor);
 
-envLines.push(`CONTRACT_ADDRESS=${contractAddress}`);
-envContent = envLines.join('\n').replace(/\n*$/, '\n');
-
-fs.writeFileSync(envPath, envContent);
+upsertEnvVars(envPath, {
+  CONTRACT_ADDRESS: contractAddress,
+  ...(startBlock != null ? { CONTRACT_START_BLOCK: startBlock } : {}),
+});
 
 console.log('\nContract address saved to deploy/.env');
-console.log('\nNext step: run node setup.js to configure roles and settings.');
+if (startBlock != null) {
+  console.log(`Deploy block ${startBlock} saved as CONTRACT_START_BLOCK.`);
+} else {
+  console.warn('Could not determine deploy block — set CONTRACT_START_BLOCK in deploy/.env manually.');
+}
+console.log('\nNext steps:');
+console.log('  1. node setup.js   # configure roles and settings');
+console.log('  2. cd ../indexer && npm run sync   # point the subgraph + frontend ABI at this deploy');
 }
 
 main().catch((err) => {

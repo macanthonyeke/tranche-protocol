@@ -6,13 +6,16 @@ import { motion, AnimatePresence } from 'framer-motion'
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
 import IconButton from '../components/IconButton.jsx'
+import Modal from '../components/Modal.jsx'
+import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
-import { useEscrowDetail, useTick } from '../hooks/useEscrows.js'
+import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { bytes32ToAddress } from '../utils/encode.js'
+import { bytes32ToAddress, hashDescription } from '../utils/encode.js'
 import {
-  isValidAddress, formatUSDCNumber, formatDeadline, formatTimestamp,
+  isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS
 } from '../utils/format.js'
 import { getDomainName, ARC_DOMAIN, isEvmDomain } from '../config/chains.js'
@@ -54,8 +57,8 @@ function DetailInner() {
   }
 
   const {
-    escrow, milestones, disputeWindowExpired, deliverySignaled,
-    effectiveDisputeDeadlines, isPayer, isFreelancer
+    escrow, milestones, disputes, splits, reviewWindowExpired, claimed,
+    reviewDeadlines, isPayer, isFreelancer
   } = detail
   const role = isPayer ? 'payer' : isFreelancer ? 'freelancer' : null
   const inv = escrow.invoiceHash
@@ -70,6 +73,7 @@ function DetailInner() {
         <LedgerColumn
           escrow={escrow}
           role={role}
+          splits={splits}
           onChange={refetch}
           optimistic={optimistic}
           setOpt={setOpt}
@@ -80,11 +84,12 @@ function DetailInner() {
           <MilestoneStack
             escrow={escrow}
             milestones={milestones}
+            disputes={disputes}
             role={role}
             userAddress={address}
-            disputeWindowExpired={disputeWindowExpired}
-            deliverySignaled={deliverySignaled}
-            effectiveDisputeDeadlines={effectiveDisputeDeadlines}
+            reviewWindowExpired={reviewWindowExpired}
+            claimed={claimed}
+            reviewDeadlines={reviewDeadlines}
             optimistic={optimistic}
             onChange={refetch}
             setOpt={setOpt}
@@ -163,7 +168,7 @@ function StateGlowPill({ state }) {
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
-function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
+function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
   return (
     <aside className="lg:col-span-1 flex flex-col gap-6">
       <div className="bg-paper border border-rule rounded-2xl p-6 h-fit flex flex-col gap-6">
@@ -194,8 +199,8 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
           </ParamRow>
-          <ParamRow label="Dispute Window">
-            <span className="text-sm text-ink">{formatWindow(escrow.disputeWindow)}</span>
+          <ParamRow label="Review Window">
+            <span className="text-sm text-ink">{formatWindow(escrow.reviewWindow)}</span>
           </ParamRow>
           <ParamRow label="Contract Suffix" last>
             <span className="font-mono text-xs text-ink-2 tracking-tight">
@@ -216,6 +221,8 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
         )}
       </div>
 
+      {splits?.length > 0 && <SplitRecipients splits={splits} />}
+
       {role && escrow.state === 0 && (
         <CancelCard
           escrow={escrow} role={role} onChange={onChange}
@@ -226,6 +233,39 @@ function LedgerColumn({ escrow, role, onChange, optimistic, setOpt, clearOpt }) 
         <UpdateReceivingAddressCard escrow={escrow} onChange={onChange} />
       )}
     </aside>
+  )
+}
+
+/* ---------- Split recipients ----------
+   Only present when the escrow was created with a multi-party split. Each
+   released milestone's remainder (after the protocol fee) is divided across
+   these recipients by their bps share, each on its own CCTP destination. */
+function SplitRecipients({ splits }) {
+  return (
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
+      <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
+      <p className="text-xs text-ink-2 leading-relaxed">
+        Released funds are divided across these wallets by share, each on its own destination chain.
+      </p>
+      <div className="flex flex-col">
+        {splits.map((s, i) => {
+          const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+          const pct = (Number(s.bps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+          return (
+            <div
+              key={i}
+              className={`flex items-center justify-between gap-3 py-3 text-sm ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
+            >
+              <div className="flex flex-col gap-0.5 min-w-0">
+                {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
+                <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
+              </div>
+              <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 
@@ -290,8 +330,8 @@ function contractSuffix(invoiceHash) {
    dispute resolution UI directly below the action area so evidence and
    counter-evidence stay attached to their milestone. */
 function MilestoneStack({
-  escrow, milestones, role,
-  disputeWindowExpired, deliverySignaled, effectiveDisputeDeadlines,
+  escrow, milestones, disputes, role, userAddress,
+  reviewWindowExpired, claimed, reviewDeadlines,
   optimistic, onChange, setOpt, clearOpt
 }) {
   const hasDispute = milestones.some((m) => m.state === 2)
@@ -328,10 +368,12 @@ function MilestoneStack({
                 <MilestoneRow
                   escrow={escrow}
                   milestone={m}
+                  dispute={disputes?.[i]}
                   role={role}
-                  disputeWindowExpired={!!disputeWindowExpired[i]}
-                  deliverySignaled={!!deliverySignaled[i] || opt?.signaledDelivery}
-                  effectiveDisputeDeadline={Number(effectiveDisputeDeadlines[i] || 0n)}
+                  userAddress={userAddress}
+                  reviewWindowExpired={!!reviewWindowExpired[i]}
+                  claimed={!!claimed[i] || opt?.claimedDelivery}
+                  reviewDeadline={Number(reviewDeadlines[i] || 0n)}
                   optimisticBadge={opt?.badge}
                   onChange={onChange}
                   setOpt={setOpt}
@@ -355,21 +397,18 @@ function loadMilestoneTitles(escrowId) {
 }
 
 function MilestoneRow({
-  escrow, milestone, role,
-  disputeWindowExpired, deliverySignaled, effectiveDisputeDeadline,
+  escrow, milestone, dispute, role, userAddress,
+  reviewWindowExpired, claimed, reviewDeadline,
   optimisticBadge, onChange, setOpt, clearOpt
 }) {
   const titles = loadMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
 
-  const noticeDeadline = deliverySignaled
-    ? Number(milestone.deliveredAt) + Number(escrow.deliveryNoticeWindow)
-    : 0
   const now = Math.floor(Date.now() / 1000)
   const deadlinePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline)
 
   const description = describeMilestone(milestone, {
-    deliverySignaled, noticeDeadline, disputeWindowExpired, effectiveDisputeDeadline
+    claimed, reviewWindowExpired, deadlinePassed
   })
 
   const inDispute = milestone.state === 2
@@ -401,28 +440,17 @@ function MilestoneRow({
             <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
           </div>
 
-          {(deliverySignaled && Number(milestone.deliveredAt) > 0) || Number(milestone.conditionMetTimestamp) > 0 ? (
+          {claimed && Number(milestone.claimedAt) > 0 ? (
             <div className="flex flex-wrap gap-4 text-xs mt-1">
-              {deliverySignaled && Number(milestone.deliveredAt) > 0 && (
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
-                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.deliveredAt)}</span>
-                </div>
-              )}
-              {Number(milestone.conditionMetTimestamp) > 0 && (
-                <div className="flex flex-col gap-0.5">
-                  <span className="text-ink-3 text-[10px] uppercase tracking-wider">Approved</span>
-                  <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.conditionMetTimestamp)}</span>
-                </div>
-              )}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
+                <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.claimedAt)}</span>
+              </div>
             </div>
           ) : null}
 
-          {milestone.state === 1 && effectiveDisputeDeadline > 0 && !disputeWindowExpired && (
-            <Countdown label="Dispute window closes" target={effectiveDisputeDeadline} tone="warning" />
-          )}
-          {milestone.state === 0 && noticeDeadline > 0 && (
-            <Countdown label="Auto-releases in" target={noticeDeadline} tone="warning" />
+          {milestone.state === 1 && reviewDeadline > 0 && !reviewWindowExpired && (
+            <Countdown label="Auto-releases in" target={reviewDeadline} tone="warning" />
           )}
         </div>
 
@@ -433,30 +461,197 @@ function MilestoneRow({
             milestone={milestone}
             role={role}
             deadlinePassed={deadlinePassed}
-            disputeWindowExpired={disputeWindowExpired}
-            deliverySignaled={deliverySignaled}
-            noticeDeadline={noticeDeadline}
+            reviewWindowExpired={reviewWindowExpired}
             setOpt={setOpt}
             clearOpt={clearOpt}
+            onChange={onChange}
+          />
+          <DisputeActions
+            escrow={escrow}
+            milestone={milestone}
+            dispute={dispute}
+            role={role}
+            userAddress={userAddress}
+            deadlinePassed={deadlinePassed}
+            reviewWindowExpired={reviewWindowExpired}
             onChange={onChange}
           />
         </div>
       </div>
 
       {milestone.state === 2 && (
-        <div className="mt-4 pt-4 border-t border-warn/30 text-xs uppercase tracking-[0.18em] font-medium text-warn">
-          In review by the arbiter panel
+        <div className="mt-4 pt-4 border-t border-warn/30 flex flex-col gap-4">
+          <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
+            In review by the arbiter panel
+          </div>
+          <ArbiterTimeoutNote dispute={dispute} />
+          {(role === 'payer' || role === 'freelancer') && (
+            <SettlementPanel
+              escrow={escrow}
+              milestone={milestone}
+              role={role}
+              onChange={onChange}
+            />
+          )}
+        </div>
+      )}
+
+      {(milestone.state === 3 || milestone.state === 4) &&
+        dispute && dispute.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
+          <ResolutionNote dispute={dispute} />
+        )}
+    </div>
+  )
+}
+
+/* Explains what the permissionless timeout fallback will do if the arbiter
+   never acts. A DISPUTED milestone always carries both a recipient
+   delivery-claim and a depositor objection, so the contract
+   (`resolveDisputeByTimeout`) settles it as a fixed 50/50 split. The countdown
+   uses ARBITER_WINDOW read from the contract — never a hardcoded 14d. */
+function ArbiterTimeoutNote({ dispute }) {
+  const { arbiterWindow } = useDisputeConfig()
+  if (!dispute?.raisedBy) return null
+
+  const windowSecs = arbiterWindow
+  const copy = 'If the arbiter does not act within the window, funds are split 50/50 between both parties.'
+
+  const target = Number(dispute.raisedAt) + Number(windowSecs)
+  const now = Math.floor(Date.now() / 1000)
+  const elapsed = windowSecs > 0n && now >= target
+
+  return (
+    <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
+      <p className="text-xs text-ink-2 leading-relaxed">{copy}</p>
+      {windowSecs > 0n && (
+        <p className="font-mono tabular-nums text-[11px] text-ink-3">
+          {elapsed
+            ? 'Arbitration window has elapsed — the timeout outcome can now be triggered.'
+            : `Arbitration window closes in ${countdown(target).replace(' remaining', '')}.`}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/* Mutual settlement (mutualSettle). Either party proposes a recipient share in
+   whole percent; when both parties' proposals match, the contract executes the
+   split automatically. We surface both standing proposals and a one-click
+   "agree to their number" path. */
+function SettlementPanel({ escrow, milestone, role, onChange }) {
+  const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
+    escrow.id, milestone.index, escrow.depositor, escrow.recipient
+  )
+  const { config } = useProtocolConfig()
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
+  // Circle's forwarding fee.
+  const maxFee = Number(escrow.destinationDomain) === ARC_DOMAIN ? 0n : cctpForwardFee
+
+  const mine = role === 'payer' ? depositorProposal : recipientProposal
+  const theirs = role === 'payer' ? recipientProposal : depositorProposal
+
+  const [pct, setPct] = useState('')
+  const tx = useTx({ onConfirmed: () => { setPct(''); refetch(); onChange?.() } })
+
+  const pctNum = pct === '' ? NaN : Number(pct)
+  const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
+  const canSubmit = pctValid && !tx.isBusy
+
+  const propose = (bps) => tx.run(
+    escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+    { loadingMessage: 'Check your wallet.' }
+  )
+
+  const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
+
+  const bpsToPct = (bps) => Number(bps) / 100
+  // Their proposal differs from mine (or I have none): offer to accept it,
+  // which makes both proposals match and settles on-chain.
+  const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
+
+  return (
+    <div className="rounded-xl border border-rule bg-paper p-4 flex flex-col gap-3">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Propose settlement</p>
+
+      <Field label="I propose recipient gets" helper="Whole percent (0–100). Both sides must agree to settle.">
+        {(p) => (
+          <div className="flex items-center gap-2">
+            <input
+              {...p}
+              type="number" min={0} max={100} step={1}
+              className="input num w-24"
+              placeholder="50"
+              value={pct}
+              onChange={(e) => setPct(e.target.value)}
+            />
+            <span className="text-[13px] text-ink-3">%</span>
+          </div>
+        )}
+      </Field>
+
+      <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
+        {tx.isBusy ? 'Working…' : 'Submit Proposal'}
+      </button>
+
+      {(mine.exists || theirs.exists) && (
+        <p className="text-[13px] text-ink-2">
+          {mine.exists ? `You proposed ${bpsToPct(mine.bps)}%` : 'You have not proposed yet'}
+          {' — '}
+          {theirs.exists ? `Counterparty proposed ${bpsToPct(theirs.bps)}%` : 'counterparty has not proposed yet'}
+        </p>
+      )}
+
+      {canAgree && (
+        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-2">
+          <p className="text-[13px] text-ink-2 leading-relaxed">
+            Both parties agree on {bpsToPct(theirs.bps)}%? Confirm to settle: the recipient
+            receives {bpsToPct(theirs.bps)}% and the depositor the remainder.
+          </p>
+          <button
+            className="btn-primary text-sm py-2 self-start"
+            onClick={() => propose(Number(theirs.bps))}
+            disabled={tx.isBusy}
+          >
+            {tx.isBusy ? 'Working…' : `Confirm settlement at ${bpsToPct(theirs.bps)}%`}
+          </button>
         </div>
       )}
     </div>
   )
 }
 
-function describeMilestone(m, { deliverySignaled, disputeWindowExpired }) {
-  if (m.state === 0 && !deliverySignaled) return 'Awaiting freelancer delivery.'
-  if (m.state === 0 && deliverySignaled) return 'Delivery signaled. Payer review pending.'
-  if (m.state === 1 && !disputeWindowExpired) return 'Approved and queued for release. Dispute window still open.'
-  if (m.state === 1 && disputeWindowExpired) return 'Dispute window closed. Ready to release.'
+/* Shown on a resolved (released/refunded) milestone that went through a
+   dispute. Links out to the arbiter's written reasoning and the on-chain
+   resolution hash. */
+function ResolutionNote({ dispute }) {
+  const pct = Number(dispute.resolvedRecipientBps ?? 0n) / 100
+  return (
+    <div className="mt-4 pt-4 border-t border-rule flex flex-col gap-2">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbiter resolution</p>
+      <p className="text-[13px] text-ink-2">Resolved with {pct}% to the recipient.</p>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        {dispute.resolutionURI && (
+          <a
+            href={dispute.resolutionURI}
+            target="_blank"
+            rel="noreferrer"
+            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[13px]"
+          >
+            View Resolution ↗
+          </a>
+        )}
+        <span className="num text-[11px] text-ink-3 break-all">{dispute.resolutionHash}</span>
+      </div>
+    </div>
+  )
+}
+
+function describeMilestone(m, { reviewWindowExpired, deadlinePassed }) {
+  if (m.state === 0 && deadlinePassed) return 'Deadline passed without delivery. Refundable to the payer.'
+  if (m.state === 0) return 'Awaiting freelancer delivery.'
+  if (m.state === 1 && !reviewWindowExpired) return 'Delivered. Payer review window open — approve, dispute, or let it auto-release.'
+  if (m.state === 1 && reviewWindowExpired) return 'Review window lapsed. Ready to auto-release.'
   if (m.state === 2) return 'In review by the arbiter panel. See evidence below.'
   if (m.state === 3) return 'Released to the freelancer.'
   if (m.state === 4) return 'Refunded to the payer.'
@@ -500,8 +695,8 @@ function MilestoneStateGlyph({ state }) {
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
 function MilestoneAction({
-  escrow, milestone, role, deadlinePassed, disputeWindowExpired,
-  deliverySignaled, noticeDeadline, setOpt, clearOpt, onChange
+  escrow, milestone, role, deadlinePassed, reviewWindowExpired,
+  setOpt, clearOpt, onChange
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
@@ -509,25 +704,34 @@ function MilestoneAction({
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
 
+  // Live CCTP forwarding fee. approveRelease honours the caller-supplied maxFee
+  // (depositor opts in), so we quote the published fee for cross-chain burns;
+  // release ignores it and uses the escrow's snapshotted fee, but the arg is
+  // kept for ABI compatibility. Same-chain (Arc) burns force maxFee = 0 inside
+  // the contract regardless.
+  const { config } = useProtocolConfig()
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+
   const id = BigInt(escrow.id)
   const idx = BigInt(milestone.index)
-  const now = Math.floor(Date.now() / 1000)
   const isPayer = role === 'payer'
   const isFreelancer = role === 'freelancer'
 
   // Pick the single highest-priority action available to this caller right now.
+  // Lifecycle: PENDING(0) → IN_REVIEW(1) → RELEASED(3); a missed deadline on a
+  // PENDING milestone is permissionlessly refundable to the payer.
   let action = null
   if (milestone.state === 0) {
-    if (isFreelancer && !deliverySignaled && !deadlinePassed) {
-      action = { key: 'signal', label: 'Mark as Delivered', fn: 'signalDelivery', args: [id, idx], optimistic: { badge: 'Signaled', signaledDelivery: true } }
-    } else if (isPayer && deliverySignaled) {
-      action = { key: 'approve', label: 'Approve & Release', fn: 'fulfillCondition', args: [id, idx], optimistic: { badge: 'Approving…' } }
-    } else if (noticeDeadline > 0 && now > noticeDeadline) {
-      action = { key: 'silent', label: 'Claim Auto-Release', fn: 'claimSilentApproval', args: [id, idx], optimistic: { badge: 'Releasing…' } }
+    if (isFreelancer && !deadlinePassed) {
+      action = { key: 'claim', label: 'Mark as Delivered', fn: 'claimDelivery', args: [id, idx], optimistic: { badge: 'Claiming…', claimedDelivery: true } }
+    } else if (deadlinePassed) {
+      action = { key: 'refund', label: 'Refund (deadline passed)', fn: 'refundAfterDeadline', args: [id, idx], optimistic: { badge: 'Refunding…' } }
     }
   } else if (milestone.state === 1) {
-    if (disputeWindowExpired) {
-      action = { key: 'release', label: 'Release Payment', fn: 'releaseAfterWindow', args: [id, idx, 0n], optimistic: { badge: 'Releasing…' } }
+    if (isPayer) {
+      action = { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Approving…' } }
+    } else if (reviewWindowExpired) {
+      action = { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Releasing…' } }
     }
   }
 
@@ -561,6 +765,172 @@ function MilestoneAction({
       )}
       {isLoading ? 'Pending…' : action.label}
     </button>
+  )
+}
+
+/* ----- Dispute portal -----
+   Secondary, warning-toned actions that a participant can take on a milestone:
+   raise a dispute (IN_REVIEW, review window still open — depositor only), or
+   submit counter-evidence (DISPUTED, you didn't raise it and none submitted
+   yet). At most one of these is reachable for any given milestone state. A
+   missed-deadline PENDING milestone is no longer escalated — it is refunded via
+   the primary {refundAfterDeadline} action. */
+function DisputeActions({
+  escrow, milestone, dispute, role, userAddress,
+  reviewWindowExpired, onChange
+}) {
+  const [modal, setModal] = useState(null) // 'raise' | 'counter' | null
+
+  const isParticipant = role === 'payer' || role === 'freelancer'
+  if (!isParticipant) return null
+
+  const state = milestone.state
+  const counterExists =
+    dispute && dispute.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
+  const raisedByMe =
+    dispute?.raisedBy && userAddress &&
+    dispute.raisedBy.toLowerCase() === userAddress.toLowerCase()
+
+  // raiseDispute is depositor-only and only from IN_REVIEW within the window.
+  const canRaise = state === 1 && role === 'payer' && !reviewWindowExpired
+  const canCounter = state === 2 && !!dispute?.raisedBy && !raisedByMe && !counterExists
+
+  if (!canRaise && !canCounter) return null
+
+  const btnCls =
+    'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ' +
+    'border border-warn/40 text-warn hover:bg-warn/10 transition-colors ' +
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-warn focus-visible:ring-offset-2 focus-visible:ring-offset-paper'
+
+  return (
+    <>
+      {canRaise && (
+        <button type="button" className={btnCls} onClick={() => setModal('raise')}>
+          Raise Dispute
+        </button>
+      )}
+      {canCounter && (
+        <button type="button" className={btnCls} onClick={() => setModal('counter')}>
+          Submit Counter Evidence
+        </button>
+      )}
+      <EvidenceModal
+        open={!!modal}
+        mode={modal}
+        escrowId={escrow.id}
+        milestoneIndex={milestone.index}
+        onClose={() => setModal(null)}
+        onConfirmed={() => { setModal(null); onChange?.() }}
+      />
+    </>
+  )
+}
+
+const EVIDENCE_MODES = {
+  raise: {
+    title: 'Raise a dispute',
+    fn: 'raiseDispute',
+    needsReason: true,
+    submitLabel: 'Submit dispute',
+    evidenceLabel: 'Evidence link',
+    blurb: 'Freezes this delivered milestone for the arbiter panel to review. Provide a reason and a link to your evidence.'
+  },
+  counter: {
+    title: 'Submit counter-evidence',
+    fn: 'submitCounterEvidence',
+    needsReason: false,
+    submitLabel: 'Submit counter-evidence',
+    evidenceLabel: 'Counter-evidence link',
+    blurb: 'Respond to the open dispute with your own evidence. You can only submit this once.'
+  }
+}
+
+/* Shared evidence form for raise / counter. The evidence link is
+   hashed client-side with keccak256 to produce the bytes32 the contract stores
+   as tamper-proof proof; the link itself is stored as the URI. */
+function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {
+  const meta = mode ? EVIDENCE_MODES[mode] : null
+  const [reason, setReason] = useState('')
+  const [uri, setUri] = useState('')
+  const tx = useTx({ onConfirmed: () => { setReason(''); setUri(''); onConfirmed?.() } })
+
+  useEffect(() => { if (!open) { setReason(''); setUri('') } }, [open])
+
+  if (!open || !meta) return null
+
+  const uriValid = isValidUrl(uri)
+  const reasonValid = !meta.needsReason || reason.trim().length > 0
+  const canSubmit = uriValid && reasonValid && !tx.isBusy
+  const evidenceHash = uriValid ? hashDescription(uri) : null
+
+  const submit = () => {
+    if (!canSubmit) return
+    const id = BigInt(escrowId)
+    const idx = BigInt(milestoneIndex)
+    const args = meta.needsReason
+      ? [id, idx, reason.trim(), evidenceHash, uri]
+      : [id, idx, evidenceHash, uri]
+    tx.run(escrowWrite(meta.fn, args), { loadingMessage: 'Check your wallet.' })
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={tx.isBusy ? () => {} : onClose}
+      title={meta.title}
+      footer={
+        <>
+          <button className="btn-quiet" onClick={onClose} disabled={tx.isBusy}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={!canSubmit}>
+            {tx.isBusy ? 'Working…' : meta.submitLabel}
+          </button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-ink-2 leading-relaxed">{meta.blurb}</p>
+
+        {meta.needsReason && (
+          <Field label="Reason" helper="A short explanation, stored on-chain.">
+            {(p) => (
+              <textarea
+                {...p}
+                rows={3}
+                className="input-multiline"
+                placeholder="Briefly explain the issue"
+                maxLength={500}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            )}
+          </Field>
+        )}
+
+        <Field
+          label={meta.evidenceLabel}
+          error={uri && !uriValid ? "That doesn't look like a valid URL." : undefined}
+          helper="Link to your evidence (URL or IPFS gateway). Hashed locally; the hash is stored on-chain."
+        >
+          {(p) => (
+            <input
+              {...p}
+              type="url"
+              className="input"
+              placeholder="https://…"
+              autoComplete="off"
+              spellCheck={false}
+              value={uri}
+              onChange={(e) => setUri(e.target.value.trim())}
+            />
+          )}
+        </Field>
+
+        <div>
+          <p className="eyebrow mb-1.5">Evidence hash</p>
+          <p className="num text-[12px] text-ink-2 break-all">{evidenceHash || '—'}</p>
+        </div>
+      </div>
+    </Modal>
   )
 }
 

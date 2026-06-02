@@ -1,4 +1,4 @@
-// Telegram command surface for the CrossChainEscrow notifier.
+// Telegram command surface for the Tranche Protocol notifier.
 import TelegramBot from 'node-telegram-bot-api';
 import { isAddress, getAddress, verifyMessage } from 'viem';
 import * as db from './db.js';
@@ -30,7 +30,7 @@ export function createBot({ token, listener }) {
     bot.sendMessage(
       msg.chat.id,
       [
-        'Welcome to the CrossChainEscrow notification bot.',
+        'Welcome to the Tranche Protocol notification bot.',
         '',
         'Link a wallet to receive notifications about your escrows:',
         '  /link 0xYourWalletAddress',

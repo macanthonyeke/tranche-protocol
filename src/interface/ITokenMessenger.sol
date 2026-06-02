@@ -15,7 +15,7 @@ pragma solidity 0.8.24;
 ///         `depositForBurnWithHook`.
 interface ITokenMessenger {
     /// @notice depositForBurn variant that includes hook data. The
-    ///         CrossChainEscrow uses this overload to attach Circle's
+    ///         TrancheProtocol uses this overload to attach Circle's
     ///         forwarding-service hook so the destination-chain mint is
     ///         submitted automatically. The forwarding fee is deducted from
     ///         the minted amount on the destination domain.

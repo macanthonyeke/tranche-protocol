@@ -1,7 +1,7 @@
 {
-  "name": "crosschain-escrow-bot",
+  "name": "tranche-protocol-bot",
   "version": "1.0.0",
-  "description": "Telegram notification bot for the CrossChainEscrow contract on Arc testnet",
+  "description": "Telegram notification bot for the Tranche Protocol contract on Arc testnet",
   "type": "module",
   "main": "src/index.js",
   "scripts": {

@@ -1,6 +1,6 @@
-# CrossChainEscrow Telegram bot
+# Tranche Protocol Telegram bot
 
-A Telegram notification bot for the `CrossChainEscrow` contract deployed on Arc
+A Telegram notification bot for the `TrancheProtocol` contract deployed on Arc
 testnet. It links wallet addresses to Telegram users via signature
 verification, listens for contract events, and sends timed reminders before
 deadlines and dispute windows close.
@@ -9,9 +9,9 @@ deadlines and dispute windows close.
 
 - Node.js 18+ (tested on 24.x)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- A running Arc testnet RPC endpoint and the deployed `CrossChainEscrow`
+- A running Arc testnet RPC endpoint and the deployed `TrancheProtocol`
   address
-- The Foundry artifact at `../out/CrossChainEscrow.sol/CrossChainEscrow.json`
+- The Foundry artifact at `../out/TrancheProtocol.sol/TrancheProtocol.json`
   (run `forge build` in the project root if it's missing)
 
 ## Install
