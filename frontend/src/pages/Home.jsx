@@ -129,7 +129,7 @@ function HeroAmount() {
         const eased = 1 - Math.pow(1 - t, 4)
         setDisplay((target * eased).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
         if (t < 1) raf = requestAnimationFrame(tick)
-        else timeout = setTimeout(run, 2000)
+        else timeout = setTimeout(run, 10000)
       }
       setDisplay('0.00')
       raf = requestAnimationFrame(tick)
