@@ -317,15 +317,29 @@ function Progress({ step, onJump }) {
   )
 }
 
+const HEADING_CONTAINER = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.07, delayChildren: 0.04 } }
+}
+const HEADING_ITEM = {
+  hidden: { opacity: 0, y: 14 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.38, ease: [0.22, 1, 0.36, 1] } }
+}
+
 function StepHeading({ step }) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-baseline gap-3">
+    <motion.div
+      className="flex flex-col gap-2"
+      variants={HEADING_CONTAINER}
+      initial="hidden"
+      animate="show"
+    >
+      <motion.div variants={HEADING_ITEM} className="flex items-baseline gap-3">
         <span className="seq text-ink-3 text-[12px]">{String(step.num).padStart(2, '0')} / {String(STEPS.length).padStart(2, '0')}</span>
-      </div>
-      <h2 className="display text-[36px] leading-tight text-ink">{step.head}</h2>
-      <p className="text-ink-2 text-[14.5px] leading-relaxed">{step.kicker}</p>
-    </div>
+      </motion.div>
+      <motion.h2 variants={HEADING_ITEM} className="display text-[36px] leading-tight text-ink">{step.head}</motion.h2>
+      <motion.p variants={HEADING_ITEM} className="text-ink-2 text-[14.5px] leading-relaxed">{step.kicker}</motion.p>
+    </motion.div>
   )
 }
 

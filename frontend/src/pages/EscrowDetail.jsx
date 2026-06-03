@@ -317,12 +317,14 @@ function AddressInline({ address }) {
 }
 
 function DeadlineCell({ deadline }) {
-  const passed = Number(deadline) * 1000 < Date.now()
+  const deadlineMs = Number(deadline) * 1000
+  const passed = deadlineMs < Date.now()
+  const urgent = !passed && (deadlineMs - Date.now()) < 86_400_000
   return (
     <div className="flex flex-col items-end gap-0.5">
       <span className="font-mono tabular-nums text-sm text-ink">{formatDeadline(deadline)}</span>
-      <span className={`text-xs font-mono tabular-nums ${passed ? 'text-bad' : 'text-ink-3'}`}>
-        {countdown(deadline)}
+      <span className={`text-xs font-mono tabular-nums ${passed ? 'text-bad' : urgent ? 'text-bad animate-pulse' : 'text-ink-3'}`}>
+        {urgent && !passed ? '⚠ ' : ''}{countdown(deadline)}
       </span>
     </div>
   )

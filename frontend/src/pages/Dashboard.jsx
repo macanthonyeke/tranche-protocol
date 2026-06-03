@@ -354,13 +354,17 @@ function PremiumEscrowCard({ summary }) {
   const barInView = useInView(barRef, { once: true, margin: '-40px' })
   const deadlineText = useLiveCountdown(summary.deadline ?? 0)
 
+  const deadlineMs = Number(summary.deadline ?? 0) * 1000
+  const isUrgent = summary.state === 0 && deadlineMs > 0 &&
+    deadlineMs > Date.now() && (deadlineMs - Date.now()) < 86_400_000
+
   return (
     <Link
       to={`/escrow/${summary.id}`}
       className="group block relative rounded-2xl p-6
                  bg-paper border border-rule
                  transition-[transform,border-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]
-                 hover:-translate-y-0.5 hover:shadow-md
+                 hover:-translate-y-1.5 hover:shadow-[0_12px_32px_-8px_oklch(0_0_0/0.12)]
                  hover:border-rule-2
                  focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
     >
@@ -422,8 +426,8 @@ function PremiumEscrowCard({ summary }) {
 
       <div className="mt-5 pt-4 border-t border-rule/70 flex items-center justify-between gap-3">
         {deadlineText && summary.state === 0 ? (
-          <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-3 tabular-nums">
-            {deadlineText}
+          <span className={`text-[10px] font-mono uppercase tracking-[0.14em] tabular-nums ${isUrgent ? 'text-bad animate-pulse' : 'text-ink-3'}`}>
+            {isUrgent && '⚠ '}{deadlineText}
           </span>
         ) : <span />}
         <span
