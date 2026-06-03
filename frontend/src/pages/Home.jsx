@@ -119,16 +119,24 @@ function HeroAmount() {
     if (reduceMotion) { setDisplay('25,000.00'); return }
     const target = 25000
     const dur = 2400
-    const start = performance.now()
     let raf
-    const tick = (now) => {
-      const t = Math.min(1, (now - start) / dur)
-      const eased = 1 - Math.pow(1 - t, 4)
-      setDisplay((target * eased).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
-      if (t < 1) raf = requestAnimationFrame(tick)
+    let timeout
+
+    const run = () => {
+      const start = performance.now()
+      const tick = (now) => {
+        const t = Math.min(1, (now - start) / dur)
+        const eased = 1 - Math.pow(1 - t, 4)
+        setDisplay((target * eased).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
+        if (t < 1) raf = requestAnimationFrame(tick)
+        else timeout = setTimeout(run, 2000)
+      }
+      setDisplay('0.00')
+      raf = requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+
+    run()
+    return () => { cancelAnimationFrame(raf); clearTimeout(timeout) }
   }, [reduceMotion])
   return <span className="num text-5xl text-ink">{display}</span>
 }
