@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
-import { motion, AnimatePresence, useReducedMotion, useInView } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
@@ -98,6 +98,7 @@ function DashboardInner() {
   const [activeTab, setActiveTab] = useState('all')
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [page, setPage] = useState(0)
+  const [refreshFlash, setRefreshFlash] = useState(0)
 
   const refundBal = dashboard?.refundBalance ?? 0n
   const activeCount = dashboard?.activeEscrowCount ?? 0
@@ -136,7 +137,10 @@ function DashboardInner() {
   const handleRefresh = async () => {
     if (isRefreshing) return
     setIsRefreshing(true)
-    try { await refetch?.() } finally { setIsRefreshing(false) }
+    try { await refetch?.() } finally {
+      setIsRefreshing(false)
+      setRefreshFlash((n) => n + 1)
+    }
   }
 
   // While roles are resolving, or for privileged wallets that are about to be
@@ -172,13 +176,13 @@ function DashboardInner() {
         animate="show"
       >
         <motion.div variants={TILE_ITEM}>
-          <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading}>
+          <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading} flash={refreshFlash}>
             <UsdcValue value={usdcBalance} />
           </StatTile>
         </motion.div>
 
         <motion.div variants={TILE_ITEM}>
-          <StatTile label="Active Escrows" sublabel={activeCount === 1 ? 'In progress' : 'In progress'} loading={isLoading}>
+          <StatTile label="Active Escrows" sublabel="In progress" loading={isLoading} flash={refreshFlash}>
             <CountValue value={activeCount} />
           </StatTile>
         </motion.div>
@@ -189,13 +193,14 @@ function DashboardInner() {
             sublabel={openDisputeCount > 0 ? 'Needs attention' : 'All clear'}
             tone={openDisputeCount > 0 ? 'warning' : 'default'}
             loading={isLoading}
+            flash={refreshFlash}
           >
             <CountValue value={openDisputeCount} tone={openDisputeCount > 0 ? 'warning' : 'default'} />
           </StatTile>
         </motion.div>
 
         <motion.div variants={TILE_ITEM}>
-          <ClaimableTile loading={isLoading} balance={refundBal} />
+          <ClaimableTile loading={isLoading} balance={refundBal} flash={refreshFlash} />
         </motion.div>
       </motion.section>
 
@@ -534,10 +539,19 @@ function RefreshCwIcon({ size = 14, spinning = false }) {
    Compact stat cells. Label up top in mono-uppercase, value mid, sublabel below.
    Tone shifts the value color when something needs attention. Loading uses a
    width-pegged skeleton so the row doesn't reflow when data arrives. */
-function StatTile({ label, sublabel, children, tone = 'default', loading = false }) {
+function StatTile({ label, sublabel, children, tone = 'default', loading = false, flash = 0 }) {
   const sublabelCls = tone === 'warning' ? 'text-warn' : 'text-ink-3'
+  const [scope, animate] = useAnimate()
+  const prevFlashRef = useRef(0)
+  const reduce = useReducedMotion()
+  useEffect(() => {
+    if (!reduce && flash > 0 && flash !== prevFlashRef.current) {
+      prevFlashRef.current = flash
+      animate(scope.current, { scale: [1, 1.03, 1] }, { duration: 0.45, ease: [0.22, 1, 0.36, 1] })
+    }
+  }, [flash, animate, scope, reduce])
   return (
-    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
+    <div ref={scope} className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
       <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
         {label}
       </span>
@@ -599,7 +613,16 @@ function ClaimableTileValue({ balance, hasFunds }) {
   )
 }
 
-function ClaimableTile({ balance, loading }) {
+function ClaimableTile({ balance, loading, flash = 0 }) {
+  const [scope, animate] = useAnimate()
+  const prevFlashRef = useRef(0)
+  const reduce = useReducedMotion()
+  useEffect(() => {
+    if (!reduce && flash > 0 && flash !== prevFlashRef.current) {
+      prevFlashRef.current = flash
+      animate(scope.current, { scale: [1, 1.03, 1] }, { duration: 0.45, ease: [0.22, 1, 0.36, 1] })
+    }
+  }, [flash, animate, scope, reduce])
   const hasFunds = balance > 0n
 
   const inner = (
@@ -638,21 +661,23 @@ function ClaimableTile({ balance, loading }) {
 
   if (hasFunds && !loading) {
     return (
-      <Link
-        to="/settings"
-        aria-label={`Withdraw ${formatUSDC(balance)} USDC from your refund balance`}
-        className="group bg-paper border border-clay/40 rounded-2xl p-5 flex flex-col gap-2
-                   transition-[border-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                   hover:-translate-y-0.5 hover:shadow-lift-md hover:border-clay
-                   focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-      >
-        {inner}
-      </Link>
+      <div ref={scope}>
+        <Link
+          to="/settings"
+          aria-label={`Withdraw ${formatUSDC(balance)} USDC from your refund balance`}
+          className="group bg-paper border border-clay/40 rounded-2xl p-5 flex flex-col gap-2
+                     transition-[border-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                     hover:-translate-y-0.5 hover:shadow-lift-md hover:border-clay
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+        >
+          {inner}
+        </Link>
+      </div>
     )
   }
 
   return (
-    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2">
+    <div ref={scope} className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2">
       {inner}
     </div>
   )

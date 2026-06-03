@@ -6,6 +6,7 @@ import ThemeToggle from '../components/ThemeToggle.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import PageTransition from '../components/PageTransition.jsx'
 import { Logo } from '../components/Logo.jsx'
+import ScrollProgress from '../components/ScrollProgress.jsx'
 import { CONTRACT_ADDRESS, arcTestnet } from '../config/wagmi.js'
 import { truncateAddr } from '../utils/format'
 
@@ -436,6 +437,7 @@ function CodeEditor() {
 export default function Home() {
   return (
     <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-clip text-ink transition-colors duration-300">
+      <ScrollProgress />
       {/* Marketing top nav — sticky to match the in-app shell header.
           The root uses overflow-x-clip (not -hidden) so it doesn't become a
           scroll container and silently break this header's sticky positioning. */}
