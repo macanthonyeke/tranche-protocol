@@ -1,6 +1,7 @@
 import { useReducedMotion } from 'framer-motion'
 
-// Golden Split geometry — same viewBox as the logo mark, just massive
+// Sizes use clamp() so marks stay proportional across screen widths.
+// At 375px mobile: ~55vw / 38vw / 22vw / 16vw. At 1280px+: capped at design size.
 const GROUPS = [
   {
     // Large, top-left, slow
@@ -8,8 +9,8 @@ const GROUPS = [
       position: 'absolute',
       left: '-4%',
       top: '8%',
-      width: 460,
-      height: 460,
+      width: 'clamp(180px, 55vw, 460px)',
+      height: 'clamp(180px, 55vw, 460px)',
       opacity: 'var(--drift-op-1)',
       animation: 'bg-drift-1 62s ease-in-out infinite',
     },
@@ -20,8 +21,8 @@ const GROUPS = [
       position: 'absolute',
       right: '-6%',
       bottom: '10%',
-      width: 310,
-      height: 310,
+      width: 'clamp(130px, 38vw, 310px)',
+      height: 'clamp(130px, 38vw, 310px)',
       opacity: 'var(--drift-op-2)',
       animation: 'bg-drift-2 78s ease-in-out infinite',
     },
@@ -32,8 +33,8 @@ const GROUPS = [
       position: 'absolute',
       left: '40%',
       top: '-5%',
-      width: 200,
-      height: 200,
+      width: 'clamp(90px, 22vw, 200px)',
+      height: 'clamp(90px, 22vw, 200px)',
       opacity: 'var(--drift-op-3)',
       animation: 'bg-drift-3 50s ease-in-out infinite',
     },
@@ -44,8 +45,8 @@ const GROUPS = [
       position: 'absolute',
       right: '24%',
       bottom: '-3%',
-      width: 155,
-      height: 155,
+      width: 'clamp(70px, 16vw, 155px)',
+      height: 'clamp(70px, 16vw, 155px)',
       opacity: 'var(--drift-op-4)',
       animation: 'bg-drift-4 95s ease-in-out infinite',
     },
