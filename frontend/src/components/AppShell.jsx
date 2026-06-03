@@ -5,7 +5,6 @@ import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { Logo } from './Logo.jsx'
-import ScrollProgress from './ScrollProgress.jsx'
 
 const CONSUMER_NAV = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -211,7 +210,6 @@ export default function AppShell({ children, maxWidth = 'content' }) {
       : 'w-full max-w-page mx-auto px-6 lg:px-10 pt-10 pb-28 md:pb-20 flex flex-col gap-8 flex-1'
   return (
     <div className="min-h-screen flex flex-col text-ink">
-      <ScrollProgress />
       <TopNav />
       <main className={mainCls}>{children}</main>
       <BottomNav />
