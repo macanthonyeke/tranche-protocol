@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion, useInView } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import { useDashboard, useUsdcBalance } from '../hooks/useEscrows.js'
 import { useRoles } from '../hooks/useRoles.jsx'
-import { formatUSDC, formatUSDCNumber } from '../utils/format.js'
+import { formatUSDC, formatUSDCNumber, countdown } from '../utils/format.js'
 
 const PAGE_SIZE = 9
 
@@ -15,21 +15,36 @@ function useCountUp(target, duration = 2600) {
   const [value, setValue] = useState(0)
   const reduce = useReducedMotion()
   const rafRef = useRef(null)
+  const prevRef = useRef(0)
   useEffect(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    if (reduce || target === 0) { setValue(target); return }
+    const from = prevRef.current
+    if (reduce || target === from) { setValue(target); prevRef.current = target; return }
+    // Initial load uses full duration; live updates use a snappier transition
+    const dur = from === 0 ? duration : Math.min(duration * 0.45, 1100)
     const start = performance.now()
     const tick = (now) => {
-      const t = Math.min(1, (now - start) / duration)
+      const t = Math.min(1, (now - start) / dur)
       const eased = 1 - Math.pow(1 - t, 4)
-      setValue(target * eased)
+      setValue(from + (target - from) * eased)
       if (t < 1) rafRef.current = requestAnimationFrame(tick)
-      else setValue(target)
+      else { setValue(target); prevRef.current = target }
     }
     rafRef.current = requestAnimationFrame(tick)
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [target, duration, reduce])
   return value
+}
+
+function useLiveCountdown(deadlineUnix) {
+  const [text, setText] = useState(() => countdown(deadlineUnix))
+  useEffect(() => {
+    if (!deadlineUnix) return
+    setText(countdown(deadlineUnix))
+    const id = setInterval(() => setText(countdown(deadlineUnix)), 30_000)
+    return () => clearInterval(id)
+  }, [deadlineUnix])
+  return text
 }
 
 const TILE_CONTAINER = {
@@ -210,15 +225,20 @@ function DashboardInner() {
                   aria-selected={isActive}
                   onClick={() => setActiveTab(tab.key)}
                   className={
-                    `inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
-                    `transition-[background-color,color,box-shadow] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ` +
+                    `relative inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
+                    `transition-colors duration-200 ` +
                     `focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk ` +
-                    (isActive
-                      ? 'text-ink bg-paper shadow-sm'
-                      : 'text-ink-2 hover:text-ink')
+                    (isActive ? 'text-ink' : 'text-ink-2 hover:text-ink')
                   }
                 >
-                  {tab.label}
+                  {isActive && (
+                    <motion.span
+                      layoutId="tab-pill"
+                      className="absolute inset-0 rounded-lg bg-paper shadow-sm"
+                      transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                    />
+                  )}
+                  <span className="relative z-10">{tab.label}</span>
                 </button>
               )
             })}
@@ -324,6 +344,10 @@ function PremiumEscrowCard({ summary }) {
     : 0
   const dotCount = Math.min(milestoneCount, 8)
 
+  const barRef = useRef(null)
+  const barInView = useInView(barRef, { once: true, margin: '-40px' })
+  const deadlineText = useLiveCountdown(summary.deadline ?? 0)
+
   return (
     <Link
       to={`/escrow/${summary.id}`}
@@ -354,6 +378,7 @@ function PremiumEscrowCard({ summary }) {
             {releasedCount} / {milestoneCount} Released
           </span>
           <div
+            ref={barRef}
             className="w-full max-w-[120px] h-1.5 bg-sunk rounded-full overflow-hidden mb-1.5"
             role="progressbar"
             aria-valuenow={Math.round(progressPct)}
@@ -361,9 +386,11 @@ function PremiumEscrowCard({ summary }) {
             aria-valuemax={100}
             aria-label={`${releasedCount} of ${milestoneCount} milestones released`}
           >
-            <div
-              className="h-full w-full bg-clay origin-left transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-              style={{ transform: `scaleX(${progressPct / 100})` }}
+            <motion.div
+              className="h-full w-full bg-clay origin-left"
+              initial={{ scaleX: 0 }}
+              animate={{ scaleX: barInView ? progressPct / 100 : 0 }}
+              transition={{ duration: 0.9, ease: [0.22, 1, 0.36, 1], delay: 0.2 }}
             />
           </div>
           {dotCount > 0 && (
@@ -387,7 +414,12 @@ function PremiumEscrowCard({ summary }) {
         </span>
       </div>
 
-      <div className="mt-5 pt-4 border-t border-rule/70 flex items-center justify-end">
+      <div className="mt-5 pt-4 border-t border-rule/70 flex items-center justify-between gap-3">
+        {deadlineText && summary.state === 0 ? (
+          <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-3 tabular-nums">
+            {deadlineText}
+          </span>
+        ) : <span />}
         <span
           className="inline-flex items-center gap-1.5 text-xs font-medium font-mono uppercase tracking-wider
                      px-3 py-1.5 rounded-lg border border-rule text-ink-2
