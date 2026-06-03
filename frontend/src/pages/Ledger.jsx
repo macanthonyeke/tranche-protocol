@@ -123,8 +123,8 @@ function LedgerInner() {
                 </tr>
               </thead>
               <tbody>
-                <AnimatePresence initial={false}>
-                  {visible.map((e) => {
+                <AnimatePresence>
+                  {visible.map((e, i) => {
                     const counterparty = e.isPayer ? e.recipient : e.depositor
                     return (
                       <motion.tr
@@ -133,7 +133,7 @@ function LedgerInner() {
                         initial={{ opacity: 0, y: 4 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0 }}
-                        transition={{ duration: 0.18 }}
+                        transition={{ duration: 0.18, delay: Math.min(i * 0.05, 0.35) }}
                         className="hover:bg-sunk/50 transition-colors"
                       >
                         <Td><span className="font-mono tabular text-sm">#{e.id}</span></Td>
@@ -162,8 +162,8 @@ function LedgerInner() {
 
           {/* Mobile cards */}
           <div className="md:hidden flex flex-col gap-4">
-            <AnimatePresence initial={false}>
-              {visible.map((e) => {
+            <AnimatePresence>
+              {visible.map((e, i) => {
                 const counterparty = e.isPayer ? e.recipient : e.depositor
                 return (
                   <motion.div
@@ -172,7 +172,7 @@ function LedgerInner() {
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
+                    transition={{ duration: 0.2, delay: Math.min(i * 0.05, 0.35) }}
                   >
                     <Link to={`/escrow/${e.id}`} className="card-clickable block p-4">
                       <div className="flex flex-col gap-2">

@@ -24,6 +24,28 @@ const addressToBytes32 = (addr) => '0x' + addr.slice(2).padStart(64, '0')
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 const POLL_MS = 12_000
 
+function useIntCountUp(target, duration = 800) {
+  const [value, setValue] = useState(target)
+  const reduce = useReducedMotion()
+  const prevRef = useRef(target)
+  useEffect(() => {
+    if (reduce || target === prevRef.current) { setValue(target); prevRef.current = target; return }
+    const from = prevRef.current
+    const start = performance.now()
+    let raf
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 3)
+      setValue(Math.round(from + (target - from) * eased))
+      if (t < 1) raf = requestAnimationFrame(tick)
+      else { setValue(target); prevRef.current = target }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target, duration, reduce])
+  return value
+}
+
 export default function EscrowDetail() {
   return (
     <ConnectGate>
@@ -368,6 +390,7 @@ function MilestoneStack({
   optimistic, onChange, setOpt, clearOpt
 }) {
   const hasDispute = milestones.some((m) => m.state === 2)
+  const releasedCount = useIntCountUp(milestones.filter((m) => m.state === 3).length)
   return (
     <div className="bg-paper border border-rule rounded-2xl p-6">
       <div className="flex items-baseline justify-between mb-5">
@@ -381,7 +404,7 @@ function MilestoneStack({
           )}
         </h2>
         <span className="text-xs font-mono tabular-nums text-ink-3 uppercase tracking-widest">
-          {milestones.filter((m) => m.state === 3).length} / {milestones.length} released
+          {releasedCount} / {milestones.length} released
         </span>
       </div>
 
@@ -795,22 +818,36 @@ function MilestoneAction({
 
   const isLoading = activeKey === action.key && tx.isBusy
   return (
-    <button
-      type="button"
-      onClick={run}
-      disabled={tx.isBusy}
-      className="inline-flex items-center justify-center gap-2 px-4 py-2
-                 bg-clay text-paper rounded-xl font-medium text-sm
-                 hover:bg-clay-hover
-                 transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                 disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
-                 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-    >
-      {isLoading && (
-        <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" aria-hidden />
-      )}
-      {isLoading ? 'Pending…' : action.label}
-    </button>
+    <div className="relative">
+      <AnimatePresence>
+        {isLoading && (
+          <motion.span
+            key="ring"
+            className="absolute inset-0 rounded-xl border-2 border-clay pointer-events-none"
+            initial={{ opacity: 0.7, scale: 1 }}
+            animate={{ opacity: 0, scale: 1.4 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.9, ease: 'easeOut', repeat: Infinity, repeatType: 'loop' }}
+          />
+        )}
+      </AnimatePresence>
+      <button
+        type="button"
+        onClick={run}
+        disabled={tx.isBusy}
+        className="relative inline-flex items-center justify-center gap-2 px-4 py-2
+                   bg-clay text-paper rounded-xl font-medium text-sm
+                   hover:bg-clay-hover
+                   transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                   disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+      >
+        {isLoading && (
+          <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" aria-hidden />
+        )}
+        {isLoading ? 'Pending…' : action.label}
+      </button>
+    </div>
   )
 }
 

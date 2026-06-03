@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { toast } from 'sonner'
@@ -275,10 +275,20 @@ function HeroVisual() {
    ------------------------------------------------------------ */
 function ProtocolTicker() {
   const reduceMotion = useReducedMotion()
+  const marqueeRef = useRef(null)
   const loop = reduceMotion ? TICKER_ITEMS : [...TICKER_ITEMS, ...TICKER_ITEMS]
+
+  const pause = () => marqueeRef.current?.getAnimations().forEach((a) => a.pause())
+  const play  = () => marqueeRef.current?.getAnimations().forEach((a) => a.play())
+
   return (
-    <section className="bg-sunk border-y border-rule py-3 overflow-hidden">
+    <section
+      className="bg-sunk border-y border-rule py-3 overflow-hidden"
+      onMouseEnter={reduceMotion ? undefined : pause}
+      onMouseLeave={reduceMotion ? undefined : play}
+    >
       <motion.div
+        ref={marqueeRef}
         className="flex gap-10 whitespace-nowrap"
         animate={reduceMotion ? undefined : { x: ['0%', '-50%'] }}
         transition={reduceMotion ? undefined : { repeat: Infinity, duration: 40, ease: 'linear' }}
@@ -545,7 +555,14 @@ export default function Home() {
                   {s.n}
                 </span>
                 {i < STEPS.length - 1 && (
-                  <span aria-hidden className="hidden md:flex flex-1 h-px bg-rule" />
+                  <motion.span
+                    aria-hidden
+                    className="hidden md:flex flex-1 h-px bg-rule origin-left"
+                    initial={{ scaleX: 0 }}
+                    whileInView={{ scaleX: 1 }}
+                    viewport={{ once: true, margin: '-60px' }}
+                    transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1], delay: 0.35 + i * 0.08 }}
+                  />
                 )}
               </div>
               <h3 className="text-lg font-medium text-ink">{s.title}</h3>
