@@ -11,7 +11,7 @@ import { formatUSDC, formatUSDCNumber } from '../utils/format.js'
 
 const PAGE_SIZE = 9
 
-function useCountUp(target, duration = 1600) {
+function useCountUp(target, duration = 2600) {
   const [value, setValue] = useState(0)
   const reduce = useReducedMotion()
   const rafRef = useRef(null)
@@ -34,11 +34,11 @@ function useCountUp(target, duration = 1600) {
 
 const TILE_CONTAINER = {
   hidden: {},
-  show: { transition: { staggerChildren: 0.11 } },
+  show: { transition: { staggerChildren: 0.16 } },
 }
 const TILE_ITEM = {
-  hidden: { opacity: 0, y: 12 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] } },
+  hidden: { opacity: 0, y: 20, scale: 0.95 },
+  show: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.55, ease: [0.22, 1, 0.36, 1] } },
 }
 
 const isActionNeeded = (e) => {
@@ -254,7 +254,7 @@ function DashboardInner() {
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.97 }}
-                    transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1], delay: i * 0.08 }}
+                    transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: i * 0.11 }}
                   >
                     <PremiumEscrowCard summary={e} />
                   </motion.div>
