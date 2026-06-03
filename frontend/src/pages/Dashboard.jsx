@@ -102,7 +102,6 @@ function DashboardInner() {
   const refundBal = dashboard?.refundBalance ?? 0n
   const activeCount = dashboard?.activeEscrowCount ?? 0
   const openDisputeCount = dashboard?.openDisputeCount ?? 0
-  const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
 
   // Build a unified list of summaries with role attached, deduplicating in the
   // unlikely case the same wallet is both depositor and recipient.
@@ -117,6 +116,8 @@ function DashboardInner() {
     })
     return Array.from(map.values())
   }, [dashboard])
+
+  const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
 
   const tabDef = LEDGER_TABS.find((t) => t.key === activeTab) ?? LEDGER_TABS[0]
   const filteredEscrows = useMemo(
