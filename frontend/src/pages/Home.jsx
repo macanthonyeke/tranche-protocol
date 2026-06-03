@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { toast } from 'sonner'
@@ -382,19 +382,6 @@ function CodeEditor() {
    LANDING PAGE
    ------------------------------------------------------------ */
 export default function Home() {
-  const spotRef = useRef(null)
-
-  const onHeroMove = (e) => {
-    if (!spotRef.current) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    spotRef.current.style.left = `${e.clientX - rect.left}px`
-    spotRef.current.style.top  = `${e.clientY - rect.top}px`
-    spotRef.current.style.opacity = '1'
-  }
-  const onHeroLeave = () => {
-    if (spotRef.current) spotRef.current.style.opacity = '0'
-  }
-
   return (
     <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-clip text-ink transition-colors duration-300">
       {/* Marketing top nav — sticky to match the in-app shell header.
@@ -419,25 +406,8 @@ export default function Home() {
           flex-col preserves the footer's mt-auto bottom-pin. */}
       <PageTransition className="flex flex-col flex-1">
       {/* Hero (split layout) */}
-      <section className="relative overflow-hidden" onMouseMove={onHeroMove} onMouseLeave={onHeroLeave}>
-        {/* Cursor spotlight — updates via ref to avoid re-renders on every mousemove */}
-        <div
-          ref={spotRef}
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            width: 660,
-            height: 660,
-            borderRadius: '50%',
-            background: 'radial-gradient(circle, oklch(58% 0.165 38 / 0.07) 0%, transparent 65%)',
-            transform: 'translate(-50%, -50%)',
-            pointerEvents: 'none',
-            opacity: 0,
-            transition: 'opacity 0.4s ease',
-            zIndex: 0,
-          }}
-        />
-        <div className="relative z-[1] lg:grid lg:grid-cols-2 lg:gap-12 lg:items-center py-16 sm:py-24 px-4 sm:px-6 lg:px-8 max-w-[1200px] mx-auto w-full">
+      <section className="relative">
+        <div className="relative lg:grid lg:grid-cols-2 lg:gap-12 lg:items-center py-16 sm:py-24 px-4 sm:px-6 lg:px-8 max-w-[1200px] mx-auto w-full">
           {/* Left: copy */}
           <motion.div
             initial={{ opacity: 0, y: 16 }}
