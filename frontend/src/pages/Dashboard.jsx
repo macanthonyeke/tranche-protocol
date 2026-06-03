@@ -257,14 +257,17 @@ function DashboardInner() {
         </div>
         <div className="w-full mt-3 border-b border-rule/50" aria-hidden="true" />
 
+        <AnimatePresence mode="wait" initial={false}>
         {isLoading ? (
-          <DashboardSkeleton />
+          <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+            <DashboardSkeleton />
+          </motion.div>
         ) : filteredEscrows.length === 0 ? (
-          <div className="mt-8">
+          <motion.div key="empty" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
             <LedgerEmptyState />
-          </div>
+          </motion.div>
         ) : (
-          <>
+          <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-8">
               <AnimatePresence mode="popLayout">
                 {visibleEscrows.map((e, i) => (
@@ -323,8 +326,9 @@ function DashboardInner() {
                 </div>
               </div>
             </nav>
-          </>
+          </motion.div>
         )}
+        </AnimatePresence>
       </section>
     </div>
   )
@@ -471,11 +475,16 @@ function deriveStatus(summary) {
 }
 
 function LedgerEmptyState() {
+  const reduce = useReducedMotion()
   return (
     <div className="w-full bg-paper border border-rule rounded-2xl p-16 flex flex-col items-center justify-center">
-      <div className="w-16 h-16 rounded-2xl bg-clay-soft text-clay flex items-center justify-center mb-6">
+      <motion.div
+        className="w-16 h-16 rounded-2xl bg-clay-soft text-clay flex items-center justify-center mb-6"
+        animate={reduce ? undefined : { y: [-5, 5, -5] }}
+        transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
+      >
         <InboxIcon size={24} />
-      </div>
+      </motion.div>
       <h3 className="text-lg font-semibold text-ink">No escrows found</h3>
       <p className="text-sm text-ink-2 mt-2 max-w-sm text-center leading-relaxed">
         You haven't interacted with any contracts yet. Create a new escrow above to secure your first cross-chain payment.
@@ -526,8 +535,18 @@ function StatTile({ label, sublabel, children, tone = 'default', loading = false
       <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
         {label}
       </span>
-      <div className="min-h-[2.25rem] flex items-baseline">
-        {loading ? <Skeleton className="h-7 w-24" /> : children}
+      <div className="min-h-[2.25rem] flex items-baseline overflow-hidden">
+        <AnimatePresence mode="wait" initial={false}>
+          {loading ? (
+            <motion.div key="skel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+              <Skeleton className="h-7 w-24" />
+            </motion.div>
+          ) : (
+            <motion.div key="val" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+              {children}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
       {sublabel && (
         <span className={`text-xs ${sublabelCls}`}>
@@ -592,12 +611,18 @@ function ClaimableTile({ balance, loading }) {
           </span>
         )}
       </div>
-      <div className="min-h-[2.25rem] flex items-baseline">
-        {loading ? (
-          <Skeleton className="h-7 w-24" />
-        ) : (
-          <ClaimableTileValue balance={balance} hasFunds={hasFunds} />
-        )}
+      <div className="min-h-[2.25rem] flex items-baseline overflow-hidden">
+        <AnimatePresence mode="wait" initial={false}>
+          {loading ? (
+            <motion.div key="skel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+              <Skeleton className="h-7 w-24" />
+            </motion.div>
+          ) : (
+            <motion.div key="val" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
+              <ClaimableTileValue balance={balance} hasFunds={hasFunds} />
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
       <span className={`text-xs ${hasFunds ? 'text-clay' : 'text-ink-3'}`}>
         {hasFunds ? 'Ready to withdraw' : 'Nothing to claim'}
