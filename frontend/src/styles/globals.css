@@ -39,6 +39,15 @@
    black/white; every neutral carries a faint warm hue.
    ============================================================ */
 
+/* Register --op as a typed <number> so @keyframes bg-breathe can smoothly
+   interpolate it. Without this, untyped CSS custom properties use discrete
+   (flip-at-50%) animation rather than smooth interpolation. */
+@property --op {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
 @layer base {
   :root {
     /* Surfaces — warm paper cream. Visibly off-white: L dropped to 96 and

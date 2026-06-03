@@ -71,6 +71,15 @@ const STEPS = [
 // Why Arc — one uniform spec list. The gas-token point leads as 01 because
 // it's the strongest differentiator, but it's the same row shape as the rest
 // so the set reads as a single sheet, not a headline plus five footnotes.
+const STAGGER_CONTAINER = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.09, delayChildren: 0.05 } },
+}
+const STAGGER_ITEM = {
+  hidden: { opacity: 0, y: 18 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] } },
+}
+
 const REASONS = [
   { title: 'One asset, the whole way through', text: 'On most chains you need ETH just to touch your USDC. Arc uses USDC as the gas token, so a contractor anywhere can lock funds, approve milestones, and withdraw payment without ever managing a separate gas token. Every transaction cost is a predictable dollar amount.' },
   { title: 'Payment release is actually final', text: 'Every action inside the escrow confirms on Arc in under a second and cannot be reversed. Locking funds, approving a milestone, raising a dispute, the contract state is always certain.' },
@@ -442,13 +451,26 @@ export default function Home() {
 
       {/* Developer flex */}
       <section className="max-w-content mx-auto w-full px-4 md:px-8 py-24">
-        <div className="text-center mb-12">
+        <motion.div
+          className="text-center mb-12"
+          initial={{ opacity: 0, y: 20 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-60px' }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        >
           <h2 className="display text-4xl md:text-5xl text-ink">Built so neither side has to trust the other</h2>
           <p className="mt-3 text-ink-2 max-w-2xl mx-auto leading-relaxed">
             Every escrow is a single on-chain record. Milestone amounts, deadlines, and dispute rules are set at the start and cannot be changed mid-way.
           </p>
-        </div>
-        <CodeEditor />
+        </motion.div>
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-60px' }}
+          transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1], delay: 0.1 }}
+        >
+          <CodeEditor />
+        </motion.div>
       </section>
 
       {/* How it works — horizontal numbered stepper.
@@ -457,28 +479,38 @@ export default function Home() {
           to a single vertical column where the numerals stay oversized so the
           rhythm survives the breakpoint. */}
       <section className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24">
-        <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
+        <motion.div
+          className="flex items-baseline justify-between gap-6 flex-wrap mb-14"
+          initial={{ opacity: 0, y: 20 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-60px' }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        >
           <h2 className="display text-4xl md:text-5xl text-ink">How it works</h2>
           <span className="eyebrow">Three on-chain steps</span>
-        </div>
-        <ol className="grid grid-cols-1 md:grid-cols-3 gap-y-10 md:gap-x-10">
+        </motion.div>
+        <motion.ol
+          className="grid grid-cols-1 md:grid-cols-3 gap-y-10 md:gap-x-10"
+          variants={STAGGER_CONTAINER}
+          initial="hidden"
+          whileInView="show"
+          viewport={{ once: true, margin: '-60px' }}
+        >
           {STEPS.map((s, i) => (
-            <li key={s.n} className="relative flex flex-col gap-3">
+            <motion.li key={s.n} variants={STAGGER_ITEM} className="relative flex flex-col gap-3">
               <div className="flex items-center gap-4">
                 <span className="display text-ink text-6xl md:text-7xl leading-none">
                   {s.n}
                 </span>
-                {/* Hairline connector to the next step. Hidden on the last item
-                    and on mobile (the stepper collapses to a vertical stack). */}
                 {i < STEPS.length - 1 && (
                   <span aria-hidden className="hidden md:flex flex-1 h-px bg-rule" />
                 )}
               </div>
               <h3 className="text-lg font-medium text-ink">{s.title}</h3>
               <p className="text-sm text-ink-2 leading-relaxed max-w-prose">{s.text}</p>
-            </li>
+            </motion.li>
           ))}
-        </ol>
+        </motion.ol>
       </section>
 
       {/* Why Arc — one uniform spec sheet. Every reason is the same row: a
@@ -494,16 +526,29 @@ export default function Home() {
         className="max-w-content mx-auto w-full px-4 md:px-8 pt-12 pb-24"
         aria-labelledby="why-arc-heading"
       >
-        <div className="flex items-baseline justify-between gap-6 flex-wrap mb-14">
+        <motion.div
+          className="flex items-baseline justify-between gap-6 flex-wrap mb-14"
+          initial={{ opacity: 0, y: 20 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-60px' }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        >
           <h2 id="why-arc-heading" className="display text-4xl md:text-5xl text-ink">Why Arc</h2>
           <span className="eyebrow text-ink-3">Six things that hold up</span>
-        </div>
-        <ol className="border-b border-rule">
+        </motion.div>
+        <motion.ol
+          className="border-b border-rule"
+          variants={STAGGER_CONTAINER}
+          initial="hidden"
+          whileInView="show"
+          viewport={{ once: true, margin: '-80px' }}
+        >
           {REASONS.map(({ title, text }, idx) => {
             const n = String(idx + 1).padStart(2, '0')
             return (
-              <li
+              <motion.li
                 key={title}
+                variants={STAGGER_ITEM}
                 className="grid grid-cols-1 md:grid-cols-[7rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)] gap-y-3 md:gap-x-8 lg:gap-x-12 py-8 md:py-10 border-t border-rule"
               >
                 <div className="md:pt-1.5 lg:pt-2 flex items-baseline gap-3 md:block">
@@ -523,10 +568,10 @@ export default function Home() {
                     {text}
                   </p>
                 </div>
-              </li>
+              </motion.li>
             )
           })}
-        </ol>
+        </motion.ol>
       </section>
 
       {/* Footer */}

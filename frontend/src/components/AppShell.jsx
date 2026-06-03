@@ -1,4 +1,5 @@
 import { NavLink, Link } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import IconButton from './IconButton.jsx'
 import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
@@ -127,12 +128,21 @@ function TopNav() {
             key={item.to}
             to={item.to}
             className={({ isActive }) =>
-              isActive
-                ? 'text-sm font-medium text-ink'
-                : 'text-sm font-medium text-ink-2 hover:text-ink transition-colors'
+              `relative text-sm font-medium pb-0.5 ${isActive ? 'text-ink' : 'text-ink-2 hover:text-ink transition-colors'}`
             }
           >
-            {item.label}
+            {({ isActive }) => (
+              <>
+                {item.label}
+                {isActive && (
+                  <motion.span
+                    layoutId="nav-underline"
+                    className="absolute bottom-0 left-0 right-0 h-px bg-clay rounded-full"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                  />
+                )}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>

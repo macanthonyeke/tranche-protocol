@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
@@ -10,6 +10,36 @@ import { useRoles } from '../hooks/useRoles.jsx'
 import { formatUSDC, formatUSDCNumber } from '../utils/format.js'
 
 const PAGE_SIZE = 9
+
+function useCountUp(target, duration = 900) {
+  const [value, setValue] = useState(0)
+  const reduce = useReducedMotion()
+  const rafRef = useRef(null)
+  useEffect(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    if (reduce || target === 0) { setValue(target); return }
+    const start = performance.now()
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 4)
+      setValue(target * eased)
+      if (t < 1) rafRef.current = requestAnimationFrame(tick)
+      else setValue(target)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+  }, [target, duration, reduce])
+  return value
+}
+
+const TILE_CONTAINER = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.07 } },
+}
+const TILE_ITEM = {
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] } },
+}
 
 const isActionNeeded = (e) => {
   if (e.state !== 0) return false
@@ -117,26 +147,40 @@ function DashboardInner() {
           The Claimable tile is a Link to /settings when there's something to
           withdraw — that interaction shift is what keeps the row from reading
           as an identical card grid. */}
-      <section aria-label="Account summary" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading}>
-          <UsdcValue value={usdcBalance} />
-        </StatTile>
+      <motion.section
+        aria-label="Account summary"
+        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
+        variants={TILE_CONTAINER}
+        initial="hidden"
+        animate="show"
+      >
+        <motion.div variants={TILE_ITEM}>
+          <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading}>
+            <UsdcValue value={usdcBalance} />
+          </StatTile>
+        </motion.div>
 
-        <StatTile label="Active Escrows" sublabel={activeCount === 1 ? 'In progress' : 'In progress'} loading={isLoading}>
-          <CountValue value={activeCount} />
-        </StatTile>
+        <motion.div variants={TILE_ITEM}>
+          <StatTile label="Active Escrows" sublabel={activeCount === 1 ? 'In progress' : 'In progress'} loading={isLoading}>
+            <CountValue value={activeCount} />
+          </StatTile>
+        </motion.div>
 
-        <StatTile
-          label="Open Disputes"
-          sublabel={openDisputeCount > 0 ? 'Needs attention' : 'All clear'}
-          tone={openDisputeCount > 0 ? 'warning' : 'default'}
-          loading={isLoading}
-        >
-          <CountValue value={openDisputeCount} tone={openDisputeCount > 0 ? 'warning' : 'default'} />
-        </StatTile>
+        <motion.div variants={TILE_ITEM}>
+          <StatTile
+            label="Open Disputes"
+            sublabel={openDisputeCount > 0 ? 'Needs attention' : 'All clear'}
+            tone={openDisputeCount > 0 ? 'warning' : 'default'}
+            loading={isLoading}
+          >
+            <CountValue value={openDisputeCount} tone={openDisputeCount > 0 ? 'warning' : 'default'} />
+          </StatTile>
+        </motion.div>
 
-        <ClaimableTile loading={isLoading} balance={refundBal} />
-      </section>
+        <motion.div variants={TILE_ITEM}>
+          <ClaimableTile loading={isLoading} balance={refundBal} />
+        </motion.div>
+      </motion.section>
 
       <section>
         <div className="flex items-center justify-between gap-4">
@@ -202,15 +246,15 @@ function DashboardInner() {
         ) : (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-8">
-              <AnimatePresence initial={false} mode="popLayout">
-                {visibleEscrows.map((e) => (
+              <AnimatePresence mode="popLayout">
+                {visibleEscrows.map((e, i) => (
                   <motion.div
                     key={e.id}
                     layout
-                    initial={{ opacity: 0, y: 8 }}
+                    initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -4 }}
-                    transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                    exit={{ opacity: 0, scale: 0.97 }}
+                    transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1], delay: i * 0.05 }}
                   >
                     <PremiumEscrowCard summary={e} />
                   </motion.div>
@@ -463,9 +507,12 @@ function StatTile({ label, sublabel, children, tone = 'default', loading = false
 }
 
 function UsdcValue({ value }) {
+  const raw = (value !== undefined && value !== null) ? Number(value) / 1e6 : 0
+  const animated = useCountUp(raw)
+  const formatted = animated.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   return (
     <span className="font-mono tabular-nums text-2xl font-semibold tracking-tight text-ink leading-none">
-      {formatUSDCNumber(value)}
+      {formatted}
       <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
     </span>
   )
@@ -483,6 +530,18 @@ function CountValue({ value, tone = 'default' }) {
 /* The Claimable tile is a Link when there's something to withdraw, a static
    div when there isn't. The interaction shift is the load-bearing visual
    distinction between this tile and the other three. */
+function ClaimableTileValue({ balance, hasFunds }) {
+  const raw = (balance !== undefined && balance !== null) ? Number(balance) / 1e6 : 0
+  const animated = useCountUp(raw)
+  const formatted = animated.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return (
+    <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-clay' : 'text-ink'}`}>
+      {formatted}
+      <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
+    </span>
+  )
+}
+
 function ClaimableTile({ balance, loading }) {
   const hasFunds = balance > 0n
 
@@ -505,10 +564,7 @@ function ClaimableTile({ balance, loading }) {
         {loading ? (
           <Skeleton className="h-7 w-24" />
         ) : (
-          <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-clay' : 'text-ink'}`}>
-            {formatUSDCNumber(balance)}
-            <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
-          </span>
+          <ClaimableTileValue balance={balance} hasFunds={hasFunds} />
         )}
       </div>
       <span className={`text-xs ${hasFunds ? 'text-clay' : 'text-ink-3'}`}>
