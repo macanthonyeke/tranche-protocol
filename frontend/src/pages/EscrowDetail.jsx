@@ -1,7 +1,7 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAccount } from 'wagmi'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import CustomSelect from '../components/CustomSelect.jsx'
@@ -329,6 +329,39 @@ function contractSuffix(invoiceHash) {
    released, muted dash when refunded/cancelled. Open disputes drop the inline
    dispute resolution UI directly below the action area so evidence and
    counter-evidence stay attached to their milestone. */
+const BURST_PARTICLES = Array.from({ length: 12 }, (_, i) => {
+  const angle = (i / 12) * 2 * Math.PI
+  const r = i % 2 === 0 ? 44 : 28
+  return {
+    id: i,
+    x: Math.round(Math.cos(angle) * r),
+    y: Math.round(Math.sin(angle) * r),
+    color: ['var(--ok)', 'var(--clay)', 'var(--warn)'][i % 3],
+    size: i % 3 === 0 ? 6 : 4,
+  }
+})
+
+function ConfettiBurst({ active }) {
+  return (
+    <AnimatePresence>
+      {active && BURST_PARTICLES.map((p) => (
+        <motion.span
+          key={p.id}
+          style={{
+            position: 'absolute', top: '18%', left: '72%',
+            width: p.size, height: p.size,
+            borderRadius: '50%', background: p.color,
+            pointerEvents: 'none', zIndex: 20,
+          }}
+          initial={{ x: 0, y: 0, opacity: 1, scale: 1 }}
+          animate={{ x: p.x, y: p.y, opacity: 0, scale: 0 }}
+          transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+        />
+      ))}
+    </AnimatePresence>
+  )
+}
+
 function MilestoneStack({
   escrow, milestones, disputes, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadlines,
@@ -353,17 +386,17 @@ function MilestoneStack({
       </div>
 
       <div className="flex flex-col gap-4">
-        <AnimatePresence initial={false}>
+        <AnimatePresence>
           {milestones.map((m, i) => {
             const opt = optimistic[`milestone_${i}`]
             return (
               <motion.div
                 key={i}
                 layout
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 18 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+                exit={{ opacity: 0, y: -8, scale: 0.98 }}
+                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1], delay: i * 0.07 }}
               >
                 <MilestoneRow
                   escrow={escrow}
@@ -406,6 +439,18 @@ function MilestoneRow({
 
   const now = Math.floor(Date.now() / 1000)
   const deadlinePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline)
+
+  const reduce = useReducedMotion()
+  const prevStateRef = useRef(milestone.state)
+  const [burst, setBurst] = useState(false)
+  useEffect(() => {
+    if (!reduce && prevStateRef.current !== 3 && milestone.state === 3) {
+      setBurst(true)
+      const id = setTimeout(() => setBurst(false), 900)
+      return () => clearTimeout(id)
+    }
+    prevStateRef.current = milestone.state
+  }, [milestone.state, reduce])
 
   const description = describeMilestone(milestone, {
     claimed, reviewWindowExpired, deadlinePassed
@@ -500,6 +545,7 @@ function MilestoneRow({
         dispute && dispute.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
           <ResolutionNote dispute={dispute} />
         )}
+      <ConfettiBurst active={burst} />
     </div>
   )
 }

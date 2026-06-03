@@ -102,6 +102,7 @@ function DashboardInner() {
   const refundBal = dashboard?.refundBalance ?? 0n
   const activeCount = dashboard?.activeEscrowCount ?? 0
   const openDisputeCount = dashboard?.openDisputeCount ?? 0
+  const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
 
   // Build a unified list of summaries with role attached, deduplicating in the
   // unlikely case the same wallet is both depositor and recipient.
@@ -203,7 +204,7 @@ function DashboardInner() {
           <div className="flex items-center gap-2 px-3 py-1 bg-sunk border border-rule rounded-md shrink-0">
             <span className="w-1.5 h-1.5 bg-ok rounded-full animate-pulse" />
             <span className="text-xs font-mono tabular-nums text-ink-2 tracking-widest uppercase whitespace-nowrap">
-              {mySummaries.length} Total On-Chain
+              {totalOnChain} Total On-Chain
             </span>
           </div>
         </div>

@@ -17,10 +17,13 @@ const ExternalLinkIcon = (props) => (
 )
 
 function ContractPill({ address }) {
+  const [copied, setCopied] = useState(false)
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(address)
       toast.success('Contract address copied')
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     } catch {
       toast.error('Copy failed')
     }
@@ -34,7 +37,17 @@ function ContractPill({ address }) {
         title="Copy contract address"
         className="flex items-center gap-2 hover:text-ink text-ink-2 transition-colors cursor-pointer bg-transparent border-0 p-0 font-sans"
       >
-        <span className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Contract</span>
+        <AnimatePresence mode="wait" initial={false}>
+          {copied ? (
+            <motion.span key="check" initial={{ opacity: 0, scale: 0.7 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.7 }} transition={{ duration: 0.15 }} className="text-[10px] uppercase tracking-[0.18em] text-ok">
+              ✓ Copied
+            </motion.span>
+          ) : (
+            <motion.span key="label" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="text-[10px] uppercase tracking-[0.18em] text-ink-3">
+              Contract
+            </motion.span>
+          )}
+        </AnimatePresence>
         <span className="num text-xs">{truncateAddr(address)}</span>
       </button>
       <span aria-hidden className="w-px h-4 bg-rule mx-1" />
@@ -99,6 +112,27 @@ const DESTINATIONS = [
   { name: 'Monad', icon: '/icons/monad.svg' }
 ]
 
+function HeroAmount() {
+  const reduceMotion = useReducedMotion()
+  const [display, setDisplay] = useState('0.00')
+  useEffect(() => {
+    if (reduceMotion) { setDisplay('25,000.00'); return }
+    const target = 25000
+    const dur = 2400
+    const start = performance.now()
+    let raf
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / dur)
+      const eased = 1 - Math.pow(1 - t, 4)
+      setDisplay((target * eased).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
+      if (t < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [reduceMotion])
+  return <span className="num text-5xl text-ink">{display}</span>
+}
+
 function HeroVisual() {
   const reduceMotion = useReducedMotion()
   const [destIndex, setDestIndex] = useState(0)
@@ -142,7 +176,7 @@ function HeroVisual() {
 
       <div className="eyebrow mb-2">Locked amount</div>
       <div className="mb-6 flex items-baseline">
-        <span className="num text-5xl text-ink">25,000.00</span>
+        <HeroAmount />
         <span className="display text-xl text-ink-2 font-sans ml-2">USDC</span>
       </div>
 
