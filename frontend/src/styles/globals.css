@@ -77,6 +77,13 @@
     --shadow-lift-lg: 0 6px 18px color-mix(in oklch, var(--ink) 9%, transparent);
     --shadow-glow-accent: 0 0 14px color-mix(in oklch, var(--clay) 55%, transparent);
 
+    /* BackgroundDrift — per-group opacity. Light mode needs higher values
+       because oklch(58%) clay on a 96% cream background has low natural contrast. */
+    --drift-op-1: 0.085;
+    --drift-op-2: 0.065;
+    --drift-op-3: 0.050;
+    --drift-op-4: 0.038;
+
     color-scheme: light;
   }
 
@@ -103,6 +110,13 @@
     --shadow-lift-md: 0 3px 10px color-mix(in oklch, black 38%, transparent);
     --shadow-lift-lg: 0 10px 28px color-mix(in oklch, black 48%, transparent);
     --shadow-glow-accent: 0 0 16px color-mix(in oklch, var(--clay) 65%, transparent);
+
+    /* BackgroundDrift — dark mode clay (oklch 72%) on near-black has more
+       natural contrast, so lower opacity than light mode. */
+    --drift-op-1: 0.048;
+    --drift-op-2: 0.036;
+    --drift-op-3: 0.028;
+    --drift-op-4: 0.020;
 
     color-scheme: dark;
   }
@@ -135,6 +149,7 @@
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    transition: background-color 300ms ease;
   }
 
   ::selection {
@@ -384,6 +399,34 @@
   @keyframes shimmer-sweep {
     0%   { transform: translateX(-100%); }
     100% { transform: translateX(100%); }
+  }
+
+  /* ── BackgroundDrift keyframes ──────────────────────────────── */
+  /* Each animation encodes both translate and rotate so they don't
+     conflict with any inline transform on the element. All return to
+     origin at 100% for a seamless infinite loop. */
+  @keyframes bg-drift-1 {
+    0%   { transform: translate(  0px,   0px) rotate(-14deg); }
+    35%  { transform: translate( 22px, -14px) rotate(-11deg); }
+    65%  { transform: translate(-10px,  13px) rotate(-17deg); }
+    100% { transform: translate(  0px,   0px) rotate(-14deg); }
+  }
+  @keyframes bg-drift-2 {
+    0%   { transform: translate(  0px,  0px) rotate( 10deg); }
+    28%  { transform: translate(-20px, -11px) rotate(  7deg); }
+    58%  { transform: translate(-26px,  7px) rotate( 13deg); }
+    100% { transform: translate(  0px,  0px) rotate( 10deg); }
+  }
+  @keyframes bg-drift-3 {
+    0%   { transform: translate( 0px, 0px) rotate(-4deg); }
+    50%  { transform: translate(15px, 11px) rotate(-7deg); }
+    100% { transform: translate( 0px, 0px) rotate(-4deg); }
+  }
+  @keyframes bg-drift-4 {
+    0%   { transform: translate(  0px,  0px) rotate(22deg); }
+    38%  { transform: translate(-13px,  9px) rotate(19deg); }
+    72%  { transform: translate(  9px, -6px) rotate(25deg); }
+    100% { transform: translate(  0px,  0px) rotate(22deg); }
   }
 
   @keyframes tx-success-pop {

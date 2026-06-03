@@ -374,7 +374,7 @@ function CodeEditor() {
    ------------------------------------------------------------ */
 export default function Home() {
   return (
-    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-clip bg-paper text-ink transition-colors duration-300">
+    <div className="flex flex-col min-h-screen w-full max-w-full overflow-x-clip text-ink transition-colors duration-300">
       {/* Marketing top nav — sticky to match the in-app shell header.
           The root uses overflow-x-clip (not -hidden) so it doesn't become a
           scroll container and silently break this header's sticky positioning. */}
