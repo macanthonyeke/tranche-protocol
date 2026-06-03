@@ -428,6 +428,12 @@
     72%  { transform: translate(  9px, -6px) rotate(25deg); }
     100% { transform: translate(  0px,  0px) rotate(22deg); }
   }
+  /* Reads --op from the element (set via inline style) so one keyframe
+     covers all four groups across both light and dark mode. */
+  @keyframes bg-breathe {
+    0%, 100% { opacity: var(--op); }
+    50%       { opacity: calc(var(--op) * 0.55); }
+  }
 
   @keyframes tx-success-pop {
     0%   { opacity: 0; transform: scale(0.85); }
