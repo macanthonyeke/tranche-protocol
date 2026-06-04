@@ -39,7 +39,7 @@ contract TrancheProtocolLifecycleTest is Base {
     function test_Claim_RevertOn_AfterDeadline() public {
         uint256 id = _depositSingle(1000e6);
         // Past the deadline *and* the delivery grace period.
-        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
+        vm.warp(block.timestamp + 30 days + 72 hours + 1);
         vm.prank(recipient);
         vm.expectRevert(DeadlinePassed.selector);
         escrow.claimDelivery(id, 0);
@@ -105,7 +105,7 @@ contract TrancheProtocolLifecycleTest is Base {
     function test_RefundAfterDeadline_RecipientNeverClaimed() public {
         uint256 id = _depositSingle(1000e6);
         // Refund only opens after the full delivery grace period elapses.
-        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
+        vm.warp(block.timestamp + 30 days + 72 hours + 1);
         vm.prank(stranger); // permissionless
         escrow.refundAfterDeadline(id, 0);
 
@@ -146,7 +146,7 @@ contract TrancheProtocolLifecycleTest is Base {
     /// @notice The recipient can claim right up to the last second of grace.
     function test_GracePeriod_Claim_SucceedsAtGraceEdge() public {
         uint256 id = _depositSingle(1000e6);
-        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD());
+        vm.warp(block.timestamp + 30 days + 72 hours);
         _claimDelivery(id, 0);
         assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.IN_REVIEW));
     }
@@ -156,7 +156,7 @@ contract TrancheProtocolLifecycleTest is Base {
     function test_GracePeriod_Refund_RevertWhileGraceActive() public {
         uint256 id = _depositSingle(1000e6);
         // Past the deadline but still inside the grace window.
-        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD());
+        vm.warp(block.timestamp + 30 days + 72 hours);
         vm.expectRevert(DeadlineNotReached.selector);
         escrow.refundAfterDeadline(id, 0);
     }
@@ -165,7 +165,7 @@ contract TrancheProtocolLifecycleTest is Base {
     ///         with no delivery claim.
     function test_GracePeriod_Refund_SucceedsAfterFullGrace() public {
         uint256 id = _depositSingle(1000e6);
-        vm.warp(block.timestamp + 30 days + escrow.DELIVERY_GRACE_PERIOD() + 1);
+        vm.warp(block.timestamp + 30 days + 72 hours + 1);
         vm.prank(stranger); // permissionless
         escrow.refundAfterDeadline(id, 0);
 

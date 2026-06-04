@@ -283,6 +283,8 @@ console.log('Deployer has DEFAULT_ADMIN_ROLE:', deployerIsAdmin);
 // RECOVERY_MANAGER_ROLE remain with the deployer — see warning at top of
 // file before mainnet.
 await grantRoleIfMissing(domainManagerRole, DOMAIN_MANAGER_ADDRESS, 'DOMAIN_MANAGER_ROLE');
+await grantRoleIfMissing(feeManagerRole, process.env.ARBITER_ADDRESS, 'FEE_MANAGER_ROLE');
+await grantRoleIfMissing(recoveryManagerRole, process.env.ARBITER_ADDRESS, 'RECOVERY_MANAGER_ROLE');
 
 await executeWithDomainManagerAndWait(
   'addSupportedDomain',
@@ -309,6 +311,8 @@ const [
   deployerStillDomainManager,
   deployerFeeManager,
   deployerRecoveryManager,
+  arbiterFeeManager,
+  arbiterRecoveryManager,
   arcSupported,
   cctpForwardFee,
 ] = await Promise.all([
@@ -318,6 +322,8 @@ const [
   readContract('hasRole', [domainManagerRole, DEPLOYER_ADDRESS]),
   readContract('hasRole', [feeManagerRole, DEPLOYER_ADDRESS]),
   readContract('hasRole', [recoveryManagerRole, DEPLOYER_ADDRESS]),
+  readContract('hasRole', [feeManagerRole, process.env.ARBITER_ADDRESS]),
+  readContract('hasRole', [recoveryManagerRole, process.env.ARBITER_ADDRESS]),
   readContract('supportedDomains', [26]),
   readContract('cctpForwardFee'),
 ]);
@@ -329,6 +335,8 @@ console.log('Domain manager configured:', domainManagerSet);
 console.log('Deployer still domain manager:', deployerStillDomainManager);
 console.log('Deployer has FEE_MANAGER_ROLE:', deployerFeeManager);
 console.log('Deployer has RECOVERY_MANAGER_ROLE:', deployerRecoveryManager);
+console.log(`${process.env.ARBITER_ADDRESS} has FEE_MANAGER_ROLE:`, arbiterFeeManager);
+console.log(`${process.env.ARBITER_ADDRESS} has RECOVERY_MANAGER_ROLE:`, arbiterRecoveryManager);
 console.log('Arc domain 26 supported:', arcSupported);
 console.log('cctpForwardFee:', cctpForwardFee.toString());
 

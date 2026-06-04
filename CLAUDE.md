@@ -1,0 +1,148 @@
+# Tranche Protocol — Claude Context
+
+## What this project is
+
+Tranche Protocol V2 is an on-chain escrow protocol on Circle's Arc Testnet. Payments are milestone-based USDC escrows with an optimistic release flow, arbiter dispute resolution, and CCTP V2 cross-chain refunds. The stack is: Solidity (Foundry), a Node.js bot, a Vite/React frontend, and a Goldsky subgraph indexer.
+
+---
+
+## Current deployment
+
+| Key | Value |
+|-----|-------|
+| Contract address | `0xa87d0bece65f11236373fd0eaf98662814df8e97` |
+| Deploy block | `45472341` |
+| Chain | Arc Testnet (chain ID 5042002) |
+| USDC | `0x3600000000000000000000000000000000000000` |
+| TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| Deployer | `0x179cc4c8f23d257b7f4acb785464025570e3af86` |
+| Arbiter / Pauser / Treasury | `0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03` |
+| Explorer | https://testnet.arcscan.app |
+| Contract on explorer | https://testnet.arcscan.app/address/0xa87d0bece65f11236373fd0eaf98662814df8e97 |
+| Source verified | Yes (Blockscout, 2026-06-04) |
+
+---
+
+## Deployment
+
+**Always use `npm run full-gas`, never `npm run full`.**
+
+Circle's API always runs `eth_estimateGas` — Arc Testnet's estimation enforces EIP-170 (24 KB runtime limit) even though the chain does not. The explicit-gas script bypasses estimation.
+
+```sh
+forge build
+cd deploy
+npm run full-gas   # deploy → setup → verify
+```
+
+After deploy, verify source on the explorer, sync the subgraph, then redeploy to Goldsky:
+```sh
+# 1. Verify on arcscan
+forge verify-contract <CONTRACT_ADDRESS> src/TrancheProtocol.sol:TrancheProtocol \
+  --chain-id 5042002 \
+  --etherscan-api-key placeholder \
+  --verifier blockscout \
+  --verifier-url "https://testnet.arcscan.app/api" \
+  --compiler-version "v0.8.24+commit.e11b9ed9" \
+  --optimizer-runs 1 \
+  --via-ir \
+  --constructor-args $(cast abi-encode "constructor(address,address,address,address,address,address)" \
+    0x3600000000000000000000000000000000000000 \
+    0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03 \
+    0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03 \
+    0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03 \
+    0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA \
+    0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03)
+
+# 2. Sync indexer config + ABI, then build and deploy subgraph
+cd indexer
+npm run sync                                               # updates subgraph.yaml, networks.json, both ABI copies
+npm run codegen && npm run build
+~/.local/bin/goldsky subgraph deploy tranche-protocol/0.1.0 --path .
+```
+
+### Bytecode size budget
+Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,394 bytes** (182-byte margin). The contract is already at `optimizer_runs = 1` and `via_ir = true`. If the budget is exceeded again, make non-external constants `internal` to remove their auto-generated getters.
+
+Constants that are `internal` (no public getter, not readable via RPC):
+`MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`
+
+Constants that must stay `public` (read by setup/verify scripts or frontend):
+`ARBITER_ROLE`, `PAUSER_ROLE`, `DOMAIN_MANAGER_ROLE`, `FEE_MANAGER_ROLE`, `RECOVERY_MANAGER_ROLE`, `ARC_DOMAIN`, `BPS_DENOMINATOR`, `ARBITER_WINDOW`.
+
+---
+
+## Role assignments (current deploy)
+
+| Role | Holder |
+|------|--------|
+| `DEFAULT_ADMIN_ROLE` | Deployer wallet |
+| `ARBITER_ROLE` | `0x2Fcbb92566...` |
+| `PAUSER_ROLE` | `0x2Fcbb92566...` |
+| `DOMAIN_MANAGER_ROLE` | `0x2Fcbb92566...` |
+| `FEE_MANAGER_ROLE` | Deployer + `0x2Fcbb92566...` |
+| `RECOVERY_MANAGER_ROLE` | Deployer + `0x2Fcbb92566...` |
+
+---
+
+## Project structure
+
+```
+src/TrancheProtocol.sol       — main contract
+src/interface/                — ITrancheProtocol, ITokenMessenger
+test/                         — Foundry test suite (177 tests)
+deploy/                       — Node.js deploy/setup/verify scripts
+  deploy-explicit-gas.mjs     — bypasses Circle estimation (use this)
+  setup.js                    — grants roles, adds domain, sets fee
+  verify.js                   — reads and prints full contract state
+frontend/                     — Vite + React + wagmi UI
+bot/                          — Node.js listener/alerting bot
+indexer/                      — Goldsky subgraph
+```
+
+---
+
+## Subgraph (Goldsky)
+
+| Key | Value |
+|-----|-------|
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.1.0/gn` |
+| Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
+| Subgraph name/version | `tranche-protocol/0.1.0` |
+| Network slug | `arc-testnet` |
+| goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
+
+The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; it falls back to on-chain reads otherwise. The endpoint is currently set.
+
+### Event handlers (current mapping)
+
+| Event | Handler | Effect |
+|-------|---------|--------|
+| `EscrowCreated` | `handleEscrowCreated` | Creates Escrow entity |
+| `EscrowTermsSnapshotted` | `handleEscrowTermsSnapshotted` | Sets fee snapshot |
+| `SplitConfigured` / `SplitsConfigured` | split handlers | Creates Split entities |
+| `DeliveryClaimed` | `handleDeliveryClaimed` | Milestone → FULFILLED, sets reviewDeadline |
+| `MilestoneApproved` | `handleMilestoneApproved` | Milestone → RELEASED, settledVia=APPROVED |
+| `MilestoneReleased` | `handleMilestoneReleased` | Milestone → RELEASED, settledVia=RELEASED_NO_DISPUTE |
+| `MilestoneCancelled` | `handleMilestoneCancelled` | Milestone → REFUNDED, settledVia=MILESTONE_CANCELLED |
+| `RefundedAfterDeadline` | `handleRefundedAfterDeadline` | Milestone → REFUNDED, settledVia=REFUNDED_AFTER_DEADLINE |
+| `DisputeRaised` | `handleDisputeRaised` | Milestone → DISPUTED, creates Dispute |
+| `CounterEvidenceSubmitted` | `handleCounterEvidenceSubmitted` | Updates Dispute |
+| `DisputeResolved` | `handleDisputeResolved` | Milestone → RELEASED, settledVia=DISPUTE_RESOLVED |
+| `DisputeTimedOutSettled` | `handleDisputeTimedOutSettled` | Milestone → RELEASED, settledVia=DISPUTE_TIMEOUT |
+| `MutualSettlementExecuted` | `handleMutualSettlementExecuted` | Milestone → RELEASED, settledVia=MUTUAL_SETTLEMENT |
+| `EscrowRefundedViaMutualCancel` | `handleEscrowRefundedViaMutualCancel` | Escrow → CANCELLED |
+| `PartialRefundCredited` | `handlePartialRefundCredited` | Updates RefundBalance + RefundCredit |
+| `RefundWithdrawn` | `handleRefundWithdrawn` | Decrements RefundBalance |
+| `RefundCreditTransferred` | `handleRefundCreditTransferred` | Moves balance between wallets |
+
+Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by the current contract — their handlers were removed.
+
+---
+
+## Key design notes
+
+- **Optimistic release**: recipient calls `claimDelivery`, depositor has a review window to dispute; after the window anyone can permissionlessly `release`.
+- **CCTP V2 cross-chain**: refunds to non-Arc addresses use Circle's forwarding service. `cctpForwardFee` must be set before cross-chain paths work (currently 0 = same-chain only).
+- **Fee snapshot**: `escrowFeeBps` and `escrowTreasury` are snapshotted at deposit so admin fee changes don't retroactively affect in-flight escrows.
+- **`DELIVERY_GRACE_PERIOD` = 72 hours**: recipient can still claim delivery up to 72 h after the nominal deadline; depositor's `refundAfterDeadline` only opens after this grace period elapses.

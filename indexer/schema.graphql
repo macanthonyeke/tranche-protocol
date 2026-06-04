@@ -70,18 +70,16 @@ type Milestone @entity(immutable: false) {
   "NOT emitted on-chain — always null. Hydrate via getMilestones(escrowId) on the detail page."
   amount: BigInt
 
-  "Deadline to dispute after ConditionFulfilled."
-  disputeDeadline: BigInt
-  fulfilledAt: BigInt
-  "Timestamp the recipient signalled delivery (DeliverySignaled); null if never."
+  "Review window deadline from DeliveryClaimed (block.timestamp + reviewWindow)."
+  reviewDeadline: BigInt
+  "Timestamp the recipient claimed delivery (DeliveryClaimed)."
   deliveredAt: BigInt
-  silentApprovalClaimedBy: Bytes
 
   "Recipient basis points the milestone settled at (resolution / timeout default / mutual)."
   resolutionBps: BigInt
   resolutionURI: String
   resolutionHash: Bytes
-  "RELEASED_NO_DISPUTE | DISPUTE_RESOLVED | DISPUTE_TIMEOUT | MUTUAL_SETTLEMENT | null"
+  "APPROVED | RELEASED_NO_DISPUTE | DISPUTE_RESOLVED | DISPUTE_TIMEOUT | MUTUAL_SETTLEMENT | REFUNDED_AFTER_DEADLINE | MILESTONE_CANCELLED | null"
   settledVia: String
 
   dispute: Dispute

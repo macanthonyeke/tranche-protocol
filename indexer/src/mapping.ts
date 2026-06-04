@@ -12,18 +12,16 @@ import {
   EscrowTermsSnapshotted,
   SplitConfigured,
   SplitsConfigured,
-  ConditionFulfilled,
-  DeliverySignaled,
-  SilentApprovalClaimed,
+  DeliveryClaimed,
+  MilestoneApproved,
+  MilestoneReleased,
+  MilestoneCancelled,
+  RefundedAfterDeadline,
   DisputeRaised,
   CounterEvidenceSubmitted,
-  EscalatedAfterDeadline,
   DisputeResolved,
   DisputeTimedOutSettled,
   MutualSettlementExecuted,
-  EscrowReleased,
-  EscrowRefunded,
-  EscrowReleasedWithoutDispute,
   EscrowRefundedViaMutualCancel,
   PartialRefundCredited,
   RefundWithdrawn,
@@ -46,8 +44,6 @@ function milestoneId(escrowId: BigInt, index: BigInt): string {
   return escrowId.toString() + "-" + index.toString();
 }
 
-// Loads an Escrow, creating a zero-initialised placeholder if an event arrives
-// before EscrowCreated (defensive — EscrowCreated should always come first).
 function getOrCreateEscrow(escrowId: BigInt, event: ethereum.Event): Escrow {
   let id = escrowId.toString();
   let e = Escrow.load(id);
@@ -75,8 +71,6 @@ function getOrCreateEscrow(escrowId: BigInt, event: ethereum.Event): Escrow {
   return e as Escrow;
 }
 
-// Loads or creates a Milestone, and keeps the parent escrow's best-effort
-// milestoneCount in sync (= highest index seen + 1).
 function getOrCreateMilestone(
   escrowId: BigInt,
   index: BigInt,
@@ -116,8 +110,6 @@ function getOrCreateRefundBalance(wallet: Bytes, ts: BigInt): RefundBalance {
   return r as RefundBalance;
 }
 
-// Marks a milestone's dispute closed and decrements the open-dispute counter
-// exactly once. Shared by the resolution / timeout / mutual-settlement paths.
 function closeDispute(
   escrowId: BigInt,
   index: BigInt,
@@ -193,44 +185,103 @@ export function handleSplitsConfigured(event: SplitsConfigured): void {
   escrow.save();
 }
 
-export function handleConditionFulfilled(event: ConditionFulfilled): void {
+// Recipient claims delivery; opens the review window for depositor to
+// approve or dispute. reviewDeadline = block.timestamp + reviewWindow.
+export function handleDeliveryClaimed(event: DeliveryClaimed): void {
   let m = getOrCreateMilestone(
     event.params.escrowId,
     event.params.milestoneIndex,
     event
   );
-  // Don't clobber a more-advanced state (DISPUTED / RELEASED / REFUNDED).
   if (m.state == MS_PENDING) {
     m.state = MS_FULFILLED;
   }
-  m.disputeDeadline = event.params.disputeDeadline;
-  m.fulfilledAt = event.block.timestamp;
+  m.reviewDeadline = event.params.reviewDeadline;
+  m.deliveredAt = event.block.timestamp;
   m.updatedAt = event.block.timestamp;
   m.save();
 }
 
-export function handleDeliverySignaled(event: DeliverySignaled): void {
+// Depositor explicitly approves delivery and triggers immediate release.
+export function handleMilestoneApproved(event: MilestoneApproved): void {
   let m = getOrCreateMilestone(
     event.params.escrowId,
     event.params.milestoneIndex,
     event
   );
-  m.deliveredAt = event.params.deliveredAt;
+  let was = m.state;
+  m.state = MS_RELEASED;
+  m.settledVia = "APPROVED";
   m.updatedAt = event.block.timestamp;
   m.save();
+  if (was != MS_RELEASED) {
+    let escrow = getOrCreateEscrow(event.params.escrowId, event);
+    escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
+    escrow.updatedAt = event.block.timestamp;
+    escrow.save();
+  }
 }
 
-export function handleSilentApprovalClaimed(
-  event: SilentApprovalClaimed
+// Permissionless release after review window lapses with no action (silence = consent).
+export function handleMilestoneReleased(event: MilestoneReleased): void {
+  let m = getOrCreateMilestone(
+    event.params.escrowId,
+    event.params.milestoneIndex,
+    event
+  );
+  let was = m.state;
+  m.state = MS_RELEASED;
+  m.settledVia = "RELEASED_NO_DISPUTE";
+  m.updatedAt = event.block.timestamp;
+  m.save();
+  if (was != MS_RELEASED) {
+    let escrow = getOrCreateEscrow(event.params.escrowId, event);
+    escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
+    escrow.updatedAt = event.block.timestamp;
+    escrow.save();
+  }
+}
+
+// Milestone refunded via mutual cancel proposal (both parties agreed).
+export function handleMilestoneCancelled(event: MilestoneCancelled): void {
+  let m = getOrCreateMilestone(
+    event.params.escrowId,
+    event.params.milestoneIndex,
+    event
+  );
+  let was = m.state;
+  m.state = MS_REFUNDED;
+  m.settledVia = "MILESTONE_CANCELLED";
+  m.updatedAt = event.block.timestamp;
+  m.save();
+  if (was != MS_REFUNDED) {
+    let escrow = getOrCreateEscrow(event.params.escrowId, event);
+    escrow.refundedMilestoneCount = escrow.refundedMilestoneCount + 1;
+    escrow.updatedAt = event.block.timestamp;
+    escrow.save();
+  }
+}
+
+// Depositor reclaims a milestone after the escrow deadline + grace period.
+export function handleRefundedAfterDeadline(
+  event: RefundedAfterDeadline
 ): void {
   let m = getOrCreateMilestone(
     event.params.escrowId,
     event.params.milestoneIndex,
     event
   );
-  m.silentApprovalClaimedBy = event.params.claimedBy;
+  let was = m.state;
+  m.state = MS_REFUNDED;
+  m.settledVia = "REFUNDED_AFTER_DEADLINE";
   m.updatedAt = event.block.timestamp;
   m.save();
+  if (was != MS_REFUNDED) {
+    let escrow = getOrCreateEscrow(event.params.escrowId, event);
+    escrow.refundedMilestoneCount = escrow.refundedMilestoneCount + 1;
+    escrow.updatedAt = event.block.timestamp;
+    escrow.save();
+  }
 }
 
 export function handleDisputeRaised(event: DisputeRaised): void {
@@ -255,7 +306,6 @@ export function handleDisputeRaised(event: DisputeRaised): void {
     dispute.resolved = false;
     isNewOpen = true;
   } else if (dispute.resolved) {
-    // Re-opened (rare) — count it as a fresh open dispute.
     dispute.resolved = false;
     dispute.resolvedAt = null;
     dispute.resolutionType = null;
@@ -290,53 +340,6 @@ export function handleCounterEvidenceSubmitted(
   dispute.save();
 }
 
-export function handleEscalatedAfterDeadline(
-  event: EscalatedAfterDeadline
-): void {
-  let m = getOrCreateMilestone(
-    event.params.escrowId,
-    event.params.milestoneIndex,
-    event
-  );
-  m.state = MS_DISPUTED;
-  m.updatedAt = event.block.timestamp;
-
-  let id = milestoneId(event.params.escrowId, event.params.milestoneIndex);
-  let dispute = Dispute.load(id);
-  let isNewOpen = false;
-  if (dispute == null) {
-    dispute = new Dispute(id);
-    dispute.escrow = event.params.escrowId.toString();
-    dispute.milestone = m.id;
-    dispute.milestoneIndex = event.params.milestoneIndex.toI32();
-    dispute.raisedBy = event.params.escalatedBy;
-    dispute.raisedAt = event.block.timestamp;
-    dispute.raisedTx = event.transaction.hash;
-    dispute.reason = event.params.reason;
-    dispute.evidenceHash = event.params.evidenceHash;
-    dispute.resolved = false;
-    isNewOpen = true;
-  } else if (dispute.resolved) {
-    dispute.resolved = false;
-    dispute.resolvedAt = null;
-    dispute.resolutionType = null;
-    isNewOpen = true;
-  }
-  dispute.isEscalation = true;
-  dispute.save();
-
-  m.dispute = dispute.id;
-  m.save();
-
-  if (isNewOpen) {
-    let escrow = getOrCreateEscrow(event.params.escrowId, event);
-    escrow.disputedMilestoneCount = escrow.disputedMilestoneCount + 1;
-    escrow.hasOpenDispute = true;
-    escrow.updatedAt = event.block.timestamp;
-    escrow.save();
-  }
-}
-
 export function handleDisputeResolved(event: DisputeResolved): void {
   closeDispute(
     event.params.escrowId,
@@ -352,12 +355,18 @@ export function handleDisputeResolved(event: DisputeResolved): void {
     event.params.milestoneIndex,
     event
   );
+  m.state = MS_RELEASED;
   m.settledVia = "DISPUTE_RESOLVED";
   m.resolutionBps = event.params.recipientBps;
   m.resolutionURI = event.params.resolutionURI;
   m.resolutionHash = event.params.resolutionHash;
   m.updatedAt = event.block.timestamp;
   m.save();
+
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
 }
 
 export function handleDisputeTimedOutSettled(
@@ -377,10 +386,16 @@ export function handleDisputeTimedOutSettled(
     event.params.milestoneIndex,
     event
   );
+  m.state = MS_RELEASED;
   m.settledVia = "DISPUTE_TIMEOUT";
   m.resolutionBps = event.params.defaultBps;
   m.updatedAt = event.block.timestamp;
   m.save();
+
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
 }
 
 export function handleMutualSettlementExecuted(
@@ -400,69 +415,16 @@ export function handleMutualSettlementExecuted(
     event.params.milestoneIndex,
     event
   );
+  m.state = MS_RELEASED;
   m.settledVia = "MUTUAL_SETTLEMENT";
   m.resolutionBps = event.params.bps;
   m.updatedAt = event.block.timestamp;
   m.save();
-}
 
-export function handleEscrowReleased(event: EscrowReleased): void {
-  let m = getOrCreateMilestone(
-    event.params.escrowId,
-    event.params.milestoneIndex,
-    event
-  );
-  let was = m.state;
-  m.state = MS_RELEASED;
-  m.resolutionHash = event.params.resolutionHash;
-  m.updatedAt = event.block.timestamp;
-  m.save();
-  if (was != MS_RELEASED) {
-    let escrow = getOrCreateEscrow(event.params.escrowId, event);
-    escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
-    escrow.updatedAt = event.block.timestamp;
-    escrow.save();
-  }
-}
-
-export function handleEscrowReleasedWithoutDispute(
-  event: EscrowReleasedWithoutDispute
-): void {
-  let m = getOrCreateMilestone(
-    event.params.escrowId,
-    event.params.milestoneIndex,
-    event
-  );
-  let was = m.state;
-  m.state = MS_RELEASED;
-  m.settledVia = "RELEASED_NO_DISPUTE";
-  m.updatedAt = event.block.timestamp;
-  m.save();
-  if (was != MS_RELEASED) {
-    let escrow = getOrCreateEscrow(event.params.escrowId, event);
-    escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
-    escrow.updatedAt = event.block.timestamp;
-    escrow.save();
-  }
-}
-
-export function handleEscrowRefunded(event: EscrowRefunded): void {
-  let m = getOrCreateMilestone(
-    event.params.escrowId,
-    event.params.milestoneIndex,
-    event
-  );
-  let was = m.state;
-  m.state = MS_REFUNDED;
-  m.resolutionHash = event.params.resolutionHash;
-  m.updatedAt = event.block.timestamp;
-  m.save();
-  if (was != MS_REFUNDED) {
-    let escrow = getOrCreateEscrow(event.params.escrowId, event);
-    escrow.refundedMilestoneCount = escrow.refundedMilestoneCount + 1;
-    escrow.updatedAt = event.block.timestamp;
-    escrow.save();
-  }
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
 }
 
 export function handleEscrowRefundedViaMutualCancel(

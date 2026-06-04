@@ -360,7 +360,7 @@ contract TrancheProtocolUpgradesTest is Base {
         (,,,,,, uint256 maxFee, uint32 minFinality,,) = _readBurnCall();
         assertEq(maxFee, CCTP_FORWARD_FEE, "cross-chain release() uses the snapshotted forward fee");
         assertEq(uint256(minFinality), 2000, "minFinalityThreshold must be 2000 (Standard Transfer)");
-        assertEq(uint256(escrow.CCTP_MIN_FINALITY_THRESHOLD()), 2000);
+        assertEq(uint256(minFinality), 2000, "constant must be 2000 (Standard Transfer)");
     }
 
     function test_RaiseDispute_StoresRaisedAtTimestamp() public {

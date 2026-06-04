@@ -20,15 +20,15 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     bytes32 public constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
-    uint256 public constant MAX_PROTOCOL_FEE = 500; // 5%
+    uint256 internal constant MAX_PROTOCOL_FEE = 500; // 5%
 
     /// @notice L-R3-05: hard caps on per-escrow milestone and split counts.
     ///         Both arrays are iterated on the release / completion paths, so an
     ///         unbounded array could push a release past the block gas limit and
     ///         strand the escrow. These bounds keep every path comfortably
     ///         within gas while staying generous for real invoices.
-    uint256 public constant MAX_MILESTONES = 20;
-    uint256 public constant MAX_SPLITS = 10;
+    uint256 internal constant MAX_MILESTONES = 20;
+    uint256 internal constant MAX_SPLITS = 10;
 
     /// @notice Upper bound on {cctpForwardFee} (L-01). The forwarding fee only
     ///         ever has to cover destination-chain gas for the relayed mint, so
@@ -36,7 +36,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         100 USDC (6 decimals) is comfortable headroom and stops a fat-
     ///         finger / compromised FEE_MANAGER from setting a fee so high it
     ///         bricks the permissionless release paths (see M-02).
-    uint256 public constant MAX_CCTP_FORWARD_FEE = 100e6; // 100 USDC
+    uint256 internal constant MAX_CCTP_FORWARD_FEE = 100e6; // 100 USDC
 
     /// @notice Magic tag Circle's CCTP V2 Forwarding Service watches for in
     ///         the burn-message hook data. When present, Circle relays the
@@ -48,12 +48,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///           byte      13 = length byte  (0)
     ///           bytes 14..31 = 18 zero padding bytes
     ///         Source: https://developers.circle.com/cctp/howtos/transfer-usdc-with-forwarding-service
-    bytes32 public constant FORWARD_HOOK_DATA = 0x636374702d666f72776172640000000000000000000000000000000000000000;
+    bytes32 internal constant FORWARD_HOOK_DATA = 0x636374702d666f72776172640000000000000000000000000000000000000000;
 
     /// @dev CCTP V2 finality threshold. We hardcode 2000 = Standard Transfer
     ///      (finalized). 1000 = Fast Transfer is explicitly disallowed
     ///      because it carries different reorg and fee semantics.
-    uint32 public constant CCTP_MIN_FINALITY_THRESHOLD = 2000;
+    uint32 internal constant CCTP_MIN_FINALITY_THRESHOLD = 2000;
 
     /// @notice Arc CCTP domain id. When destinationDomain == ARC_DOMAIN we are
     ///         doing a same-chain transfer and Circle does not charge the
@@ -64,8 +64,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     /// @notice Bounds on a per-escrow optimistic review window. The recipient
     ///         claims delivery; the depositor has this long to approve or
     ///         dispute before anyone can permissionlessly release.
-    uint256 public constant MIN_REVIEW_WINDOW = 1 days;
-    uint256 public constant MAX_REVIEW_WINDOW = 7 days;
+    uint256 internal constant MIN_REVIEW_WINDOW = 1 days;
+    uint256 internal constant MAX_REVIEW_WINDOW = 7 days;
     /// @notice Single arbiter-inaction window. After it elapses, a DISPUTED
     ///         milestone can be settled by the permissionless 50/50 timeout.
     uint256 public constant ARBITER_WINDOW = 14 days;
@@ -75,7 +75,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         deadline, and the depositor's {refundAfterDeadline} only opens
     ///         once it fully elapses. This stops a depositor from front-running
     ///         a just-late delivery claim with an instant deadline refund.
-    uint256 public constant DELIVERY_GRACE_PERIOD = 72 hours;
+    uint256 internal constant DELIVERY_GRACE_PERIOD = 72 hours;
 
     IERC20 public immutable usdc;
     ITokenMessenger public immutable tokenMessenger;

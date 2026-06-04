@@ -10,10 +10,10 @@ dataSources:
     network: arc-testnet
     source:
       # Live Tranche Protocol proxy — from deploy/.env CONTRACT_ADDRESS (matches frontend/.env).
-      address: "0xc6dadd5f4df5089ab4878387aaf44e4d42919765"
+      address: "0xa87d0bece65f11236373fd0eaf98662814df8e97"
       abi: TrancheProtocol
       # Proxy deployment block (found via on-chain getCode binary search).
-      startBlock: 44298133
+      startBlock: 45472341
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -38,30 +38,26 @@ dataSources:
           handler: handleSplitConfigured
         - event: SplitsConfigured(indexed uint256,uint256)
           handler: handleSplitsConfigured
-        - event: ConditionFulfilled(indexed uint256,uint256,uint256)
-          handler: handleConditionFulfilled
-        - event: DeliverySignaled(indexed uint256,uint256,uint256)
-          handler: handleDeliverySignaled
-        - event: SilentApprovalClaimed(indexed uint256,uint256,address)
-          handler: handleSilentApprovalClaimed
+        - event: DeliveryClaimed(indexed uint256,uint256,uint256)
+          handler: handleDeliveryClaimed
+        - event: MilestoneApproved(indexed uint256,uint256)
+          handler: handleMilestoneApproved
+        - event: MilestoneReleased(indexed uint256,uint256)
+          handler: handleMilestoneReleased
+        - event: MilestoneCancelled(indexed uint256,uint256,uint256)
+          handler: handleMilestoneCancelled
+        - event: RefundedAfterDeadline(indexed uint256,uint256,uint256)
+          handler: handleRefundedAfterDeadline
         - event: DisputeRaised(indexed uint256,indexed address,indexed uint256,string,bytes32)
           handler: handleDisputeRaised
         - event: CounterEvidenceSubmitted(indexed uint256,address,uint256,bytes32)
           handler: handleCounterEvidenceSubmitted
-        - event: EscalatedAfterDeadline(indexed uint256,uint256,address,string,bytes32)
-          handler: handleEscalatedAfterDeadline
         - event: DisputeResolved(indexed uint256,indexed uint256,uint256,bytes32,string)
           handler: handleDisputeResolved
         - event: DisputeTimedOutSettled(indexed uint256,indexed uint256,uint256)
           handler: handleDisputeTimedOutSettled
         - event: MutualSettlementExecuted(indexed uint256,indexed uint256,uint256)
           handler: handleMutualSettlementExecuted
-        - event: EscrowReleased(indexed uint256,uint256,bytes32)
-          handler: handleEscrowReleased
-        - event: EscrowRefunded(indexed uint256,uint256,bytes32)
-          handler: handleEscrowRefunded
-        - event: EscrowReleasedWithoutDispute(indexed uint256,uint256)
-          handler: handleEscrowReleasedWithoutDispute
         - event: EscrowRefundedViaMutualCancel(indexed uint256)
           handler: handleEscrowRefundedViaMutualCancel
         - event: PartialRefundCredited(indexed uint256,indexed uint256,indexed address,uint256)

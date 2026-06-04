@@ -109,14 +109,14 @@ contract TrancheProtocolAuditRound2Test is Base {
     // =======================================================================
 
     function test_L01_SetCctpForwardFee_RevertOn_AboveMax() public {
-        uint256 max = escrow.MAX_CCTP_FORWARD_FEE();
+        uint256 max = 100e6;
         vm.prank(deployer);
         vm.expectRevert(CctpForwardFeeTooHigh.selector);
         escrow.setCctpForwardFee(max + 1);
     }
 
     function test_L01_SetCctpForwardFee_AllowsExactlyMax() public {
-        uint256 max = escrow.MAX_CCTP_FORWARD_FEE();
+        uint256 max = 100e6;
         vm.prank(deployer);
         escrow.setCctpForwardFee(max);
         assertEq(escrow.cctpForwardFee(), max);

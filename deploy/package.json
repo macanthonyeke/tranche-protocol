@@ -4,9 +4,13 @@
   "type": "module",
   "scripts": {
     "deploy": "node deploy.js",
+    "deploy-gas": "node deploy-explicit-gas.mjs",
+    "deploy-sign": "node deploy-sign-broadcast.mjs",
+    "full-sign": "node deploy-sign-broadcast.mjs && node setup.js && node verify.js",
     "setup": "node setup.js",
     "verify": "node verify.js",
-    "full": "node deploy.js && node setup.js && node verify.js"
+    "full": "node deploy.js && node setup.js && node verify.js",
+    "full-gas": "node deploy-explicit-gas.mjs && node setup.js && node verify.js"
   },
   "dependencies": {
     "@circle-fin/developer-controlled-wallets": "^10.3.1",

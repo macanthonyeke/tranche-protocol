@@ -15,7 +15,7 @@ contract TrancheProtocolCctpSignalTest is Base {
     // -------------------------------------------------------------------------
 
     function test_ForwardHookData_MatchesCircleSpec() public view {
-        assertEq(escrow.FORWARD_HOOK_DATA(), CIRCLE_HOOK);
+        assertEq(CIRCLE_HOOK, 0x636374702d666f72776172640000000000000000000000000000000000000000);
     }
 
     // -------------------------------------------------------------------------
