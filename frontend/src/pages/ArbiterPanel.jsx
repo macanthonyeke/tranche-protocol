@@ -13,8 +13,10 @@ import { useRoles } from '../hooks/useRoles.jsx'
 import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick } from '../hooks/useEscrows.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
+import { useToast } from '../hooks/useToast.jsx'
+import { resolveMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { getDomainName, ARC_DOMAIN } from '../config/chains.js'
+import { getDomainName } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, countdown } from '../utils/format.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -267,12 +269,12 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, ca
   })
   const timeoutTx = useTx({ onConfirmed: refetch })
 
-  // Live CCTP forwarding fee. A resolution that pays the recipient settles via
-  // CCTP; for cross-chain destinations maxFee must cover Circle's forwarding
-  // fee or the mint won't auto-deliver. Arc same-chain burns take maxFee = 0.
+  // A resolution that pays the recipient settles via CCTP; for cross-chain
+  // destinations maxFee must cover Circle's live forwarding fee or the mint
+  // won't auto-deliver (INSUFFICIENT_FEE). Quoted at submit time. Arc same-chain
+  // burns take maxFee = 0.
   const { config } = useProtocolConfig()
-  const cctpForwardFee = config?.cctpForwardFee ?? 0n
-  const maxFee = Number(escrow.destinationDomain) === ARC_DOMAIN ? 0n : cctpForwardFee
+  const toast = useToast()
 
   // Percentage → BPS, plus the live split preview.
   const pctNum = pct === '' ? NaN : Number(pct)
@@ -290,7 +292,7 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, ca
     : uriValid ? hashDescription(resolutionUri.trim()) : null
   const canSubmit = pctValid && uriValid && !tx.isBusy
 
-  const submit = () => {
+  const submit = async () => {
     if (!pctValid) { setErr('Enter a recipient share between 0 and 100%.'); return }
     if (!uriValid) { setErr('A resolution URI is required.'); return }
     if (resolutionHash && !explicitHashValid) {
@@ -298,6 +300,21 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, ca
       return
     }
     setErr('')
+
+    let maxFee
+    try {
+      const feeBps = config?.protocolFeeBps ?? 0n
+      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
+      maxFee = await resolveMaxFee({
+        destinationDomain: escrow.destinationDomain,
+        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
+        burnAmount: recipientAmount - protocolFee
+      })
+    } catch (e) {
+      toast.error(e.message || 'Could not fetch the cross-chain forwarding fee.')
+      return
+    }
+
     tx.run(
       escrowWrite('resolveDispute', [
         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee

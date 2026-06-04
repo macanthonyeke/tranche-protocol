@@ -13,6 +13,8 @@ import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } fr
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
+import { useToast } from '../hooks/useToast.jsx'
+import { resolveMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription } from '../utils/encode.js'
 import {
   isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
@@ -614,10 +616,7 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
   const { config } = useProtocolConfig()
-  const cctpForwardFee = config?.cctpForwardFee ?? 0n
-  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
-  // Circle's forwarding fee.
-  const maxFee = Number(escrow.destinationDomain) === ARC_DOMAIN ? 0n : cctpForwardFee
+  const toast = useToast()
 
   const mine = role === 'payer' ? depositorProposal : recipientProposal
   const theirs = role === 'payer' ? recipientProposal : depositorProposal
@@ -629,10 +628,28 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
   const canSubmit = pctValid && !tx.isBusy
 
-  const propose = (bps) => tx.run(
-    escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
-    { loadingMessage: 'Check your wallet.' }
-  )
+  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
+  // Circle's live forwarding fee on the recipient's share, quoted at submit time.
+  const propose = async (bps) => {
+    let maxFee
+    try {
+      const recipientAmount = (milestone.amount * BigInt(bps)) / 10_000n
+      const feeBps = config?.protocolFeeBps ?? 0n
+      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
+      maxFee = await resolveMaxFee({
+        destinationDomain: escrow.destinationDomain,
+        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
+        burnAmount: recipientAmount - protocolFee
+      })
+    } catch (err) {
+      toast.error(err.message || 'Could not fetch the cross-chain forwarding fee.')
+      return
+    }
+    return tx.run(
+      escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+      { loadingMessage: 'Check your wallet.' }
+    )
+  }
 
   const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
 
@@ -775,13 +792,15 @@ function MilestoneAction({
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
 
-  // Live CCTP forwarding fee. approveRelease honours the caller-supplied maxFee
-  // (depositor opts in), so we quote the published fee for cross-chain burns;
-  // release ignores it and uses the escrow's snapshotted fee, but the arg is
-  // kept for ABI compatibility. Same-chain (Arc) burns force maxFee = 0 inside
-  // the contract regardless.
+  // Cross-chain burns must carry a maxFee that covers Circle's live Forwarding
+  // Service fee, or the burn is attested but the mint is rejected
+  // (INSUFFICIENT_FEE). We quote that fee at submit time (see {resolveMaxFee})
+  // rather than reusing the contract's static floor. approveRelease honours the
+  // caller-supplied maxFee; release ignores it and uses the escrow's snapshotted
+  // fee, but the arg is kept for ABI compatibility. Same-chain (Arc) burns force
+  // maxFee = 0 inside the contract regardless.
   const { config } = useProtocolConfig()
-  const cctpForwardFee = config?.cctpForwardFee ?? 0n
+  const toast = useToast()
 
   const id = BigInt(escrow.id)
   const idx = BigInt(milestone.index)
@@ -800,9 +819,9 @@ function MilestoneAction({
     }
   } else if (milestone.state === 1) {
     if (isPayer) {
-      action = { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Approving…' } }
+      action = { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Approving…' } }
     } else if (reviewWindowExpired) {
-      action = { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx, cctpForwardFee], optimistic: { badge: 'Releasing…' } }
+      action = { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Releasing…' } }
     }
   }
 
@@ -811,8 +830,31 @@ function MilestoneAction({
   const run = async () => {
     setActiveKey(action.key)
     setOpt(`milestone_${milestone.index}`, action.optimistic)
+
+    let args = action.args
+    if (action.needsForwardFee) {
+      // Whole milestone is released; burn amount is the milestone minus the
+      // protocol fee. Quote Circle's live forwarding fee for the band check.
+      // This runs before the wallet prompt, so useTx won't toast its failures.
+      try {
+        const feeBps = config?.protocolFeeBps ?? 0n
+        const protocolFee = (milestone.amount * BigInt(feeBps)) / 10_000n
+        const maxFee = await resolveMaxFee({
+          destinationDomain: escrow.destinationDomain,
+          escrowCctpForwardFee: escrow.escrowCctpForwardFee,
+          burnAmount: milestone.amount - protocolFee
+        })
+        args = [...action.args, maxFee]
+      } catch (err) {
+        clearOpt(`milestone_${milestone.index}`)
+        setActiveKey(null)
+        toast.error(err.message || 'Could not fetch the cross-chain forwarding fee.')
+        return
+      }
+    }
+
     try {
-      await tx.run(escrowWrite(action.fn, action.args), { loadingMessage: 'Check your wallet.' })
+      await tx.run(escrowWrite(action.fn, args), { loadingMessage: 'Check your wallet.' })
     } catch {
       clearOpt(`milestone_${milestone.index}`)
     }
