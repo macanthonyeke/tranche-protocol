@@ -621,8 +621,8 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
   const mine = role === 'payer' ? depositorProposal : recipientProposal
   const theirs = role === 'payer' ? recipientProposal : depositorProposal
 
-  const [pct, setPct] = useState('')
-  const tx = useTx({ onConfirmed: () => { setPct(''); refetch(); onChange?.() } })
+  const [pct, setPct] = useState('50')
+  const tx = useTx({ onConfirmed: () => { setPct('50'); refetch(); onChange?.() } })
 
   const pctNum = pct === '' ? NaN : Number(pct)
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
@@ -658,11 +658,34 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
   // which makes both proposals match and settles on-chain.
   const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
 
+  // Perspective-relative copy: `role === 'payer'` is the depositor (client),
+  // otherwise the recipient (freelancer). Both sides always enter the
+  // recipient's percentage; the label disambiguates whose share that is.
+  const isPayer = role === 'payer'
+  const shareLabel = isPayer
+    ? "Freelancer's share of the disputed amount"
+    : 'Your share of the disputed amount'
+
+  // Live USDC split off the disputed milestone amount, recomputed as they type.
+  const recipientShare = pctValid ? (milestone.amount * BigInt(Math.round(pctNum * 100))) / 10_000n : 0n
+  const depositorShare = pctValid ? milestone.amount - recipientShare : 0n
+
   return (
     <div className="rounded-xl border border-rule bg-paper p-4 flex flex-col gap-3">
-      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Propose settlement</p>
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Settle this without an arbiter</p>
 
-      <Field label="I propose recipient gets" helper="Whole percent (0–100). Both sides must agree to settle.">
+      {theirs.exists && (
+        <div className="rounded-xl bg-sunk px-3 py-2.5">
+          <p className="text-[13px] text-ink-2 leading-relaxed">
+            They proposed {bpsToPct(theirs.bps)}% — enter the same number to settle instantly
+          </p>
+        </div>
+      )}
+
+      <Field
+        label={shareLabel}
+        helper="Agree on a number with the other party first, then both submit it here. When both sides submit the same percentage, funds split instantly."
+      >
         {(p) => (
           <div className="flex items-center gap-2">
             <input
@@ -678,16 +701,45 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
         )}
       </Field>
 
-      <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
-        {tx.isBusy ? 'Working…' : 'Submit Proposal'}
-      </button>
+      {pctValid && (
+        <div className="rounded-xl bg-sunk px-3.5 py-3 flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col gap-1.5">
+              <span className="eyebrow">{isPayer ? 'Freelancer gets' : 'You receive'}</span>
+              <span className="flex items-baseline gap-1">
+                <span className="num text-[20px] leading-none font-medium text-clay">{formatUSDCNumber(recipientShare)}</span>
+                <span className="text-[10.5px] text-ink-3">USDC</span>
+              </span>
+              <span className="num text-[11px] text-ink-3">{Math.round(pctNum)}%</span>
+            </div>
+            <div className="flex flex-col items-end gap-1.5 text-right">
+              <span className="eyebrow">{isPayer ? 'You keep' : 'Client gets back'}</span>
+              <span className="flex items-baseline gap-1">
+                <span className="num text-[20px] leading-none font-medium text-ink">{formatUSDCNumber(depositorShare)}</span>
+                <span className="text-[10.5px] text-ink-3">USDC</span>
+              </span>
+              <span className="num text-[11px] text-ink-3">{100 - Math.round(pctNum)}%</span>
+            </div>
+          </div>
+          {/* Live split meter: clay = recipient's share. scaleX (transform, not
+              width) so the fill animates without touching layout properties. */}
+          <div className="relative h-2 rounded-full bg-rule overflow-hidden" aria-hidden="true">
+            <div
+              className="absolute inset-0 origin-left bg-clay transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+              style={{ transform: `scaleX(${Math.max(0, Math.min(1, pctNum / 100))})` }}
+            />
+          </div>
+        </div>
+      )}
 
-      {(mine.exists || theirs.exists) && (
+      {mine.exists ? (
         <p className="text-[13px] text-ink-2">
-          {mine.exists ? `You proposed ${bpsToPct(mine.bps)}%` : 'You have not proposed yet'}
-          {' — '}
-          {theirs.exists ? `Counterparty proposed ${bpsToPct(theirs.bps)}%` : 'counterparty has not proposed yet'}
+          Proposal submitted. Waiting for the other party to match {bpsToPct(mine.bps)}%.
         </p>
+      ) : (
+        <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
+          {tx.isBusy ? 'Working…' : 'Submit Settlement Proposal'}
+        </button>
       )}
 
       {canAgree && (
