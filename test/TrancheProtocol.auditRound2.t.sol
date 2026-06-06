@@ -80,9 +80,7 @@ contract TrancheProtocolAuditRound2Test is Base {
     function test_M02_Deposit_RevertOn_SplitsCrossChainTinyMilestone() public {
         SplitRecipient[] memory sp = new SplitRecipient[](1);
         sp[0] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(makeAddr("s")))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 10_000
+            mintRecipient: bytes32(uint256(uint160(makeAddr("s")))), destinationDomain: DEST_DOMAIN, bps: 10_000
         });
         uint256[] memory ms = _singleMilestone(CCTP_FORWARD_FEE);
         vm.startPrank(depositor);
@@ -128,10 +126,8 @@ contract TrancheProtocolAuditRound2Test is Base {
 
     function _depositTwoSplits(address a, address b) internal returns (uint256 id) {
         SplitRecipient[] memory sp = new SplitRecipient[](2);
-        sp[0] =
-            SplitRecipient({mintRecipient: bytes32(uint256(uint160(a))), destinationDomain: DEST_DOMAIN, bps: 6000});
-        sp[1] =
-            SplitRecipient({mintRecipient: bytes32(uint256(uint160(b))), destinationDomain: DEST_DOMAIN, bps: 4000});
+        sp[0] = SplitRecipient({mintRecipient: bytes32(uint256(uint160(a))), destinationDomain: DEST_DOMAIN, bps: 6000});
+        sp[1] = SplitRecipient({mintRecipient: bytes32(uint256(uint160(b))), destinationDomain: DEST_DOMAIN, bps: 4000});
         id = _deposit(DEST_DOMAIN, MINT_RECIPIENT, _singleMilestone(1000e6), 1000e6, sp);
     }
 

@@ -515,15 +515,22 @@ contract TrancheProtocolAuditFixesTest is Base {
         });
     }
 
-    function test_H04_MultiSplit_RevertOn_PerShareMaxFeeEqualsShare() public {
+    function test_F1_MultiSplit_PerBurnFeeUsesFloor_NoScaling() public {
+        // F1 (supersedes the old H-04 per-share-scaling behaviour): each split is
+        // an independent CCTP burn that now carries the FULL per-escrow
+        // forwarding-fee floor, not a bps-scaled fraction. approveRelease no
+        // longer reverts with MaxFeeExceedsBurnAmount, and both burns are funded
+        // at the floor (was 70e6 / 30e6 under the old scaling).
         uint256 id = _depositWithSplits(100e6, _twoSplits());
         _claimDelivery(id, 0);
 
-        // M-R3-01: caller maxFee only flows through the depositor path now.
-        // cctpMaxFee = 100e6 -> split0 share == perShareMaxFee == 70e6.
+        uint256 before = tokenMessenger.callsLength();
         vm.prank(depositor);
-        vm.expectRevert(MaxFeeExceedsBurnAmount.selector);
         escrow.approveRelease(id, 0, 100e6);
+
+        assertEq(tokenMessenger.callsLength(), before + 2, "two split burns");
+        assertEq(tokenMessenger.lastCall().maxFee, CCTP_FORWARD_FEE, "split burn uses floor, not bps-scaled");
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED));
     }
 
     function test_H04_MultiSplit_PerShareMaxFeeJustBelowShare_Succeeds() public {

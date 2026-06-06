@@ -223,7 +223,6 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ) external whenNotPaused nonReentrant returns (uint256 escrowId) {
         if (_totalAmount == 0) revert InvalidAmount();
         if (_recipient == address(0)) revert ZeroAddress();
-        if (_mintRecipient == bytes32(0)) revert ZeroAddress();
         if (address(uint160(uint256(_mintRecipient))) == address(0)) revert ZeroAddress();
         if (_reviewWindow < MIN_REVIEW_WINDOW) revert ReviewWindowTooShort();
         if (_reviewWindow > MAX_REVIEW_WINDOW) revert ReviewWindowTooLong();
@@ -243,23 +242,36 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // destination outside ARC_DOMAIN routes through Circle's Forwarding
         // Service and therefore must out-size the forwarding fee.
         bool isCrossChain;
+        uint256 minBps = BPS_DENOMINATOR;
         if (_splits.length == 0) {
             if (!supportedDomains[_destinationDomain]) revert UnsupportedDomain();
             isCrossChain = _destinationDomain != ARC_DOMAIN;
         } else {
-            _validateSplits(_splits);
-            isCrossChain = _splitsCrossChain(_splits);
+            (minBps, isCrossChain) = _validateSplits(_splits);
         }
 
         // Default refundTo to the depositor when address(0) is passed.
         if (_refundTo == address(0)) _refundTo = msg.sender;
 
         uint256 sum = 0;
+        uint256 minMilestone = type(uint256).max;
         for (uint256 i = 0; i < _milestoneAmounts.length; i++) {
             if (_milestoneAmounts[i] == 0) revert InvalidAmount();
             sum += _milestoneAmounts[i];
+            if (_milestoneAmounts[i] < minMilestone) minMilestone = _milestoneAmounts[i];
         }
         if (sum != _totalAmount) revert MilestoneAmountMismatch();
+
+        // F2: validate cross-chain deposits against the per-burn floor. The
+        // smallest milestone net of the protocol fee (Hole A) times the smallest
+        // cross-chain split share (Hole B; BPS_DENOMINATOR when no splits) is the
+        // binding burn — both factors are monotonic so one check covers all. A 0
+        // forwarding fee would brick every cross-chain release (Hole C).
+        if (isCrossChain) {
+            if (cctpForwardFee == 0) revert CctpForwardFeeNotSet();
+            uint256 net = minMilestone - (minMilestone * protocolFeeBps) / BPS_DENOMINATOR;
+            if ((net * minBps) / BPS_DENOMINATOR <= cctpForwardFee) revert MilestoneBelowForwardFee();
+        }
 
         // M-02: for cross-chain escrows, every milestone must out-size the
         // current forwarding fee, otherwise its burn share could never satisfy
@@ -267,12 +279,6 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // require, leaving the milestone permanently stuck on the
         // permissionless paths. Same-chain (Arc) escrows pay no forwarding fee
         // and are exempt.
-        if (isCrossChain) {
-            for (uint256 i = 0; i < _milestoneAmounts.length; i++) {
-                if (_milestoneAmounts[i] <= cctpForwardFee) revert MilestoneBelowForwardFee();
-            }
-        }
-
         usdc.safeTransferFrom(msg.sender, address(this), _totalAmount);
 
         escrowId = ++escrowCount;
@@ -298,7 +304,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         });
 
         for (uint256 i = 0; i < _milestoneAmounts.length; i++) {
-            milestones[escrowId][i] = Milestone({amount: _milestoneAmounts[i], claimedAt: 0, state: MilestoneState.PENDING});
+            milestones[escrowId][i] =
+                Milestone({amount: _milestoneAmounts[i], claimedAt: 0, state: MilestoneState.PENDING});
         }
 
         if (_splits.length > 0) {
@@ -482,11 +489,13 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         SettlementProposal storage rec = settlementProposals[escrowId][milestoneIndex][e.recipient];
 
         if (dep.exists && rec.exists && dep.bps == rec.bps) {
-            // L-R3-03: enforce the cross-chain forwarding-fee floor before the
-            // recipient share is burned, mirroring {release}. Only when a
-            // recipient share actually burns (bps > 0).
-            if (_agreedBps > 0) _assertCrossChainFee(escrowId, e, maxFee);
-            _executePartialRelease(escrowId, milestoneIndex, e, m, _agreedBps, maxFee);
+            // L-R3-03 / F4: enforce the cross-chain forwarding-fee floor before
+            // the recipient share is burned, mirroring {release}. The completing
+            // caller's `maxFee` is NOT trusted here (it would let one party pick a
+            // fee that strands the other's payout); burn at the per-escrow
+            // snapshot floor instead, exactly like the permissionless {release}.
+            if (_agreedBps > 0) _assertCrossChainFee(escrowId, e, e.escrowCctpForwardFee);
+            _executePartialRelease(escrowId, milestoneIndex, e, m, _agreedBps, e.escrowCctpForwardFee);
             emit MutualSettlementExecuted(escrowId, milestoneIndex, _agreedBps);
         }
     }
@@ -776,6 +785,11 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
 
         if (amount == 0) revert NothingToWithdraw();
 
+        // F5: a successful self-service withdrawal proves this wallet is live,
+        // so any pending two-step recovery proposal targeting it is moot. Clear
+        // it so a stale nominee cannot later sweep credit this wallet re-accrues.
+        delete pendingRefundRecovery[msg.sender];
+
         if (destinationDomain == 0) {
             // Arc path: unchanged behaviour.
             refundBalances[msg.sender] = 0;
@@ -814,6 +828,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
 
         uint256 amount = refundBalances[msg.sender];
         if (amount == 0) revert NothingToWithdraw();
+
+        // F5: re-keying credit from this wallet proves it is live, so clear any
+        // pending recovery proposal targeting it (see {withdrawRefund}).
+        delete pendingRefundRecovery[msg.sender];
 
         refundBalances[msg.sender] = 0;
         refundBalances[newOwner] += amount;
@@ -876,15 +894,24 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         Escrow storage e = escrows[escrowId];
 
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        if (e.state == EscrowState.COMPLETED) revert InvalidState();
-        if (e.state == EscrowState.CANCELLED) revert InvalidState();
+        if (e.state != EscrowState.ACTIVE) revert InvalidState();
         if (msg.sender != e.recipient) revert NotRecipient();
-        if (newAddress == bytes32(0)) revert ZeroAddress();
+        // A zero bytes32 decodes to address(0), so the decode check below covers
+        // both the all-zero case and a non-zero word with a zero low-160 address.
         if (address(uint160(uint256(newAddress))) == address(0)) revert ZeroAddress();
         // ARC_DOMAIN is the home chain — same-chain transfer is always
         // available even if the domain manager removed it from
         // supportedDomains. Other domains must be on the allow-list.
         if (newDestinationDomain != ARC_DOMAIN && !supportedDomains[newDestinationDomain]) revert UnsupportedDomain();
+
+        // F3: a same-chain escrow's milestones were never floor-validated for a
+        // cross-chain burn (the deposit-time F2 guard only runs when cross-chain
+        // at deposit), so forbid converting one to cross-chain post-deposit.
+        // cross-chain<->cross-chain and any ->Arc redirect stay allowed. Only the
+        // single-recipient path uses `e.destinationDomain` for the burn.
+        if (newDestinationDomain != ARC_DOMAIN && e.destinationDomain == ARC_DOMAIN && splits[escrowId].length == 0) {
+            revert MilestoneBelowForwardFee();
+        }
 
         bytes32 oldAddress = e.mintRecipient;
         uint32 oldDomain = e.destinationDomain;
@@ -914,8 +941,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         Escrow storage e = escrows[escrowId];
 
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        if (e.state == EscrowState.COMPLETED) revert InvalidState();
-        if (e.state == EscrowState.CANCELLED) revert InvalidState();
+        if (e.state != EscrowState.ACTIVE) revert InvalidState();
 
         SplitRecipient[] storage s = splits[escrowId];
         if (splitIndex >= s.length) revert InvalidSplitIndex();
@@ -924,9 +950,18 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // single-recipient path.
         if (s[splitIndex].mintRecipient != bytes32(uint256(uint160(msg.sender)))) revert NotRecipient();
 
-        if (newAddress == bytes32(0)) revert ZeroAddress();
+        // A zero bytes32 decodes to address(0), so the decode check below covers
+        // both the all-zero case and a non-zero word with a zero low-160 address.
         if (address(uint160(uint256(newAddress))) == address(0)) revert ZeroAddress();
         if (newDestinationDomain != ARC_DOMAIN && !supportedDomains[newDestinationDomain]) revert UnsupportedDomain();
+
+        // F3: an Arc split's share was never floor-validated for a cross-chain
+        // burn, so forbid converting it to cross-chain post-deposit (this also
+        // removes the all-or-nothing co-recipient DoS). cross-chain<->cross-chain
+        // and ->Arc redirects stay allowed.
+        if (newDestinationDomain != ARC_DOMAIN && s[splitIndex].destinationDomain == ARC_DOMAIN) {
+            revert MilestoneBelowForwardFee();
+        }
 
         bytes32 oldAddress = s[splitIndex].mintRecipient;
         uint32 oldDomain = s[splitIndex].destinationDomain;
@@ -951,12 +986,6 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
 
     function splitsLength(uint256 escrowId) external view returns (uint256) {
         return splits[escrowId].length;
-    }
-
-    /// @notice Refund credit accumulated for `account`. Mirrors the public
-    ///         `refundBalances` getter under a stable name.
-    function getRefundBalance(address account) external view returns (uint256) {
-        return refundBalances[account];
     }
 
     /// @notice Full escrow struct for `escrowId`. Reverts if it does not exist.
@@ -1253,11 +1282,14 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
                     distributed += share;
                 }
                 if (share > 0) {
-                    // H-04: scale the caller-supplied global `cctpMaxFee`
-                    // by this split's bps so a small share cannot be
-                    // drained by a maxFee meant for the whole milestone.
-                    uint256 perShareMaxFee = (cctpMaxFee * s[i].bps) / BPS_DENOMINATOR;
-                    _approveAndBurn(share, s[i].destinationDomain, s[i].mintRecipient, perShareMaxFee);
+                    // F1: each split is an independent CCTP burn that incurs
+                    // Circle's full per-burn forwarding fee, which is keyed to
+                    // destination gas, not to the share size. The old bps-scaled
+                    // `perShareMaxFee` under-quoted every non-100% split, so the
+                    // burn was attested but never minted (INSUFFICIENT_FEE). Use
+                    // the per-escrow floor for every cross-chain leg; ARC legs are
+                    // forced to maxFee = 0 inside `_approveAndBurn`.
+                    _approveAndBurn(share, s[i].destinationDomain, s[i].mintRecipient, e.escrowCctpForwardFee);
                 }
             }
         }
@@ -1337,23 +1369,26 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         return false;
     }
 
-    /// @dev Cross-chain check over a calldata splits array, used at deposit
-    ///      time before the escrow (and its stored splits) exist (M-02).
-    function _splitsCrossChain(SplitRecipient[] calldata _splits) internal pure returns (bool) {
-        for (uint256 i = 0; i < _splits.length; i++) {
-            if (_splits[i].destinationDomain != ARC_DOMAIN) return true;
-        }
-        return false;
-    }
-
-    function _validateSplits(SplitRecipient[] calldata _splits) internal view {
+    /// @dev Validates splits and, in the same pass, returns the smallest
+    ///      cross-chain split bps (BPS_DENOMINATOR if none) and whether any split
+    ///      is cross-chain. Folding both out of separate loops keeps the F2
+    ///      deposit floor check O(1) and removes the old `_splitsCrossChain`.
+    function _validateSplits(SplitRecipient[] calldata _splits)
+        internal
+        view
+        returns (uint256 minCrossChainBps, bool anyCrossChain)
+    {
+        minCrossChainBps = BPS_DENOMINATOR;
         uint256 sumBps;
         for (uint256 i = 0; i < _splits.length; i++) {
             SplitRecipient calldata sr = _splits[i];
             if (sr.bps == 0) revert InvalidBps();
-            if (sr.mintRecipient == bytes32(0)) revert ZeroAddress();
             if (address(uint160(uint256(sr.mintRecipient))) == address(0)) revert ZeroAddress();
             if (!supportedDomains[sr.destinationDomain]) revert UnsupportedDomain();
+            if (sr.destinationDomain != ARC_DOMAIN) {
+                anyCrossChain = true;
+                if (sr.bps < minCrossChainBps) minCrossChainBps = sr.bps;
+            }
             sumBps += sr.bps;
         }
         if (sumBps != BPS_DENOMINATOR) revert BpsSumMismatch();
