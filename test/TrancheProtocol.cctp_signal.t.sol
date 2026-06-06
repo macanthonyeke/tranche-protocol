@@ -107,11 +107,26 @@ contract TrancheProtocolCctpSignalTest is Base {
         vm.prank(deployer);
         escrow.setCctpForwardFee(0);
 
-        uint256 id = _depositSingle(100e6);
-        _claimDelivery(id, 0);
-        vm.warp(block.timestamp + REVIEW_WINDOW);
+        // F2 (Hole C): a zero forwarding fee now makes a cross-chain escrow
+        // un-creatable, so the guard fires at deposit rather than at release
+        // (which previously left a stuck, never-releasable escrow).
+        vm.startPrank(depositor);
+        usdc.approve(address(escrow), 100e6);
         vm.expectRevert(CctpForwardFeeNotSet.selector);
-        escrow.release(id, 0, 0);
+        escrow.deposit(
+            recipient,
+            refundTo,
+            100e6,
+            DEST_DOMAIN,
+            MINT_RECIPIENT,
+            REVIEW_WINDOW,
+            INVOICE_HASH,
+            INVOICE_URI,
+            _singleMilestone(100e6),
+            block.timestamp + 30 days,
+            new SplitRecipient[](0)
+        );
+        vm.stopPrank();
     }
 
     function test_CCTP_ApproveRelease_ForwardsCallerMaxFee() public {

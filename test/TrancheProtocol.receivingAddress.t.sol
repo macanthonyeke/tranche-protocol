@@ -73,19 +73,20 @@ contract TrancheProtocolReceivingAddressTest is Base {
 
     function test_Domain_CanChangeBetweenSupportedDomains() public {
         uint256 id = _seed();
-        // _seed creates with DEST_DOMAIN (6). Flip to ARC and back.
+        // _seed creates with DEST_DOMAIN (6, cross-chain). cross -> Arc is
+        // allowed; Arc -> cross is now blocked (F3: a same-chain escrow's
+        // milestones were never floor-validated for a cross-chain burn, and the
+        // O(1) guard cannot tell this one was originally cross-chain).
         bytes32 a1 = _toB32(makeAddr("a1"));
         bytes32 a2 = _toB32(makeAddr("a2"));
 
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, a1, ARC_DOMAIN);
-        uint32 d1 = escrow.getEscrow(id).destinationDomain;
-        assertEq(d1, ARC_DOMAIN);
+        assertEq(escrow.getEscrow(id).destinationDomain, ARC_DOMAIN);
 
         vm.prank(recipient);
+        vm.expectRevert(MilestoneBelowForwardFee.selector);
         escrow.updateReceivingAddress(id, a2, DEST_DOMAIN);
-        uint32 d2 = escrow.getEscrow(id).destinationDomain;
-        assertEq(d2, DEST_DOMAIN);
     }
 
     // ----- permission gating -----

@@ -62,7 +62,7 @@ npm run codegen && npm run build
 ```
 
 ### Bytecode size budget
-Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,394 bytes** (182-byte margin). The contract is already at `optimizer_runs = 1` and `via_ir = true`. If the budget is exceeded again, make non-external constants `internal` to remove their auto-generated getters.
+Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,573 bytes** (3-byte margin — essentially exhausted after the round-4 audit fixes). The contract is already at `optimizer_runs = 1` and `via_ir = true`, and every non-external constant is already `internal`, so the constant-getter lever is spent. Any further additions will require freeing space first — e.g. removing a redundant public view (`splitsLength` duplicates `getSplits(id).length`), making one of the `public` constants `internal` (and updating the scripts/frontend that read it), or deploying over the limit via `npm run full-gas` (Arc's chain does not enforce EIP-170; only Circle's estimation does, which the explicit-gas script bypasses).
 
 Constants that are `internal` (no public getter, not readable via RPC):
 `MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`
