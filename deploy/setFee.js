@@ -9,7 +9,13 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 
-const CONTRACT_ADDRESS = '0x495f5786367d77b47A528B68E14Dbe812305DD39';
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+if (!CONTRACT_ADDRESS) throw new Error('CONTRACT_ADDRESS is not set in .env');
+
+const CCTP_FORWARD_FEE = process.env.CCTP_FORWARD_FEE
+  ? BigInt(process.env.CCTP_FORWARD_FEE)
+  : 100000n;
+
 const ARC_RPC_URL = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
 
 const SET_FEE_ABI = [
@@ -49,14 +55,16 @@ const publicClient = createPublicClient({
 });
 
 async function main() {
+  console.log('Contract          :', CONTRACT_ADDRESS);
+  console.log('cctpForwardFee    :', CCTP_FORWARD_FEE.toString(), 'micro-USDC');
+
   const callData = encodeFunctionData({
     abi: SET_FEE_ABI,
     functionName: 'setCctpForwardFee',
-    args: [1n],
+    args: [CCTP_FORWARD_FEE],
   });
 
-  console.log('Contract :', CONTRACT_ADDRESS);
-  console.log('Calldata :', callData);
+  console.log('Calldata          :', callData);
 
   const circleClient = initiateDeveloperControlledWalletsClient({
     apiKey: process.env.CIRCLE_API_KEY,
