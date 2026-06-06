@@ -72,9 +72,9 @@ export function createListener({
     // The auto-generated getter returns a tuple matching the Escrow struct
     // member order (mappings/arrays skipped, dynamic byte fields included):
     // [depositor, recipient, refundTo, totalAmount, destinationDomain,
-    //  mintRecipient, disputeWindow, depositorApproveCancel,
+    //  mintRecipient, reviewWindow, depositorApproveCancel,
     //  recipientApproveCancel, invoiceHash, invoiceURI, deadline,
-    //  milestoneCount, state, deliveryNoticeWindow]
+    //  milestoneCount, state, escrowCctpForwardFee]
     return {
       depositor: r[0],
       recipient: r[1],
@@ -82,7 +82,7 @@ export function createListener({
       totalAmount: r[3],
       destinationDomain: r[4],
       mintRecipient: r[5],
-      disputeWindow: r[6],
+      reviewWindow: r[6],
       depositorApproveCancel: r[7],
       recipientApproveCancel: r[8],
       invoiceHash: r[9],
@@ -90,7 +90,7 @@ export function createListener({
       deadline: r[11],
       milestoneCount: r[12],
       state: r[13], // 0=ACTIVE, 1=COMPLETED, 2=CANCELLED
-      deliveryNoticeWindow: r[14],
+      escrowCctpForwardFee: r[14],
     };
   }
 
@@ -103,9 +103,8 @@ export function createListener({
     });
     return {
       amount: r[0],
-      conditionMetTimestamp: r[1],
-      state: r[2], // 0=PENDING, 1=FULFILLED, 2=DISPUTED, 3=RELEASED, 4=REFUNDED
-      deliveredAt: r[3],
+      claimedAt: r[1],
+      state: r[2], // 0=PENDING, 1=IN_REVIEW, 2=DISPUTED, 3=RELEASED, 4=REFUNDED
     };
   }
 

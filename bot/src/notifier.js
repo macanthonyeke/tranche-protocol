@@ -80,18 +80,18 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
 
-    const noticeDays = Math.round(Number(escrow.deliveryNoticeWindow ?? 0) / 86400);
+    const reviewDays = Math.round(Number(escrow.reviewWindow ?? 0) / 86400);
     const milestones = Number(escrow.milestoneCount);
 
     const depositorMessage = [
       `Escrow #${escrowId}: you locked ${formatUSDC(amount)} USDC for ${addr(recipient)} across ${milestones} milestone(s), due ${formatDate(deadline)}.`,
-      `When the freelancer signals delivery you have ${noticeDays} days to approve or dispute, otherwise the milestone releases automatically.`,
+      `When the freelancer claims delivery you have ${reviewDays} days to approve or dispute, otherwise the milestone releases automatically.`,
       txLink(transactionHash),
     ].filter(Boolean).join('\n\n');
 
     const recipientMessage = [
       `Escrow #${escrowId}: ${addr(depositor)} has locked ${formatUSDC(amount)} USDC for you across ${milestones} milestone(s), due ${formatDate(deadline)}.`,
-      `Start the work. When a milestone is ready, signal delivery in the app so the ${noticeDays}-day review window can begin.`,
+      `Start the work. When a milestone is ready, claim delivery in the app so the ${reviewDays}-day review window can begin.`,
     ].join('\n\n');
 
     await Promise.all([
@@ -100,20 +100,18 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     ]);
   }
 
-  async function onDeliverySignaled({ args }) {
-    const { escrowId, milestoneIndex } = args;
+  async function onDeliveryClaimed({ args }) {
+    const { escrowId, milestoneIndex, reviewDeadline } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
-    const noticeDays = Math.round(Number(escrow.deliveryNoticeWindow ?? 0) / 86400);
 
     const depositorMessage =
-      `Escrow #${escrowId}: the freelancer says the ${ordinal(milestoneIndex)} milestone is ready. ` +
-      `You have ${noticeDays} days to approve or dispute it in the app. ` +
-      `If you do nothing, the milestone releases automatically.`;
+      `Escrow #${escrowId}: the freelancer claimed delivery on the ${ordinal(milestoneIndex)} milestone. ` +
+      `Review it by ${formatDate(reviewDeadline)} — approve or dispute in the app. If you do nothing, it releases automatically once the window closes.`;
 
     const recipientMessage =
-      `Escrow #${escrowId}: your delivery signal for the ${ordinal(milestoneIndex)} milestone is in. ` +
-      `The payer now has ${noticeDays} days to approve or dispute. No action needed from you right now.`;
+      `Escrow #${escrowId}: your delivery claim for the ${ordinal(milestoneIndex)} milestone is in. ` +
+      `The payer has until ${formatDate(reviewDeadline)} to approve or dispute. No action needed from you right now.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -121,21 +119,18 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     ]);
   }
 
-  async function onConditionFulfilled({ args }) {
+  async function onMilestoneApproved({ args }) {
     const { escrowId, milestoneIndex } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
-    const reviewHours = Math.round(Number(escrow.disputeWindow) / 3600);
 
     const depositorMessage =
-      `Escrow #${escrowId}: you approved the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
-      `The ${reviewHours}-hour review window has started and the payment releases automatically when it ends. No further action needed.`;
+      `Escrow #${escrowId}: you approved the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) — payment has been released to the freelancer immediately, no waiting period. No further action needed.`;
 
     const recipientMessage =
-      `Escrow #${escrowId}: the payer approved your ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
-      `Payment releases automatically in ${reviewHours} hours. No action needed unless you spot an issue.`;
+      `Escrow #${escrowId}: the payer approved your ${ordinal(milestoneIndex)} milestone — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is on its way to your wallet right now.`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -143,20 +138,25 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     ]);
   }
 
-  async function onSilentApprovalClaimed({ args }) {
+  async function onMilestoneReleased({ args }) {
     const { escrowId, milestoneIndex } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
+    const progress = await summarizeProgress(escrowId, escrow);
+    const tail =
+      progress.completed >= progress.total
+        ? `All ${progress.total} milestones are now done — this escrow is complete.`
+        : `Progress: ${progress.completed} of ${progress.total} milestones done.`;
 
     const depositorMessage =
-      `Escrow #${escrowId}: the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) was auto-released because the delivery review window passed without a response from you. ` +
-      `If you believe the work wasn't done, you can still raise a dispute before the dispute window closes.`;
+      `Escrow #${escrowId}: the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) was released to the freelancer automatically — the review window closed with no approval or dispute (silence = consent). ` +
+      `${tail}`;
 
     const recipientMessage =
-      `Escrow #${escrowId}: your ${ordinal(milestoneIndex)} milestone was auto-released. ` +
-      `${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is on its way to your wallet via Circle.`;
+      `Escrow #${escrowId}: your ${ordinal(milestoneIndex)} milestone was auto-released — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is heading to your wallet. ` +
+      `${tail}`;
 
     await Promise.all([
       notifyWallet(escrow.depositor, depositorMessage),
@@ -218,77 +218,44 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     await Promise.all(sends);
   }
 
-  async function onEscrowReleasedWithoutDispute({ args }) {
-    const { escrowId, milestoneIndex } = args;
-    const escrow = await safeGetEscrow(escrowId);
-    if (!escrow) return;
-    const milestone = await safeGetMilestone(escrowId, milestoneIndex);
-    if (!milestone) return;
-    const progress = await summarizeProgress(escrowId, escrow);
-    const tail =
-      progress.completed >= progress.total
-        ? `All ${progress.total} milestones are now done — this escrow is complete.`
-        : `Progress: ${progress.completed} of ${progress.total} milestones done.`;
-
-    const depositorMessage =
-      `Escrow #${escrowId}: the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) has been released to the freelancer after the review window closed with no dispute. ` +
-      `${tail}`;
-
-    const recipientMessage =
-      `Escrow #${escrowId}: your ${ordinal(milestoneIndex)} milestone has been released — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is heading to your wallet. ` +
-      `${tail}`;
-
-    await Promise.all([
-      notifyWallet(escrow.depositor, depositorMessage),
-      notifyWallet(escrow.recipient, recipientMessage),
-    ]);
-  }
-
-  async function onEscrowReleased({ args }) {
-    // Arbiter-mediated release in favor of the recipient.
-    const { escrowId, milestoneIndex, resolutionHash } = args;
+  async function onDisputeResolved({ args }) {
+    const { escrowId, milestoneIndex, recipientBps, resolutionHash } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     if (!milestone) return;
 
-    const depositorMessage =
-      `Escrow #${escrowId}: the arbiter ruled for the freelancer on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been released. ` +
-      `Resolution ${code(resolutionHash)}. This decision is final.`;
+    const bps = Number(recipientBps);
+    const recipientShare = (milestone.amount * recipientBps) / 10000n;
+    const depositorShare = milestone.amount - recipientShare;
+    const recipientPct = (bps / 100).toFixed(2);
+    const depositorPct = ((10000 - bps) / 100).toFixed(2);
 
-    const recipientMessage =
-      `Escrow #${escrowId}: the arbiter ruled in your favor on the ${ordinal(milestoneIndex)} milestone — ${formatUSDCAfterFee(milestone.amount)} USDC (after the 1.99% fee) is on its way to you. ` +
-      `Resolution ${code(resolutionHash)}.`;
+    const verdict =
+      bps === 10000
+        ? 'ruled fully in favor of the freelancer'
+        : bps === 0
+          ? 'ruled fully in favor of the payer'
+          : `split it ${recipientPct}% to the freelancer and ${depositorPct}% back to the payer`;
+
+    const depositorMessage = [
+      `Escrow #${escrowId}: the arbiter ${verdict} on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC at stake).`,
+      depositorShare > 0n
+        ? `${formatUSDC(depositorShare)} USDC has been credited to your refund balance — open the app and go to Withdraw to claim it.`
+        : null,
+      `Resolution ${code(resolutionHash)}. This decision is final.`,
+    ].filter(Boolean).join(' ');
+
+    const recipientMessage = [
+      `Escrow #${escrowId}: the arbiter ${verdict} on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC at stake).`,
+      recipientShare > 0n
+        ? `${formatUSDCAfterFee(recipientShare)} USDC (after the 1.99% fee) is on its way to you.`
+        : null,
+      `Resolution ${code(resolutionHash)}.`,
+    ].filter(Boolean).join(' ');
 
     const arbiterMessage =
-      `Escrow #${escrowId}: you resolved the ${ordinal(milestoneIndex)} milestone in favor of the freelancer — ${formatUSDC(milestone.amount)} USDC released. ` +
-      `Resolution ${code(resolutionHash)}.`;
-
-    await Promise.all([
-      notifyWallet(escrow.depositor, depositorMessage),
-      notifyWallet(escrow.recipient, recipientMessage),
-      notifyArbiter(arbiterMessage),
-    ]);
-  }
-
-  async function onEscrowRefunded({ args }) {
-    // Arbiter-mediated refund in favor of the depositor.
-    const { escrowId, milestoneIndex, resolutionHash } = args;
-    const escrow = await safeGetEscrow(escrowId);
-    if (!escrow) return;
-    const milestone = await safeGetMilestone(escrowId, milestoneIndex);
-    if (!milestone) return;
-
-    const depositorMessage =
-      `Escrow #${escrowId}: the arbiter ruled in your favor on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been added to your refund balance. ` +
-      `Resolution ${code(resolutionHash)}. Open the app and go to Withdraw to claim it.`;
-
-    const recipientMessage =
-      `Escrow #${escrowId}: the arbiter ruled for the payer on the ${ordinal(milestoneIndex)} milestone — ${formatUSDC(milestone.amount)} USDC has been refunded. ` +
-      `Resolution ${code(resolutionHash)}.`;
-
-    const arbiterMessage =
-      `Escrow #${escrowId}: you resolved the ${ordinal(milestoneIndex)} milestone in favor of the payer — ${formatUSDC(milestone.amount)} USDC refunded. ` +
+      `Escrow #${escrowId}: you ${verdict} on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC at stake). ` +
       `Resolution ${code(resolutionHash)}.`;
 
     await Promise.all([
@@ -317,29 +284,22 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     ]);
   }
 
-  async function onEscalatedAfterDeadline({ args }) {
-    const { escrowId, milestoneIndex, evidenceHash } = args;
+  async function onRefundedAfterDeadline({ args }) {
+    const { escrowId, milestoneIndex, amount } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
-    const milestone = await safeGetMilestone(escrowId, milestoneIndex);
-    if (!milestone) return;
 
     const depositorMessage =
-      `Escrow #${escrowId}: the freelancer escalated the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC) to the arbiter because the project deadline passed without your approval. ` +
-      `Submit counter-evidence in the app now if you have a reason for not approving.`;
+      `Escrow #${escrowId}: the freelancer never claimed delivery on the ${ordinal(milestoneIndex)} milestone before the deadline (plus the grace period) passed. ` +
+      `${formatUSDC(amount)} USDC has been credited to your refund balance — open the app and go to Withdraw to claim it.`;
 
     const recipientMessage =
-      `Escrow #${escrowId}: your escalation of the ${ordinal(milestoneIndex)} milestone is in front of the arbiter. ` +
-      `You'll get a notification when a decision is made.`;
-
-    const arbiterMessage =
-      `Escrow #${escrowId}: deadline escalation on the ${ordinal(milestoneIndex)} milestone (${formatUSDC(milestone.amount)} USDC). ` +
-      `Evidence ${code(evidenceHash)}. Open the arbiter panel to review.`;
+      `Escrow #${escrowId}: the deadline (plus grace period) for the ${ordinal(milestoneIndex)} milestone passed without a delivery claim from you, so it has been automatically refunded to the payer. ` +
+      `No further action is possible on this milestone.`;
 
     await Promise.all([
-      notifyWallet(escrow.depositor, depositorMessage),
+      notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
       notifyWallet(escrow.recipient, recipientMessage),
-      notifyArbiter(arbiterMessage),
     ]);
   }
 
@@ -384,25 +344,90 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     ]);
   }
 
-  async function onDisputeTimedOutRefunded({ args }) {
-    const { escrowId, milestoneIndex } = args;
+  async function onDisputeTimedOutSettled({ args }) {
+    const { escrowId, milestoneIndex, defaultBps } = args;
     const escrow = await safeGetEscrow(escrowId);
     if (!escrow) return;
     const milestone = await safeGetMilestone(escrowId, milestoneIndex);
     const amountLine = milestone ? ` (${formatUSDC(milestone.amount)} USDC)` : '';
+    const recipientPct = (Number(defaultBps) / 100).toFixed(2);
+    const depositorPct = ((10000 - Number(defaultBps)) / 100).toFixed(2);
 
     const depositorMessage =
-      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — the arbiter didn't act within 30 days. ` +
-      `The funds have been refunded to your refund balance. Open the app and go to Withdraw to claim them.`;
+      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — 14 days passed with no arbiter ruling, so it defaulted to an even ${depositorPct}% / ${recipientPct}% split between you and the freelancer. ` +
+      `Your share has been credited to your refund balance — open the app and go to Withdraw to claim it.`;
 
     const recipientMessage =
-      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — the arbiter didn't act within 30 days, so the funds have been refunded to the payer. ` +
-      `No further action on this milestone.`;
+      `Escrow #${escrowId}: the dispute on the ${ordinal(milestoneIndex)} milestone${amountLine} timed out — 14 days passed with no arbiter ruling, so it defaulted to an even ${recipientPct}% / ${depositorPct}% split between you and the payer. ` +
+      `Your share (after the 1.99% fee) has been credited to your refund balance — open the app and go to Withdraw to claim it.`;
 
     await Promise.all([
       notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
       notifyWallet(escrow.recipient, recipientMessage),
     ]);
+  }
+
+  async function onMutualSettlementExecuted({ args }) {
+    const { escrowId, milestoneIndex, bps } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+    const milestone = await safeGetMilestone(escrowId, milestoneIndex);
+    if (!milestone) return;
+
+    const recipientShare = (milestone.amount * bps) / 10000n;
+    const depositorShare = milestone.amount - recipientShare;
+    const recipientPct = (Number(bps) / 100).toFixed(2);
+    const depositorPct = ((10000 - Number(bps)) / 100).toFixed(2);
+
+    const depositorMessage = [
+      `Escrow #${escrowId}: you and the freelancer agreed to settle the ${ordinal(milestoneIndex)} milestone dispute — ${recipientPct}% to them, ${depositorPct}% back to you.`,
+      depositorShare > 0n
+        ? `${formatUSDC(depositorShare)} USDC has been credited to your refund balance — open the app and go to Withdraw to claim it.`
+        : null,
+    ].filter(Boolean).join(' ');
+
+    const recipientMessage = [
+      `Escrow #${escrowId}: you and the payer agreed to settle the ${ordinal(milestoneIndex)} milestone dispute — ${recipientPct}% to you, ${depositorPct}% back to them.`,
+      recipientShare > 0n
+        ? `${formatUSDCAfterFee(recipientShare)} USDC (after the 1.99% fee) is on its way to you.`
+        : null,
+    ].filter(Boolean).join(' ');
+
+    await Promise.all([
+      notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
+      notifyWallet(escrow.recipient, recipientMessage),
+    ]);
+  }
+
+  async function onMilestoneCancelled({ args }) {
+    const { escrowId, milestoneIndex, amount } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+
+    const depositorMessage =
+      `Escrow #${escrowId}: you and the freelancer agreed to cancel the ${ordinal(milestoneIndex)} milestone. ` +
+      `${formatUSDC(amount)} USDC (no protocol fee) has been credited to your refund balance — open the app and go to Withdraw to claim it. The rest of the escrow is unaffected.`;
+
+    const recipientMessage =
+      `Escrow #${escrowId}: you and the payer agreed to cancel the ${ordinal(milestoneIndex)} milestone. ` +
+      `${formatUSDC(amount)} USDC has been refunded to the payer. The rest of the escrow is unaffected.`;
+
+    await Promise.all([
+      notifyWallet(escrow.refundTo || escrow.depositor, depositorMessage),
+      notifyWallet(escrow.recipient, recipientMessage),
+    ]);
+  }
+
+  async function onPartialRefundCredited({ args }) {
+    const { escrowId, milestoneIndex, refundTo, amount } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+
+    const message =
+      `Escrow #${escrowId}: ${formatUSDC(amount)} USDC from the ${ordinal(milestoneIndex)} milestone has been credited to your refund balance following a dispute resolution or settlement. ` +
+      `Open the app and go to Withdraw to claim it.`;
+
+    await notifyWallet(refundTo, message);
   }
 
   async function onRefundCreditTransferred({ args }) {
@@ -445,6 +470,18 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
       `No action needed — you'll be notified when funds are released.`;
 
     await notifyWallet(recipient, message);
+  }
+
+  async function onSplitsConfigured({ args }) {
+    const { escrowId, splitCount } = args;
+    const escrow = await safeGetEscrow(escrowId);
+    if (!escrow) return;
+
+    const message =
+      `Escrow #${escrowId}: payment for this escrow is split across ${Number(splitCount)} recipient(s). ` +
+      `Each one will get their own notification with their share and payout details. No action needed from you.`;
+
+    await notifyWallet(escrow.depositor, message);
   }
 
   // ---------- helpers ----------
@@ -491,22 +528,24 @@ export function createNotifier({ bot, getEscrow, getMilestone, arbiterTelegramId
     notifyArbiter,
     handlers: {
       EscrowCreated: onEscrowCreated,
-      DeliverySignaled: onDeliverySignaled,
-      ConditionFulfilled: onConditionFulfilled,
-      SilentApprovalClaimed: onSilentApprovalClaimed,
+      DeliveryClaimed: onDeliveryClaimed,
+      MilestoneApproved: onMilestoneApproved,
+      MilestoneReleased: onMilestoneReleased,
+      RefundedAfterDeadline: onRefundedAfterDeadline,
       DisputeRaised: onDisputeRaised,
       CounterEvidenceSubmitted: onCounterEvidenceSubmitted,
-      EscrowReleased: onEscrowReleased,
-      EscrowReleasedWithoutDispute: onEscrowReleasedWithoutDispute,
-      EscrowRefunded: onEscrowRefunded,
+      DisputeResolved: onDisputeResolved,
+      DisputeTimedOutSettled: onDisputeTimedOutSettled,
+      MutualSettlementExecuted: onMutualSettlementExecuted,
       EscrowRefundedViaMutualCancel: onEscrowRefundedViaMutualCancel,
-      EscalatedAfterDeadline: onEscalatedAfterDeadline,
+      MilestoneCancelled: onMilestoneCancelled,
+      PartialRefundCredited: onPartialRefundCredited,
       RefundWithdrawn: onRefundWithdrawn,
       ReceivingAddressUpdated: onReceivingAddressUpdated,
-      DisputeTimedOutRefunded: onDisputeTimedOutRefunded,
       RefundCreditTransferred: onRefundCreditTransferred,
       EscrowTermsSnapshotted: onEscrowTermsSnapshotted,
       SplitConfigured: onSplitConfigured,
+      SplitsConfigured: onSplitsConfigured,
     },
   };
 }
