@@ -62,7 +62,7 @@ function RefundSection() {
       setTxError(null); setTxStatus('confirming')
       const hash = await writeContractAsync({
         address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
-        functionName: 'withdrawRefund', args: [recipient]
+        functionName: 'withdrawRefund', args: [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]
       })
       setTxHash(hash); setTxStatus('pending')
       t.update('Transaction sent. Waiting for confirmation.')
