@@ -3,7 +3,7 @@ import { defineChain } from 'viem'
 import { injected, mock } from 'wagmi/connectors'
 
 export const arcTestnet = defineChain({
-  id: 1516,
+  id: 5042002,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
   rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
