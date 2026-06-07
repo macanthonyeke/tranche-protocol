@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion, useInView } from 'framer-motion'
+import { ContainerScroll } from '../components/ui/container-scroll-animation.jsx'
 import { toast } from 'sonner'
 import ThemeToggle from '../components/ThemeToggle.jsx'
 import WalletButton from '../components/WalletButton.jsx'
@@ -310,9 +311,46 @@ function ProtocolTicker() {
 /* ------------------------------------------------------------
    DEVELOPER FLEX: mock code editor with Solidity snippet
    ------------------------------------------------------------ */
+const CODE_LINES = [
+  <><span className="text-ink-3">{'// Lock USDC into a milestone-bound, dispute-aware escrow'}</span></>,
+  <><span className="text-clay">{'function'}</span>{' '}<span className="text-ink">{'createEscrow'}</span><span className="text-ink-2">{'('}</span></>,
+  <>{'    '}<span className="text-clay">{'address'}</span>{' '}<span className="text-ink">{'freelancer'}</span><span className="text-ink-2">{','}</span></>,
+  <>{'    '}<span className="text-clay">{'uint256'}</span>{' '}<span className="text-ink">{'amount'}</span><span className="text-ink-2">{','}</span></>,
+  <>{'    '}<span className="text-clay">{'uint32'}</span>{' '}<span className="text-ink">{'destinationDomain'}</span><span className="text-ink-2">{','}</span></>,
+  <>{'    '}<span className="text-clay">{'bytes32'}</span>{' '}<span className="text-ink">{'receivingAddress'}</span><span className="text-ink-2">{','}</span></>,
+  <>{'    '}<span className="text-clay">{'uint64'}</span>{' '}<span className="text-ink">{'deadline'}</span><span className="text-ink-2">{','}</span></>,
+  <>{'    '}<span className="text-clay">{'uint256'}</span><span className="text-ink-2">{'[]'}</span>{' '}<span className="text-clay">{'calldata'}</span>{' '}<span className="text-ink">{'milestoneAmounts'}</span></>,
+  <><span className="text-ink-2">{')'}</span>{' '}<span className="text-clay">{'external'}</span>{' '}<span className="text-clay">{'returns'}</span>{' '}<span className="text-ink-2">{'('}</span><span className="text-clay">{'uint256'}</span>{' '}<span className="text-ink">{'escrowId'}</span><span className="text-ink-2">{') {'}</span></>,
+  <>{'    '}<span className="text-ink">{'require'}</span><span className="text-ink-2">{'('}</span><span className="text-ink">{'amount '}</span><span className="text-ink-2">{'>'}</span><span className="text-warn">{' 0'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ok">{'"zero amount"'}</span><span className="text-ink-2">{');'}</span></>,
+  <>{'    '}<span className="text-ink">{'require'}</span><span className="text-ink-2">{'('}</span><span className="text-ink">{'deadline '}</span><span className="text-ink-2">{'>'}</span><span className="text-ink">{' block'}</span><span className="text-ink-2">{'.'}</span><span className="text-ink">{'timestamp'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ok">{'"past deadline"'}</span><span className="text-ink-2">{');'}</span></>,
+  <>{' '}</>,
+  <>{'    '}<span className="text-ink-3">{'// Pull USDC from the payer into the escrow'}</span></>,
+  <>{'    '}<span className="text-ink">{'USDC'}</span><span className="text-ink-2">{'.'}</span><span className="text-ink">{'safeTransferFrom'}</span><span className="text-ink-2">{'('}</span><span className="text-ink">{'msg'}</span><span className="text-ink-2">{'.'}</span><span className="text-ink">{'sender'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-clay">{'address'}</span><span className="text-ink-2">{'('}</span><span className="text-clay">{'this'}</span><span className="text-ink-2">{'),'}</span>{' '}<span className="text-ink">{'amount'}</span><span className="text-ink-2">{');'}</span></>,
+  <>{' '}</>,
+  <>{'    '}<span className="text-ink">{'escrowId '}</span><span className="text-ink-2">{'='}</span>{' '}<span className="text-ink">{'_storeEscrow'}</span><span className="text-ink-2">{'('}</span><span className="text-ink">{'freelancer'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ink">{'milestoneAmounts'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ink">{'deadline'}</span><span className="text-ink-2">{');'}</span></>,
+  <>{'    '}<span className="text-ink">{'emit '}</span><span className="text-ink">{'EscrowCreated'}</span><span className="text-ink-2">{'('}</span><span className="text-ink">{'escrowId'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ink">{'msg'}</span><span className="text-ink-2">{'.'}</span><span className="text-ink">{'sender'}</span><span className="text-ink-2">{','}</span>{' '}<span className="text-ink">{'freelancer'}</span><span className="text-ink-2">{');'}</span></>,
+  <><span className="text-ink-2">{'}'}</span></>,
+]
+
+const LINE_DELAY = 0.055
+const LINE_DURATION = 0.28
+
 function CodeEditor() {
+  const containerRef = useRef(null)
+  const isInView = useInView(containerRef, { once: true, margin: '-80px' })
+  const reduceMotion = useReducedMotion()
+
+  const shouldAnimate = isInView && !reduceMotion
+  const cursorDelay = (CODE_LINES.length - 1) * LINE_DELAY + LINE_DURATION
+
   return (
-    <div className="bg-paper border border-rule rounded-md overflow-hidden max-w-4xl mx-auto">
+    <motion.div
+      ref={containerRef}
+      className="bg-paper border border-rule rounded-md overflow-hidden max-w-4xl mx-auto"
+      initial={reduceMotion ? false : { opacity: 0, scale: 0.97, y: 10 }}
+      animate={isInView ? { opacity: 1, scale: 1, y: 0 } : {}}
+      transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+    >
       {/* macOS terminal header */}
       <div className="h-10 bg-sunk border-b border-rule flex items-center px-4 gap-2">
         <span className="w-3 h-3 rounded-full bg-[#FF5F56]" />
@@ -321,112 +359,38 @@ function CodeEditor() {
         <span className="ml-4 num text-xs text-ink-3">TrancheProtocol.sol</span>
       </div>
 
-      {/* Code body */}
+      {/* Code body — each line reveals with stagger as editor enters view */}
       <pre className="font-mono text-sm leading-relaxed text-ink p-6 overflow-x-auto">
         <code>
-          <span className="text-ink-3">{'// Lock USDC into a milestone-bound, dispute-aware escrow'}</span>
-          {'\n'}
-          <span className="text-clay">function</span>{' '}
-          <span className="text-ink">createEscrow</span>
-          <span className="text-ink-2">(</span>
-          {'\n    '}
-          <span className="text-clay">address</span>{' '}
-          <span className="text-ink">freelancer</span>
-          <span className="text-ink-2">,</span>
-          {'\n    '}
-          <span className="text-clay">uint256</span>{' '}
-          <span className="text-ink">amount</span>
-          <span className="text-ink-2">,</span>
-          {'\n    '}
-          <span className="text-clay">uint32</span>{' '}
-          <span className="text-ink">destinationDomain</span>
-          <span className="text-ink-2">,</span>
-          {'\n    '}
-          <span className="text-clay">bytes32</span>{' '}
-          <span className="text-ink">receivingAddress</span>
-          <span className="text-ink-2">,</span>
-          {'\n    '}
-          <span className="text-clay">uint64</span>{' '}
-          <span className="text-ink">deadline</span>
-          <span className="text-ink-2">,</span>
-          {'\n    '}
-          <span className="text-clay">uint256</span>
-          <span className="text-ink-2">[]</span>{' '}
-          <span className="text-clay">calldata</span>{' '}
-          <span className="text-ink">milestoneAmounts</span>
-          {'\n'}
-          <span className="text-ink-2">{')'}</span>{' '}
-          <span className="text-clay">external</span>{' '}
-          <span className="text-clay">returns</span>{' '}
-          <span className="text-ink-2">(</span>
-          <span className="text-clay">uint256</span>{' '}
-          <span className="text-ink">escrowId</span>
-          <span className="text-ink-2">{') {'}</span>
-          {'\n    '}
-          <span className="text-ink">require</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-ink">amount </span>
-          <span className="text-ink-2">{'>'}</span>
-          <span className="text-warn"> 0</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ok">"zero amount"</span>
-          <span className="text-ink-2">);</span>
-          {'\n    '}
-          <span className="text-ink">require</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-ink">deadline </span>
-          <span className="text-ink-2">{'>'}</span>
-          <span className="text-ink"> block</span>
-          <span className="text-ink-2">.</span>
-          <span className="text-ink">timestamp</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ok">"past deadline"</span>
-          <span className="text-ink-2">);</span>
-          {'\n\n    '}
-          <span className="text-ink-3">{'// Pull USDC from the payer into the escrow'}</span>
-          {'\n    '}
-          <span className="text-ink">USDC</span>
-          <span className="text-ink-2">.</span>
-          <span className="text-ink">safeTransferFrom</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-ink">msg</span>
-          <span className="text-ink-2">.</span>
-          <span className="text-ink">sender</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-clay">address</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-clay">this</span>
-          <span className="text-ink-2">),</span>{' '}
-          <span className="text-ink">amount</span>
-          <span className="text-ink-2">);</span>
-          {'\n\n    '}
-          <span className="text-ink">escrowId </span>
-          <span className="text-ink-2">=</span>{' '}
-          <span className="text-ink">_storeEscrow</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-ink">freelancer</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ink">milestoneAmounts</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ink">deadline</span>
-          <span className="text-ink-2">);</span>
-          {'\n    '}
-          <span className="text-ink">emit </span>
-          <span className="text-ink">EscrowCreated</span>
-          <span className="text-ink-2">(</span>
-          <span className="text-ink">escrowId</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ink">msg</span>
-          <span className="text-ink-2">.</span>
-          <span className="text-ink">sender</span>
-          <span className="text-ink-2">,</span>{' '}
-          <span className="text-ink">freelancer</span>
-          <span className="text-ink-2">);</span>
-          {'\n'}
-          <span className="text-ink-2">{'}'}</span>
+          {CODE_LINES.map((line, i) => (
+            <motion.span
+              key={i}
+              className="block"
+              initial={reduceMotion ? false : { opacity: 0, y: 7 }}
+              animate={shouldAnimate ? { opacity: 1, y: 0 } : {}}
+              transition={{ duration: LINE_DURATION, ease: [0.22, 1, 0.36, 1], delay: i * LINE_DELAY }}
+            >
+              {line}
+              {i === CODE_LINES.length - 1 && (
+                <motion.span
+                  aria-hidden
+                  className="inline-block w-0.5 h-[0.85em] bg-clay align-middle ml-0.5"
+                  initial={{ opacity: 0 }}
+                  animate={shouldAnimate ? { opacity: [0, 1, 1, 0, 0] } : reduceMotion ? { opacity: 1 } : { opacity: 0 }}
+                  transition={shouldAnimate ? {
+                    delay: cursorDelay,
+                    duration: 0.9,
+                    times: [0, 0.01, 0.5, 0.51, 1],
+                    ease: 'linear',
+                    repeat: Infinity,
+                  } : {}}
+                />
+              )}
+            </motion.span>
+          ))}
         </code>
       </pre>
-    </div>
+    </motion.div>
   )
 }
 
@@ -502,27 +466,19 @@ export default function Home() {
       <ProtocolTicker />
 
       {/* Developer flex */}
-      <section className="max-w-content mx-auto w-full px-4 md:px-8 py-24">
-        <motion.div
-          className="text-center mb-12"
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, margin: '-60px' }}
-          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <h2 className="display text-4xl md:text-5xl text-ink">Built so neither side has to trust the other</h2>
-          <p className="mt-3 text-ink-2 max-w-2xl mx-auto leading-relaxed">
-            Every escrow is a single on-chain record. Milestone amounts, deadlines, and dispute rules are set at the start and cannot be changed mid-way.
-          </p>
-        </motion.div>
-        <motion.div
-          initial={{ opacity: 0, y: 24 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, margin: '-60px' }}
-          transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1], delay: 0.1 }}
+      <section className="w-full">
+        <ContainerScroll
+          titleComponent={
+            <>
+              <h2 className="display text-4xl md:text-5xl text-ink">Built so neither side has to trust the other</h2>
+              <p className="mt-3 text-ink-2 max-w-2xl mx-auto leading-relaxed">
+                Every escrow is a single on-chain record. Milestone amounts, deadlines, and dispute rules are set at the start and cannot be changed mid-way.
+              </p>
+            </>
+          }
         >
           <CodeEditor />
-        </motion.div>
+        </ContainerScroll>
       </section>
 
       {/* How it works — horizontal numbered stepper.
