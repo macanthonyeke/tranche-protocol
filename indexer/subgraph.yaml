@@ -10,10 +10,10 @@ dataSources:
     network: arc-testnet
     source:
       # Live Tranche Protocol proxy — from deploy/.env CONTRACT_ADDRESS (matches frontend/.env).
-      address: "0xa87d0bece65f11236373fd0eaf98662814df8e97"
+      address: "0x35c05953d2a258b4011ab84a917bd39629a1dfa6"
       abi: TrancheProtocol
       # Proxy deployment block (found via on-chain getCode binary search).
-      startBlock: 45472341
+      startBlock: 46002984
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9

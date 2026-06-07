@@ -256,6 +256,21 @@ function DomainControls() {
 
 /* ---------- Recovery Controls ---------- */
 function RecoveryControls() {
+  return (
+    <section className="flex flex-col gap-6 max-w-prose">
+      <div>
+        <h2 className="display text-[28px] leading-tight text-ink">Recovery</h2>
+        <p className="text-[13.5px] text-ink-2 leading-relaxed mt-2">
+          Two-step emergency refund credit recovery. Step 1 (admin): propose the transfer. Step 2 (new owner): claim from their wallet.
+        </p>
+      </div>
+      <ProposeRecovery />
+      <ClaimRecovery />
+    </section>
+  )
+}
+
+function ProposeRecovery() {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [confirm, setConfirm] = useState(false)
@@ -263,12 +278,8 @@ function RecoveryControls() {
   const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
 
   return (
-    <section className="flex flex-col gap-4 max-w-prose">
-      <h2 className="display text-[28px] leading-tight text-ink">Recovery</h2>
-      <p className="text-[13.5px] text-ink-2 leading-relaxed">
-        Emergency action: transfer refund credit between wallets when one has lost access. Irreversible once confirmed.
-      </p>
-
+    <div className="panel p-4 flex flex-col gap-3">
+      <p className="eyebrow text-ink-2">Step 1 — Propose (admin)</p>
       <Field
         label="Restricted wallet"
         error={from && !isAddress(from) ? 'Not a valid address.' : undefined}
@@ -295,32 +306,82 @@ function RecoveryControls() {
           />
         )}
       </Field>
-
       {!confirm ? (
         <div>
           <button className="btn-danger" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
-            Transfer credit
+            Propose transfer
           </button>
         </div>
       ) : (
         <div className="panel border-bad p-4 flex flex-col gap-3">
-          <p className="eyebrow text-bad">Confirm transfer</p>
+          <p className="eyebrow text-bad">Confirm proposal</p>
           <p className="text-[13px] text-ink-2 leading-relaxed">
-            Move refund credit from <span className="num">{truncateAddr(from)}</span> to <span className="num">{truncateAddr(to)}</span>. This cannot be undone.
+            Propose moving refund credit from <span className="num">{truncateAddr(from)}</span> to <span className="num">{truncateAddr(to)}</span>. The replacement wallet must then claim it.
           </p>
           <div className="flex gap-2">
             <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
               className="btn-danger"
-              onClick={() => tx.run(escrowWrite('adminTransferRefundCredit', [from, to]), { loadingMessage: 'Executing emergency recovery.' })}
+              onClick={() => tx.run(escrowWrite('proposeRefundCreditTransfer', [from, to]), { loadingMessage: 'Submitting proposal…' })}
               disabled={tx.isBusy}
             >
-              {tx.isBusy ? 'Executing…' : 'Confirm execution'}
+              {tx.isBusy ? 'Submitting…' : 'Confirm proposal'}
             </button>
           </div>
         </div>
       )}
-    </section>
+    </div>
+  )
+}
+
+function ClaimRecovery() {
+  const [blacklisted, setBlacklisted] = useState('')
+  const [confirm, setConfirm] = useState(false)
+  const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
+  const valid = isAddress(blacklisted)
+
+  return (
+    <div className="panel p-4 flex flex-col gap-3">
+      <p className="eyebrow text-ink-2">Step 2 — Claim (replacement wallet)</p>
+      <p className="text-[13px] text-ink-2 leading-relaxed">
+        Connect as the replacement wallet, then enter the restricted wallet address to claim its refund credit.
+      </p>
+      <Field
+        label="Restricted wallet"
+        error={blacklisted && !isAddress(blacklisted) ? 'Not a valid address.' : undefined}
+      >
+        {(p) => (
+          <input {...p} className="input num" placeholder="0x… (the restricted wallet from step 1)"
+            autoComplete="off" spellCheck={false}
+            value={blacklisted} onChange={(e) => setBlacklisted(e.target.value.trim())} disabled={tx.isBusy}
+          />
+        )}
+      </Field>
+      {!confirm ? (
+        <div>
+          <button className="btn-primary" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
+            Claim credit
+          </button>
+        </div>
+      ) : (
+        <div className="panel border-bad p-4 flex flex-col gap-3">
+          <p className="eyebrow text-bad">Confirm claim</p>
+          <p className="text-[13px] text-ink-2 leading-relaxed">
+            Transfer refund credit from <span className="num">{truncateAddr(blacklisted)}</span> to your connected wallet.
+          </p>
+          <div className="flex gap-2">
+            <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
+            <button
+              className="btn-primary"
+              onClick={() => tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), { loadingMessage: 'Claiming refund credit…' })}
+              disabled={tx.isBusy}
+            >
+              {tx.isBusy ? 'Claiming…' : 'Confirm claim'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

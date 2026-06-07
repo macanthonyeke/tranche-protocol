@@ -10,16 +10,16 @@ Tranche Protocol V2 is an on-chain escrow protocol on Circle's Arc Testnet. Paym
 
 | Key | Value |
 |-----|-------|
-| Contract address | `0xa87d0bece65f11236373fd0eaf98662814df8e97` |
-| Deploy block | `45472341` |
+| Contract address | `0x35c05953d2a258b4011ab84a917bd39629a1dfa6` |
+| Deploy block | `46002984` |
 | Chain | Arc Testnet (chain ID 5042002) |
 | USDC | `0x3600000000000000000000000000000000000000` |
 | TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
 | Deployer | `0x179cc4c8f23d257b7f4acb785464025570e3af86` |
 | Arbiter / Pauser / Treasury | `0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03` |
 | Explorer | https://testnet.arcscan.app |
-| Contract on explorer | https://testnet.arcscan.app/address/0xa87d0bece65f11236373fd0eaf98662814df8e97 |
-| Source verified | Yes (Blockscout, 2026-06-04) |
+| Contract on explorer | https://testnet.arcscan.app/address/0x35c05953d2a258b4011ab84a917bd39629a1dfa6 |
+| Source verified | Yes (Blockscout, 2026-06-07) |
 
 ---
 
@@ -106,9 +106,9 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.1.0/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.2.0/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.1.0` |
+| Subgraph name/version | `tranche-protocol/0.2.0` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
@@ -143,7 +143,7 @@ Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by 
 ## Key design notes
 
 - **Optimistic release**: recipient calls `claimDelivery`, depositor has a review window to dispute; after the window anyone can permissionlessly `release`.
-- **CCTP V2 cross-chain**: releases/refunds to non-Arc addresses use Circle's Forwarding Service (the `cctp-forward` hook auto-mints on the destination). `cctpForwardFee` is the on-chain **floor**; it is currently set to `250000` (0.25 USDC). It is *not* the real fee — see the live-fee note below.
+- **CCTP V2 cross-chain**: releases/refunds to non-Arc addresses use Circle's Forwarding Service (the `cctp-forward` hook auto-mints on the destination). `cctpForwardFee` is the on-chain **floor**; it is currently set to `200000` (0.20 USDC). It is *not* the real fee — see the live-fee note below.
 - **Cross-chain `maxFee` must be a live Circle quote** (critical): a burn whose `maxFee` is below Circle's live forwarding fee is *attested but never minted* — Iris returns `forwardState: FAILED / forwardErrorCode: INSUFFICIENT_FEE`. The on-chain `cctpForwardFee` is only the floor `_assertCrossChainFee` enforces. The frontend quotes the real fee immediately before `approveRelease`/`release`/`mutualSettle`/`resolveDispute` via `frontend/src/utils/cctpFee.js` (`resolveMaxFee`), calling `GET https://iris-api-sandbox.circle.com/v2/burn/USDC/fees/{src}/{dst}?forward=true` and taking the `finalityThreshold: 2000` tier's `forwardFee.high`. Never pass the static `config.cctpForwardFee` as `maxFee`. Caveat: permissionless `release()` ignores the caller's `maxFee` and burns at the deposit-time `escrowCctpForwardFee` snapshot, so the global floor must stay ≥ Circle's live fee for that path to auto-deliver. A burn stranded by an under-quote is recoverable by self-relaying `receiveMessage(message, attestation)` on the destination's MessageTransmitterV2 (`destinationCaller = 0x0`, so anyone can relay).
 - **Fee snapshot**: `escrowFeeBps`, `escrowTreasury`, and `escrowCctpForwardFee` are snapshotted at deposit so admin changes don't retroactively affect in-flight escrows.
 - **`DELIVERY_GRACE_PERIOD` = 72 hours**: recipient can still claim delivery up to 72 h after the nominal deadline; depositor's `refundAfterDeadline` only opens after this grace period elapses.

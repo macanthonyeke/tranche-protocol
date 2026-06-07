@@ -14,7 +14,7 @@ if (!CONTRACT_ADDRESS) throw new Error('CONTRACT_ADDRESS is not set in .env');
 
 const CCTP_FORWARD_FEE = process.env.CCTP_FORWARD_FEE
   ? BigInt(process.env.CCTP_FORWARD_FEE)
-  : 100000n;
+  : 200000n;
 
 const ARC_RPC_URL = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.network';
 

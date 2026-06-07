@@ -317,7 +317,7 @@ export function useRefundBalance(address) {
   const { data, isLoading, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
-    functionName: 'getRefundBalance',
+    functionName: 'refundBalances',
     args: enabled ? [address] : undefined,
     query: { enabled }
   })
