@@ -151,7 +151,7 @@ function TopNav() {
       <div className="flex items-center gap-1">
         <IconButton
           as="a"
-          href="https://twitter.com"
+          href="https://x.com/trancheprotocol"
           target="_blank"
           rel="noreferrer"
           label="X (Twitter)"
