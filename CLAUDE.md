@@ -58,17 +58,23 @@ forge verify-contract <CONTRACT_ADDRESS> src/TrancheProtocol.sol:TrancheProtocol
 cd indexer
 npm run sync                                               # updates subgraph.yaml, networks.json, both ABI copies
 npm run codegen && npm run build
-~/.local/bin/goldsky subgraph deploy tranche-protocol/0.1.0 --path .
+~/.local/bin/goldsky subgraph deploy tranche-protocol/<next-version> --path .
+# Then update VITE_GOLDSKY_ENDPOINT in frontend/.env and CLAUDE.md subgraph section
+
+# 3. Set the CCTP forward fee (resets to 0 on every fresh deploy)
+node setFee.js
 ```
 
 ### Bytecode size budget
-Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,573 bytes** (3-byte margin — essentially exhausted after the round-4 audit fixes). The contract is already at `optimizer_runs = 1` and `via_ir = true`, and every non-external constant is already `internal`, so the constant-getter lever is spent. Any further additions will require freeing space first — e.g. removing a redundant public view (`splitsLength` duplicates `getSplits(id).length`), making one of the `public` constants `internal` (and updating the scripts/frontend that read it), or deploying over the limit via `npm run full-gas` (Arc's chain does not enforce EIP-170; only Circle's estimation does, which the explicit-gas script bypasses).
+Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,552 bytes** (24-byte margin). The contract is at `optimizer_runs = 1` and `via_ir = true`. Any further additions will require freeing space first — e.g. removing a redundant public view (`splitsLength` duplicates `getSplits(id).length`), making another `public` constant `internal` (and hardcoding its hash in the deploy scripts), or deploying over the limit via `npm run full-gas` (Arc's chain does not enforce EIP-170; only Circle's estimation does, which the explicit-gas script bypasses).
 
 Constants that are `internal` (no public getter, not readable via RPC):
-`MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`
+`MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`, `RECOVERY_MANAGER_ROLE`
+
+`RECOVERY_MANAGER_ROLE` is internal — its keccak256 hash (`0x926fb51ac9583c9ff853ed9f763f17034aa5e977d332565b8a7360cd393448b1`) is hardcoded directly in `deploy/setup.js` and `deploy/verify.js`.
 
 Constants that must stay `public` (read by setup/verify scripts or frontend):
-`ARBITER_ROLE`, `PAUSER_ROLE`, `DOMAIN_MANAGER_ROLE`, `FEE_MANAGER_ROLE`, `RECOVERY_MANAGER_ROLE`, `ARC_DOMAIN`, `BPS_DENOMINATOR`, `ARBITER_WINDOW`.
+`ARBITER_ROLE`, `PAUSER_ROLE`, `DOMAIN_MANAGER_ROLE`, `FEE_MANAGER_ROLE`, `ARC_DOMAIN`, `BPS_DENOMINATOR`, `ARBITER_WINDOW`.
 
 ---
 
@@ -90,7 +96,7 @@ Constants that must stay `public` (read by setup/verify scripts or frontend):
 ```
 src/TrancheProtocol.sol       — main contract
 src/interface/                — ITrancheProtocol, ITokenMessenger
-test/                         — Foundry test suite (177 tests)
+test/                         — Foundry test suite (194 tests)
 deploy/                       — Node.js deploy/setup/verify scripts
   deploy-explicit-gas.mjs     — bypasses Circle estimation (use this)
   setup.js                    — grants roles, adds domain, sets fee
