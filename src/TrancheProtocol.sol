@@ -17,7 +17,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant DOMAIN_MANAGER_ROLE = keccak256("DOMAIN_MANAGER_ROLE");
     bytes32 public constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
-    bytes32 public constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
+    bytes32 internal constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 internal constant MAX_PROTOCOL_FEE = 500; // 5%
@@ -1302,21 +1302,18 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     function _approveAndBurn(uint256 burnAmount, uint32 destinationDomain, bytes32 mintRecipient, uint256 cctpMaxFee)
         internal
     {
-        uint256 maxFee;
-
         if (destinationDomain == ARC_DOMAIN) {
-            // Same-chain: no Forwarding Service involvement, Circle handles
-            // the mint natively without taking a fee.
-            maxFee = 0;
-        } else {
-            // H-04 / M-03: bound the per-burn maxFee strictly below
-            // `burnAmount`. Catches the grief vector where a permissionless
-            // caller passes a huge maxFee that the CCTP forwarder could
-            // (in theory) consume in full, and the stale-stored-fee case
-            // where `cctpForwardFee` drifts above the share size.
-            if (cctpMaxFee >= burnAmount) revert MaxFeeExceedsBurnAmount();
-            maxFee = cctpMaxFee;
+            // Same-chain: direct transfer, no CCTP burn/mint round-trip.
+            usdc.safeTransfer(address(uint160(uint256(mintRecipient))), burnAmount);
+            return;
         }
+
+        // H-04 / M-03: bound the per-burn maxFee strictly below
+        // `burnAmount`. Catches the grief vector where a permissionless
+        // caller passes a huge maxFee that the CCTP forwarder could
+        // (in theory) consume in full, and the stale-stored-fee case
+        // where `cctpForwardFee` drifts above the share size.
+        if (cctpMaxFee >= burnAmount) revert MaxFeeExceedsBurnAmount();
 
         // SafeERC20.forceApprove is incompatible with the Arc USDC precompile,
         // so we make a raw call but properly decode the ERC-20 return value.
@@ -1331,7 +1328,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             mintRecipient,
             address(usdc),
             bytes32(0),
-            maxFee,
+            cctpMaxFee,
             CCTP_MIN_FINALITY_THRESHOLD,
             abi.encodePacked(FORWARD_HOOK_DATA)
         );

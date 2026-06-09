@@ -10,16 +10,16 @@ Tranche Protocol V2 is an on-chain escrow protocol on Circle's Arc Testnet. Paym
 
 | Key | Value |
 |-----|-------|
-| Contract address | `0x35c05953d2a258b4011ab84a917bd39629a1dfa6` |
-| Deploy block | `46002984` |
+| Contract address | `0x5e477f506aac4c2b422e769fdfbffafa939f5107` |
+| Deploy block | `46357272` |
 | Chain | Arc Testnet (chain ID 5042002) |
 | USDC | `0x3600000000000000000000000000000000000000` |
 | TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
 | Deployer | `0x179cc4c8f23d257b7f4acb785464025570e3af86` |
 | Arbiter / Pauser / Treasury | `0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03` |
 | Explorer | https://testnet.arcscan.app |
-| Contract on explorer | https://testnet.arcscan.app/address/0x35c05953d2a258b4011ab84a917bd39629a1dfa6 |
-| Source verified | Yes (Blockscout, 2026-06-07) |
+| Contract on explorer | https://testnet.arcscan.app/address/0x5e477f506aac4c2b422e769fdfbffafa939f5107 |
+| Source verified | Yes (Blockscout, 2026-06-09) |
 
 ---
 
@@ -106,9 +106,9 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.2.0/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.3.0/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.2.0` |
+| Subgraph name/version | `tranche-protocol/0.3.0` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 

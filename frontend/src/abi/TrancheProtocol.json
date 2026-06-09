@@ -141,19 +141,6 @@
   },
   {
     "type": "function",
-    "name": "RECOVERY_MANAGER_ROLE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "addSupportedDomain",
     "inputs": [
       {

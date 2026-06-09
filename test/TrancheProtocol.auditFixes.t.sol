@@ -276,7 +276,7 @@ contract TrancheProtocolAuditFixesTest is Base {
     function test_RecoveryPropose_NonRecoveryManagerReverts() public {
         address blacklisted = _seedRefundCredit(100e6);
         address rescue = makeAddr("rescueWallet");
-        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        bytes32 recoveryRole = keccak256("RECOVERY_MANAGER_ROLE");
 
         vm.prank(stranger);
         vm.expectRevert(
@@ -371,7 +371,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         adminOnly = makeAddr("adminOnly");
         bytes32 adminRole = escrow.DEFAULT_ADMIN_ROLE();
         bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
-        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        bytes32 recoveryRole = keccak256("RECOVERY_MANAGER_ROLE");
         vm.startPrank(deployer);
         escrow.grantRole(adminRole, adminOnly);
         escrow.revokeRole(feeRole, adminOnly);
@@ -456,7 +456,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         address blacklisted = _seedRefundCredit(100e6);
         address rescue = makeAddr("rescueWallet");
         address recoveryMgr = makeAddr("recoveryMgr");
-        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        bytes32 recoveryRole = keccak256("RECOVERY_MANAGER_ROLE");
         vm.prank(deployer);
         escrow.grantRole(recoveryRole, recoveryMgr);
 
@@ -472,7 +472,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         address blacklisted = _seedRefundCredit(100e6);
         address rescue = makeAddr("rescueWallet");
         address adminOnly = _deployerOnlyAdmin();
-        bytes32 recoveryRole = escrow.RECOVERY_MANAGER_ROLE();
+        bytes32 recoveryRole = keccak256("RECOVERY_MANAGER_ROLE");
 
         vm.prank(adminOnly);
         vm.expectRevert(

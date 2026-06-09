@@ -98,7 +98,7 @@ const [
   readContract('PAUSER_ROLE'),
   readContract('DOMAIN_MANAGER_ROLE'),
   readContract('FEE_MANAGER_ROLE'),
-  readContract('RECOVERY_MANAGER_ROLE'),
+  Promise.resolve('0x926fb51ac9583c9ff853ed9f763f17034aa5e977d332565b8a7360cd393448b1'),
   readContract('escrowCount'),
   readContract('paused'),
   readContract('supportedDomains', [ARC_DOMAIN]),

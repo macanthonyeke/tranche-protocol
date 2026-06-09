@@ -44,9 +44,10 @@ contract TrancheProtocolCctpSignalTest is Base {
     // CCTP burn parameters: same-chain vs cross-chain
     // -------------------------------------------------------------------------
 
-    function test_CCTP_SameChainRelease_UsesZeroMaxFee() public {
+    function test_CCTP_SameChainRelease_UsesDirectTransfer() public {
         uint32 arcDomain = escrow.ARC_DOMAIN();
-        bytes32 arcRecipient = bytes32(uint256(uint160(0xA1C0)));
+        address arcRecipientAddr = address(0xA1C0);
+        bytes32 arcRecipient = bytes32(uint256(uint160(arcRecipientAddr)));
 
         vm.prank(domainManager);
         escrow.addSupportedDomain(arcDomain);
@@ -54,11 +55,14 @@ contract TrancheProtocolCctpSignalTest is Base {
         uint256 id = _depositToDomain(100e6, arcDomain, arcRecipient);
         _claimDelivery(id, 0);
         vm.warp(block.timestamp + REVIEW_WINDOW);
-        escrow.release(id, 0, 0); // same-chain: maxFee forced to 0 internally
 
-        (, uint256 burnAmount,,,,, uint256 maxFee,,,) = _readBurnCall();
-        assertEq(maxFee, 0, "same-chain (Arc) release must pass maxFee = 0");
-        assertEq(burnAmount, 100e6);
+        uint256 balBefore = usdc.balanceOf(arcRecipientAddr);
+        escrow.release(id, 0, 0);
+        uint256 balAfter = usdc.balanceOf(arcRecipientAddr);
+
+        // Base.setUp sets protocolFeeBps = 0, so full amount reaches recipient.
+        uint256 fee = (100e6 * escrow.protocolFeeBps()) / escrow.BPS_DENOMINATOR();
+        assertEq(balAfter - balBefore, 100e6 - fee, "same-chain release must direct-transfer to recipient");
     }
 
     // M-R3-01: the permissionless release() path IGNORES the caller-supplied

@@ -1,8 +1,8 @@
 {
   "arc-testnet": {
     "TrancheProtocol": {
-      "address": "0x35c05953d2a258b4011ab84a917bd39629a1dfa6",
-      "startBlock": 46002984
+      "address": "0x5e477f506aac4c2b422e769fdfbffafa939f5107",
+      "startBlock": 46357272
     }
   }
 }
