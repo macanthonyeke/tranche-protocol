@@ -40,6 +40,9 @@ deploy/.env
 # Local agent state
 .claude/
 
+# Pre-audit / x-ray reports (generated locally, not for version control)
+x-ray/
+
 # Vite dep cache
 frontend/.vite/
 frontend/public/
