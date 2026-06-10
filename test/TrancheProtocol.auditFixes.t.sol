@@ -500,7 +500,8 @@ contract TrancheProtocolAuditFixesTest is Base {
             INVOICE_URI,
             ms,
             block.timestamp + 30 days,
-            splits
+            splits,
+            new string[](0)
         );
         vm.stopPrank();
     }

@@ -335,4 +335,39 @@ interface ITrancheProtocol {
     ///         is greater than or equal to the caller's refund balance, leaving
     ///         nothing to burn after the fee is deducted.
     error RefundBelowMaxFee();
+
+    /// @notice A split recipient's `mintRecipient` has non-zero bytes in the
+    ///         top 12 bytes, indicating it is not a valid left-padded EVM
+    ///         address. Depositing silently would strand funds on release.
+    error InvalidSplitMintRecipient();
+
+    /// @notice {extendDeadline} was called with a `newDeadline` that is not
+    ///         strictly greater than the escrow's current deadline.
+    error DeadlineNotExtended();
+
+    // ---------- new events ----------
+
+    /// @notice Depositor extended the escrow deadline.
+    event DeadlineExtended(uint256 indexed escrowId, uint256 newDeadline);
+
+    /// @notice A party retracted their own mutual-cancel approval.
+    event CancelApprovalRetracted(uint256 indexed escrowId, address indexed retractedBy);
+
+    /// @notice Recipient declined the escrow; full amount refunded to payer.
+    event EscrowDeclined(uint256 indexed escrowId, address recipient);
+
+    /// @notice Either party appended evidence to an ongoing dispute thread.
+    ///         Nothing is stored on-chain — the subgraph indexes the thread.
+    event EvidenceAppended(
+        uint256 indexed escrowId,
+        uint256 milestoneIndex,
+        address indexed caller,
+        bytes32 hash,
+        string uri,
+        uint256 timestamp
+    );
+
+    /// @notice Milestone titles emitted at deposit for off-chain indexing.
+    ///         Nothing stored on-chain.
+    event MilestoneTitles(uint256 indexed escrowId, string[] titles);
 }

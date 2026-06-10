@@ -357,9 +357,19 @@ contract TrancheProtocolLifecycleTest is Base {
     // Mutual cancel
     // ----------------------------------------------------------------------
 
-    function test_MutualCancel_RefundsPendingAndInReview() public {
+    function test_MutualCancel_RevertOn_DuringInReview() public {
         uint256 id = _depositMulti(); // [100, 200, 300]
-        _claimDelivery(id, 0); // milestone 0 IN_REVIEW; 1 & 2 PENDING
+        _claimDelivery(id, 0); // milestone 0 IN_REVIEW
+
+        vm.prank(depositor);
+        escrow.mutualCancel(id);
+        vm.prank(recipient);
+        vm.expectRevert(CannotCancelDuringDispute.selector);
+        escrow.mutualCancel(id);
+    }
+
+    function test_MutualCancel_WorksWhenAllPending() public {
+        uint256 id = _depositMulti(); // [100, 200, 300] all PENDING
 
         vm.prank(depositor);
         escrow.mutualCancel(id);

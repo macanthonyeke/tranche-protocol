@@ -99,7 +99,8 @@ abstract contract Base is Test, ITrancheProtocol {
             INVOICE_URI,
             milestoneAmounts,
             block.timestamp + 30 days,
-            noSplits
+            noSplits,
+            new string[](0)
         );
         vm.stopPrank();
     }

@@ -27,7 +27,8 @@ contract TrancheProtocolAuditRound2Test is Base {
             INVOICE_URI,
             ms,
             block.timestamp + 30 days,
-            sp
+            sp,
+            new string[](0)
         );
         vm.stopPrank();
     }
@@ -57,7 +58,8 @@ contract TrancheProtocolAuditRound2Test is Base {
             INVOICE_URI,
             ms,
             block.timestamp + 30 days,
-            _noSplits()
+            _noSplits(),
+            new string[](0)
         );
         vm.stopPrank();
     }
@@ -97,7 +99,8 @@ contract TrancheProtocolAuditRound2Test is Base {
             INVOICE_URI,
             ms,
             block.timestamp + 30 days,
-            sp
+            sp,
+            new string[](0)
         );
         vm.stopPrank();
     }
