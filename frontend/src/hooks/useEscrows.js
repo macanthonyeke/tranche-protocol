@@ -216,7 +216,7 @@ export function useEscrowDetail(escrowId, caller, { pollMs } = {}) {
 
 // --- Dashboard ---
 function useDashboardOnchain(address, active) {
-  const { data, isLoading, refetch } = useReadContract({
+  const { data, isLoading, error, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'getDashboard',
@@ -233,27 +233,28 @@ function useDashboardOnchain(address, active) {
       refundBalance: data.refundBalance ?? 0n
     }
   }, [data])
-  return { dashboard, isLoading, refetch }
+  return { dashboard, isLoading, error: error ?? null, refetch }
 }
 
 function useDashboardGoldsky(address, active) {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['gs-dashboard', address?.toLowerCase()],
     queryFn: () => fetchDashboard(address),
     enabled: active
   })
-  return { dashboard: data ?? null, isLoading, refetch }
+  return { dashboard: data ?? null, isLoading, error: error ?? null, refetch }
 }
 
 export function useDashboard(address) {
   const onchain = useDashboardOnchain(address, !GOLDSKY_ENABLED && !!address)
   const goldsky = useDashboardGoldsky(address, GOLDSKY_ENABLED && !!address)
+  // Both paths expose { dashboard, isLoading, error, refetch }
   return GOLDSKY_ENABLED ? goldsky : onchain
 }
 
 // --- Escrows by participant role ---
 function useEscrowsByRoleOnchain(functionName, address, active) {
-  const { data, isLoading, refetch } = useReadContract({
+  const { data, isLoading, error, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName,
@@ -261,16 +262,16 @@ function useEscrowsByRoleOnchain(functionName, address, active) {
     query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
-  return { escrows, isLoading, refetch }
+  return { escrows, isLoading, error: error ?? null, refetch }
 }
 
 function useEscrowsByRoleGoldsky(role, address, active) {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['gs-escrows', role, address?.toLowerCase()],
     queryFn: () => fetchEscrowsByRole(role, address),
     enabled: active
   })
-  return { escrows: data ?? [], isLoading, refetch }
+  return { escrows: data ?? [], isLoading, error: error ?? null, refetch }
 }
 
 export function useEscrowsForPayer(address) {
@@ -287,23 +288,23 @@ export function useEscrowsForFreelancer(address) {
 
 // --- All disputed escrows across the protocol (arbiter panel) ---
 function useDisputedEscrowsOnchain(active) {
-  const { data, isLoading, refetch } = useReadContract({
+  const { data, isLoading, error, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'getDisputedEscrows',
     query: { enabled: active }
   })
   const escrows = useMemo(() => (Array.isArray(data) ? data.map(normaliseSummary) : []), [data])
-  return { escrows, isLoading, refetch }
+  return { escrows, isLoading, error: error ?? null, refetch }
 }
 
 function useDisputedEscrowsGoldsky(active) {
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['gs-disputed'],
     queryFn: () => fetchDisputedEscrows(),
     enabled: active
   })
-  return { escrows: data ?? [], isLoading, refetch }
+  return { escrows: data ?? [], isLoading, error: error ?? null, refetch }
 }
 
 export function useDisputedEscrows() {

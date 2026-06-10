@@ -11,6 +11,7 @@ import { useTheme } from '../hooks/useTheme.jsx'
 import { txToast } from '../hooks/useToast.jsx'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { formatUSDC, isValidAddress } from '../utils/format.js'
+import { parseRevertReason } from '../utils/errors.js'
 
 export default function Settings() {
   return (
@@ -29,6 +30,7 @@ function SettingsInner() {
       </div>
 
       <RefundSection />
+      <TransferRefundCreditSection />
       <AppearanceSection />
       <AccountSection />
     </div>
@@ -68,7 +70,7 @@ function RefundSection() {
       t.update('Transaction sent. Waiting for confirmation.')
     } catch (err) {
       setTxError(err); setTxStatus('error')
-      t.error('Withdrawal failed. Try again.')
+      t.error(parseRevertReason(err))
     }
   }
 
@@ -111,6 +113,82 @@ function RefundSection() {
       <TxModal status={txStatus} txHash={txHash} error={txError}
         onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
         onRetry={submit} title="Processing withdrawal" />
+    </Section>
+  )
+}
+
+/* ---------- Transfer Refund Credit ---------- */
+function TransferRefundCreditSection() {
+  const { address } = useAccount()
+  const { balance, refetch } = useRefundBalance(address)
+  const [recipient, setRecipient] = useState('')
+  const { writeContractAsync } = useWriteContract()
+  const [txStatus, setTxStatus] = useState('idle')
+  const [txHash, setTxHash] = useState(null)
+  const [txError, setTxError] = useState(null)
+  const [txToastApi, setTxToastApi] = useState(null)
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+
+  useEffect(() => {
+    if (!receipt) return
+    setTxStatus('success'); refetch()
+    txToastApi?.success('Credit transferred.', { hash: txHash })
+  }, [receipt]) // eslint-disable-line
+
+  const submit = async () => {
+    const t = txToast({ loading: 'Submitting. Check your wallet.' })
+    setTxToastApi(t)
+    try {
+      if (!isValidAddress(recipient)) throw new Error('Invalid recipient address')
+      setTxError(null); setTxStatus('confirming')
+      const hash = await writeContractAsync({
+        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
+        functionName: 'transferRefundCredit', args: [recipient]
+      })
+      setTxHash(hash); setTxStatus('pending')
+      t.update('Transaction sent. Waiting for confirmation.')
+    } catch (err) {
+      setTxError(err); setTxStatus('error')
+      t.error(parseRevertReason(err))
+    }
+  }
+
+  return (
+    <Section title="Transfer refund credit" description="Move your entire refund balance to a different wallet — useful if your current wallet is restricted and you need to withdraw from another address.">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <div className="text-xs text-ink-2 mb-1">Credit to transfer</div>
+          <div className="font-mono text-2xl text-clay">{formatUSDC(balance)}</div>
+        </div>
+      </div>
+      <Field
+        label="Recipient address"
+        error={recipient && !isValidAddress(recipient) ? "That doesn't look like a valid address." : undefined}
+      >
+        {(props) => (
+          <input
+            {...props}
+            className="input-field font-mono text-sm"
+            placeholder="0x…"
+            autoComplete="off"
+            spellCheck={false}
+            inputMode="text"
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value.trim())}
+          />
+        )}
+      </Field>
+      <button
+        type="button"
+        className="btn-primary"
+        onClick={submit}
+        disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}
+      >
+        {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Transfer credit'}
+      </button>
+      <TxModal status={txStatus} txHash={txHash} error={txError}
+        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+        onRetry={submit} title="Transferring refund credit" />
     </Section>
   )
 }

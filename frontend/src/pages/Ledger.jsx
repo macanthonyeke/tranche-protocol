@@ -17,7 +17,8 @@ const FILTERS = [
   { value: 'all',       label: 'All' },
   { value: 'active',    label: 'Active' },
   { value: 'disputed',  label: 'Disputed' },
-  { value: 'completed', label: 'Completed' }
+  { value: 'completed', label: 'Completed' },
+  { value: 'cancelled', label: 'Cancelled' }
 ]
 
 export default function Ledger() {
@@ -58,6 +59,7 @@ function LedgerInner() {
     return mine.filter((e) => {
       if (filter === 'active'    && e.state !== 0) return false
       if (filter === 'completed' && e.state !== 1) return false
+      if (filter === 'cancelled' && e.state !== 2) return false
       if (filter === 'disputed'  && !(e.disputedMilestoneCount > 0)) return false
 
       if (search) {

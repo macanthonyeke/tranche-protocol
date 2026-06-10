@@ -46,3 +46,41 @@ export const NON_EVM_DOMAINS = new Set([
 ])
 
 export const isEvmDomain = (domain) => !NON_EVM_DOMAINS.has(Number(domain))
+
+// Block explorers for CCTP destination domains (testnet).
+// Used to link to the destination transaction after delivery.
+export const CHAIN_EXPLORER_TX = {
+  0:  (tx) => `https://sepolia.etherscan.io/tx/${tx}`,
+  1:  (tx) => `https://testnet.snowtrace.io/tx/${tx}`,
+  2:  (tx) => `https://sepolia-optimism.etherscan.io/tx/${tx}`,
+  3:  (tx) => `https://sepolia.arbiscan.io/tx/${tx}`,
+  6:  (tx) => `https://sepolia.basescan.org/tx/${tx}`,
+  7:  (tx) => `https://amoy.polygonscan.com/tx/${tx}`,
+  10: (tx) => `https://unichain-sepolia.blockscout.com/tx/${tx}`,
+  17: (tx) => `https://testnet.bscscan.com/tx/${tx}`,
+}
+
+export const getChainExplorerTx = (domain, txHash) => {
+  const fn = CHAIN_EXPLORER_TX[Number(domain)]
+  return fn && txHash ? fn(txHash) : null
+}
+
+// MessageTransmitterV2 contract addresses on EVM destination chains (testnet).
+// Source: https://developers.circle.com/stablecoins/docs/evm-smart-contracts
+// Add entries here to enable one-click self-relay for that chain.
+// An absent entry degrades to showing the raw calldata for manual relay.
+export const MESSAGE_TRANSMITTER_V2 = {
+  // 0: '0x...', // Ethereum Sepolia — fill from Circle's developer portal
+  // 6: '0x...', // Base Sepolia
+}
+
+// EIP-3085 params for wallet_addEthereumChain on each destination domain.
+// Only needed for chains not already in the user's wallet.
+export const EVM_CHAIN_PARAMS = {
+  0:  { chainId: '0xaa36a7', chainName: 'Ethereum Sepolia',   nativeCurrency: { name: 'ETH',  symbol: 'ETH',  decimals: 18 }, rpcUrls: ['https://rpc.sepolia.org'],                     blockExplorerUrls: ['https://sepolia.etherscan.io'] },
+  1:  { chainId: '0xa869',   chainName: 'Avalanche Fuji',     nativeCurrency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 }, rpcUrls: ['https://api.avax-test.network/ext/bc/C/rpc'], blockExplorerUrls: ['https://testnet.snowtrace.io'] },
+  2:  { chainId: '0xaa37dc', chainName: 'OP Sepolia',         nativeCurrency: { name: 'ETH',  symbol: 'ETH',  decimals: 18 }, rpcUrls: ['https://sepolia.optimism.io'],                 blockExplorerUrls: ['https://sepolia-optimism.etherscan.io'] },
+  3:  { chainId: '0x66eee',  chainName: 'Arbitrum Sepolia',   nativeCurrency: { name: 'ETH',  symbol: 'ETH',  decimals: 18 }, rpcUrls: ['https://sepolia-rollup.arbitrum.io/rpc'],      blockExplorerUrls: ['https://sepolia.arbiscan.io'] },
+  6:  { chainId: '0x14a34',  chainName: 'Base Sepolia',       nativeCurrency: { name: 'ETH',  symbol: 'ETH',  decimals: 18 }, rpcUrls: ['https://sepolia.base.org'],                    blockExplorerUrls: ['https://sepolia.basescan.org'] },
+  7:  { chainId: '0x13882',  chainName: 'Polygon Amoy',       nativeCurrency: { name: 'POL',  symbol: 'POL',  decimals: 18 }, rpcUrls: ['https://rpc-amoy.polygon.technology'],         blockExplorerUrls: ['https://amoy.polygonscan.com'] },
+}

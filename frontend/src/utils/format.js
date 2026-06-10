@@ -83,7 +83,7 @@ export const countdown = (targetUnixSeconds) => {
 }
 
 export const MILESTONE_LABELS = {
-  0: 'Pending', 1: 'Approved', 2: 'In Dispute',
+  0: 'Pending', 1: 'In Review', 2: 'In Dispute',
   3: 'Paid Out', 4: 'Refunded'
 }
 

@@ -1,5 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
@@ -16,15 +16,22 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
 import { resolveMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription } from '../utils/encode.js'
+import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS
 } from '../utils/format.js'
-import { getDomainName, ARC_DOMAIN, isEvmDomain } from '../config/chains.js'
+import {
+  getDomainName, ARC_DOMAIN, isEvmDomain,
+  getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS
+} from '../config/chains.js'
+import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
 
 const addressToBytes32 = (addr) => '0x' + addr.slice(2).padStart(64, '0')
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 const POLL_MS = 12_000
+// Must match DELIVERY_GRACE_PERIOD in TrancheProtocol.sol — update both if either changes.
+const DELIVERY_GRACE_PERIOD = 72 * 60 * 60
 
 function useIntCountUp(target, duration = 800) {
   const [value, setValue] = useState(target)
@@ -59,7 +66,19 @@ export default function EscrowDetail() {
 function DetailInner() {
   const { id } = useParams()
   const { address } = useAccount()
-  const { detail, isLoading, error, refetch } = useEscrowDetail(id, address, { pollMs: POLL_MS })
+
+  // After a tx confirms, poll at 3s until state updates or 30s elapses.
+  const [fastPollUntil, setFastPollUntil] = useState(null)
+  const fastPollActive = fastPollUntil != null && Date.now() < fastPollUntil
+  useEffect(() => {
+    if (!fastPollUntil) return
+    const remaining = fastPollUntil - Date.now()
+    if (remaining <= 0) { setFastPollUntil(null); return }
+    const t = setTimeout(() => setFastPollUntil(null), remaining)
+    return () => clearTimeout(t)
+  }, [fastPollUntil])
+
+  const { detail, isLoading, error, refetch } = useEscrowDetail(id, address, { pollMs: fastPollActive ? 3_000 : POLL_MS })
   useTick(15_000)
 
   // Optimistic overlays keep the UI responsive while a tx is in flight; cleared
@@ -70,12 +89,28 @@ function DetailInner() {
     setOptimistic((o) => { const next = { ...o }; delete next[key]; return next })
   useEffect(() => { if (detail) setOptimistic({}) }, [detail])
 
+  const handleChange = useCallback(() => {
+    setFastPollUntil(Date.now() + 30_000)
+    refetch()
+  }, [refetch])
+
   if (isLoading) return <EscrowDetailSkeleton />
-  if (!detail || error) {
+  if (!detail) {
+    const isNotFound = !error || error?.cause?.data?.errorName === 'EscrowDoesNotExist'
     return (
       <div className="card-surface p-12 text-center">
-        <h2 className="text-xl font-semibold mb-2">Escrow not found</h2>
-        <p className="text-sm text-ink-2">There is no escrow with ID #{id}.</p>
+        {isNotFound ? (
+          <>
+            <h2 className="text-xl font-semibold mb-2">Escrow not found</h2>
+            <p className="text-sm text-ink-2">There is no escrow with ID #{id}.</p>
+          </>
+        ) : (
+          <>
+            <h2 className="text-xl font-semibold mb-2">Couldn't load this escrow</h2>
+            <p className="text-sm text-ink-2 mb-4">Something went wrong. Check your connection and try again.</p>
+            <button type="button" className="btn-secondary text-sm" onClick={refetch}>Retry</button>
+          </>
+        )}
       </div>
     )
   }
@@ -85,20 +120,17 @@ function DetailInner() {
     reviewDeadlines, isPayer, isFreelancer
   } = detail
   const role = isPayer ? 'payer' : isFreelancer ? 'freelancer' : null
-  const inv = escrow.invoiceHash
-    ? `INV-${escrow.invoiceHash.slice(2, 6).toUpperCase()}`
-    : `ESC-${escrow.id}`
 
   return (
     <div className="flex flex-col">
-      <InspectionHeader escrow={escrow} inv={inv} />
+      <InspectionHeader escrow={escrow} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-6">
         <LedgerColumn
           escrow={escrow}
           role={role}
           splits={splits}
-          onChange={refetch}
+          onChange={handleChange}
           optimistic={optimistic}
           setOpt={setOpt}
           clearOpt={clearOpt}
@@ -115,7 +147,7 @@ function DetailInner() {
             claimed={claimed}
             reviewDeadlines={reviewDeadlines}
             optimistic={optimistic}
-            onChange={refetch}
+            onChange={handleChange}
             setOpt={setOpt}
             clearOpt={clearOpt}
           />
@@ -130,13 +162,18 @@ function DetailInner() {
    right. The pill shows the protocol host chain (Arc) since the escrow contract
    itself lives there — the destinationDomain (where the freelancer receives)
    is surfaced separately in the ledger column. */
-function InspectionHeader({ escrow, inv }) {
+function InspectionHeader({ escrow }) {
   const navigate = useNavigate()
   const [copied, setCopied] = useState(false)
 
+  const displayId = `#${escrow.id}`
+  const invTag = escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32
+    ? `INV-${escrow.invoiceHash.slice(2, 6).toUpperCase()}`
+    : null
+
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(inv)
+      await navigator.clipboard.writeText(displayId)
       setCopied(true)
       setTimeout(() => setCopied(false), 1200)
     } catch {}
@@ -154,12 +191,17 @@ function InspectionHeader({ escrow, inv }) {
 
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3 min-w-0">
-          <h1 className="text-3xl font-mono font-bold text-ink tracking-tight truncate">
-            {inv}
+          <h1 className="text-3xl font-mono font-bold text-ink tracking-tight">
+            {displayId}
           </h1>
+          {invTag && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-sunk border border-rule font-mono text-xs text-ink-2 tracking-tight shrink-0">
+              {invTag}
+            </span>
+          )}
           <IconButton
             onClick={onCopy}
-            label={`Copy ${inv}`}
+            label="Copy escrow ID"
             title={copied ? 'Copied' : 'Copy ID'}
           >
             {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
@@ -211,41 +253,27 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
           <ParamRow label="Freelancer Address">
             <AddressInline address={escrow.recipient} />
           </ParamRow>
-          <ParamRow label="Arbiter Status">
-            <span className="text-sm text-ink">Decentralized Panel</span>
+          <ParamRow label="Arbiter">
+            <span className="text-sm text-ink">Assigned protocol arbiter</span>
           </ParamRow>
-          <ParamRow label="Gas Asset">
-            <span className="text-sm text-ink">{gasAssetLabel(escrow.destinationDomain)}</span>
-          </ParamRow>
-          <ParamRow label="Destination">
+          <ParamRow label="Payout chain">
             <span className="text-sm text-ink">{getDomainName(escrow.destinationDomain)}</span>
           </ParamRow>
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
           </ParamRow>
-          <ParamRow label="Review Window">
+          <ParamRow label="Review window" last={!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)}>
             <span className="text-sm text-ink">{formatWindow(escrow.reviewWindow)}</span>
           </ParamRow>
-          <ParamRow label="Contract Suffix" last>
-            <span className="font-mono text-xs text-ink-2 tracking-tight">
-              {contractSuffix(escrow.invoiceHash)}
-            </span>
-          </ParamRow>
+          {escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32 && (
+            <InvoiceHashRow hash={escrow.invoiceHash} />
+          )}
         </div>
 
-        {escrow.invoiceURI && (
-          <a
-            href={escrow.invoiceURI}
-            target="_blank"
-            rel="noreferrer"
-            className="self-start text-sm text-clay hover:text-clay-hover transition-colors inline-flex items-center gap-1"
-          >
-            View invoice ↗
-          </a>
-        )}
+        {escrow.invoiceURI && <InvoiceURIDisclosure uri={escrow.invoiceURI} />}
       </div>
 
-      {splits?.length > 0 && <SplitRecipients splits={splits} />}
+      {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} onChange={onChange} />}
 
       {role && escrow.state === 0 && (
         <CancelCard
@@ -264,7 +292,8 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
    Only present when the escrow was created with a multi-party split. Each
    released milestone's remainder (after the protocol fee) is divided across
    these recipients by their bps share, each on its own CCTP destination. */
-function SplitRecipients({ splits }) {
+function SplitRecipients({ splits, escrow, onChange }) {
+  const { address } = useAccount()
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
@@ -275,20 +304,153 @@ function SplitRecipients({ splits }) {
         {splits.map((s, i) => {
           const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
           const pct = (Number(s.bps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+          const isMyEntry = addr && address && addr.toLowerCase() === address.toLowerCase()
           return (
             <div
               key={i}
-              className={`flex items-center justify-between gap-3 py-3 text-sm ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
+              className={`flex flex-col gap-2 py-3 ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
             >
-              <div className="flex flex-col gap-0.5 min-w-0">
-                {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
-                <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
+                  <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
+                </div>
+                <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
               </div>
-              <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
+              {isMyEntry && escrow && escrow.state === 0 && (
+                <UpdateSplitAddressRow escrow={escrow} splitIndex={i} currentDomain={Number(s.destinationDomain)} onChange={onChange} />
+              )}
             </div>
           )
         })}
       </div>
+    </div>
+  )
+}
+
+function UpdateSplitAddressRow({ escrow, splitIndex, currentDomain, onChange }) {
+  const [editing, setEditing] = useState(false)
+  const [addr, setAddr] = useState('')
+  const [domain, setDomain] = useState(currentDomain)
+  const [successInfo, setSuccessInfo] = useState(null)
+  const { supported } = useSupportedDomains()
+  const addrId = useId()
+
+  const domainOptions = useMemo(() => {
+    const set = new Set(supported.filter(isEvmDomain))
+    set.add(ARC_DOMAIN)
+    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
+  }, [supported])
+
+  const tx = useTx({
+    onConfirmed: () => {
+      setSuccessInfo({ address: addr, domain })
+      setEditing(false); setAddr('')
+      onChange?.()
+    }
+  })
+
+  const submit = () => {
+    if (!isValidAddress(addr)) return
+    return tx.run(
+      escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(addr), Number(domain)]),
+      { loadingMessage: 'Updating. Check your wallet.' }
+    )
+  }
+
+  if (!editing && !successInfo) {
+    return (
+      <button
+        type="button"
+        className="self-start text-xs text-clay hover:text-clay-hover transition-colors"
+        onClick={() => setEditing(true)}
+      >
+        Update my address
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {successInfo && !editing && (
+        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2 text-xs text-ok flex items-center gap-2">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
+            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Updated to <span className="font-mono ml-1">{truncateAddr(successInfo.address)}</span>
+          <button type="button" onClick={() => { setSuccessInfo(null); setEditing(true) }} className="ml-auto text-ok/70 hover:text-ok transition-colors">Edit again</button>
+        </div>
+      )}
+      {editing && (
+        <div className="flex flex-col gap-2 pt-1">
+          <div className="flex flex-col gap-1">
+            <label htmlFor={addrId} className="text-[11px] font-medium text-ink-2">New address</label>
+            <input
+              id={addrId}
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="0x…"
+              value={addr}
+              onChange={(e) => setAddr(e.target.value.trim())}
+              className="input-field font-mono text-sm"
+            />
+          </div>
+          <CustomSelect
+            value={domain}
+            onChange={setDomain}
+            options={domainOptions}
+            label="Destination chain"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn-primary text-xs py-1.5 px-3"
+              disabled={!isValidAddress(addr) || tx.isBusy}
+              onClick={submit}
+            >
+              {tx.isBusy ? 'Working…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              className="text-xs text-ink-2 hover:text-ink transition-colors"
+              onClick={() => setEditing(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function InvoiceURIDisclosure({ uri }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="self-start text-sm text-clay hover:opacity-80 transition-opacity"
+      >
+        {open ? 'Hide invoice link' : 'View invoice link'}
+      </button>
+      {open && (
+        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
+          <p className="text-[11.5px] text-ink-3 leading-relaxed">
+            Invoice links are user-provided and not verified by the protocol. Check before opening.
+          </p>
+          <a
+            href={uri}
+            target="_blank"
+            rel="noreferrer"
+            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-sm inline-flex items-start gap-1 break-all"
+          >
+            {uri} ↗
+          </a>
+        </div>
+      )}
     </div>
   )
 }
@@ -332,20 +494,28 @@ function DeadlineCell({ deadline }) {
   )
 }
 
-// "USDC (Native Arc Gas)" maps to the native-USDC-as-gas property of Arc
-// specifically — every other chain uses its own native asset for gas with USDC
-// as the value asset.
-function gasAssetLabel(destinationDomain) {
-  const d = Number(destinationDomain)
-  if (d === ARC_DOMAIN) return 'USDC (Native Arc Gas)'
-  return `USDC · ${getDomainName(d)} gas`
-}
-
-// Reasonable binding for "Contract Suffix": last 4 bytes of the invoice hash,
-// which is the part most likely to differ between escrows in a UI listing.
-function contractSuffix(invoiceHash) {
-  if (!invoiceHash || invoiceHash === ZERO_BYTES32) return '—'
-  return invoiceHash.slice(-10)
+function InvoiceHashRow({ hash }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = async () => {
+    try { await navigator.clipboard.writeText(hash); setCopied(true); setTimeout(() => setCopied(false), 1200) } catch {}
+  }
+  return (
+    <ParamRow label="Invoice hash" last>
+      <div className="flex items-center gap-1.5 justify-end">
+        <span className="font-mono text-xs text-ink-2 tracking-tight">
+          {hash.slice(0, 8)}…{hash.slice(-6)}
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          title={copied ? 'Copied!' : 'Copy full hash'}
+          className="text-ink-3 hover:text-ink transition-colors"
+        >
+          {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
+        </button>
+      </div>
+    </ParamRow>
+  )
 }
 
 /* ---------- Column 2 — Milestone stack ----------
@@ -397,7 +567,7 @@ function MilestoneStack({
   const releasedCount = useIntCountUp(milestones.filter((m) => m.state === 3).length)
   return (
     <div className="bg-paper border border-rule rounded-2xl p-6">
-      <div className="flex items-baseline justify-between mb-5">
+      <div className="flex items-baseline justify-between mb-2">
         <h2 className="text-base font-semibold text-ink tracking-tight">
           Milestones
           {hasDispute && (
@@ -411,6 +581,9 @@ function MilestoneStack({
           {releasedCount} / {milestones.length} released
         </span>
       </div>
+      <p className="text-[11px] text-ink-3 mb-5 leading-relaxed">
+        Milestone titles are only visible on the device that created this escrow.
+      </p>
 
       <div className="flex flex-col gap-4">
         <AnimatePresence>
@@ -456,6 +629,23 @@ function loadMilestoneTitles(escrowId) {
   return []
 }
 
+const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+function readCctpTrack(escrowId, milestoneIndex) {
+  try {
+    const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
+      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 function MilestoneRow({
   escrow, milestone, dispute, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadline,
@@ -464,8 +654,24 @@ function MilestoneRow({
   const titles = loadMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
 
+  // Persistent cross-chain delivery tracker — read once on mount, updated by
+  // MilestoneAction/SettlementPanel when a release tx is submitted from this device.
+  const [cctpTrack, setCctpTrack] = useState(() =>
+    readCctpTrack(escrow.id, milestone.index)
+  )
+
+  // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
+  // device, they write to localStorage and call onCrossChainRelease so we re-read.
+  const handleCrossChainRelease = useCallback(() => {
+    setCctpTrack(readCctpTrack(escrow.id, milestone.index))
+  }, [escrow.id, milestone.index])
+
   const now = Math.floor(Date.now() / 1000)
   const deadlinePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline)
+  const gracePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline) + DELIVERY_GRACE_PERIOD
+  const graceHoursRemaining = deadlinePassed && !gracePassed
+    ? Math.ceil((Number(escrow.deadline) + DELIVERY_GRACE_PERIOD - now) / 3600)
+    : 0
 
   const reduce = useReducedMotion()
   const prevStateRef = useRef(milestone.state)
@@ -480,7 +686,7 @@ function MilestoneRow({
   }, [milestone.state, reduce])
 
   const description = describeMilestone(milestone, {
-    claimed, reviewWindowExpired, deadlinePassed
+    claimed, reviewWindowExpired, deadlinePassed, gracePassed, graceHoursRemaining, dispute
   })
 
   const inDispute = milestone.state === 2
@@ -533,10 +739,12 @@ function MilestoneRow({
             milestone={milestone}
             role={role}
             deadlinePassed={deadlinePassed}
+            gracePassed={gracePassed}
             reviewWindowExpired={reviewWindowExpired}
             setOpt={setOpt}
             clearOpt={clearOpt}
             onChange={onChange}
+            onCrossChainRelease={handleCrossChainRelease}
           />
           <DisputeActions
             escrow={escrow}
@@ -556,6 +764,12 @@ function MilestoneRow({
           <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
             In review by the arbiter panel
           </div>
+          {(role === 'payer' || role === 'freelancer') && (
+            <DisputeStepper dispute={dispute} role={role} />
+          )}
+          {Number(dispute?.raisedAt ?? 0) > 0 && (role === 'payer' || role === 'freelancer') && (
+            <DisputeDetails dispute={dispute} />
+          )}
           <ArbiterTimeoutNote dispute={dispute} />
           {(role === 'payer' || role === 'freelancer') && (
             <SettlementPanel
@@ -563,16 +777,130 @@ function MilestoneRow({
               milestone={milestone}
               role={role}
               onChange={onChange}
+              onCrossChainRelease={handleCrossChainRelease}
             />
           )}
         </div>
       )}
 
       {(milestone.state === 3 || milestone.state === 4) &&
-        dispute && dispute.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
+        dispute?.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
           <ResolutionNote dispute={dispute} />
         )}
+      {milestone.state === 4 && Number(dispute?.raisedAt ?? 0) > 0 &&
+        (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
+          <TimeoutOutcomeCard milestone={milestone} role={role} />
+        )}
+      {milestone.state === 3 && cctpTrack && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
+        <CrossChainDelivery
+          txHash={cctpTrack.txHash}
+          destinationDomain={escrow.destinationDomain}
+          escrowId={escrow.id}
+          milestoneIndex={milestone.index}
+        />
+      )}
+
       <ConfettiBurst active={burst} />
+    </div>
+  )
+}
+
+/* Role-aware process stepper shown inside the DISPUTED milestone block.
+   Gives both parties a clear picture of where the dispute stands and what's next.
+   The arbiter window countdown comes from the live contract value via useDisputeConfig. */
+function DisputeStepper({ dispute, role }) {
+  const { arbiterWindow } = useDisputeConfig()
+
+  const counterDone =
+    !!dispute?.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
+  const windowSecs = arbiterWindow ?? 0n
+  const arbiterTarget = Number(dispute?.raisedAt ?? 0) + Number(windowSecs)
+  const timeLeft = windowSecs > 0n ? countdown(arbiterTarget).replace(' remaining', '') : null
+  const elapsed = windowSecs > 0n && Math.floor(Date.now() / 1000) >= arbiterTarget
+
+  const steps = [
+    {
+      state: 'done',
+      label: 'Dispute raised',
+      sub: role === 'payer'
+        ? 'You contested the delivery claim.'
+        : 'Payer contested your delivery claim.',
+    },
+    {
+      state: counterDone ? 'done' : 'current',
+      label: counterDone
+        ? 'Counter-evidence submitted'
+        : role === 'freelancer'
+        ? 'Submit counter-evidence'
+        : 'Awaiting counter-evidence',
+      sub: counterDone
+        ? null
+        : role === 'freelancer'
+        ? 'Respond with evidence to defend your delivery before the window closes.'
+        : 'The freelancer may respond with their side of the story.',
+    },
+    {
+      state: counterDone ? 'current' : 'future',
+      label: 'Arbiter ruling',
+      sub: elapsed
+        ? 'Arbitration window has elapsed — the 50/50 timeout outcome can now be triggered.'
+        : timeLeft
+        ? `Arbitration closes in ${timeLeft}. If the arbiter doesn't act, funds split 50/50 — the freelancer's share arrives as a claimable balance, net of the protocol fee.`
+        : 'The arbiter will review both sides and issue a ruling.',
+    },
+    {
+      state: 'future',
+      label: 'Funds distributed',
+      sub: 'Resolved amounts arrive as a claimable balance. The protocol fee applies.',
+    },
+  ]
+
+  return (
+    <div className="flex flex-col">
+      {steps.map((step, i) => (
+        <StepRow
+          key={i}
+          stepState={step.state}
+          label={step.label}
+          sub={step.sub}
+          isLast={i === steps.length - 1}
+        />
+      ))}
+    </div>
+  )
+}
+
+function StepRow({ stepState, label, sub, isLast }) {
+  const isDone    = stepState === 'done'
+  const isCurrent = stepState === 'current'
+  return (
+    <div className="flex gap-3">
+      <div className="flex flex-col items-center">
+        <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+          isDone
+            ? 'bg-ok/20 text-ok border border-ok/30'
+            : isCurrent
+            ? 'bg-warn/10 border border-warn/50'
+            : 'bg-sunk border border-rule'
+        }`}>
+          {isDone ? (
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+              <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : isCurrent ? (
+            <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" />
+          ) : (
+            <span className="w-1.5 h-1.5 rounded-full bg-ink-3/40" />
+          )}
+        </div>
+        {!isLast && <div className="w-px flex-1 min-h-[12px] bg-rule/60 my-1" />}
+      </div>
+      <div className={`${isLast ? 'pb-0' : 'pb-3'} min-w-0 flex-1`}>
+        <p className={`text-[12.5px] font-medium leading-snug ${
+          isDone ? 'text-ok' : isCurrent ? 'text-warn' : 'text-ink-3'
+        }`}>{label}</p>
+        {sub && <p className="text-[11.5px] text-ink-3 mt-0.5 leading-relaxed">{sub}</p>}
+      </div>
     </div>
   )
 }
@@ -587,7 +915,7 @@ function ArbiterTimeoutNote({ dispute }) {
   if (!dispute?.raisedBy) return null
 
   const windowSecs = arbiterWindow
-  const copy = 'If the arbiter does not act within the window, funds are split 50/50 between both parties.'
+  const copy = 'If the arbiter does not act within the window, funds are split 50/50. The freelancer\'s share arrives as a claimable balance on Arc and is charged the protocol fee.'
 
   const target = Number(dispute.raisedAt) + Number(windowSecs)
   const now = Math.floor(Date.now() / 1000)
@@ -607,11 +935,67 @@ function ArbiterTimeoutNote({ dispute }) {
   )
 }
 
+/* Shows the open dispute's evidence to both parties — payer and freelancer see the
+   same dispute card so neither is blind to what the other submitted. Data comes
+   from the getEscrowDetail payload; no extra fetches needed. */
+function DisputeDetails({ dispute }) {
+  const counterSubmitted =
+    dispute.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
+  return (
+    <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-3">
+      {dispute.reason && (
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.18em] text-ink-3 font-medium mb-1">Dispute reason</p>
+          <p className="text-[13px] text-ink-2 leading-relaxed">{dispute.reason}</p>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 items-center text-[13px]">
+        {Number(dispute.raisedAt) > 0 && (
+          <span className="text-ink-3">Raised {formatTimestamp(dispute.raisedAt)}</span>
+        )}
+        {dispute.evidenceURI && (
+          <a
+            href={dispute.evidenceURI}
+            target="_blank"
+            rel="noreferrer"
+            className="text-clay hover:opacity-80 inline-flex items-center gap-1"
+          >
+            View evidence ↗
+          </a>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-[12px]">
+        {counterSubmitted ? (
+          <>
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-ok shrink-0" aria-hidden />
+            <span className="text-ink-2">Counter-evidence submitted</span>
+            {dispute.counterEvidenceURI && (
+              <a
+                href={dispute.counterEvidenceURI}
+                target="_blank"
+                rel="noreferrer"
+                className="text-clay hover:opacity-80"
+              >
+                View ↗
+              </a>
+            )}
+          </>
+        ) : (
+          <>
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-ink-3 shrink-0" aria-hidden />
+            <span className="text-ink-3">No counter-evidence yet</span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /* Mutual settlement (mutualSettle). Either party proposes a recipient share in
    whole percent; when both parties' proposals match, the contract executes the
    split automatically. We surface both standing proposals and a one-click
    "agree to their number" path. */
-function SettlementPanel({ escrow, milestone, role, onChange }) {
+function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainRelease }) {
   const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
@@ -623,6 +1007,10 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
 
   const [pct, setPct] = useState('50')
   const tx = useTx({ onConfirmed: () => { setPct('50'); refetch(); onChange?.() } })
+
+  useEffect(() => {
+    if (mine.exists) setPct(String(bpsToPct(mine.bps)))
+  }, [mine.exists]) // eslint-disable-line
 
   const pctNum = pct === '' ? NaN : Number(pct)
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
@@ -642,13 +1030,20 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
         burnAmount: recipientAmount - protocolFee
       })
     } catch (err) {
-      toast.error(err.message || 'Could not fetch the cross-chain forwarding fee.')
+      toast.error(err.message || "Couldn't check delivery fees. Please try again.")
       return
     }
-    return tx.run(
+    const txHash = await tx.run(
       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
       { loadingMessage: 'Check your wallet.' }
     )
+    if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+      localStorage.setItem(
+        cctpTrackKey(escrow.id, milestone.index),
+        JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
+      )
+      onCrossChainRelease?.()
+    }
   }
 
   const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
@@ -732,14 +1127,13 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
         </div>
       )}
 
-      {mine.exists ? (
-        <p className="text-[13px] text-ink-2">
-          Proposal submitted. Waiting for the other party to match {bpsToPct(mine.bps)}%.
+      <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
+        {tx.isBusy ? 'Working…' : mine.exists ? 'Update Settlement Proposal' : 'Submit Settlement Proposal'}
+      </button>
+      {mine.exists && (
+        <p className="text-[12px] text-ink-3 -mt-1">
+          Your offer stays open until you change it.
         </p>
-      ) : (
-        <button className="btn-secondary text-sm py-2" onClick={submit} disabled={!canSubmit}>
-          {tx.isBusy ? 'Working…' : 'Submit Settlement Proposal'}
-        </button>
       )}
 
       {canAgree && (
@@ -761,11 +1155,251 @@ function SettlementPanel({ escrow, milestone, role, onChange }) {
   )
 }
 
+/* Cross-chain delivery tracker. Shown on a RELEASED cross-chain milestone when
+   we have a tracked burn tx hash from this device. Polls Iris every 15s. */
+function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneIndex }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
+  const chainName = getDomainName(destinationDomain)
+  const [copied, setCopied] = useState(false)
+
+  if (phase === 'idle') return null
+
+  return (
+    <div className="mt-3 pt-3 border-t border-rule flex flex-col gap-2">
+      {phase === 'polling' && (
+        <div className="flex items-center gap-2 text-[12.5px] text-ink-2">
+          <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+          Delivering to {chainName}…
+          <span className="text-[11px] text-ink-3">(checking every 15s)</span>
+        </div>
+      )}
+
+      {phase === 'delivered' && deliveries.map((d, i) => {
+        const explorerUrl = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+        return (
+          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            Delivered to {chainName}
+            {explorerUrl && (
+              <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
+                View tx <ExternalLinkIcon size={11} />
+              </a>
+            )}
+          </div>
+        )
+      })}
+
+      {phase === 'failed' && (
+        <SelfRelayCard
+          deliveries={deliveries}
+          destinationDomain={destinationDomain}
+          escrowId={escrowId}
+          milestoneIndex={milestoneIndex}
+          copied={copied}
+          onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+        />
+      )}
+
+      {phase === 'unavailable' && (
+        <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+      )}
+    </div>
+  )
+}
+
+/* Recovery card shown when Iris reports forwardState: FAILED.
+   Explains what happened in plain English and walks the user through relaying
+   the CCTP message on the destination chain to complete the transfer. */
+function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex, copied, onCopied }) {
+  const { address } = useAccount()
+  const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
+  const [relayTxHash, setRelayTxHash] = useState(null)
+  const [relayError, setRelayError] = useState(null)
+  const [calldataOpen, setCalldataOpen] = useState(false)
+  const chainName = getDomainName(destinationDomain)
+
+  // Use the first failed delivery (or all of them for multi-split)
+  const primary = deliveries.find((d) => d.forwardState === 'FAILED') ?? deliveries[0]
+  if (!primary) return null
+
+  const transmitter = MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null
+  const chainParams = EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null
+  const canRelayInApp = !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
+
+  const calldata = primary.message && primary.attestation
+    ? encodeReceiveMessage(primary.message, primary.attestation)
+    : null
+
+  const copyText = async (text) => {
+    try { await navigator.clipboard.writeText(text); onCopied?.() } catch {}
+  }
+
+  const relayInApp = async () => {
+    if (!canRelayInApp) return
+    try {
+      setRelayPhase('switching')
+      setRelayError(null)
+      try {
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: chainParams.chainId }]
+        })
+      } catch (err) {
+        if (err.code === 4902) {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [chainParams]
+          })
+        } else {
+          throw err
+        }
+      }
+      setRelayPhase('relaying')
+      const params = [{ to: transmitter, data: calldata, from: address }]
+      const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params })
+      setRelayTxHash(txHash)
+      setRelayPhase('done')
+      // Clean up localStorage so the tracker doesn't restart next visit
+      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+    } catch (err) {
+      setRelayPhase('error')
+      setRelayError(err.message || 'Relay failed. Try again.')
+    }
+  }
+
+  const errorIsInsufficientFee = primary.errorCode === 'INSUFFICIENT_FEE'
+
+  return (
+    <div className="rounded-xl border border-warn/30 bg-warn/[0.04] px-4 py-4 flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
+        <p className="text-[12px] font-medium text-warn uppercase tracking-[0.14em]">Delivery failed</p>
+        <p className="text-[13px] text-ink-2 leading-relaxed">
+          {errorIsInsufficientFee
+            ? `The payment reached Circle but wasn't auto-delivered to ${chainName} because the forwarding fee was too low.`
+            : `The payment reached Circle but wasn't auto-delivered to ${chainName}.`}
+          {' '}You can recover it by self-relaying the message on {chainName}.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2.5">
+        <p className="text-[11.5px] text-ink-3 uppercase tracking-[0.14em] font-medium">Recovery steps</p>
+
+        <div className="flex items-start gap-3">
+          <span className="h-5 w-5 rounded-full bg-sunk border border-rule flex items-center justify-center text-[10px] font-mono text-ink-3 shrink-0">1</span>
+          <p className="text-[12.5px] text-ink-2 pt-0.5">
+            Switch your wallet to <span className="font-medium text-ink">{chainName}</span>.
+          </p>
+        </div>
+
+        <div className="flex items-start gap-3">
+          <span className="h-5 w-5 rounded-full bg-sunk border border-rule flex items-center justify-center text-[10px] font-mono text-ink-3 shrink-0">2</span>
+          <p className="text-[12.5px] text-ink-2 pt-0.5">
+            Call <span className="font-mono text-[11.5px] text-ink">receiveMessage(message, attestation)</span> on {chainName}'s <span className="font-medium text-ink">MessageTransmitterV2</span>.
+            {!transmitter && (
+              <span className="text-ink-3"> Find the address at Circle's{' '}
+                <a href="https://developers.circle.com/stablecoins/docs/evm-smart-contracts" target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 underline-offset-2 hover:underline">developer portal</a>.
+              </span>
+            )}
+          </p>
+        </div>
+      </div>
+
+      {/* Primary action: one-click relay if we have the transmitter address */}
+      {canRelayInApp && relayPhase !== 'done' && (
+        <button
+          type="button"
+          className="btn-primary text-sm py-2.5 self-start"
+          onClick={relayInApp}
+          disabled={relayPhase === 'switching' || relayPhase === 'relaying'}
+        >
+          {relayPhase === 'switching' && (
+            <span className="inline-flex items-center gap-2">
+              <span className="h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" />
+              Switching to {chainName}…
+            </span>
+          )}
+          {relayPhase === 'relaying' && (
+            <span className="inline-flex items-center gap-2">
+              <span className="h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" />
+              Relaying…
+            </span>
+          )}
+          {(relayPhase === 'idle' || relayPhase === 'error') && `Relay on ${chainName} →`}
+        </button>
+      )}
+
+      {relayPhase === 'done' && relayTxHash && (
+        <div className="flex items-center gap-2 text-[12.5px] text-ok">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Relay submitted — {relayTxHash.slice(0, 10)}…
+        </div>
+      )}
+
+      {relayPhase === 'error' && relayError && (
+        <p className="text-[12px] text-warn">{relayError}</p>
+      )}
+
+      {/* Calldata fallback: always available for manual relay */}
+      <div className="flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => setCalldataOpen((v) => !v)}
+          className="self-start text-[11.5px] text-ink-3 hover:text-ink-2 transition-colors"
+        >
+          {calldataOpen ? '▾ Hide relay calldata' : '▸ Show relay calldata'}
+        </button>
+        {calldataOpen && (
+          <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-2">
+            <CallDataRow label="Message"     value={primary.message}     onCopy={copyText} copied={copied} />
+            <CallDataRow label="Attestation" value={primary.attestation} onCopy={copyText} copied={copied} />
+            {calldata && <CallDataRow label="Calldata"    value={calldata}           onCopy={copyText} copied={copied} />}
+            <p className="text-[11px] text-ink-3 leading-relaxed pt-1">
+              Call <span className="font-mono">receiveMessage(message, attestation)</span> on {chainName}'s MessageTransmitterV2 to complete the transfer.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function CallDataRow({ label, value, onCopy, copied }) {
+  if (!value) return null
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-[11px] text-ink-3 shrink-0 w-20">{label}:</span>
+      <div className="flex items-start gap-1.5 min-w-0 flex-1">
+        <span className="font-mono text-[10px] text-ink-3 break-all leading-relaxed flex-1">
+          {value.slice(0, 40)}…
+        </span>
+        <button
+          type="button"
+          onClick={() => onCopy(value)}
+          title="Copy"
+          className="shrink-0 text-ink-3 hover:text-ink transition-colors mt-0.5"
+        >
+          {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* Shown on a resolved (released/refunded) milestone that went through a
    dispute. Links out to the arbiter's written reasoning and the on-chain
    resolution hash. */
 function ResolutionNote({ dispute }) {
+  const [hashCopied, setHashCopied] = useState(false)
   const pct = Number(dispute.resolvedRecipientBps ?? 0n) / 100
+
+  const copyHash = async () => {
+    try { await navigator.clipboard.writeText(dispute.resolutionHash); setHashCopied(true); setTimeout(() => setHashCopied(false), 1200) } catch {}
+  }
+
   return (
     <div className="mt-4 pt-4 border-t border-rule flex flex-col gap-2">
       <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbiter resolution</p>
@@ -781,18 +1415,73 @@ function ResolutionNote({ dispute }) {
             View Resolution ↗
           </a>
         )}
-        <span className="num text-[11px] text-ink-3 break-all">{dispute.resolutionHash}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="num text-[11px] text-ink-3">
+            {dispute.resolutionHash.slice(0, 8)}…{dispute.resolutionHash.slice(-6)}
+          </span>
+          <button
+            type="button"
+            onClick={copyHash}
+            title={hashCopied ? 'Copied!' : 'Copy resolution hash'}
+            className="text-ink-3 hover:text-ink transition-colors"
+          >
+            {hashCopied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
+          </button>
+        </div>
       </div>
     </div>
   )
 }
 
-function describeMilestone(m, { reviewWindowExpired, deadlinePassed }) {
-  if (m.state === 0 && deadlinePassed) return 'Deadline passed without delivery. Refundable to the payer.'
+/* Shown when a dispute settled by arbiter timeout (resolveDisputeByTimeout).
+   State = REFUNDED but no resolutionHash — the 50/50 split was automatic.
+   Freelancer's share lands in their refund balance, not auto-delivered. */
+function TimeoutOutcomeCard({ milestone, role }) {
+  const half = milestone.amount / 2n
+  const depositorShare = milestone.amount - half
+  return (
+    <div className="mt-4 pt-4 border-t border-rule flex flex-col gap-3">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbiter timeout — 50/50 split</p>
+      <p className="text-[13px] text-ink-2 leading-relaxed">
+        The arbiter did not act within the window. Funds were split equally between both parties.
+      </p>
+      <div className="rounded-xl bg-sunk px-3.5 py-3 flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <span className="eyebrow">Freelancer received</span>
+          <span className="num text-[18px] leading-none font-medium text-clay">{formatUSDCNumber(half)}</span>
+          <span className="text-[10px] text-ink-3 num">USDC · 50%</span>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <span className="eyebrow">Payer received</span>
+          <span className="num text-[18px] leading-none font-medium text-ink">{formatUSDCNumber(depositorShare)}</span>
+          <span className="text-[10px] text-ink-3 num">USDC · 50%</span>
+        </div>
+      </div>
+      {role === 'freelancer' && (
+        <p className="text-[13px] text-ink-2">
+          Your 50% is in your{' '}
+          <Link to="/settings" className="text-clay hover:opacity-80 underline-offset-2 hover:underline">
+            claimable balance
+          </Link>
+          .
+        </p>
+      )}
+    </div>
+  )
+}
+
+function describeMilestone(m, { reviewWindowExpired, deadlinePassed, gracePassed, graceHoursRemaining, dispute }) {
+  // Timeout 50/50: state REFUNDED but no arbiter resolutionHash — timeout path settled it.
+  if (m.state === 4 && Number(dispute?.raisedAt ?? 0) > 0 &&
+      (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32)) {
+    return 'Settled by arbiter timeout — funds split 50/50. The freelancer\'s share is in their claimable balance, net of the protocol fee.'
+  }
+  if (m.state === 0 && gracePassed) return 'Deadline passed without delivery. Refundable to the payer.'
+  if (m.state === 0 && deadlinePassed) return `Deadline passed. Freelancer has ${graceHoursRemaining}h left in the grace period to mark delivery.`
   if (m.state === 0) return 'Awaiting freelancer delivery.'
   if (m.state === 1 && !reviewWindowExpired) return 'Delivered. Payer review window open — approve, dispute, or let it auto-release.'
   if (m.state === 1 && reviewWindowExpired) return 'Review window lapsed. Ready to auto-release.'
-  if (m.state === 2) return 'In review by the arbiter panel. See evidence below.'
+  if (m.state === 2) return 'In review by the arbiter panel.'
   if (m.state === 3) return 'Released to the freelancer.'
   if (m.state === 4) return 'Refunded to the payer.'
   return null
@@ -835,8 +1524,8 @@ function MilestoneStateGlyph({ state }) {
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
 function MilestoneAction({
-  escrow, milestone, role, deadlinePassed, reviewWindowExpired,
-  setOpt, clearOpt, onChange
+  escrow, milestone, role, deadlinePassed, gracePassed, reviewWindowExpired,
+  setOpt, clearOpt, onChange, onCrossChainRelease
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
@@ -864,9 +1553,9 @@ function MilestoneAction({
   // PENDING milestone is permissionlessly refundable to the payer.
   let action = null
   if (milestone.state === 0) {
-    if (isFreelancer && !deadlinePassed) {
+    if (isFreelancer && !gracePassed) {
       action = { key: 'claim', label: 'Mark as Delivered', fn: 'claimDelivery', args: [id, idx], optimistic: { badge: 'Claiming…', claimedDelivery: true } }
-    } else if (deadlinePassed) {
+    } else if (gracePassed) {
       action = { key: 'refund', label: 'Refund (deadline passed)', fn: 'refundAfterDeadline', args: [id, idx], optimistic: { badge: 'Refunding…' } }
     }
   } else if (milestone.state === 1) {
@@ -900,13 +1589,20 @@ function MilestoneAction({
       } catch (err) {
         clearOpt(`milestone_${milestone.index}`)
         setActiveKey(null)
-        toast.error(err.message || 'Could not fetch the cross-chain forwarding fee.')
+        toast.error(err.message || "Couldn't check delivery fees. Please try again.")
         return
       }
     }
 
     try {
-      await tx.run(escrowWrite(action.fn, args), { loadingMessage: 'Check your wallet.' })
+      const txHash = await tx.run(escrowWrite(action.fn, args), { loadingMessage: 'Check your wallet.' })
+      if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+        localStorage.setItem(
+          cctpTrackKey(escrow.id, milestone.index),
+          JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
+        )
+        onCrossChainRelease?.()
+      }
     } catch {
       clearOpt(`milestone_${milestone.index}`)
     }
@@ -1012,7 +1708,7 @@ const EVIDENCE_MODES = {
     needsReason: true,
     submitLabel: 'Submit dispute',
     evidenceLabel: 'Evidence link',
-    blurb: 'Freezes this delivered milestone for the arbiter panel to review. Provide a reason and a link to your evidence.'
+    blurb: 'Pauses this milestone for arbiter review. Upload your evidence to a permanent host (IPFS or Arweave recommended) and paste the link below. Avoid links to editable content — the link\'s hash is stored on-chain and used to detect tampering.'
   },
   counter: {
     title: 'Submit counter-evidence',
@@ -1020,7 +1716,7 @@ const EVIDENCE_MODES = {
     needsReason: false,
     submitLabel: 'Submit counter-evidence',
     evidenceLabel: 'Counter-evidence link',
-    blurb: 'Respond to the open dispute with your own evidence. You can only submit this once.'
+    blurb: 'Your one opportunity to respond. Upload your evidence to a permanent host (IPFS or Arweave recommended) — avoid editable links. The hash of your submission is committed on-chain and cannot be changed.'
   }
 }
 

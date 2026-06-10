@@ -23,14 +23,14 @@ const STANDARD_FINALITY = 2000
 export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } })
-  if (!res.ok) throw new Error(`Circle fee API returned ${res.status}`)
+  if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
   const data = await res.json()
-  if (!Array.isArray(data)) throw new Error('Circle fee API: unexpected response shape')
+  if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
   const tier = data.find((t) => Number(t.finalityThreshold) === STANDARD_FINALITY) ?? data[0]
   const fwd = tier?.forwardFee
-  if (!fwd) throw new Error('Circle fee API: no forwardFee in response (forwarding may be unsupported for this route)')
+  if (!fwd) throw new Error("Delivery to this chain may not be supported. Try Arc as the destination.")
   const raw = fwd[level] ?? fwd.high ?? fwd.med ?? fwd.low
-  if (raw == null) throw new Error('Circle fee API: forwardFee missing tiers')
+  if (raw == null) throw new Error("Couldn't read delivery fee tiers. Please try again.")
   return BigInt(Math.ceil(Number(raw)))
 }
 
@@ -61,7 +61,7 @@ export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, b
   const maxFee = live > floor ? live : floor
 
   if (burnAmount != null && maxFee >= BigInt(burnAmount)) {
-    throw new Error('Cross-chain forwarding fee exceeds this payout amount — increase the milestone size or release on Arc.')
+    throw new Error('This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.')
   }
   return maxFee
 }
