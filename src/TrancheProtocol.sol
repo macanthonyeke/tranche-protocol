@@ -219,7 +219,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         string calldata _invoiceURI,
         uint256[] calldata _milestoneAmounts,
         uint256 _deadline,
-        SplitRecipient[] calldata _splits
+        SplitRecipient[] calldata _splits,
+        string[] calldata _milestoneTitles
     ) external whenNotPaused nonReentrant returns (uint256 escrowId) {
         if (_totalAmount == 0) revert InvalidAmount();
         if (_recipient == address(0)) revert ZeroAddress();
@@ -328,6 +329,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         emit EscrowTermsSnapshotted(escrowId, protocolFeeBps, protocolTreasury);
 
         emit EscrowCreated(escrowId, msg.sender, _recipient, _totalAmount, _invoiceHash, _invoiceURI, _deadline);
+        emit MilestoneTitles(escrowId, _milestoneTitles);
     }
 
     /// @notice Recipient claims a milestone is delivered, opening the optimistic
@@ -475,7 +477,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         Milestone storage m = milestones[escrowId][milestoneIndex];
 
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        if (m.state != MilestoneState.DISPUTED) revert MutualSettlementAlreadyExecuted();
+        // Also allows settling from IN_REVIEW so parties can agree without a
+        // formal dispute. Race: if the review window lapses and release() is
+        // called while proposals are pending, release() wins and both proposals
+        // go moot (the second proposer's mutualSettle reverts
+        // MutualSettlementAlreadyExecuted). This is acceptable by design.
+        if (m.state != MilestoneState.DISPUTED && m.state != MilestoneState.IN_REVIEW) revert MutualSettlementAlreadyExecuted();
         if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
         if (_agreedBps > BPS_DENOMINATOR) revert InvalidBps();
 
@@ -691,8 +698,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             uint256 refundable = 0;
             for (uint256 i = 0; i < e.milestoneCount; i++) {
                 Milestone storage m = milestones[escrowId][i];
-                if (m.state == MilestoneState.DISPUTED) revert CannotCancelDuringDispute();
-                if (m.state == MilestoneState.PENDING || m.state == MilestoneState.IN_REVIEW) {
+                if (m.state == MilestoneState.DISPUTED || m.state == MilestoneState.IN_REVIEW) revert CannotCancelDuringDispute();
+                if (m.state == MilestoneState.PENDING) {
                     refundable += m.amount;
                     m.state = MilestoneState.REFUNDED;
                 }
@@ -970,6 +977,73 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         s[splitIndex].destinationDomain = newDestinationDomain;
 
         emit SplitReceivingAddressUpdated(escrowId, splitIndex, oldAddress, newAddress, oldDomain, newDestinationDomain);
+    }
+
+    /// @notice Depositor-only deadline extension. Only callable by the
+    ///         depositor; newDeadline must exceed the current deadline.
+    ///         No consent from the recipient is needed — extending only delays
+    ///         the depositor's own refund-after-deadline path.
+    function extendDeadline(uint256 escrowId, uint256 newDeadline) external {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        if (msg.sender != e.depositor) revert NotEscrowOwner();
+        if (newDeadline <= e.deadline) revert DeadlineNotExtended();
+        e.deadline = newDeadline;
+        emit DeadlineExtended(escrowId, newDeadline);
+    }
+
+    /// @notice Retract the caller's own mutual-cancel approval. Clears only
+    ///         their own flag; the other party's flag is unchanged.
+    function retractCancelApproval(uint256 escrowId) external {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
+        if (msg.sender == e.depositor) {
+            e.depositorApproveCancel = false;
+        } else {
+            e.recipientApproveCancel = false;
+        }
+        emit CancelApprovalRetracted(escrowId, msg.sender);
+    }
+
+    /// @notice Recipient-only escrow decline. Valid only while every milestone
+    ///         is still PENDING (none claimed). Refunds the full escrow amount
+    ///         to the payer's refund credit — no protocol fee.
+    function declineEscrow(uint256 escrowId) external nonReentrant {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        if (msg.sender != e.recipient) revert NotRecipient();
+        // Single pass: validate all PENDING then immediately mark REFUNDED.
+        // Safe because the entire tx reverts atomically if any check fails,
+        // so no partial state mutation can escape.
+        for (uint256 i = 0; i < e.milestoneCount; i++) {
+            if (milestones[escrowId][i].state != MilestoneState.PENDING) revert InvalidState();
+            milestones[escrowId][i].state = MilestoneState.REFUNDED;
+        }
+        e.state = EscrowState.CANCELLED;
+        refundBalances[e.refundTo] += e.totalAmount;
+        emit EscrowDeclined(escrowId, msg.sender);
+    }
+
+    /// @notice Append evidence to an ongoing dispute. Callable by either party
+    ///         while the milestone is DISPUTED. Emits only — nothing is stored
+    ///         on-chain; the subgraph indexes the full thread from events.
+    function appendEvidence(
+        uint256 escrowId,
+        uint256 milestoneIndex,
+        bytes32 hash,
+        string calldata uri
+    ) external {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (milestones[escrowId][milestoneIndex].state != MilestoneState.DISPUTED) revert NoDispute();
+        if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
+        if (hash == bytes32(0)) revert NoEvidence();
+        if (bytes(uri).length == 0) revert NoEvidenceURI();
+        emit EvidenceAppended(escrowId, milestoneIndex, msg.sender, hash, uri, block.timestamp);
     }
 
     function pause() public onlyRole(PAUSER_ROLE) {
@@ -1381,6 +1455,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             SplitRecipient calldata sr = _splits[i];
             if (sr.bps == 0) revert InvalidBps();
             if (address(uint160(uint256(sr.mintRecipient))) == address(0)) revert ZeroAddress();
+            // Catch non-EVM addresses (e.g. Solana pubkeys) whose top 12 bytes
+            // are non-zero. Releasing to such a recipient would silently strand
+            // funds because _approveAndBurn casts to address(uint160(...)).
+            if (uint256(sr.mintRecipient) >> 160 != 0) revert InvalidSplitMintRecipient();
             if (!supportedDomains[sr.destinationDomain]) revert UnsupportedDomain();
             if (sr.destinationDomain != ARC_DOMAIN) {
                 anyCrossChain = true;

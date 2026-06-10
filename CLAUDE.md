@@ -66,7 +66,7 @@ node setFee.js
 ```
 
 ### Bytecode size budget
-Runtime bytecode must stay under **24,576 bytes** (EIP-170). Current size is **24,552 bytes** (24-byte margin). The contract is at `optimizer_runs = 1` and `via_ir = true`. Any further additions will require freeing space first — e.g. removing a redundant public view (`splitsLength` duplicates `getSplits(id).length`), making another `public` constant `internal` (and hardcoding its hash in the deploy scripts), or deploying over the limit via `npm run full-gas` (Arc's chain does not enforce EIP-170; only Circle's estimation does, which the explicit-gas script bypasses).
+EIP-170 limit is **24,576 bytes**. **The contract currently exceeds this limit: runtime size is 25,689 bytes (1,113 bytes over).** Arc Testnet does not enforce EIP-170 at the chain level — deployment succeeds via `npm run full-gas` because Circle's `eth_estimateGas` enforcement is bypassed by the explicit-gas script. **Do not rely on Circle's estimation path (`npm run full`) for this contract.** To bring the contract back under the limit, options include: removing the `splitsLength` view (duplicates `getSplits(id).length`), making additional constants `internal`, or inlining small helpers. The contract is at `optimizer_runs = 1` and `via_ir = true` — both already at maximum size-reduction settings.
 
 Constants that are `internal` (no public getter, not readable via RPC):
 `MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`, `RECOVERY_MANAGER_ROLE`
@@ -96,7 +96,7 @@ Constants that must stay `public` (read by setup/verify scripts or frontend):
 ```
 src/TrancheProtocol.sol       — main contract
 src/interface/                — ITrancheProtocol, ITokenMessenger
-test/                         — Foundry test suite (194 tests)
+test/                         — Foundry test suite (237 tests)
 deploy/                       — Node.js deploy/setup/verify scripts
   deploy-explicit-gas.mjs     — bypasses Circle estimation (use this)
   setup.js                    — grants roles, adds domain, sets fee

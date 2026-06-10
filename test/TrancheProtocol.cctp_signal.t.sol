@@ -128,7 +128,8 @@ contract TrancheProtocolCctpSignalTest is Base {
             INVOICE_URI,
             _singleMilestone(100e6),
             block.timestamp + 30 days,
-            new SplitRecipient[](0)
+            new SplitRecipient[](0),
+            new string[](0)
         );
         vm.stopPrank();
     }
@@ -172,7 +173,8 @@ contract TrancheProtocolCctpSignalTest is Base {
             INVOICE_URI,
             _singleMilestone(amount),
             block.timestamp + 30 days,
-            new SplitRecipient[](0)
+            new SplitRecipient[](0),
+            new string[](0)
         );
         vm.stopPrank();
     }
