@@ -12,6 +12,7 @@ import Tooltip from '../components/Tooltip.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { ARC_DOMAIN, getDomainName, isEvmDomain } from '../config/chains.js'
 import { CONTRACT_ADDRESS, USDC_ADDRESS, ESCROW_ABI, USDC_ABI } from '../config/contract.js'
 import {
@@ -82,6 +83,17 @@ export default function CreateEscrow() {
         title="Lock funds into milestones."
         kicker="The ledger on the right is what the contract sees. Fill in the form on the left and watch it build."
       />
+      <div className="mb-6 rounded-xl bg-sunk border border-rule px-4 py-3 flex items-center gap-3 flex-wrap text-[12.5px] text-ink-2">
+        <span>Gas on Arc is paid in USDC.</span>
+        <a
+          href="https://faucet.circle.com"
+          target="_blank"
+          rel="noreferrer"
+          className="text-clay hover:opacity-80 underline-offset-2 hover:underline"
+        >
+          Get testnet USDC ↗
+        </a>
+      </div>
       <ConnectGate title="Connect to create an escrow">
         <Flow />
       </ConnectGate>
@@ -93,6 +105,9 @@ function Flow() {
   const navigate = useNavigate()
   const { address } = useAccount()
   const { supported, isLoading: loadingDomains, refetch: refetchDomains } = useSupportedDomains()
+  const { config } = useProtocolConfig()
+  const feeBps = config?.protocolFeeBps ?? 199n
+  const cctpForwardFee = config?.cctpForwardFee ?? 0n
 
   const [step, setStep] = useState(1)
   const [state, setState] = useState(() => {
@@ -123,6 +138,12 @@ function Flow() {
     query: { enabled: !!address }
   })
   const approved = allowance !== undefined && totalBaseUnits > 0n && BigInt(allowance) >= totalBaseUnits
+
+  const { data: usdcBalance, isLoading: balanceLoading } = useReadContract({
+    address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address }
+  })
 
   const milestoneAmountsBigInt = useMemo(
     () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
@@ -172,7 +193,17 @@ function Flow() {
         const eff = m.title === 'Custom' ? m.customTitle.trim() : m.title
         if (!eff) e[`m_${i}_title`] = 'Give this milestone a title.'
         const a = parseFloat(m.amount)
-        if (!a || a <= 0) e[`m_${i}_amount`] = 'Amount must be greater than zero.'
+        if (!a || a <= 0) {
+          e[`m_${i}_amount`] = 'Amount must be greater than zero.'
+        } else if (Number(state.destinationDomain) !== ARC_DOMAIN && cctpForwardFee > 0n) {
+          // Cross-chain: verify each milestone's net burn amount exceeds the forwarding fee floor.
+          const amtBigInt = milestoneAmountsBigInt[i]
+          const milestoneProtocolFee = (amtBigInt * feeBps) / 10_000n
+          const burnAmount = amtBigInt - milestoneProtocolFee
+          if (burnAmount <= cctpForwardFee) {
+            e[`m_${i}_amount`] = 'Too small to deliver to this chain — increase this milestone or switch to Arc.'
+          }
+        }
       })
       if (!exactMatch) e.milestonesTotal = 'Milestones must sum to the total.'
     }
@@ -185,7 +216,7 @@ function Flow() {
   }
   const back = () => setStep((s) => Math.max(s - 1, 1))
 
-  const protocolFee = totalBaseUnits * 199n / 10_000n
+  const protocolFee = totalBaseUnits * feeBps / 10_000n
 
   const approveTx = useTx({ onConfirmed: () => refetchAllowance() })
   const depositTx = useTx({
@@ -262,7 +293,7 @@ function Flow() {
             {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
             {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
             {step === 4 && <Step4 state={state} setState={setState} errors={errors} milestoneSum={milestoneSum} totalAmountNum={totalAmountNum} overBaseUnits={overBaseUnits} remainingBaseUnits={remainingBaseUnits} exactMatch={exactMatch} />}
-            {step === 5 && <Step5 approved={approved} approveTx={approveTx} depositTx={depositTx} onApprove={onApprove} onDeposit={onDeposit} totalBaseUnits={totalBaseUnits} address={address} allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance} />}
+            {step === 5 && <Step5 approved={approved} approveTx={approveTx} depositTx={depositTx} onApprove={onApprove} onDeposit={onDeposit} totalBaseUnits={totalBaseUnits} address={address} allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance} usdcBalance={usdcBalance} balanceLoading={balanceLoading} />}
 
             <div className="rule mt-2" />
             <div className="flex items-center justify-between pt-1">
@@ -285,6 +316,8 @@ function Flow() {
             protocolFee={protocolFee}
             milestoneAmountsBigInt={milestoneAmountsBigInt}
             step={step}
+            feeBps={feeBps}
+            cctpForwardFee={cctpForwardFee}
           />
         </div>
       </aside>
@@ -365,6 +398,12 @@ function Step1({ state, setState, errors, supported, loadingDomains, domainsFail
           />
         )}
       </Field>
+
+      {Number(state.destinationDomain) !== ARC_DOMAIN && (
+        <div className="rounded-xl bg-sunk border border-rule px-3 py-2.5 text-[12.5px] text-ink-2 leading-relaxed">
+          Safe and smart contract wallets have different addresses on each chain. Make sure this is the right address for the selected destination chain.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Field label="Destination chain" error={errors.destinationDomain} helper={domainHelper}>
@@ -626,9 +665,11 @@ function Step4({ state, setState, errors, milestoneSum, totalAmountNum, overBase
 }
 
 /* ------- Step 5 ------- */
-function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBaseUnits, address, allowanceLoading, allowanceIsError, refetchAllowance }) {
+function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBaseUnits, address, allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading }) {
   const disconnected = !address
   const busy = approveTx.isBusy || depositTx.isBusy
+  const hasInsufficientBalance = !balanceLoading && usdcBalance !== undefined
+    && totalBaseUnits > 0n && BigInt(usdcBalance) < totalBaseUnits
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3">
@@ -653,6 +694,12 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
         </div>
       )}
 
+      {!disconnected && hasInsufficientBalance && (
+        <div className="rounded-xl bg-bad/8 border border-bad/20 px-4 py-3 text-[13px] text-bad leading-relaxed" role="alert">
+          Insufficient USDC — you have {formatUSDC(BigInt(usdcBalance))}, need {formatUSDC(totalBaseUnits)}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FlowStep
           letter="A"
@@ -662,7 +709,7 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
           loading={approveTx.isBusy}
           actionLabel={approved ? 'Approved' : allowanceLoading ? 'Checking…' : 'Approve'}
           onAction={onApprove}
-          disabled={busy || totalBaseUnits === 0n || disconnected || allowanceLoading}
+          disabled={busy || totalBaseUnits === 0n || disconnected || allowanceLoading || hasInsufficientBalance}
         />
         <FlowStep
           letter="B"
@@ -704,9 +751,19 @@ function FlowStep({ letter, label, description, done, loading, actionLabel, onAc
 }
 
 /* ------- Live ledger (right pane) ------- */
-function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsBigInt, step }) {
+function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsBigInt, step, feeBps, cctpForwardFee }) {
   const dl = state.deadline ? Math.floor(new Date(state.deadline).getTime() / 1000) : 0
-  const totalSum = milestoneAmountsBigInt.reduce((a, b) => a + b, 0n)
+  const effectiveFeeBps = feeBps ?? 199n
+  const effectiveCctpFee = cctpForwardFee ?? 0n
+  const isCrossChain = Number(state.destinationDomain) !== ARC_DOMAIN
+  const feePct = (Number(effectiveFeeBps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+  // Estimated per-release forwarding fee × number of milestones. The real fee is
+  // Circle's live quote at release time; this floor estimate can only be lower.
+  const totalForwardFeeEst = isCrossChain ? effectiveCctpFee * BigInt(state.milestones.length) : 0n
+  const freelancerReceivesEst = totalBaseUnits > protocolFee + totalForwardFeeEst
+    ? totalBaseUnits - protocolFee - totalForwardFeeEst
+    : 0n
+
   return (
     <div className="panel p-6 flex flex-col gap-5">
       <div className="flex items-baseline justify-between">
@@ -755,12 +812,14 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
 
       <div className="rule" />
 
-      <Row label="Subtotal" muted>
-        <span className="num text-[13px] text-ink-2">{formatUSDC(totalSum).replace(' USDC', '')}</span>
+      <Row label={`Protocol fee (${feePct}%)`} muted>
+        <span className="num text-[13px] text-ink-2">−{formatUSDC(protocolFee).replace(' USDC', '')}</span>
       </Row>
-      <Row label="Protocol fee (1.99%)" muted>
-        <span className="num text-[13px] text-ink-2">{formatUSDC(protocolFee).replace(' USDC', '')}</span>
-      </Row>
+      {isCrossChain && effectiveCctpFee > 0n && (
+        <Row label="Est. forwarding fee (varies)" muted>
+          <span className="num text-[13px] text-ink-2">≈ {formatUSDC(effectiveCctpFee).replace(' USDC', '')} / payout</span>
+        </Row>
+      )}
 
       <div className="rule-2" />
 
@@ -768,6 +827,12 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
         <p className="text-[13px] text-ink font-medium">Total to lock</p>
         <p className="num text-[22px] text-clay font-medium">{formatUSDC(totalBaseUnits).replace(' USDC', '')} <span className="text-ink-3 text-[13px] font-sans">USDC</span></p>
       </div>
+
+      {totalBaseUnits > 0n && (
+        <p className="text-[12px] text-ink-3 leading-relaxed">
+          Freelancer receives ≈ {formatUSDC(freelancerReceivesEst).replace(' USDC', '')} USDC after {feePct}% protocol fee{isCrossChain ? ' and transfer fees' : ''}.
+        </p>
+      )}
 
       {step === 5 && (
         <p className="text-[12px] text-ink-3 leading-relaxed pt-1">

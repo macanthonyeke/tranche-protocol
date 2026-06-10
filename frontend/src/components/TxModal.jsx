@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { explorerTx, truncateAddr } from '../utils/format'
-import { parseRevertReason } from '../utils/errors'
+import { parseRevertReason, getRawErrorDetails } from '../utils/errors'
 
 const FOCUSABLE = [
   'a[href]',
@@ -184,6 +184,8 @@ function SuccessState({ titleId, title, txHash, onClose }) {
 }
 
 function ErrorState({ titleId, error, onClose, onRetry }) {
+  const [showDetails, setShowDetails] = useState(false)
+  const details = getRawErrorDetails(error)
   return (
     <>
       <div className="mx-auto mb-5 h-14 w-14 rounded-full bg-bad/12 text-bad inline-flex items-center justify-center border border-bad/30">
@@ -193,6 +195,23 @@ function ErrorState({ titleId, error, onClose, onRetry }) {
       </div>
       <h3 id={titleId} className="text-lg font-semibold mb-1.5 text-ink">Transaction failed</h3>
       <p className="text-sm text-ink-2 break-words leading-relaxed">{parseRevertReason(error)}</p>
+      {details && (
+        <div className="mt-3 text-left">
+          <button
+            type="button"
+            className="text-xs text-ink-3 hover:text-ink-2 transition-colors flex items-center gap-1"
+            onClick={() => setShowDetails((v) => !v)}
+          >
+            <span>{showDetails ? '▾' : '▸'}</span>
+            <span>Technical details</span>
+          </button>
+          {showDetails && (
+            <p className="mt-2 text-[11px] font-mono text-ink-3 break-all bg-sunk rounded-lg px-3 py-2">
+              {details}
+            </p>
+          )}
+        </div>
+      )}
       <div className="flex gap-3 mt-6">
         {onRetry && <button className="btn-primary flex-1" onClick={onRetry}>Try again</button>}
         <button className="btn-secondary flex-1" onClick={onClose}>Close</button>

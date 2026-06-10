@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 
@@ -16,8 +16,10 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
 import { resolveMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { getDomainName } from '../config/chains.js'
-import { formatUSDC, formatUSDCNumber, formatTimestamp, countdown } from '../utils/format.js'
+import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -53,19 +55,25 @@ function Gate() {
 
 function Body() {
   useTick(20_000)
-  const { escrows, isLoading, refetch } = useDisputedEscrows()
+  const { escrows, isLoading, error, refetch } = useDisputedEscrows()
   const [openId, setOpenId] = useState(null)
   const open = (escrows || []).filter((e) => e && Number(e.disputedMilestoneCount) > 0)
 
   return (
     <div className="pb-20 flex flex-col gap-10">
       <div className="flex items-baseline justify-between">
-        <p className="eyebrow">Queue · {open.length}</p>
+        <p className="eyebrow">Queue · {error ? '?' : open.length}</p>
         <button className="btn-quiet" onClick={() => refetch()}>Refresh</button>
       </div>
 
       {isLoading ? (
         <div className="flex flex-col gap-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14" />)}</div>
+      ) : error ? (
+        <div className="flex flex-col items-start gap-3 py-12">
+          <p className="text-warn text-[14.5px]">Failed to load the dispute queue — the indexer may be temporarily unavailable.</p>
+          <p className="text-ink-3 text-[13px]">{error.message || String(error)}</p>
+          <button className="btn-quiet text-[13px]" onClick={() => refetch()}>Try again</button>
+        </div>
       ) : open.length === 0 ? (
         <p className="text-ink-3 text-[14.5px] py-12">No open disputes. The queue is clear.</p>
       ) : (
@@ -135,6 +143,8 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
           <Link to={`/escrow/${id}`} className="btn-secondary" target="_blank">Open full view ↗</Link>
         </div>
 
+        {detail.escrow.invoiceURI && <InvoiceLink uri={detail.escrow.invoiceURI} />}
+
         {detail.splits?.length > 0 && <SplitsPanel splits={detail.splits} />}
 
         <ul className="flex flex-col gap-7">
@@ -144,6 +154,41 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
         </ul>
       </div>
     </Modal>
+  )
+}
+
+/* Invoice link provided by the depositor at escrow creation. User-provided content —
+   disclosed behind a toggle so the arbiter actively chooses to open it. */
+function InvoiceLink({ uri }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <p className="eyebrow">Invoice</p>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="text-[11.5px] text-clay hover:opacity-80 transition-opacity"
+        >
+          {open ? 'Hide' : 'View link'}
+        </button>
+      </div>
+      {open && (
+        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
+          <p className="text-[11.5px] text-ink-3 leading-relaxed">
+            User-provided link — verify before opening.
+          </p>
+          <a
+            href={uri}
+            target="_blank"
+            rel="noreferrer"
+            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all"
+          >
+            {uri} ↗
+          </a>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -181,6 +226,7 @@ function DisputeBlock({ detail, index, refetch }) {
   const d = detail.disputes[index]
   const e = detail.escrow
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+  const [resolveTxHash, setResolveTxHash] = useState(null)
 
   // Single ARBITER_WINDOW read from the contract rather than hardcoding 14d.
   const windowSecs = arbiterWindow
@@ -190,7 +236,19 @@ function DisputeBlock({ detail, index, refetch }) {
 
   // A DISPUTED milestone always carries both a delivery-claim and an objection,
   // so the contract's timeout fallback settles it as a fixed 50/50 split.
-  const timeoutOutcome = 'Funds split 50/50 between both parties.'
+  const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
+
+  const handleResolve = useCallback((txHash) => {
+    if (txHash && Number(e.destinationDomain) !== ARC_DOMAIN) {
+      setResolveTxHash(txHash)
+      // Also persist to localStorage so EscrowDetail picks it up on other devices.
+      localStorage.setItem(
+        cctpTrackKey(detail.id, index),
+        JSON.stringify({ txHash, domain: e.destinationDomain, ts: Date.now() })
+      )
+    }
+    refetch()
+  }, [e.destinationDomain, detail.id, index, refetch])
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -204,9 +262,21 @@ function DisputeBlock({ detail, index, refetch }) {
         <span className="status-bad">Disputed</span>
       </div>
 
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-[12px] text-ink-3">
+        {Number(m.claimedAt) > 0 && (
+          <span>Claimed: <span className="text-ink-2">{formatTimestamp(m.claimedAt)}</span></span>
+        )}
+        {Number(e.deadline) > 0 && (
+          <span>Deadline: <span className="text-ink-2">{formatDeadline(e.deadline)}</span></span>
+        )}
+        {Number(e.reviewWindow) > 0 && (
+          <span>Review window: <span className="text-ink-2">{formatWindow(e.reviewWindow)}</span></span>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
         <Side
-          label="Opened by"
+          label="Payer"
           who={d.raisedBy}
           when={d.raisedAt}
           reason={d.reason}
@@ -214,28 +284,40 @@ function DisputeBlock({ detail, index, refetch }) {
         />
         {d.counterEvidenceHash && d.counterEvidenceHash !== ZERO_BYTES32 ? (
           <Side
-            label="Counter-evidence"
+            label="Freelancer"
             who={d.raisedBy?.toLowerCase() === e.depositor.toLowerCase() ? e.recipient : e.depositor}
             uri={d.counterEvidenceURI}
           />
         ) : (
           <div>
-            <p className="eyebrow mb-1">Counter-evidence</p>
-            <p className="text-[13px] text-ink-3">Not submitted.</p>
+            <p className="eyebrow mb-1">Freelancer</p>
+            <p className="text-[13px] text-ink-3">No counter-evidence submitted.</p>
           </div>
         )}
       </div>
+
+      <EvidenceHashVerifier
+        payerHash={d.evidenceHash}
+        freelancerHash={d.counterEvidenceHash}
+      />
 
       <ResolveForm
         id={detail.id} index={index}
         escrow={e}
         milestone={m}
         bpsDenominator={bpsDenominator}
-        refetch={refetch}
+        onResolved={handleResolve}
         canTimeout={canTimeout}
         timeoutAt={timeoutAt}
         timeoutOutcome={timeoutOutcome}
       />
+
+      {resolveTxHash && Number(e.destinationDomain) !== ARC_DOMAIN && (
+        <ArbiterDeliveryStatus
+          txHash={resolveTxHash}
+          destinationDomain={e.destinationDomain}
+        />
+      )}
     </li>
   )
 }
@@ -258,16 +340,121 @@ function Side({ label, who, when, reason, uri }) {
   )
 }
 
-function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, canTimeout, timeoutAt, timeoutOutcome }) {
+/* Shown in the arbiter's DisputeBlock after resolveDispute confirms cross-chain.
+   Polls Iris so the arbiter can confirm the payment was forwarded. */
+function ArbiterDeliveryStatus({ txHash, destinationDomain }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
+  const chainName = getDomainName(destinationDomain)
+
+  if (phase === 'idle') return null
+
+  return (
+    <div className="flex flex-col gap-1.5 pt-2 border-t border-rule mt-1">
+      {phase === 'polling' && (
+        <div className="flex items-center gap-2 text-[12px] text-ink-2">
+          <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+          Delivering to {chainName}…
+        </div>
+      )}
+      {phase === 'delivered' && deliveries.map((d, i) => {
+        const url = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+        return (
+          <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
+            <span>✓ Delivered to {chainName}</span>
+            {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
+          </div>
+        )
+      })}
+      {phase === 'failed' && (
+        <p className="text-[12px] text-warn">
+          Delivery failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
+        </p>
+      )}
+      {phase === 'unavailable' && (
+        <p className="text-[12px] text-ink-3">Delivery status unavailable.</p>
+      )}
+    </div>
+  )
+}
+
+/* Arbiter tool: paste any evidence link to compute its hash and check it against
+   the hashes committed on-chain by each party. Catches URI-substitution claims. */
+function EvidenceHashVerifier({ payerHash, freelancerHash }) {
+  const [open, setOpen] = useState(false)
+  const [uri, setUri] = useState('')
+
+  const computed = uri.trim() ? hashDescription(uri.trim()) : null
+  const matchesPayer     = computed && payerHash     && payerHash     !== ZERO_BYTES32 && computed.toLowerCase() === payerHash.toLowerCase()
+  const matchesFreelancer = computed && freelancerHash && freelancerHash !== ZERO_BYTES32 && computed.toLowerCase() === freelancerHash.toLowerCase()
+  const noMatch = computed && !matchesPayer && !matchesFreelancer
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="self-start text-[11.5px] text-ink-3 hover:text-ink-2 transition-colors"
+      >
+        {open ? '▾ Hide hash verifier' : '▸ Verify evidence hashes'}
+      </button>
+      {open && (
+        <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-3">
+          <p className="text-[11.5px] text-ink-3 leading-relaxed">
+            Paste an evidence link to verify it matches a hash committed on-chain. Mismatches indicate the link was not the one originally submitted.
+          </p>
+          <input
+            type="text"
+            className="input text-[12.5px]"
+            placeholder="Paste evidence link to verify…"
+            autoComplete="off"
+            spellCheck={false}
+            value={uri}
+            onChange={(e) => setUri(e.target.value)}
+          />
+          {computed && (
+            <div className="flex flex-col gap-1.5">
+              <div className="font-mono text-[10.5px] text-ink-3 break-all">{computed}</div>
+              {matchesPayer && (
+                <p className="text-[12px] text-ok font-medium">✓ Matches payer evidence hash</p>
+              )}
+              {matchesFreelancer && (
+                <p className="text-[12px] text-ok font-medium">✓ Matches freelancer evidence hash</p>
+              )}
+              {noMatch && (
+                <p className="text-[12px] text-warn">No match — this link was not committed on-chain.</p>
+              )}
+            </div>
+          )}
+          <div className="flex flex-col gap-1 border-t border-rule pt-2">
+            <EvidenceHashRow label="Payer hash" hash={payerHash} />
+            <EvidenceHashRow label="Freelancer hash" hash={freelancerHash} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EvidenceHashRow({ label, hash }) {
+  const valid = hash && hash !== ZERO_BYTES32
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-[11px] text-ink-3 shrink-0 w-28">{label}:</span>
+      <span className="font-mono text-[10.5px] text-ink-3 break-all">{valid ? hash : '—'}</span>
+    </div>
+  )
+}
+
+function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
   // User works in whole percent (0–100); the contract receives BPS (0–10,000).
   const [pct, setPct] = useState('50')
   const [resolutionUri, setResolutionUri] = useState('')
   const [resolutionHash, setResolutionHash] = useState('')
   const [err, setErr] = useState('')
   const tx = useTx({
-    onConfirmed: () => { refetch(); setPct('50'); setResolutionUri(''); setResolutionHash('') }
+    onConfirmed: () => { setPct('50'); setResolutionUri(''); setResolutionHash('') }
   })
-  const timeoutTx = useTx({ onConfirmed: refetch })
+  const timeoutTx = useTx({ onConfirmed: () => onResolved?.(null) })
 
   // A resolution that pays the recipient settles via CCTP; for cross-chain
   // destinations maxFee must cover Circle's live forwarding fee or the mint
@@ -311,16 +498,17 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, refetch, ca
         burnAmount: recipientAmount - protocolFee
       })
     } catch (e) {
-      toast.error(e.message || 'Could not fetch the cross-chain forwarding fee.')
+      toast.error(e.message || "Couldn't check delivery fees. Please try again.")
       return
     }
 
-    tx.run(
+    const txHash = await tx.run(
       escrowWrite('resolveDispute', [
         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
       ]),
       { loadingMessage: 'Sign to resolve.' }
     )
+    onResolved?.(txHash ?? null)
   }
 
   return (

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
-import { useDashboard, useUsdcBalance } from '../hooks/useEscrows.js'
+import { useDashboard, useUsdcBalance, useDisputedEscrows } from '../hooks/useEscrows.js'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { formatUSDC, formatUSDCNumber, countdown } from '../utils/format.js'
 
@@ -81,18 +81,31 @@ export default function Dashboard() {
   )
 }
 
+function ArbiterDisputeBanner() {
+  const { escrows } = useDisputedEscrows()
+  const count = escrows.length
+  return (
+    <div className="rounded-xl bg-clay-soft border border-clay/20 px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <p className="text-[13px] text-clay leading-relaxed">
+        {count === 0
+          ? 'Arbiter panel — no open disputes right now.'
+          : `Arbiter panel — ${count} open ${count === 1 ? 'dispute' : 'disputes'} awaiting review.`}
+      </p>
+      <Link
+        to="/arbiter"
+        className="shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-clay/30 px-3 py-1.5 text-xs font-medium text-clay hover:bg-clay/10 transition-colors"
+      >
+        Review in Arbiter Panel →
+      </Link>
+    </div>
+  )
+}
+
 function DashboardInner() {
   const { address } = useAccount()
-  const navigate = useNavigate()
-  const { isArbiter, isAdmin, isLoading: rolesLoading } = useRoles()
+  const { isArbiter } = useRoles()
 
-  useEffect(() => {
-    if (rolesLoading) return
-    if (isArbiter) navigate('/arbiter', { replace: true })
-    else if (isAdmin) navigate('/protocol', { replace: true })
-  }, [rolesLoading, isArbiter, isAdmin, navigate])
-
-  const { dashboard, isLoading, refetch } = useDashboard(address)
+  const { dashboard, isLoading, error: dashboardError, refetch } = useDashboard(address)
   const { balance: usdcBalance } = useUsdcBalance(address)
 
   const [activeTab, setActiveTab] = useState('all')
@@ -118,12 +131,24 @@ function DashboardInner() {
     return Array.from(map.values())
   }, [dashboard])
 
+  // Incoming: freelancer role, active, no released/disputed milestones yet —
+  // escrows the user hasn't engaged with. Shown in a separate section so new
+  // requests don't blend into the user's own active work.
+  const incomingEscrows = useMemo(
+    () => mySummaries.filter((e) => !e.isPayer && e.state === 0 && e.releasedMilestoneCount === 0 && e.disputedMilestoneCount === 0),
+    [mySummaries]
+  )
+  const mainEscrows = useMemo(
+    () => mySummaries.filter((e) => e.isPayer || e.state !== 0 || e.releasedMilestoneCount > 0 || e.disputedMilestoneCount > 0),
+    [mySummaries]
+  )
+
   const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
 
   const tabDef = LEDGER_TABS.find((t) => t.key === activeTab) ?? LEDGER_TABS[0]
   const filteredEscrows = useMemo(
-    () => mySummaries.filter(tabDef.filter),
-    [mySummaries, tabDef]
+    () => mainEscrows.filter(tabDef.filter),
+    [mainEscrows, tabDef]
   )
 
   useEffect(() => { setPage(0) }, [activeTab, filteredEscrows.length])
@@ -143,17 +168,6 @@ function DashboardInner() {
     }
   }
 
-  // While roles are resolving, or for privileged wallets that are about to be
-  // redirected, suppress the consumer vault grid so it never flashes.
-  if (rolesLoading || isArbiter || isAdmin) {
-    return (
-      <div className="flex flex-col gap-6">
-        <Skeleton className="h-24" />
-        <Skeleton className="h-64" />
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col gap-10 md:gap-14">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -162,6 +176,8 @@ function DashboardInner() {
           + New Escrow
         </Link>
       </header>
+
+      {isArbiter && <ArbiterDisputeBanner />}
 
       {/* Stat tiles. Four real metrics, semantically distinct: two USDC values
           (wallet balance, claimable) and two integer counts (active, disputes).
@@ -203,6 +219,21 @@ function DashboardInner() {
           <ClaimableTile loading={isLoading} balance={refundBal} flash={refreshFlash} />
         </motion.div>
       </motion.section>
+
+      {incomingEscrows.length > 0 && (
+        <section>
+          <div className="flex items-center justify-between gap-4 mb-2">
+            <h2 className="text-xl font-bold text-ink tracking-tight">Incoming requests</h2>
+            <span className="text-xs text-ink-3">{incomingEscrows.length} new</span>
+          </div>
+          <p className="text-sm text-ink-2 mb-6">Escrows you've been added to as a recipient but haven't started working on yet.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {incomingEscrows.map((e) => (
+              <PremiumEscrowCard key={e.id} summary={e} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <div className="flex items-center justify-between gap-4">
@@ -268,6 +299,14 @@ function DashboardInner() {
         {isLoading ? (
           <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
             <DashboardSkeleton />
+          </motion.div>
+        ) : dashboardError ? (
+          <motion.div key="error" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+            <div className="flex flex-col items-start gap-3 py-12">
+              <p className="text-warn text-[14.5px]">Failed to load escrows — the indexer may be temporarily unavailable.</p>
+              <p className="text-ink-3 text-[13px]">{dashboardError.message || String(dashboardError)}</p>
+              <button className="btn-quiet text-[13px]" onClick={refetch}>Try again</button>
+            </div>
           </motion.div>
         ) : filteredEscrows.length === 0 ? (
           <motion.div key="empty" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
