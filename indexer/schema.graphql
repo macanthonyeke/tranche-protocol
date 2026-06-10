@@ -1,9 +1,8 @@
 # Tranche Protocol subgraph schema.
 #
-# Designed around the events the contract ACTUALLY emits (see
-# src/interface/ITrancheProtocol.sol). Two fields the frontend's card summaries
-# want — per-escrow `milestoneCount` and per-milestone `amount` — are NOT emitted
-# on-chain, so they are best-effort / nullable here. See README "Event gaps".
+# milestoneCount is read via getEscrow() eth_call at EscrowCreated time.
+# per-milestone `amount` is NOT emitted on-chain — always null; hydrate via
+# getMilestones(escrowId) on the detail page.
 
 enum EscrowState {
   ACTIVE
@@ -40,7 +39,7 @@ type Escrow @entity(immutable: false) {
   "Number of split recipients (from SplitsConfigured); 0 = single recipient."
   splitCount: Int!
 
-  "Best-effort = max(milestoneIndex seen) + 1. Not authoritative: a milestone that has emitted no event yet is invisible. See README."
+  "Real value from getEscrow() eth_call at EscrowCreated; falls back to max(milestoneIndex seen)+1 for pre-fix escrows."
   milestoneCount: Int!
   releasedMilestoneCount: Int!
   refundedMilestoneCount: Int!
@@ -54,10 +53,14 @@ type Escrow @entity(immutable: false) {
   createdTx: Bytes!
   updatedAt: BigInt!
 
+  "Milestone titles from MilestoneTitles event. Empty array if the depositor did not pass titles at deposit time."
+  titles: [String!]!
+
   milestones: [Milestone!]! @derivedFrom(field: "escrow")
   splits: [Split!]! @derivedFrom(field: "escrow")
   disputes: [Dispute!]! @derivedFrom(field: "escrow")
   refundCredits: [RefundCredit!]! @derivedFrom(field: "escrow")
+  evidenceEntries: [EvidenceEntry!]! @derivedFrom(field: "escrow")
 }
 
 type Milestone @entity(immutable: false) {
@@ -132,6 +135,19 @@ type RefundBalance @entity(immutable: false) {
   totalCredited: BigInt!
   totalWithdrawn: BigInt!
   updatedAt: BigInt!
+}
+
+"Immutable ledger of evidence appended to a disputed milestone (EvidenceAppended). Ordered by timestamp ascending."
+type EvidenceEntry @entity(immutable: true) {
+  "txHash-logIndex"
+  id: ID!
+  escrow: Escrow!
+  milestoneIndex: Int!
+  caller: Bytes!
+  hash: Bytes!
+  uri: String!
+  timestamp: BigInt!
+  tx: Bytes!
 }
 
 "Immutable ledger of partial refund credits (PartialRefundCredited)."

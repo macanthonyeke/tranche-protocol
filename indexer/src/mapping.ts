@@ -1,4 +1,4 @@
-import { BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts";
+import { BigInt, Bytes, ethereum, Address } from "@graphprotocol/graph-ts";
 import {
   Escrow,
   Milestone,
@@ -6,7 +6,11 @@ import {
   Split,
   RefundBalance,
   RefundCredit,
+  EvidenceEntry,
 } from "../generated/schema";
+import {
+  TrancheProtocol,
+} from "../generated/TrancheProtocol/TrancheProtocol";
 import {
   EscrowCreated,
   EscrowTermsSnapshotted,
@@ -26,10 +30,13 @@ import {
   PartialRefundCredited,
   RefundWithdrawn,
   RefundCreditTransferred,
+  EvidenceAppended,
+  MilestoneTitles,
 } from "../generated/TrancheProtocol/TrancheProtocol";
 
 // ---- enum string constants (must match schema.graphql) ----
 const ESCROW_ACTIVE = "ACTIVE";
+const ESCROW_COMPLETED = "COMPLETED";
 const ESCROW_CANCELLED = "CANCELLED";
 
 const MS_PENDING = "PENDING";
@@ -63,6 +70,7 @@ function getOrCreateEscrow(escrowId: BigInt, event: ethereum.Event): Escrow {
     e.refundedMilestoneCount = 0;
     e.disputedMilestoneCount = 0;
     e.hasOpenDispute = false;
+    e.titles = [];
     e.createdAt = event.block.timestamp;
     e.createdAtBlock = event.block.number;
     e.createdTx = event.transaction.hash;
@@ -85,6 +93,8 @@ function getOrCreateMilestone(
     m.state = MS_PENDING;
     m.updatedAt = event.block.timestamp;
 
+    // Safety net for backfill: bump milestoneCount if we see an index beyond
+    // what was recorded at creation (pre-C6a escrows on old deploys).
     let escrow = getOrCreateEscrow(escrowId, event);
     let observed = index.toI32() + 1;
     if (observed > escrow.milestoneCount) {
@@ -108,6 +118,18 @@ function getOrCreateRefundBalance(wallet: Bytes, ts: BigInt): RefundBalance {
   }
   r.updatedAt = ts;
   return r as RefundBalance;
+}
+
+// C6b: Set escrow to COMPLETED when all milestones have reached a terminal
+// state (RELEASED or REFUNDED). Only transitions ACTIVE → COMPLETED.
+function maybeCompleteEscrow(escrow: Escrow, event: ethereum.Event): void {
+  if (escrow.state != ESCROW_ACTIVE) return;
+  if (escrow.milestoneCount == 0) return;
+  let terminal = escrow.releasedMilestoneCount + escrow.refundedMilestoneCount;
+  if (terminal >= escrow.milestoneCount) {
+    escrow.state = ESCROW_COMPLETED;
+    escrow.updatedAt = event.block.timestamp;
+  }
 }
 
 function closeDispute(
@@ -154,6 +176,15 @@ export function handleEscrowCreated(event: EscrowCreated): void {
   escrow.createdAtBlock = event.block.number;
   escrow.createdTx = event.transaction.hash;
   escrow.updatedAt = event.block.timestamp;
+
+  // C6a: read the real milestoneCount from the contract rather than
+  // accumulating from events (which start at 0 and only count seen indexes).
+  let contract = TrancheProtocol.bind(event.address);
+  let escrowData = contract.try_getEscrow(event.params.escrowId);
+  if (!escrowData.reverted) {
+    escrow.milestoneCount = escrowData.value.milestoneCount.toI32();
+  }
+
   escrow.save();
 }
 
@@ -218,6 +249,7 @@ export function handleMilestoneApproved(event: MilestoneApproved): void {
     let escrow = getOrCreateEscrow(event.params.escrowId, event);
     escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
     escrow.updatedAt = event.block.timestamp;
+    maybeCompleteEscrow(escrow, event);
     escrow.save();
   }
 }
@@ -238,6 +270,7 @@ export function handleMilestoneReleased(event: MilestoneReleased): void {
     let escrow = getOrCreateEscrow(event.params.escrowId, event);
     escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
     escrow.updatedAt = event.block.timestamp;
+    maybeCompleteEscrow(escrow, event);
     escrow.save();
   }
 }
@@ -258,6 +291,7 @@ export function handleMilestoneCancelled(event: MilestoneCancelled): void {
     let escrow = getOrCreateEscrow(event.params.escrowId, event);
     escrow.refundedMilestoneCount = escrow.refundedMilestoneCount + 1;
     escrow.updatedAt = event.block.timestamp;
+    maybeCompleteEscrow(escrow, event);
     escrow.save();
   }
 }
@@ -280,6 +314,7 @@ export function handleRefundedAfterDeadline(
     let escrow = getOrCreateEscrow(event.params.escrowId, event);
     escrow.refundedMilestoneCount = escrow.refundedMilestoneCount + 1;
     escrow.updatedAt = event.block.timestamp;
+    maybeCompleteEscrow(escrow, event);
     escrow.save();
   }
 }
@@ -366,6 +401,7 @@ export function handleDisputeResolved(event: DisputeResolved): void {
   let escrow = getOrCreateEscrow(event.params.escrowId, event);
   escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
   escrow.updatedAt = event.block.timestamp;
+  maybeCompleteEscrow(escrow, event);
   escrow.save();
 }
 
@@ -395,6 +431,7 @@ export function handleDisputeTimedOutSettled(
   let escrow = getOrCreateEscrow(event.params.escrowId, event);
   escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
   escrow.updatedAt = event.block.timestamp;
+  maybeCompleteEscrow(escrow, event);
   escrow.save();
 }
 
@@ -424,6 +461,7 @@ export function handleMutualSettlementExecuted(
   let escrow = getOrCreateEscrow(event.params.escrowId, event);
   escrow.releasedMilestoneCount = escrow.releasedMilestoneCount + 1;
   escrow.updatedAt = event.block.timestamp;
+  maybeCompleteEscrow(escrow, event);
   escrow.save();
 }
 
@@ -481,4 +519,31 @@ export function handleRefundCreditTransferred(
   let to = getOrCreateRefundBalance(event.params.to, event.block.timestamp);
   to.balance = to.balance.plus(event.params.amount);
   to.save();
+}
+
+// appendEvidence: either party may add evidence to an open dispute.
+// Emit-only on-chain; we store an immutable ledger entry per call.
+export function handleEvidenceAppended(event: EvidenceAppended): void {
+  let id =
+    event.transaction.hash.toHexString() +
+    "-" +
+    event.logIndex.toString();
+  let entry = new EvidenceEntry(id);
+  entry.escrow = event.params.escrowId.toString();
+  entry.milestoneIndex = event.params.milestoneIndex.toI32();
+  entry.caller = event.params.caller;
+  entry.hash = event.params.hash;
+  entry.uri = event.params.uri;
+  entry.timestamp = event.params.timestamp;
+  entry.tx = event.transaction.hash;
+  entry.save();
+}
+
+// MilestoneTitles: emitted once at deposit with the depositor-supplied titles.
+// Stored on the Escrow entity; an empty array means no titles were provided.
+export function handleMilestoneTitles(event: MilestoneTitles): void {
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.titles = event.params.titles;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
 }
