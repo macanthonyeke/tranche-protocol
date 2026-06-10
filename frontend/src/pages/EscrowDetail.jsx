@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAccount } from 'wagmi'
+import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
@@ -26,6 +27,7 @@ import {
   getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS
 } from '../config/chains.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+import { GOLDSKY_ENABLED, fetchEscrowTitles } from '../lib/goldsky.js'
 
 const addressToBytes32 = (addr) => '0x' + addr.slice(2).padStart(64, '0')
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -629,6 +631,23 @@ function loadMilestoneTitles(escrowId) {
   return []
 }
 
+// Titles are emitted on-chain at deposit (MilestoneTitles event) and indexed
+// on the subgraph's Escrow entity, so any device — not just the creating
+// one — can read them. localStorage stays as the fallback for escrows created
+// before titles were passed on-chain, and as the instant value while the
+// subgraph fetch is in flight. The shared queryKey dedupes the fetch across
+// all MilestoneRow instances; staleTime is Infinity because titles never
+// change after deposit.
+function useMilestoneTitles(escrowId) {
+  const { data } = useQuery({
+    queryKey: ['gs-titles', escrowId],
+    queryFn: () => fetchEscrowTitles(escrowId),
+    enabled: GOLDSKY_ENABLED && escrowId !== undefined && escrowId !== null,
+    staleTime: Infinity
+  })
+  return data && data.length > 0 ? data : loadMilestoneTitles(escrowId)
+}
+
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 function readCctpTrack(escrowId, milestoneIndex) {
@@ -651,7 +670,7 @@ function MilestoneRow({
   reviewWindowExpired, claimed, reviewDeadline,
   optimisticBadge, onChange, setOpt, clearOpt
 }) {
-  const titles = loadMilestoneTitles(escrow.id)
+  const titles = useMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
 
   // Persistent cross-chain delivery tracker — read once on mount, updated by

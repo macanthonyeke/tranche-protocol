@@ -120,6 +120,17 @@ export async function fetchDisputedEscrows() {
   return (data.escrows || []).map(toSummary)
 }
 
+// Milestone titles for one escrow, emitted once at deposit (MilestoneTitles
+// event) and indexed onto the Escrow entity. Returns [] when the escrow
+// predates on-chain titles or the depositor passed none.
+export async function fetchEscrowTitles(escrowId) {
+  const data = await gql(
+    `query Titles($id: ID!) { escrow(id: $id) { titles } }`,
+    { id: String(escrowId) }
+  )
+  return data.escrow?.titles || []
+}
+
 export async function fetchRefundBalance(address) {
   const data = await gql(
     `query Refund($wallet: ID!) { refundBalance(id: $wallet) { balance } }`,

@@ -267,7 +267,8 @@ function Flow() {
       state.invoiceURI,
       milestoneAmountsBigInt,
       deadline,
-      []
+      [],
+      state.milestones.map((m) => m.title === 'Custom' ? m.customTitle.trim() : m.title)
     ]), { loadingMessage: 'Sign to create the escrow.' }).catch(() => {})
   }
 

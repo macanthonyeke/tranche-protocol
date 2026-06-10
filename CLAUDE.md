@@ -112,9 +112,9 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.3.0/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.4.0/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.3.0` |
+| Subgraph name/version | `tranche-protocol/0.4.0` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
@@ -125,6 +125,7 @@ The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in
 | Event | Handler | Effect |
 |-------|---------|--------|
 | `EscrowCreated` | `handleEscrowCreated` | Creates Escrow entity |
+| `MilestoneTitles` | `handleMilestoneTitles` | Sets Escrow.titles (string[] of per-milestone titles) |
 | `EscrowTermsSnapshotted` | `handleEscrowTermsSnapshotted` | Sets fee snapshot |
 | `SplitConfigured` / `SplitsConfigured` | split handlers | Creates Split entities |
 | `DeliveryClaimed` | `handleDeliveryClaimed` | Milestone → FULFILLED, sets reviewDeadline |
