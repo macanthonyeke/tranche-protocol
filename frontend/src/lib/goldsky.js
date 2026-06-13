@@ -131,6 +131,24 @@ export async function fetchEscrowTitles(escrowId) {
   return data.escrow?.titles || []
 }
 
+export async function fetchEscrowInvoice(escrowId) {
+  const data = await gql(
+    `query Invoice($id: ID!) {
+      escrow(id: $id) {
+        invoiceData
+        invoiceAcknowledgedAt
+      }
+    }`,
+    { id: String(escrowId) }
+  )
+  return {
+    invoiceData: data.escrow?.invoiceData ?? null,
+    invoiceAcknowledgedAt: data.escrow?.invoiceAcknowledgedAt
+      ? BigInt(data.escrow.invoiceAcknowledgedAt)
+      : null
+  }
+}
+
 export async function fetchRefundBalance(address) {
   const data = await gql(
     `query Refund($wallet: ID!) { refundBalance(id: $wallet) { balance } }`,

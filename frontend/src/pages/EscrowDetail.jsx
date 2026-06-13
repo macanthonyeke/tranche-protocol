@@ -16,7 +16,7 @@ import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
 import { resolveMaxFee } from '../utils/cctpFee.js'
-import { bytes32ToAddress, hashDescription } from '../utils/encode.js'
+import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
@@ -28,6 +28,8 @@ import {
 } from '../config/chains.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
 import { GOLDSKY_ENABLED, fetchEscrowTitles } from '../lib/goldsky.js'
+import { useEscrowInvoice } from '../hooks/useEscrows.js'
+import InvoiceCard from '../components/InvoiceCard.jsx'
 
 const addressToBytes32 = (addr) => '0x' + addr.slice(2).padStart(64, '0')
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -96,6 +98,11 @@ function DetailInner() {
     refetch()
   }, [refetch])
 
+  const detailHasInvoice = detail
+    ? !!(detail.escrow.invoiceHash && detail.escrow.invoiceHash !== ZERO_BYTES32)
+    : false
+  const { invoiceAcknowledgedAt: ackAt } = useEscrowInvoice(detailHasInvoice ? detail.escrow.id : null)
+
   if (isLoading) return <EscrowDetailSkeleton />
   if (!detail) {
     const isNotFound = !error || error?.cause?.data?.errorName === 'EscrowDoesNotExist'
@@ -138,7 +145,10 @@ function DetailInner() {
           clearOpt={clearOpt}
         />
 
-        <div className="lg:col-span-2 flex flex-col">
+        <div className="lg:col-span-2 flex flex-col gap-4">
+          {isFreelancer && escrow.state === 0 && detailHasInvoice && !ackAt && (
+            <AckBanner escrow={escrow} onChange={handleChange} />
+          )}
           <MilestoneStack
             escrow={escrow}
             milestones={milestones}
@@ -232,11 +242,55 @@ function StateGlowPill({ state }) {
   )
 }
 
+/* ---------- Invoice acknowledgment banner ----------
+   Shown to the freelancer when the escrow is active, has an invoice, and the
+   recipient hasn't yet emitted InvoiceAcknowledged on-chain. */
+function AckBanner({ escrow, onChange }) {
+  const tx = useTx({ onConfirmed: () => onChange?.() })
+  return (
+    <div className="bg-paper border border-clay/30 rounded-2xl p-6 flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h2 className="text-base font-semibold text-ink">Review and accept the invoice terms</h2>
+        <p className="text-sm text-ink-2 leading-relaxed">
+          The payer has committed to these terms on-chain. Accepting creates a record that you agreed to this scope.
+        </p>
+      </div>
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          className="btn-primary text-sm py-2"
+          disabled={tx.isBusy}
+          onClick={() => tx.run(
+            escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
+            { loadingMessage: 'Check your wallet.' }
+          )}
+        >
+          {tx.isBusy ? 'Working…' : 'Accept terms'}
+        </button>
+        <button
+          type="button"
+          className="btn-danger text-sm py-2"
+          disabled={tx.isBusy}
+          onClick={() => tx.run(
+            escrowWrite('mutualCancel', [BigInt(escrow.id)]),
+            { loadingMessage: 'Check your wallet.' }
+          )}
+        >
+          Decline escrow
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* ---------- Column 1 — Metadata & financial ledger ----------
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
 function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
+  const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
+  const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
+
   return (
     <aside className="lg:col-span-1 flex flex-col gap-6">
       <div className="bg-paper border border-rule rounded-2xl p-6 h-fit flex flex-col gap-6">
@@ -264,15 +318,21 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
           </ParamRow>
-          <ParamRow label="Review window" last={!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)}>
+          <ParamRow label="Review window" last>
             <span className="text-sm text-ink">{formatWindow(escrow.reviewWindow)}</span>
           </ParamRow>
-          {escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32 && (
-            <InvoiceHashRow hash={escrow.invoiceHash} />
-          )}
         </div>
 
-        {escrow.invoiceURI && <InvoiceURIDisclosure uri={escrow.invoiceURI} />}
+        {hasInvoice && (
+          <InvoiceCard
+            escrowId={escrow.id}
+            invoiceHash={escrow.invoiceHash}
+            invoiceData={invoiceData}
+            invoiceURI={escrow.invoiceURI}
+            invoiceAcknowledgedAt={invoiceAcknowledgedAt}
+            role={role === 'freelancer' ? 'recipient' : role ?? 'payer'}
+          />
+        )}
       </div>
 
       {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} onChange={onChange} />}
@@ -427,36 +487,6 @@ function UpdateSplitAddressRow({ escrow, splitIndex, currentDomain, onChange }) 
   )
 }
 
-function InvoiceURIDisclosure({ uri }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="flex flex-col gap-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="self-start text-sm text-clay hover:opacity-80 transition-opacity"
-      >
-        {open ? 'Hide invoice link' : 'View invoice link'}
-      </button>
-      {open && (
-        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
-          <p className="text-[11.5px] text-ink-3 leading-relaxed">
-            Invoice links are user-provided and not verified by the protocol. Check before opening.
-          </p>
-          <a
-            href={uri}
-            target="_blank"
-            rel="noreferrer"
-            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-sm inline-flex items-start gap-1 break-all"
-          >
-            {uri} ↗
-          </a>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function ParamRow({ label, last = false, children }) {
   return (
     <div className={`flex justify-between items-center py-3 text-sm ${last ? '' : 'border-b border-rule/50'}`}>
@@ -493,30 +523,6 @@ function DeadlineCell({ deadline }) {
         {urgent && !passed ? '⚠ ' : ''}{countdown(deadline)}
       </span>
     </div>
-  )
-}
-
-function InvoiceHashRow({ hash }) {
-  const [copied, setCopied] = useState(false)
-  const onCopy = async () => {
-    try { await navigator.clipboard.writeText(hash); setCopied(true); setTimeout(() => setCopied(false), 1200) } catch {}
-  }
-  return (
-    <ParamRow label="Invoice hash" last>
-      <div className="flex items-center gap-1.5 justify-end">
-        <span className="font-mono text-xs text-ink-2 tracking-tight">
-          {hash.slice(0, 8)}…{hash.slice(-6)}
-        </span>
-        <button
-          type="button"
-          onClick={onCopy}
-          title={copied ? 'Copied!' : 'Copy full hash'}
-          className="text-ink-3 hover:text-ink transition-colors"
-        >
-          {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
-        </button>
-      </div>
-    </ParamRow>
   )
 }
 
@@ -1673,7 +1679,7 @@ function DisputeActions({
   escrow, milestone, dispute, role, userAddress,
   reviewWindowExpired, onChange
 }) {
-  const [modal, setModal] = useState(null) // 'raise' | 'counter' | null
+  const [modal, setModal] = useState(null) // 'raise' | 'counter' | 'append' | null
 
   const isParticipant = role === 'payer' || role === 'freelancer'
   if (!isParticipant) return null
@@ -1688,8 +1694,10 @@ function DisputeActions({
   // raiseDispute is depositor-only and only from IN_REVIEW within the window.
   const canRaise = state === 1 && role === 'payer' && !reviewWindowExpired
   const canCounter = state === 2 && !!dispute?.raisedBy && !raisedByMe && !counterExists
+  // Either participant may append additional evidence while the dispute is open.
+  const canAppend = state === 2
 
-  if (!canRaise && !canCounter) return null
+  if (!canRaise && !canCounter && !canAppend) return null
 
   const btnCls =
     'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ' +
@@ -1706,6 +1714,11 @@ function DisputeActions({
       {canCounter && (
         <button type="button" className={btnCls} onClick={() => setModal('counter')}>
           Submit Counter Evidence
+        </button>
+      )}
+      {canAppend && (
+        <button type="button" className={btnCls} onClick={() => setModal('append')}>
+          Add Evidence
         </button>
       )}
       <EvidenceModal
@@ -1727,7 +1740,7 @@ const EVIDENCE_MODES = {
     needsReason: true,
     submitLabel: 'Submit dispute',
     evidenceLabel: 'Evidence link',
-    blurb: 'Pauses this milestone for arbiter review. Upload your evidence to a permanent host (IPFS or Arweave recommended) and paste the link below. Avoid links to editable content — the link\'s hash is stored on-chain and used to detect tampering.'
+    blurb: 'Pauses this milestone for arbiter review. Upload your evidence to a permanent host (IPFS or Arweave recommended) and paste the link below. Dropping the file below fingerprints its contents directly — stronger than a URL hash.'
   },
   counter: {
     title: 'Submit counter-evidence',
@@ -1735,27 +1748,59 @@ const EVIDENCE_MODES = {
     needsReason: false,
     submitLabel: 'Submit counter-evidence',
     evidenceLabel: 'Counter-evidence link',
-    blurb: 'Your one opportunity to respond. Upload your evidence to a permanent host (IPFS or Arweave recommended) — avoid editable links. The hash of your submission is committed on-chain and cannot be changed.'
+    blurb: 'Your one opportunity to respond. Upload your evidence to a permanent host (IPFS or Arweave recommended). Dropping the file fingerprints its contents on-chain — the hash cannot be changed after submission.'
+  },
+  append: {
+    title: 'Add evidence',
+    fn: 'appendEvidence',
+    needsReason: false,
+    submitLabel: 'Add evidence',
+    evidenceLabel: 'Evidence link',
+    blurb: 'Attach a supplementary evidence link to this dispute. Either party may add evidence while the dispute is open. Dropping the file fingerprints its contents directly rather than hashing the URL.'
   }
 }
 
-/* Shared evidence form for raise / counter. The evidence link is
-   hashed client-side with keccak256 to produce the bytes32 the contract stores
-   as tamper-proof proof; the link itself is stored as the URI. */
+/* Shared evidence form for raise / counter / append.
+   The on-chain hash is the file fingerprint when a file is dropped, falling
+   back to keccak256(uri) when only a link is provided. The URI is always
+   stored separately so the arbiter can fetch the content. */
 function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {
   const meta = mode ? EVIDENCE_MODES[mode] : null
   const [reason, setReason] = useState('')
   const [uri, setUri] = useState('')
-  const tx = useTx({ onConfirmed: () => { setReason(''); setUri(''); onConfirmed?.() } })
+  const [fileHash, setFileHash] = useState(null)
+  const [fileName, setFileName] = useState(null)
+  const [fileDragging, setFileDragging] = useState(false)
+  const fileInputRef = useRef(null)
 
-  useEffect(() => { if (!open) { setReason(''); setUri('') } }, [open])
+  const reset = () => { setReason(''); setUri(''); setFileHash(null); setFileName(null) }
+  const tx = useTx({ onConfirmed: () => { reset(); onConfirmed?.() } })
+
+  useEffect(() => { if (!open) reset() }, [open]) // eslint-disable-line
 
   if (!open || !meta) return null
 
   const uriValid = isValidUrl(uri)
   const reasonValid = !meta.needsReason || reason.trim().length > 0
   const canSubmit = uriValid && reasonValid && !tx.isBusy
-  const evidenceHash = uriValid ? hashDescription(uri) : null
+
+  // File fingerprint takes precedence; URI hash is the fallback.
+  const evidenceHash = fileHash ?? (uriValid ? hashDescription(uri) : null)
+
+  const fingerprintFile = async (file) => {
+    try {
+      const buf = await file.arrayBuffer()
+      setFileHash(hashBytes(new Uint8Array(buf)))
+      setFileName(file.name)
+    } catch {}
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setFileDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file) fingerprintFile(file)
+  }
 
   const submit = () => {
     if (!canSubmit) return
@@ -1803,7 +1848,7 @@ function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfir
         <Field
           label={meta.evidenceLabel}
           error={uri && !uriValid ? "That doesn't look like a valid URL." : undefined}
-          helper="Link to your evidence (URL or IPFS gateway). Hashed locally; the hash is stored on-chain."
+          helper="Link where your evidence is hosted (URL or IPFS gateway). Always stored on-chain alongside the hash."
         >
           {(p) => (
             <input
@@ -1818,6 +1863,57 @@ function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfir
             />
           )}
         </Field>
+
+        {/* File fingerprint drop zone */}
+        <div className="flex flex-col gap-2">
+          <p className="eyebrow">File fingerprint</p>
+          {fileHash ? (
+            <div className="flex items-center gap-2 rounded-xl bg-ok/10 border border-ok/30 px-3 py-2.5">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path d="M2.5 7.5l3 3 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-ok" style={{ color: 'var(--ok)' }} />
+              </svg>
+              <span className="text-[12.5px] text-ink-2 min-w-0 flex-1 truncate">{fileName}</span>
+              <span className="font-mono text-[11px] text-ok shrink-0">{fileHash.slice(0, 10)}…</span>
+              <button
+                type="button"
+                onClick={() => { setFileHash(null); setFileName(null) }}
+                className="shrink-0 text-ink-3 hover:text-ink transition-colors text-sm leading-none"
+                title="Remove file"
+              >
+                ×
+              </button>
+            </div>
+          ) : (
+            <div
+              className={`rounded-xl border border-dashed px-3 py-3 text-[11.5px] text-center cursor-pointer transition-colors ${
+                fileDragging
+                  ? 'border-clay bg-clay/5 text-clay'
+                  : 'border-rule/60 text-ink-3 hover:border-clay/50 hover:text-ink-2'
+              }`}
+              onDrop={handleDrop}
+              onDragOver={(e) => { e.preventDefault(); setFileDragging(true) }}
+              onDragLeave={() => setFileDragging(false)}
+              onClick={() => fileInputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => e.key === 'Enter' && fileInputRef.current?.click()}
+            >
+              Drop your evidence file to fingerprint it (recommended)
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="sr-only"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) { fingerprintFile(f); e.target.value = '' } }}
+                tabIndex={-1}
+              />
+            </div>
+          )}
+          {!fileHash && uriValid && (
+            <p className="text-[11.5px] text-ink-3">
+              Link only — file contents are not fingerprinted
+            </p>
+          )}
+        </div>
 
         <div>
           <p className="eyebrow mb-1.5">Evidence hash</p>

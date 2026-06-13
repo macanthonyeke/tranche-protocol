@@ -10,7 +10,8 @@ import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
-import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick } from '../hooks/useEscrows.js'
+import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick, useEscrowInvoice } from '../hooks/useEscrows.js'
+import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
@@ -112,6 +113,9 @@ function Body() {
 function ResolutionDrawer({ id, onClose, onResolved }) {
   const { address } = useAccount()
   const { detail, refetch } = useEscrowDetail(id, address, { pollMs: 0 })
+  const hasInvoice = !!(detail?.escrow?.invoiceHash && detail.escrow.invoiceHash !== ZERO_BYTES32)
+  const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? id : null)
+
   if (!id) return null
   if (!detail) {
     return (
@@ -143,7 +147,16 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
           <Link to={`/escrow/${id}`} className="btn-secondary" target="_blank">Open full view ↗</Link>
         </div>
 
-        {detail.escrow.invoiceURI && <InvoiceLink uri={detail.escrow.invoiceURI} />}
+        {hasInvoice && (
+          <InvoiceCard
+            escrowId={id}
+            invoiceHash={detail.escrow.invoiceHash}
+            invoiceData={invoiceData}
+            invoiceURI={detail.escrow.invoiceURI}
+            invoiceAcknowledgedAt={invoiceAcknowledgedAt}
+            role="arbiter"
+          />
+        )}
 
         {detail.splits?.length > 0 && <SplitsPanel splits={detail.splits} />}
 
@@ -154,41 +167,6 @@ function ResolutionDrawer({ id, onClose, onResolved }) {
         </ul>
       </div>
     </Modal>
-  )
-}
-
-/* Invoice link provided by the depositor at escrow creation. User-provided content —
-   disclosed behind a toggle so the arbiter actively chooses to open it. */
-function InvoiceLink({ uri }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-2">
-        <p className="eyebrow">Invoice</p>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="text-[11.5px] text-clay hover:opacity-80 transition-opacity"
-        >
-          {open ? 'Hide' : 'View link'}
-        </button>
-      </div>
-      {open && (
-        <div className="rounded-xl bg-sunk px-3 py-2.5 flex flex-col gap-1.5">
-          <p className="text-[11.5px] text-ink-3 leading-relaxed">
-            User-provided link — verify before opening.
-          </p>
-          <a
-            href={uri}
-            target="_blank"
-            rel="noreferrer"
-            className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all"
-          >
-            {uri} ↗
-          </a>
-        </div>
-      )}
-    </div>
   )
 }
 
