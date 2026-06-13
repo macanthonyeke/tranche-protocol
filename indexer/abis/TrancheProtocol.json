@@ -141,6 +141,19 @@
   },
   {
     "type": "function",
+    "name": "acknowledgeInvoice",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "addSupportedDomain",
     "inputs": [
       {
@@ -337,9 +350,9 @@
         ]
       },
       {
-        "name": "_milestoneTitles",
-        "type": "string[]",
-        "internalType": "string[]"
+        "name": "_invoiceData",
+        "type": "string",
+        "internalType": "string"
       }
     ],
     "outputs": [
@@ -2330,6 +2343,24 @@
   },
   {
     "type": "function",
+    "name": "updateInvoiceURI",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "newURI",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "updateReceivingAddress",
     "inputs": [
       {
@@ -2827,6 +2858,75 @@
   },
   {
     "type": "event",
+    "name": "InvoiceAcknowledged",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "acknowledger",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "invoiceHash",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InvoiceSnapshotted",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "invoiceData",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "InvoiceURIUpdated",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "oldURI",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "newURI",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "MilestoneApproved",
     "inputs": [
       {
@@ -2909,25 +3009,6 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "MilestoneTitles",
-    "inputs": [
-      {
-        "name": "escrowId",
-        "type": "uint256",
-        "indexed": true,
-        "internalType": "uint256"
-      },
-      {
-        "name": "titles",
-        "type": "string[]",
-        "indexed": false,
-        "internalType": "string[]"
       }
     ],
     "anonymous": false

@@ -1,4 +1,4 @@
-import { BigInt, Bytes, ethereum, Address } from "@graphprotocol/graph-ts";
+import { BigInt, Bytes, ethereum, Address, json, JSONValueKind } from "@graphprotocol/graph-ts";
 import {
   Escrow,
   Milestone,
@@ -7,6 +7,7 @@ import {
   RefundBalance,
   RefundCredit,
   EvidenceEntry,
+  InvoiceURIUpdate,
 } from "../generated/schema";
 import {
   TrancheProtocol,
@@ -31,7 +32,9 @@ import {
   RefundWithdrawn,
   RefundCreditTransferred,
   EvidenceAppended,
-  MilestoneTitles,
+  InvoiceSnapshotted,
+  InvoiceAcknowledged,
+  InvoiceURIUpdated,
 } from "../generated/TrancheProtocol/TrancheProtocol";
 
 // ---- enum string constants (must match schema.graphql) ----
@@ -539,11 +542,71 @@ export function handleEvidenceAppended(event: EvidenceAppended): void {
   entry.save();
 }
 
-// MilestoneTitles: emitted once at deposit with the depositor-supplied titles.
-// Stored on the Escrow entity; an empty array means no titles were provided.
-export function handleMilestoneTitles(event: MilestoneTitles): void {
+// InvoiceSnapshotted: emitted once at deposit with the full invoice JSON string.
+// We store the raw string and, if parseable, extract invoiceNumber and
+// lineItems[].title to populate titles.
+export function handleInvoiceSnapshotted(event: InvoiceSnapshotted): void {
   let escrow = getOrCreateEscrow(event.params.escrowId, event);
-  escrow.titles = event.params.titles;
+  let data = event.params.invoiceData;
+  escrow.invoiceData = data;
+  escrow.updatedAt = event.block.timestamp;
+
+  // Only attempt JSON parsing when there is actual content.
+  if (data.length > 0) {
+    let result = json.try_fromString(data);
+    if (!result.isError && result.value.kind == JSONValueKind.OBJECT) {
+      let obj = result.value.toObject();
+
+      // Extract invoiceNumber if present.
+      let numEntry = obj.get("invoiceNumber");
+      if (numEntry != null && numEntry.kind == JSONValueKind.STRING) {
+        escrow.invoiceNumber = numEntry.toString();
+      }
+
+      // Derive titles from lineItems[].title.
+      let itemsEntry = obj.get("lineItems");
+      if (itemsEntry != null && itemsEntry.kind == JSONValueKind.ARRAY) {
+        let items = itemsEntry.toArray();
+        let titles: string[] = [];
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].kind == JSONValueKind.OBJECT) {
+            let item = items[i].toObject();
+            let titleEntry = item.get("title");
+            if (titleEntry != null && titleEntry.kind == JSONValueKind.STRING) {
+              titles.push(titleEntry.toString());
+            }
+          }
+        }
+        if (titles.length > 0) {
+          escrow.titles = titles;
+        }
+      }
+    }
+  }
+
+  escrow.save();
+}
+
+export function handleInvoiceAcknowledged(event: InvoiceAcknowledged): void {
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.invoiceAcknowledgedAt = event.block.timestamp;
+  escrow.invoiceAcknowledgedBy = event.params.acknowledger;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
+}
+
+export function handleInvoiceURIUpdated(event: InvoiceURIUpdated): void {
+  let id = event.transaction.hash.toHexString() + "-" + event.logIndex.toString();
+  let record = new InvoiceURIUpdate(id);
+  record.escrowId = event.params.escrowId;
+  record.oldURI = event.params.oldURI;
+  record.newURI = event.params.newURI;
+  record.timestamp = event.block.timestamp;
+  record.blockNumber = event.block.number;
+  record.save();
+
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.invoiceURI = event.params.newURI;
   escrow.updatedAt = event.block.timestamp;
   escrow.save();
 }

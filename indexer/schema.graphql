@@ -53,8 +53,17 @@ type Escrow @entity(immutable: false) {
   createdTx: Bytes!
   updatedAt: BigInt!
 
-  "Milestone titles from MilestoneTitles event. Empty array if the depositor did not pass titles at deposit time."
+  "Raw invoice JSON string from InvoiceSnapshotted. Empty string if the depositor passed no data."
+  invoiceData: String
+  "Parsed invoice number from the invoiceData JSON (invoiceNumber field). Null if absent or unparseable."
+  invoiceNumber: String
+  "Milestone titles derived from invoiceData JSON lineItems[].title. Empty array if not provided."
   titles: [String!]!
+
+  "Timestamp the recipient acknowledged the invoice on-chain (InvoiceAcknowledged). Null until acknowledged."
+  invoiceAcknowledgedAt: BigInt
+  "Address that emitted InvoiceAcknowledged. Null until acknowledged."
+  invoiceAcknowledgedBy: Bytes
 
   milestones: [Milestone!]! @derivedFrom(field: "escrow")
   splits: [Split!]! @derivedFrom(field: "escrow")
@@ -150,6 +159,7 @@ type EvidenceEntry @entity(immutable: true) {
   tx: Bytes!
 }
 
+
 "Immutable ledger of partial refund credits (PartialRefundCredited)."
 type RefundCredit @entity(immutable: true) {
   "txHash-logIndex"
@@ -160,4 +170,15 @@ type RefundCredit @entity(immutable: true) {
   amount: BigInt!
   timestamp: BigInt!
   tx: Bytes!
+}
+
+"Immutable record of each InvoiceURIUpdated event. Ordered by timestamp ascending."
+type InvoiceURIUpdate @entity(immutable: true) {
+  "txHash-logIndex"
+  id: ID!
+  escrowId: BigInt!
+  oldURI: String!
+  newURI: String!
+  timestamp: BigInt!
+  blockNumber: BigInt!
 }
