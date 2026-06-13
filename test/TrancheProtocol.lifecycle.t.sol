@@ -277,7 +277,7 @@ contract TrancheProtocolLifecycleTest is Base {
         _claimDelivery(id, 0);
         _raiseDispute(id, 0);
 
-        vm.warp(block.timestamp + escrow.ARBITER_WINDOW());
+        vm.warp(block.timestamp + 14 days);
         escrow.resolveDisputeByTimeout(id, 0);
 
         assertEq(escrow.refundBalances(recipient), 500e6);
@@ -332,7 +332,7 @@ contract TrancheProtocolLifecycleTest is Base {
         uint256 id = _depositSingle(1000e6);
         _claimDelivery(id, 0);
         _raiseDispute(id, 0);
-        vm.warp(block.timestamp + escrow.ARBITER_WINDOW() - 1);
+        vm.warp(block.timestamp + 14 days - 1);
         vm.expectRevert(ArbiterTimeoutNotReached.selector);
         escrow.resolveDisputeByTimeout(id, 0);
     }
@@ -344,7 +344,7 @@ contract TrancheProtocolLifecycleTest is Base {
         _claimDelivery(id, 0);
         _raiseDispute(id, 0);
 
-        vm.warp(block.timestamp + escrow.ARBITER_WINDOW());
+        vm.warp(block.timestamp + 14 days);
         escrow.resolveDisputeByTimeout(id, 0);
 
         uint256 fee = (500e6 * 199) / 10_000;

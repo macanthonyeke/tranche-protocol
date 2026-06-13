@@ -11,7 +11,7 @@ import {Base} from "./Base.t.sol";
 ///   retractCancelApproval (C4b)
 ///   declineEscrow
 ///   appendEvidence
-///   MilestoneTitles event
+///   InvoiceSnapshotted event
 contract TrancheProtocolV2FeaturesTest is Base {
     // =========================================================================
     // C4a — mutualCancel blocked when any milestone is IN_REVIEW
@@ -145,7 +145,7 @@ contract TrancheProtocolV2FeaturesTest is Base {
             _singleMilestone(1_000_000),
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -173,7 +173,7 @@ contract TrancheProtocolV2FeaturesTest is Base {
             _singleMilestone(1_000_000),
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
         assertEq(_getMilestoneAmount(id, 0), 1_000_000);
@@ -510,14 +510,11 @@ contract TrancheProtocolV2FeaturesTest is Base {
     }
 
     // =========================================================================
-    // MilestoneTitles event
+    // InvoiceSnapshotted event
     // =========================================================================
 
-    function test_MilestoneTitles_EmittedAtDeposit() public {
-        string[] memory titles = new string[](3);
-        titles[0] = "Design";
-        titles[1] = "Development";
-        titles[2] = "Delivery";
+    function test_InvoiceSnapshotted_EmittedAtDeposit() public {
+        string memory data = "{\"invoiceNumber\":\"INV-0001\",\"lineItems\":[]}";
 
         uint256[] memory ms = _milestones3();
         SplitRecipient[] memory noSplits = new SplitRecipient[](0);
@@ -525,7 +522,7 @@ contract TrancheProtocolV2FeaturesTest is Base {
         vm.startPrank(depositor);
         usdc.approve(address(escrow), 600e6);
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit MilestoneTitles(escrowCount() + 1, titles);
+        emit InvoiceSnapshotted(escrowCount() + 1, data);
         escrow.deposit(
             recipient,
             refundTo,
@@ -538,42 +535,13 @@ contract TrancheProtocolV2FeaturesTest is Base {
             ms,
             block.timestamp + 30 days,
             noSplits,
-            titles
+            data
         );
         vm.stopPrank();
     }
 
-    function test_MilestoneTitles_EmptyArray_NoRevert() public {
-        uint256 id = _depositSingle(100e6);
-        assertGt(id, 0); // deposit with empty titles succeeds
-    }
-
-    function test_MilestoneTitles_LengthMismatch_NoRevert() public {
-        // Contract does not validate title count matches milestone count —
-        // the indexer handles mismatches; contract just emits what was passed.
-        string[] memory titles = new string[](1);
-        titles[0] = "Only One";
-
-        uint256[] memory ms = _milestones3(); // 3 milestones, 1 title
-        SplitRecipient[] memory noSplits = new SplitRecipient[](0);
-
-        vm.startPrank(depositor);
-        usdc.approve(address(escrow), 600e6);
-        uint256 id = escrow.deposit(
-            recipient,
-            refundTo,
-            600e6,
-            DEST_DOMAIN,
-            MINT_RECIPIENT,
-            REVIEW_WINDOW,
-            INVOICE_HASH,
-            INVOICE_URI,
-            ms,
-            block.timestamp + 30 days,
-            noSplits,
-            titles
-        );
-        vm.stopPrank();
+    function test_InvoiceSnapshotted_EmptyData_NoRevert() public {
+        uint256 id = _depositSingle(100e6); // passes "" as invoiceData
         assertGt(id, 0);
     }
 

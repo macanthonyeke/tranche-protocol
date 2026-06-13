@@ -28,7 +28,7 @@ contract TrancheProtocolUpgradesTest is Base {
             _singleMilestone(100e6),
             deadline,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -67,7 +67,7 @@ contract TrancheProtocolUpgradesTest is Base {
             _singleMilestone(100e6),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -100,7 +100,7 @@ contract TrancheProtocolUpgradesTest is Base {
             _singleMilestone(100e6),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -139,7 +139,7 @@ contract TrancheProtocolUpgradesTest is Base {
             _singleMilestone(100e6),
             block.timestamp + 1 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
         assertEq(escrow.getEscrow(id).refundTo, depositor);
@@ -262,7 +262,7 @@ contract TrancheProtocolUpgradesTest is Base {
     // -------------------------------------------------------------------------
 
     function test_DomainManagerRole_CanAddAndRemoveDomain() public {
-        bytes32 role = escrow.DOMAIN_MANAGER_ROLE();
+        bytes32 role = keccak256("DOMAIN_MANAGER_ROLE");
         assertFalse(escrow.hasRole(role, deployer));
         assertTrue(escrow.hasRole(role, domainManager));
 
@@ -281,7 +281,7 @@ contract TrancheProtocolUpgradesTest is Base {
 
     function test_DomainManagerRole_StrangerCannotAddOrRemove() public {
         bytes memory expected = abi.encodeWithSelector(
-            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, escrow.DOMAIN_MANAGER_ROLE()
+            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, keccak256("DOMAIN_MANAGER_ROLE")
         );
 
         vm.prank(stranger);
@@ -298,7 +298,7 @@ contract TrancheProtocolUpgradesTest is Base {
     // -------------------------------------------------------------------------
 
     function test_DefaultAdmin_CanGrantAndRevokeArbiterRole() public {
-        bytes32 role = escrow.ARBITER_ROLE();
+        bytes32 role = keccak256("ARBITER_ROLE");
         address newArbiter = makeAddr("newArbiter");
 
         vm.prank(deployer);
@@ -318,10 +318,10 @@ contract TrancheProtocolUpgradesTest is Base {
     }
 
     function test_Constructor_AssignsConfiguredRoles() public view {
-        assertTrue(escrow.hasRole(escrow.ARBITER_ROLE(), arbiter));
-        assertTrue(escrow.hasRole(escrow.PAUSER_ROLE(), pauser));
+        assertTrue(escrow.hasRole(keccak256("ARBITER_ROLE"), arbiter));
+        assertTrue(escrow.hasRole(keccak256("PAUSER_ROLE"), pauser));
         assertTrue(escrow.hasRole(escrow.DEFAULT_ADMIN_ROLE(), deployer));
-        assertTrue(escrow.hasRole(escrow.DOMAIN_MANAGER_ROLE(), domainManager));
+        assertTrue(escrow.hasRole(keccak256("DOMAIN_MANAGER_ROLE"), domainManager));
     }
 
     // -------------------------------------------------------------------------

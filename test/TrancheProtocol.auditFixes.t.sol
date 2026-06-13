@@ -8,6 +8,7 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 /// @notice Regression tests for the earlier audit-finding fixes, updated for the
 ///         redesigned lifecycle (claimDelivery / approveRelease / release).
 contract TrancheProtocolAuditFixesTest is Base {
+    bytes32 private constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
     // -----------------------------------------------------------------------
     // H-01: constructor must reject address(0) for arbiter and pauser.
     // -----------------------------------------------------------------------
@@ -42,7 +43,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         vm.expectRevert(ArbiterTimeoutNotReached.selector);
         escrow.resolveDisputeByTimeout(id, 0);
 
-        vm.warp(block.timestamp + escrow.ARBITER_WINDOW() - 1);
+        vm.warp(block.timestamp + 14 days - 1);
         vm.expectRevert(ArbiterTimeoutNotReached.selector);
         escrow.resolveDisputeByTimeout(id, 0);
     }
@@ -52,7 +53,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         _claimDelivery(id, 0);
         _raiseDispute(id, 0);
 
-        vm.warp(block.timestamp + escrow.ARBITER_WINDOW());
+        vm.warp(block.timestamp + 14 days);
         vm.prank(stranger); // permissionless
         escrow.resolveDisputeByTimeout(id, 0);
 
@@ -91,7 +92,7 @@ contract TrancheProtocolAuditFixesTest is Base {
         _raiseDispute(id, 0);
 
         bytes32 newAddr = bytes32(uint256(uint160(makeAddr("freshWallet"))));
-        uint32 arc = escrow.ARC_DOMAIN();
+        uint32 arc = 26;
         vm.prank(recipient);
         escrow.updateReceivingAddress(id, newAddr, arc);
 
@@ -185,7 +186,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_M04_UpdateReceivingAddress_WorksEvenIfArcDomainNotSupported() public {
         uint256 id = _depositSingle(100e6);
-        uint32 arc = escrow.ARC_DOMAIN();
+        uint32 arc = 26;
         assertFalse(escrow.supportedDomains(arc));
 
         address freshAddr = makeAddr("fresh");
@@ -370,7 +371,7 @@ contract TrancheProtocolAuditFixesTest is Base {
     function _deployerOnlyAdmin() internal returns (address adminOnly) {
         adminOnly = makeAddr("adminOnly");
         bytes32 adminRole = escrow.DEFAULT_ADMIN_ROLE();
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         bytes32 recoveryRole = keccak256("RECOVERY_MANAGER_ROLE");
         vm.startPrank(deployer);
         escrow.grantRole(adminRole, adminOnly);
@@ -381,7 +382,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_FeeManagerRole_SetProtocolFee_AllowsHolder() public {
         address feeMgr = makeAddr("feeMgr");
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(deployer);
         escrow.grantRole(feeRole, feeMgr);
 
@@ -391,7 +392,7 @@ contract TrancheProtocolAuditFixesTest is Base {
     }
 
     function test_FeeManagerRole_SetProtocolFee_RejectsStranger() public {
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(stranger);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, feeRole)
@@ -401,7 +402,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_FeeManagerRole_SetProtocolFee_RejectsAdminOnly() public {
         address adminOnly = _deployerOnlyAdmin();
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(adminOnly);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
@@ -412,7 +413,7 @@ contract TrancheProtocolAuditFixesTest is Base {
     function test_FeeManagerRole_SetProtocolTreasury_AllowsHolder() public {
         address feeMgr = makeAddr("feeMgr");
         address newTreasury = makeAddr("newTreasury");
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(deployer);
         escrow.grantRole(feeRole, feeMgr);
 
@@ -423,7 +424,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_FeeManagerRole_SetProtocolTreasury_RejectsAdminOnly() public {
         address adminOnly = _deployerOnlyAdmin();
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(adminOnly);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
@@ -433,7 +434,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_FeeManagerRole_SetCctpForwardFee_AllowsHolder() public {
         address feeMgr = makeAddr("feeMgr");
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(deployer);
         escrow.grantRole(feeRole, feeMgr);
 
@@ -444,7 +445,7 @@ contract TrancheProtocolAuditFixesTest is Base {
 
     function test_FeeManagerRole_SetCctpForwardFee_RejectsAdminOnly() public {
         address adminOnly = _deployerOnlyAdmin();
-        bytes32 feeRole = escrow.FEE_MANAGER_ROLE();
+        bytes32 feeRole = FEE_MANAGER_ROLE;
         vm.prank(adminOnly);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, adminOnly, feeRole)
@@ -501,7 +502,7 @@ contract TrancheProtocolAuditFixesTest is Base {
             ms,
             block.timestamp + 30 days,
             splits,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }

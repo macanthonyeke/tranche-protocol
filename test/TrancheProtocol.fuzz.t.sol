@@ -58,7 +58,7 @@ contract TrancheProtocolFuzzTest is Base {
             ms,
             block.timestamp + 1 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }

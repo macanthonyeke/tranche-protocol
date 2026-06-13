@@ -13,13 +13,13 @@ import {ITrancheProtocol} from "./interface/ITrancheProtocol.sol";
 contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    bytes32 public constant ARBITER_ROLE = keccak256("ARBITER_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-    bytes32 public constant DOMAIN_MANAGER_ROLE = keccak256("DOMAIN_MANAGER_ROLE");
-    bytes32 public constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
+    bytes32 internal constant ARBITER_ROLE = keccak256("ARBITER_ROLE");
+    bytes32 internal constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 internal constant DOMAIN_MANAGER_ROLE = keccak256("DOMAIN_MANAGER_ROLE");
+    bytes32 internal constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
     bytes32 internal constant RECOVERY_MANAGER_ROLE = keccak256("RECOVERY_MANAGER_ROLE");
 
-    uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint256 internal constant BPS_DENOMINATOR = 10_000;
     uint256 internal constant MAX_PROTOCOL_FEE = 500; // 5%
 
     /// @notice L-R3-05: hard caps on per-escrow milestone and split counts.
@@ -59,7 +59,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         doing a same-chain transfer and Circle does not charge the
     ///         forwarding fee, so we override maxFee = 0 regardless of the
     ///         configured `cctpForwardFee`.
-    uint32 public constant ARC_DOMAIN = 26;
+    uint32  internal constant ARC_DOMAIN = 26;
 
     /// @notice Bounds on a per-escrow optimistic review window. The recipient
     ///         claims delivery; the depositor has this long to approve or
@@ -68,7 +68,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     uint256 internal constant MAX_REVIEW_WINDOW = 7 days;
     /// @notice Single arbiter-inaction window. After it elapses, a DISPUTED
     ///         milestone can be settled by the permissionless 50/50 timeout.
-    uint256 public constant ARBITER_WINDOW = 14 days;
+    uint256 internal constant ARBITER_WINDOW = 14 days;
 
     /// @notice Grace period appended to a milestone's nominal deadline. The
     ///         recipient may still {claimDelivery} up to this long after the
@@ -102,7 +102,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     mapping(address => uint256) public refundBalances;
     mapping(uint256 => mapping(uint256 => DisputeData)) public disputes;
     mapping(uint256 => mapping(uint256 => Milestone)) public milestones;
-    mapping(uint256 => SplitRecipient[]) public splits;
+    mapping(uint256 => SplitRecipient[]) internal splits;
     mapping(uint256 => mapping(uint256 => mapping(address => SettlementProposal))) public settlementProposals;
 
     /// @notice Milestone-level mutual-cancel proposals, keyed
@@ -114,12 +114,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     /// @notice Per-escrow snapshot of `protocolFeeBps` taken at deposit (H-05).
     ///         Releases compute the protocol fee from this snapshot, so an
     ///         admin cannot retroactively raise the fee on in-flight escrows.
-    mapping(uint256 => uint256) public escrowFeeBps;
+    mapping(uint256 => uint256) internal escrowFeeBps;
     /// @notice Per-escrow snapshot of `protocolTreasury` taken at deposit
     ///         (H-05). Mirrors `escrowFeeBps`: prevents the admin from
     ///         redirecting fees of existing escrows by changing the global
     ///         `protocolTreasury` mid-flight.
-    mapping(uint256 => address) public escrowTreasury;
+    mapping(uint256 => address) internal escrowTreasury;
 
     /// @notice Pending two-step refund-credit recovery (M-03). Maps a
     ///         blacklisted/locked source wallet to the address a
@@ -220,7 +220,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         uint256[] calldata _milestoneAmounts,
         uint256 _deadline,
         SplitRecipient[] calldata _splits,
-        string[] calldata _milestoneTitles
+        string calldata _invoiceData
     ) external whenNotPaused nonReentrant returns (uint256 escrowId) {
         if (_totalAmount == 0) revert InvalidAmount();
         if (_recipient == address(0)) revert ZeroAddress();
@@ -228,7 +228,6 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (_reviewWindow < MIN_REVIEW_WINDOW) revert ReviewWindowTooShort();
         if (_reviewWindow > MAX_REVIEW_WINDOW) revert ReviewWindowTooLong();
         if (_invoiceHash == bytes32(0)) revert NoInvoice();
-        if (bytes(_invoiceURI).length == 0) revert NoInvoiceURI();
         if (_deadline == 0) revert DeadlineRequired();
         if (_deadline <= block.timestamp + 1 hours) revert DeadlineTooSoon();
         if (_deadline >= block.timestamp + 3650 days) revert DeadlineTooFar();
@@ -248,7 +247,20 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             if (!supportedDomains[_destinationDomain]) revert UnsupportedDomain();
             isCrossChain = _destinationDomain != ARC_DOMAIN;
         } else {
-            (minBps, isCrossChain) = _validateSplits(_splits);
+            uint256 sumBps;
+            for (uint256 i = 0; i < _splits.length; i++) {
+                SplitRecipient calldata sr = _splits[i];
+                if (sr.bps == 0) revert InvalidBps();
+                if (address(uint160(uint256(sr.mintRecipient))) == address(0)) revert ZeroAddress();
+                if (uint256(sr.mintRecipient) >> 160 != 0) revert InvalidSplitMintRecipient();
+                if (!supportedDomains[sr.destinationDomain]) revert UnsupportedDomain();
+                if (sr.destinationDomain != ARC_DOMAIN) {
+                    isCrossChain = true;
+                    if (sr.bps < minBps) minBps = sr.bps;
+                }
+                sumBps += sr.bps;
+            }
+            if (sumBps != BPS_DENOMINATOR) revert BpsSumMismatch();
         }
 
         // Default refundTo to the depositor when address(0) is passed.
@@ -329,7 +341,24 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         emit EscrowTermsSnapshotted(escrowId, protocolFeeBps, protocolTreasury);
 
         emit EscrowCreated(escrowId, msg.sender, _recipient, _totalAmount, _invoiceHash, _invoiceURI, _deadline);
-        emit MilestoneTitles(escrowId, _milestoneTitles);
+        emit InvoiceSnapshotted(escrowId, _invoiceData);
+    }
+
+    function acknowledgeInvoice(uint256 escrowId) external {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (msg.sender != e.recipient) revert NotRecipient();
+        emit InvoiceAcknowledged(escrowId, msg.sender, e.invoiceHash);
+    }
+
+    function updateInvoiceURI(uint256 escrowId, string calldata newURI) external {
+        Escrow storage e = escrows[escrowId];
+        if (e.depositor == address(0)) revert EscrowDoesNotExist();
+        if (msg.sender != e.depositor) revert NotEscrowOwner();
+        if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        string memory oldURI = e.invoiceURI;
+        e.invoiceURI = newURI;
+        emit InvoiceURIUpdated(escrowId, oldURI, newURI);
     }
 
     /// @notice Recipient claims a milestone is delivered, opening the optimistic
@@ -1046,21 +1075,17 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         emit EvidenceAppended(escrowId, milestoneIndex, msg.sender, hash, uri, block.timestamp);
     }
 
-    function pause() public onlyRole(PAUSER_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
-    function unpause() public onlyRole(PAUSER_ROLE) {
+    function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
 
     // =========================================================================
     // Views
     // =========================================================================
-
-    function splitsLength(uint256 escrowId) external view returns (uint256) {
-        return splits[escrowId].length;
-    }
 
     /// @notice Full escrow struct for `escrowId`. Reverts if it does not exist.
     function getEscrow(uint256 escrowId) external view returns (Escrow memory) {
@@ -1070,7 +1095,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     }
 
     /// @notice All milestones for `escrowId` in index order.
-    function getMilestones(uint256 escrowId) public view returns (Milestone[] memory list) {
+    function getMilestones(uint256 escrowId) external view returns (Milestone[] memory list) {
         Escrow storage e = escrows[escrowId];
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         list = new Milestone[](e.milestoneCount);
@@ -1079,26 +1104,15 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         }
     }
 
-    /// @notice All dispute records for `escrowId`, indexed by milestone. Slots
-    ///         for milestones that were never disputed are zero-filled.
-    function getDisputes(uint256 escrowId) public view returns (DisputeData[] memory list) {
-        Escrow storage e = escrows[escrowId];
-        if (e.depositor == address(0)) revert EscrowDoesNotExist();
-        list = new DisputeData[](e.milestoneCount);
-        for (uint256 i = 0; i < e.milestoneCount; i++) {
-            list[i] = disputes[escrowId][i];
-        }
-    }
-
     /// @notice All split recipients configured for `escrowId`. Empty array when
     ///         the escrow has no splits (single recipient path).
-    function getSplits(uint256 escrowId) public view returns (SplitRecipient[] memory) {
+    function getSplits(uint256 escrowId) external view returns (SplitRecipient[] memory) {
         return splits[escrowId];
     }
 
     /// @notice True if a milestone is IN_REVIEW and its review window has
     ///         already lapsed, i.e. anyone may now call {release}.
-    function isReviewWindowExpired(uint256 escrowId, uint256 milestoneIndex) public view returns (bool) {
+    function isReviewWindowExpired(uint256 escrowId, uint256 milestoneIndex) external view returns (bool) {
         Escrow storage e = escrows[escrowId];
         Milestone storage m = milestones[escrowId][milestoneIndex];
         if (e.depositor == address(0)) return false;
@@ -1107,23 +1121,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     }
 
     /// @notice True once the recipient has claimed delivery on a milestone.
-    function isClaimed(uint256 escrowId, uint256 milestoneIndex) public view returns (bool) {
+    function isClaimed(uint256 escrowId, uint256 milestoneIndex) external view returns (bool) {
         return milestones[escrowId][milestoneIndex].claimedAt != 0;
-    }
-
-    /// @notice Caller role on a given escrow.
-    /// @return isPayer       caller is the depositor
-    /// @return isFreelancer  caller is the recipient
-    /// @return isArbiter     caller holds ARBITER_ROLE
-    function getRole(uint256 escrowId, address caller)
-        public
-        view
-        returns (bool isPayer, bool isFreelancer, bool isArbiter)
-    {
-        Escrow storage e = escrows[escrowId];
-        isPayer = e.depositor == caller;
-        isFreelancer = e.recipient == caller;
-        isArbiter = hasRole(ARBITER_ROLE, caller);
     }
 
     /// @notice Single-call payload for the escrow detail page.
@@ -1158,35 +1157,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         detail.reviewWindowExpired = expired;
         detail.claimed = claimedArr;
         detail.reviewDeadlines = deadlines;
-        (detail.isPayer, detail.isFreelancer, detail.isArbiter) = getRole(escrowId, caller);
-    }
-
-    /// @notice Escrow summaries where `payer` is the depositor.
-    function getEscrowsForPayer(address payer) public view returns (EscrowSummary[] memory) {
-        return _collectByParticipant(payer, true);
-    }
-
-    /// @notice Escrow summaries where `freelancer` is the recipient.
-    function getEscrowsForFreelancer(address freelancer) public view returns (EscrowSummary[] memory) {
-        return _collectByParticipant(freelancer, false);
-    }
-
-    /// @notice Everything the dashboard needs for `account` in one call.
-    function getDashboard(address account) external view returns (DashboardData memory data) {
-        data.asPayer = getEscrowsForPayer(account);
-        data.asFreelancer = getEscrowsForFreelancer(account);
-        data.refundBalance = refundBalances[account];
-
-        uint256 total = escrowCount;
-        for (uint256 i = 1; i <= total; i++) {
-            Escrow storage e = escrows[i];
-            bool involved = e.depositor == account || e.recipient == account;
-            if (!involved) continue;
-            if (e.state == EscrowState.ACTIVE) data.activeEscrowCount++;
-            for (uint256 j = 0; j < e.milestoneCount; j++) {
-                if (milestones[i][j].state == MilestoneState.DISPUTED) data.openDisputeCount++;
-            }
-        }
+        detail.isPayer = e.depositor == caller;
+        detail.isFreelancer = e.recipient == caller;
+        detail.isArbiter = hasRole(ARBITER_ROLE, caller);
     }
 
     /// @notice One call lets the frontend gate admin / arbiter / pauser /
@@ -1212,67 +1185,25 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         c.paused = paused();
     }
 
-    /// @notice Summaries for every escrow with at least one milestone in
-    ///         DISPUTED state. Intended for the arbiter panel.
-    function getDisputedEscrows() external view returns (EscrowSummary[] memory) {
-        uint256 total = escrowCount;
-        uint256[] memory ids = new uint256[](total);
-        uint256 n;
-        for (uint256 i = 1; i <= total; i++) {
-            Escrow storage e = escrows[i];
-            for (uint256 j = 0; j < e.milestoneCount; j++) {
-                if (milestones[i][j].state == MilestoneState.DISPUTED) {
-                    ids[n++] = i;
+    /// @notice Returns IDs of all escrows that have at least one DISPUTED
+    ///         milestone. View-only; intended for the arbiter panel.
+    function getDisputedEscrows() external view returns (uint256[] memory ids) {
+        uint256 count = escrowCount;
+        uint256[] memory buf = new uint256[](count);
+        uint256 found = 0;
+        for (uint256 id = 1; id <= count; id++) {
+            uint256 mc = escrows[id].milestoneCount;
+            for (uint256 i = 0; i < mc; i++) {
+                if (milestones[id][i].state == MilestoneState.DISPUTED) {
+                    buf[found++] = id;
                     break;
                 }
             }
         }
-        EscrowSummary[] memory out = new EscrowSummary[](n);
-        for (uint256 k = 0; k < n; k++) {
-            out[k] = _summarize(ids[k]);
+        ids = new uint256[](found);
+        for (uint256 i = 0; i < found; i++) {
+            ids[i] = buf[i];
         }
-        return out;
-    }
-
-    function _collectByParticipant(address account, bool asPayer) internal view returns (EscrowSummary[] memory) {
-        uint256 total = escrowCount;
-        uint256[] memory tmp = new uint256[](total);
-        uint256 n;
-        for (uint256 i = 1; i <= total; i++) {
-            Escrow storage e = escrows[i];
-            if (asPayer ? e.depositor == account : e.recipient == account) {
-                tmp[n++] = i;
-            }
-        }
-        EscrowSummary[] memory out = new EscrowSummary[](n);
-        for (uint256 k = 0; k < n; k++) {
-            out[k] = _summarize(tmp[k]);
-        }
-        return out;
-    }
-
-    function _summarize(uint256 escrowId) internal view returns (EscrowSummary memory s) {
-        Escrow storage e = escrows[escrowId];
-        uint256 released;
-        uint256 disputed;
-        for (uint256 i = 0; i < e.milestoneCount; i++) {
-            MilestoneState ms = milestones[escrowId][i].state;
-            if (ms == MilestoneState.RELEASED) released++;
-            else if (ms == MilestoneState.DISPUTED) disputed++;
-        }
-        s = EscrowSummary({
-            escrowId: escrowId,
-            depositor: e.depositor,
-            recipient: e.recipient,
-            totalAmount: e.totalAmount,
-            state: e.state,
-            deadline: e.deadline,
-            milestoneCount: e.milestoneCount,
-            releasedMilestoneCount: released,
-            disputedMilestoneCount: disputed,
-            invoiceHash: e.invoiceHash,
-            invoiceURI: e.invoiceURI
-        });
     }
 
     // =========================================================================
@@ -1415,7 +1346,16 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///      force maxFee = 0 inside {_approveAndBurn}. Used by {approveRelease}
     ///      and {release}.
     function _assertCrossChainFee(uint256 escrowId, Escrow storage e, uint256 maxFee) internal view {
-        if (_isCrossChain(escrowId, e)) {
+        SplitRecipient[] storage s = splits[escrowId];
+        bool crossChain;
+        if (s.length == 0) {
+            crossChain = e.destinationDomain != ARC_DOMAIN;
+        } else {
+            for (uint256 i = 0; i < s.length; i++) {
+                if (s[i].destinationDomain != ARC_DOMAIN) { crossChain = true; break; }
+            }
+        }
+        if (crossChain) {
             // M-R3-02: floor against the per-escrow snapshot, not the live
             // admin-mutable global, so the fee an escrow must clear is fixed
             // at deposit time.
@@ -1424,48 +1364,4 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         }
     }
 
-    /// @dev True if at least one destination on this escrow lives outside
-    ///      ARC_DOMAIN, i.e. the burn would actually invoke Circle's
-    ///      Forwarding Service. Used to scope the `maxFee` floor / zero-fee
-    ///      guard to the path that can be griefed (I-01: renamed from the
-    ///      misleading `_isTrancheProtocol`).
-    function _isCrossChain(uint256 escrowId, Escrow storage e) internal view returns (bool) {
-        SplitRecipient[] storage s = splits[escrowId];
-        if (s.length == 0) {
-            return e.destinationDomain != ARC_DOMAIN;
-        }
-        for (uint256 i = 0; i < s.length; i++) {
-            if (s[i].destinationDomain != ARC_DOMAIN) return true;
-        }
-        return false;
-    }
-
-    /// @dev Validates splits and, in the same pass, returns the smallest
-    ///      cross-chain split bps (BPS_DENOMINATOR if none) and whether any split
-    ///      is cross-chain. Folding both out of separate loops keeps the F2
-    ///      deposit floor check O(1) and removes the old `_splitsCrossChain`.
-    function _validateSplits(SplitRecipient[] calldata _splits)
-        internal
-        view
-        returns (uint256 minCrossChainBps, bool anyCrossChain)
-    {
-        minCrossChainBps = BPS_DENOMINATOR;
-        uint256 sumBps;
-        for (uint256 i = 0; i < _splits.length; i++) {
-            SplitRecipient calldata sr = _splits[i];
-            if (sr.bps == 0) revert InvalidBps();
-            if (address(uint160(uint256(sr.mintRecipient))) == address(0)) revert ZeroAddress();
-            // Catch non-EVM addresses (e.g. Solana pubkeys) whose top 12 bytes
-            // are non-zero. Releasing to such a recipient would silently strand
-            // funds because _approveAndBurn casts to address(uint160(...)).
-            if (uint256(sr.mintRecipient) >> 160 != 0) revert InvalidSplitMintRecipient();
-            if (!supportedDomains[sr.destinationDomain]) revert UnsupportedDomain();
-            if (sr.destinationDomain != ARC_DOMAIN) {
-                anyCrossChain = true;
-                if (sr.bps < minCrossChainBps) minCrossChainBps = sr.bps;
-            }
-            sumBps += sr.bps;
-        }
-        if (sumBps != BPS_DENOMINATOR) revert BpsSumMismatch();
-    }
 }

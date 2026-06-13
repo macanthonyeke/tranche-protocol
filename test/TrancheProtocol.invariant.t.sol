@@ -93,7 +93,7 @@ contract Handler is Test, ITrancheProtocol {
             ms,
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         ) returns (
             uint256 id
         ) {

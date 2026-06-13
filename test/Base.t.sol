@@ -100,7 +100,7 @@ abstract contract Base is Test, ITrancheProtocol {
             milestoneAmounts,
             block.timestamp + 30 days,
             noSplits,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }

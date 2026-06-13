@@ -66,7 +66,7 @@ node setFee.js
 ```
 
 ### Bytecode size budget
-EIP-170 limit is **24,576 bytes**. **The contract currently exceeds this limit: runtime size is 25,689 bytes (1,113 bytes over).** Arc Testnet does not enforce EIP-170 at the chain level — deployment succeeds via `npm run full-gas` because Circle's `eth_estimateGas` enforcement is bypassed by the explicit-gas script. **Do not rely on Circle's estimation path (`npm run full`) for this contract.** To bring the contract back under the limit, options include: removing the `splitsLength` view (duplicates `getSplits(id).length`), making additional constants `internal`, or inlining small helpers. The contract is at `optimizer_runs = 1` and `via_ir = true` — both already at maximum size-reduction settings.
+EIP-170 limit is **24,576 bytes**. Current runtime is **23,211 bytes — 1,365 bytes under the limit** (as of 2026-06-12). Arc Testnet does not enforce EIP-170 at the chain level, but Circle's `eth_estimateGas` does — always deploy via `npm run full-gas`. The contract is at `optimizer_runs = 1` and `via_ir = true` — both already at maximum size-reduction settings. The bulk-read views (`getDashboard`, `getEscrowsForPayer`, `getEscrowsForFreelancer`) were removed permanently; the Goldsky subgraph is the only bulk-read path.
 
 Constants that are `internal` (no public getter, not readable via RPC):
 `MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`, `RECOVERY_MANAGER_ROLE`
@@ -96,7 +96,7 @@ Constants that must stay `public` (read by setup/verify scripts or frontend):
 ```
 src/TrancheProtocol.sol       — main contract
 src/interface/                — ITrancheProtocol, ITokenMessenger
-test/                         — Foundry test suite (237 tests)
+test/                         — Foundry test suite (236 tests)
 deploy/                       — Node.js deploy/setup/verify scripts
   deploy-explicit-gas.mjs     — bypasses Circle estimation (use this)
   setup.js                    — grants roles, adds domain, sets fee
@@ -118,14 +118,15 @@ indexer/                      — Goldsky subgraph
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
-The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; it falls back to on-chain reads otherwise. The endpoint is currently set.
+The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; bulk reads (dashboard, arbiter queue) require Goldsky and throw if the endpoint is unset — there is no on-chain fallback. The endpoint is currently set.
 
-### Event handlers (current mapping)
+**Note:** Version 0.5.0 is staged in the local indexer (built, passing) but not yet deployed to Goldsky. It adds `InvoiceAcknowledged` and `InvoiceURIUpdated` handlers and the `InvoiceURIUpdate` entity. Deploy with `~/.local/bin/goldsky subgraph deploy tranche-protocol/0.5.0 --path .` from `indexer/` after the next contract redeploy.
+
+### Event handlers (current mapping — 0.4.0 live; 0.5.0 adds last two rows)
 
 | Event | Handler | Effect |
 |-------|---------|--------|
 | `EscrowCreated` | `handleEscrowCreated` | Creates Escrow entity |
-| `MilestoneTitles` | `handleMilestoneTitles` | Sets Escrow.titles (string[] of per-milestone titles) |
 | `EscrowTermsSnapshotted` | `handleEscrowTermsSnapshotted` | Sets fee snapshot |
 | `SplitConfigured` / `SplitsConfigured` | split handlers | Creates Split entities |
 | `DeliveryClaimed` | `handleDeliveryClaimed` | Milestone → FULFILLED, sets reviewDeadline |
@@ -142,6 +143,10 @@ The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in
 | `PartialRefundCredited` | `handlePartialRefundCredited` | Updates RefundBalance + RefundCredit |
 | `RefundWithdrawn` | `handleRefundWithdrawn` | Decrements RefundBalance |
 | `RefundCreditTransferred` | `handleRefundCreditTransferred` | Moves balance between wallets |
+| `EvidenceAppended` | `handleEvidenceAppended` | Creates EvidenceEntry (immutable) |
+| `InvoiceSnapshotted` | `handleInvoiceSnapshotted` | Sets Escrow.invoiceData, invoiceNumber, titles |
+| `InvoiceAcknowledged` *(0.5.0)* | `handleInvoiceAcknowledged` | Sets Escrow.invoiceAcknowledgedAt + invoiceAcknowledgedBy |
+| `InvoiceURIUpdated` *(0.5.0)* | `handleInvoiceURIUpdated` | Creates InvoiceURIUpdate entity, updates Escrow.invoiceURI |
 
 Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by the current contract — their handlers were removed.
 
