@@ -154,9 +154,7 @@ contract TrancheProtocolV2FeaturesTest is Base {
         address splitAddr = makeAddr("splitAddr");
         SplitRecipient[] memory sp = new SplitRecipient[](1);
         sp[0] = SplitRecipient({
-            mintRecipient: bytes32(uint256(uint160(splitAddr))),
-            destinationDomain: DEST_DOMAIN,
-            bps: 10_000
+            mintRecipient: bytes32(uint256(uint160(splitAddr))), destinationDomain: DEST_DOMAIN, bps: 10_000
         });
 
         vm.startPrank(depositor);

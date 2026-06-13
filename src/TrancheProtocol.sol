@@ -59,7 +59,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         doing a same-chain transfer and Circle does not charge the
     ///         forwarding fee, so we override maxFee = 0 regardless of the
     ///         configured `cctpForwardFee`.
-    uint32  internal constant ARC_DOMAIN = 26;
+    uint32 internal constant ARC_DOMAIN = 26;
 
     /// @notice Bounds on a per-escrow optimistic review window. The recipient
     ///         claims delivery; the depositor has this long to approve or
@@ -511,7 +511,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // called while proposals are pending, release() wins and both proposals
         // go moot (the second proposer's mutualSettle reverts
         // MutualSettlementAlreadyExecuted). This is acceptable by design.
-        if (m.state != MilestoneState.DISPUTED && m.state != MilestoneState.IN_REVIEW) revert MutualSettlementAlreadyExecuted();
+        if (m.state != MilestoneState.DISPUTED && m.state != MilestoneState.IN_REVIEW) {
+            revert MutualSettlementAlreadyExecuted();
+        }
         if (msg.sender != e.depositor && msg.sender != e.recipient) revert NotEscrowOwnerOrRecipient();
         if (_agreedBps > BPS_DENOMINATOR) revert InvalidBps();
 
@@ -727,7 +729,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             uint256 refundable = 0;
             for (uint256 i = 0; i < e.milestoneCount; i++) {
                 Milestone storage m = milestones[escrowId][i];
-                if (m.state == MilestoneState.DISPUTED || m.state == MilestoneState.IN_REVIEW) revert CannotCancelDuringDispute();
+                if (m.state == MilestoneState.DISPUTED || m.state == MilestoneState.IN_REVIEW) {
+                    revert CannotCancelDuringDispute();
+                }
                 if (m.state == MilestoneState.PENDING) {
                     refundable += m.amount;
                     m.state = MilestoneState.REFUNDED;
@@ -1060,12 +1064,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     /// @notice Append evidence to an ongoing dispute. Callable by either party
     ///         while the milestone is DISPUTED. Emits only — nothing is stored
     ///         on-chain; the subgraph indexes the full thread from events.
-    function appendEvidence(
-        uint256 escrowId,
-        uint256 milestoneIndex,
-        bytes32 hash,
-        string calldata uri
-    ) external {
+    function appendEvidence(uint256 escrowId, uint256 milestoneIndex, bytes32 hash, string calldata uri) external {
         Escrow storage e = escrows[escrowId];
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (milestones[escrowId][milestoneIndex].state != MilestoneState.DISPUTED) revert NoDispute();
@@ -1352,7 +1351,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             crossChain = e.destinationDomain != ARC_DOMAIN;
         } else {
             for (uint256 i = 0; i < s.length; i++) {
-                if (s[i].destinationDomain != ARC_DOMAIN) { crossChain = true; break; }
+                if (s[i].destinationDomain != ARC_DOMAIN) crossChain = true;
+                break;
             }
         }
         if (crossChain) {
@@ -1363,5 +1363,4 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             if (maxFee < e.escrowCctpForwardFee) revert MaxFeeBelowFloor();
         }
     }
-
 }

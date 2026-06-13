@@ -376,5 +376,4 @@ interface ITrancheProtocol {
 
     /// @notice Depositor updated the external invoice URI for an active escrow.
     event InvoiceURIUpdated(uint256 indexed escrowId, string oldURI, string newURI);
-
 }
