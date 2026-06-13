@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useReadContract } from 'wagmi'
-import { decodeEventLog } from 'viem'
+import { decodeEventLog, keccak256, toHex } from 'viem'
 import { motion, AnimatePresence } from 'framer-motion'
 
 import PageHeader from '../components/PageHeader.jsx'
@@ -16,11 +16,10 @@ import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { ARC_DOMAIN, getDomainName, isEvmDomain } from '../config/chains.js'
 import { CONTRACT_ADDRESS, USDC_ADDRESS, ESCROW_ABI, USDC_ABI } from '../config/contract.js'
 import {
-  addressToBytes32, hashDescription, daysToSeconds,
-  usdcToBaseUnits, isValidBytes32
+  addressToBytes32, daysToSeconds, usdcToBaseUnits
 } from '../utils/encode.js'
 import {
-  isValidAddress, isValidUrl, formatUSDC, formatDeadline, formatWindow
+  isValidAddress, formatUSDC, formatDeadline, formatWindow
 } from '../utils/format.js'
 
 const DRAFT_KEY = 'escrow-draft'
@@ -28,7 +27,7 @@ const MAX_DEADLINE_SECONDS = 5 * 365 * 86400
 
 const STEPS = [
   { num: 1, label: 'Parties',    head: 'Who are you paying?', kicker: 'Approved milestones go directly to this address on the chain they choose.' },
-  { num: 2, label: 'Invoice',    head: 'What is this for?',   kicker: "Give the escrow a description and link to the invoice. Only the description's hash is stored on-chain." },
+  { num: 2, label: 'Invoice',    head: 'What is this for?',   kicker: 'Invoice contents are published on-chain by default — or choose Private to store only the hash.' },
   { num: 3, label: 'Timeline',   head: 'Set the timeline',    kicker: 'When work needs to be done, and how long each side has to respond at each step.' },
   { num: 4, label: 'Milestones', head: 'Break the payment',   kicker: 'Each milestone releases independently. They must sum to the total.' },
   { num: 5, label: 'Review',     head: 'Confirm and lock',    kicker: 'Two transactions: approve USDC, then create the escrow.' }
@@ -49,10 +48,11 @@ const emptyState = () => ({
   freelancer: '',
   destinationDomain: ARC_DOMAIN,
   totalAmount: '',
-  description: '',
-  invoiceURI: '',
-  useCustomHash: false,
-  customInvoiceHash: '',
+  invoiceNumber: '',
+  notes: '',
+  attachmentURI: '',
+  attachmentHash: '',
+  privateMode: false,
   deadline: '',
   reviewWindowDays: 3,
   milestones: [emptyMilestone()]
@@ -173,10 +173,7 @@ function Flow() {
       if (!totalAmountNum || totalAmountNum <= 0) e.totalAmount = 'Enter an amount greater than zero.'
     }
     if (s === 2) {
-      if (!state.useCustomHash && !state.description.trim()) e.description = 'Add a description for this invoice.'
-      if (state.useCustomHash && !isValidBytes32(state.customInvoiceHash))
-        e.customInvoiceHash = 'Hash must be 0x followed by 64 hex characters.'
-      if (!isValidUrl(state.invoiceURI)) e.invoiceURI = "That doesn't look like a valid URL."
+      if (!state.invoiceNumber.trim()) e.invoiceNumber = 'Invoice number is required.'
     }
     if (s === 3) {
       if (!state.deadline) e.deadline = 'Set a project deadline.'
@@ -231,12 +228,6 @@ function Flow() {
           } catch {}
         }
       } catch {}
-      if (escrowId !== null) {
-        try {
-          const titles = state.milestones.map((m) => m.title === 'Custom' ? m.customTitle : m.title)
-          localStorage.setItem(`escrow-titles-${escrowId}`, JSON.stringify(titles))
-        } catch {}
-      }
       try { localStorage.removeItem(DRAFT_KEY) } catch {}
       setTimeout(() => navigate(escrowId !== null ? `/escrow/${escrowId}` : '/dashboard'), 600)
     }
@@ -252,7 +243,27 @@ function Flow() {
 
   const onDeposit = () => {
     if (!address) return
-    const invoiceHash = state.useCustomHash ? state.customInvoiceHash : hashDescription(state.description)
+    const invoiceObject = {
+      version: 1,
+      invoiceNumber: state.invoiceNumber,
+      issuedAt: new Date().toISOString(),
+      payer: address,
+      payee: state.freelancer,
+      currency: 'USDC',
+      total: state.totalAmount,
+      lineItems: state.milestones.map((m, i) => ({
+        milestone: i,
+        title: m.title === 'Custom' ? m.customTitle.trim() : m.title,
+        amount: m.amount
+      })),
+      notes: state.notes || undefined,
+      attachments: state.attachmentURI ? [{
+        uri: state.attachmentURI,
+        sha256: state.attachmentHash || undefined
+      }] : []
+    }
+    const invoiceJson = JSON.stringify(invoiceObject)
+    const invoiceHash = keccak256(toHex(invoiceJson))
     const mintRecipient = addressToBytes32(state.freelancer)
     const deadline = BigInt(Math.floor(new Date(state.deadline).getTime() / 1000))
     const reviewWindow = BigInt(daysToSeconds(state.reviewWindowDays))
@@ -264,11 +275,11 @@ function Flow() {
       mintRecipient,
       reviewWindow,
       invoiceHash,
-      state.invoiceURI,
+      state.attachmentURI || '',
       milestoneAmountsBigInt,
       deadline,
       [],
-      state.milestones.map((m) => m.title === 'Custom' ? m.customTitle.trim() : m.title)
+      state.privateMode ? '' : invoiceJson
     ]), { loadingMessage: 'Sign to create the escrow.' }).catch(() => {})
   }
 
@@ -452,62 +463,119 @@ function Step1({ state, setState, errors, supported, loadingDomains, domainsFail
 /* ------- Step 2 ------- */
 function Step2({ state, setState, errors }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
-  const hashPreview = useMemo(() => {
-    if (state.useCustomHash) return state.customInvoiceHash
-    if (!state.description.trim()) return ''
-    try { return hashDescription(state.description) } catch { return '' }
-  }, [state.description, state.useCustomHash, state.customInvoiceHash])
+  const [dragging, setDragging] = useState(false)
+
+  useEffect(() => {
+    if (!state.invoiceNumber) {
+      const year = new Date().getFullYear()
+      const rand = String(Math.floor(Math.random() * 9000) + 1000)
+      set('invoiceNumber')(`INV-${year}-${rand}`)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleDrop = async (e) => {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files[0]
+    if (!file) return
+    try {
+      const buffer = await file.arrayBuffer()
+      const hashBuffer = await crypto.subtle.digest('SHA-256', buffer)
+      const hashArray = Array.from(new Uint8Array(hashBuffer))
+      const hex = '0x' + hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
+      set('attachmentHash')(hex)
+    } catch {}
+  }
 
   return (
     <div className="flex flex-col gap-6">
-      {!state.useCustomHash ? (
-        <Field label="Invoice description" error={errors.description}
-          helper="Hashed locally. Only the hash is stored on-chain.">
-          {(p) => (
-            <textarea {...p} rows={3} className="input-multiline"
-              placeholder="e.g. Brand identity redesign, Q3 deliverables"
-              maxLength={500}
-              value={state.description}
-              onChange={(e) => set('description')(e.target.value)}
-            />
-          )}
-        </Field>
-      ) : (
-        <Field label="Custom invoice hash (bytes32)" error={errors.customInvoiceHash}>
-          {(p) => (
-            <input {...p} className="input num" placeholder="0x…"
-              autoComplete="off" spellCheck={false}
-              value={state.customInvoiceHash}
-              onChange={(e) => set('customInvoiceHash')(e.target.value.trim())}
-            />
-          )}
-        </Field>
+      {!state.privateMode && (
+        <div className="rounded-xl bg-sunk border border-rule px-4 py-3 text-[12.5px] text-ink-2 leading-relaxed">
+          Everything in this invoice will be publicly readable on-chain forever and cannot be deleted. Do not include personal information.
+        </div>
       )}
 
-      <label className="inline-flex items-center gap-2 text-[14px] text-ink-2 cursor-pointer select-none">
-        <input type="checkbox"
-          className="rounded border-rule-2 h-4 w-4"
-          style={{ accentColor: 'var(--clay)' }}
-          checked={state.useCustomHash}
-          onChange={(e) => set('useCustomHash')(e.target.checked)}
-        />
-        Use a pre-computed hash instead
-      </label>
-
-      <Field label="Invoice URL" error={errors.invoiceURI}
-        helper="Stored on-chain as a reference.">
+      <Field label="Invoice number" error={errors.invoiceNumber}>
         {(p) => (
-          <input {...p} type="url" className="input" placeholder="https://…"
-            autoComplete="url"
-            value={state.invoiceURI}
-            onChange={(e) => set('invoiceURI')(e.target.value.trim())}
+          <input {...p} className="input num" placeholder="INV-2025-0001"
+            autoComplete="off" spellCheck={false}
+            value={state.invoiceNumber}
+            onChange={(e) => set('invoiceNumber')(e.target.value.trim())}
           />
         )}
       </Field>
 
-      <div className="pt-1">
-        <p className="eyebrow mb-1.5">Hash preview</p>
-        <p className="num text-[12px] text-ink-2 break-all">{hashPreview || '—'}</p>
+      <Field label="Notes">
+        {(p) => (
+          <textarea {...p} rows={3} className="input-multiline"
+            placeholder="Any additional context for this escrow (optional)"
+            maxLength={500}
+            value={state.notes}
+            onChange={(e) => set('notes')(e.target.value)}
+          />
+        )}
+      </Field>
+
+      <div className="flex flex-col gap-2">
+        <Field label="Attachment">
+          {(p) => (
+            <input {...p} type="url" className="input"
+              placeholder="Link to supporting document (optional)"
+              autoComplete="url"
+              value={state.attachmentURI}
+              onChange={(e) => { set('attachmentURI')(e.target.value.trim()); set('attachmentHash')('') }}
+            />
+          )}
+        </Field>
+
+        {state.attachmentURI && !state.attachmentHash && (
+          <p className="text-[12px] text-ink-3">Link only (contents not verified)</p>
+        )}
+
+        <div
+          onDrop={handleDrop}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          className={`rounded-xl border-2 border-dashed px-4 py-5 text-center transition-colors ${dragging ? 'border-clay bg-clay/5' : 'border-rule'}`}
+        >
+          {state.attachmentHash ? (
+            <p className="text-[12.5px] text-ok">
+              File fingerprinted ✓{' '}
+              <span className="num text-[11px] opacity-70">{state.attachmentHash.slice(0, 10)}</span>
+            </p>
+          ) : (
+            <p className="text-[12.5px] text-ink-3 leading-relaxed">
+              Drop file here to verify its contents are fingerprinted on-chain. The file never leaves your browser.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <p className="eyebrow">Visibility</p>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => set('privateMode')(false)}
+            className={`rounded-xl border px-4 py-3 text-left transition-colors ${!state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
+          >
+            <p className="text-[13.5px] font-medium">Public (recommended)</p>
+            <p className="text-[11.5px] mt-0.5 opacity-60">Invoice published on-chain</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => set('privateMode')(true)}
+            className={`rounded-xl border px-4 py-3 text-left transition-colors ${state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
+          >
+            <p className="text-[13.5px] font-medium">Private — hash only</p>
+            <p className="text-[11.5px] mt-0.5 opacity-60">Contents kept off-chain</p>
+          </button>
+        </div>
+        {state.privateMode && (
+          <p className="text-[12.5px] text-ink-2 leading-relaxed">
+            Download and keep your invoice file. Anyone verifying will need a copy of it.
+          </p>
+        )}
       </div>
     </div>
   )

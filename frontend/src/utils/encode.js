@@ -19,6 +19,9 @@ export const bytes32ToAddress = (b32) =>
 export const hashDescription = (text) =>
   keccak256(toBytes(text))
 
+// Hash raw file bytes (Uint8Array from file.arrayBuffer()).
+export const hashBytes = (bytes) => keccak256(bytes)
+
 export const daysToSeconds = (days) => days * 86400
 export const hoursToSeconds = (hours) => hours * 3600
 
