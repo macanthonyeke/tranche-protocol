@@ -27,6 +27,7 @@ dataSources:
         - RefundBalance
         - RefundCredit
         - EvidenceEntry
+        - InvoiceURIUpdate
       abis:
         - name: TrancheProtocol
           file: ./abis/TrancheProtocol.json
@@ -69,5 +70,9 @@ dataSources:
           handler: handleRefundCreditTransferred
         - event: EvidenceAppended(indexed uint256,uint256,indexed address,bytes32,string,uint256)
           handler: handleEvidenceAppended
-        - event: MilestoneTitles(indexed uint256,string[])
-          handler: handleMilestoneTitles
+        - event: InvoiceSnapshotted(indexed uint256,string)
+          handler: handleInvoiceSnapshotted
+        - event: InvoiceAcknowledged(indexed uint256,indexed address,bytes32)
+          handler: handleInvoiceAcknowledged
+        - event: InvoiceURIUpdated(indexed uint256,string,string)
+          handler: handleInvoiceURIUpdated
