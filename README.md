@@ -23,7 +23,7 @@ about destination logistics.
 | Audit rounds | 5 complete, 0 Critical/High findings |
 | Test suite | 236 tests passing |
 | Contract size | 23,211 bytes (EIP-170 limit: 24,576) |
-| Subgraph | Goldsky, live |
+| Subgraph | Goldsky v0.4.0 live (v0.5.0 built, pending deploy) |
 
 ## What It Does
 
@@ -168,17 +168,28 @@ production-ready.
 │   ├── TrancheProtocol.sol
 │   └── interface/
 ├── test/
-│   ├── TrancheProtocol.t.sol
-│   ├── TrancheProtocol.adversarial.t.sol
+│   ├── Base.t.sol
+│   ├── TrancheProtocol.auditFixes.t.sol
+│   ├── TrancheProtocol.auditRound2.t.sol
+│   ├── TrancheProtocol.auditRound3.t.sol
+│   ├── TrancheProtocol.auditRound4.t.sol
 │   ├── TrancheProtocol.cctp_signal.t.sol
+│   ├── TrancheProtocol.crossChainRefund.t.sol
 │   ├── TrancheProtocol.fuzz.t.sol
 │   ├── TrancheProtocol.invariant.t.sol
+│   ├── TrancheProtocol.lifecycle.t.sol
+│   ├── TrancheProtocol.receivingAddress.t.sol
+│   ├── TrancheProtocol.t.sol
 │   ├── TrancheProtocol.upgrades.t.sol
+│   ├── TrancheProtocol.v2features.t.sol
 │   └── mocks/
 ├── script/
 │   └── Deploy.s.sol
 ├── deploy/
+│   ├── deploy-explicit-gas.mjs
 │   ├── deploy.js
+│   ├── lib/deployment.mjs
+│   ├── setFee.js
 │   ├── setup.js
 │   ├── verify.js
 │   └── README.md
@@ -242,6 +253,8 @@ https://iris-api-sandbox.circle.com/v2/burn/USDC/fees/26/{destinationDomain}?for
 | `ARBITER_ROLE` | resolve disputes |
 | `PAUSER_ROLE` | pause and unpause deposits |
 | `DOMAIN_MANAGER_ROLE` | add and remove supported CCTP domains |
+| `FEE_MANAGER_ROLE` | manage CCTP forward fee |
+| `RECOVERY_MANAGER_ROLE` | recover stuck escrows (internal — no public getter) |
 
 ### Protocol Fee
 
@@ -325,6 +338,12 @@ cp .env.example .env
 npm start
 ```
 
+Development mode:
+
+```sh
+cd bot && npm run dev
+```
+
 ## Deployment
 
 ### Circle Deployment Scripts (primary path)
@@ -341,31 +360,28 @@ npm run setup
 npm run verify
 ```
 
+After every deploy, run `setFee.js` to restore the CCTP 
+forward fee:
+
+```sh
+npm run set-fee
+```
+
+The fee resets to 0 on every fresh deploy. The contract 
+will reject cross-chain releases until this is run.
+
 Or all three:
 
 ```sh
-npm run full
+npm run full-gas
 ```
+
+Do not use `npm run full` — Circle's gas estimation enforces EIP-170 at estimation 
+time. `full-gas` bypasses this correctly.
 
 `setup.js` grants roles, adds Arc domain `26`, sets the initial 
 CCTP forward fee, and syncs the new contract address to `bot/.env` 
-and `frontend/src/lib/config.ts`.
-
-### Foundry Script
-
-`script/Deploy.s.sol`
-
-```sh
-cp .env.example .env
-set -a; source .env; set +a
-forge script script/Deploy.s.sol:Deploy \
-  --rpc-url "$ARC_TESTNET_RPC" \
-  --broadcast
-```
-
-Defaults: Arc native USDC precompile 
-`0x3600000000000000000000000000000000000000`, Arc TokenMessengerV2 
-`0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA`
+and `frontend/src/config/`.
 
 ## Getting Started
 
@@ -406,6 +422,12 @@ dispute creation and counter-evidence, arbiter resolution, mutual
 cancel and settle, refund withdrawals, role permissions, pause 
 behavior, reentrancy, CCTP hook data, same-chain releases, silent 
 approval, split validation, protocol fee bounds, invariant solvency.
+
+## CI
+
+GitHub Actions runs the Foundry test suite on every push 
+and pull request via `.github/workflows/test.yml`. 
+Frontend responsive e2e tests run in the same workflow.
 
 ## Environment Variables
 
@@ -450,6 +472,17 @@ approval, split validation, protocol fee bounds, invariant solvency.
 | `REMINDER_CRON` | Optional cron schedule |
 | `DEBUG` | Optional debug flag |
 
+### Frontend `.env`
+
+| Variable | Purpose |
+|---|---|
+| `VITE_CONTRACT_ADDRESS` | Deployed contract address |
+| `VITE_GOLDSKY_ENDPOINT` | Goldsky subgraph query URL |
+
+`VITE_GOLDSKY_ENDPOINT` is required. The frontend has no 
+on-chain fallback for bulk reads — if this is unset, 
+the dashboard will not load.
+
 ## Security Model
 
 Defensive measures:
@@ -474,6 +507,16 @@ Assumptions:
   active domain support
 - Cross-chain completion depends on Circle CCTP V2 and its 
   forwarding service
+
+## Operational Notes
+
+- CCTP stranded burn recovery: if a cross-chain release is 
+  stranded because `maxFee` was too low, the burn is recoverable. 
+  Anyone can self-relay by calling `receiveMessage(message, 
+  attestation)` on the destination chain's `MessageTransmitterV2`. 
+  `destinationCaller` is `0x0`, so no special permission is needed.
+- The Goldsky CLI is not on PATH by default. Use the full path: 
+  `~/.local/bin/goldsky subgraph deploy ...`
 
 ## Roadmap
 
