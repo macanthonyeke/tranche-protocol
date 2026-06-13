@@ -33,7 +33,7 @@ contract TrancheProtocolCctpSignalTest is Base {
 
     function test_SetCctpForwardFee_RevertOn_NonAdmin() public {
         bytes memory expected = abi.encodeWithSelector(
-            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, escrow.FEE_MANAGER_ROLE()
+            IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, keccak256("FEE_MANAGER_ROLE")
         );
         vm.prank(stranger);
         vm.expectRevert(expected);
@@ -45,7 +45,7 @@ contract TrancheProtocolCctpSignalTest is Base {
     // -------------------------------------------------------------------------
 
     function test_CCTP_SameChainRelease_UsesDirectTransfer() public {
-        uint32 arcDomain = escrow.ARC_DOMAIN();
+        uint32 arcDomain = 26;
         address arcRecipientAddr = address(0xA1C0);
         bytes32 arcRecipient = bytes32(uint256(uint160(arcRecipientAddr)));
 
@@ -61,7 +61,7 @@ contract TrancheProtocolCctpSignalTest is Base {
         uint256 balAfter = usdc.balanceOf(arcRecipientAddr);
 
         // Base.setUp sets protocolFeeBps = 0, so full amount reaches recipient.
-        uint256 fee = (100e6 * escrow.protocolFeeBps()) / escrow.BPS_DENOMINATOR();
+        uint256 fee = (100e6 * escrow.protocolFeeBps()) / 10_000;
         assertEq(balAfter - balBefore, 100e6 - fee, "same-chain release must direct-transfer to recipient");
     }
 
@@ -129,7 +129,7 @@ contract TrancheProtocolCctpSignalTest is Base {
             _singleMilestone(100e6),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -174,7 +174,7 @@ contract TrancheProtocolCctpSignalTest is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }

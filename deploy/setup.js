@@ -248,13 +248,13 @@ function updateDownstreamConfig(contractAddress) {
 console.log('Setting up TrancheProtocol V2...');
 console.log('Contract:', CONTRACT_ADDRESS);
 
-const [arbiterRole, pauserRole, domainManagerRole, feeManagerRole, recoveryManagerRole] = await Promise.all([
-  readContract('ARBITER_ROLE'),
-  readContract('PAUSER_ROLE'),
-  readContract('DOMAIN_MANAGER_ROLE'),
-  readContract('FEE_MANAGER_ROLE'),
-  Promise.resolve('0x926fb51ac9583c9ff853ed9f763f17034aa5e977d332565b8a7360cd393448b1'),
-]);
+// Role hashes are keccak256 of their string names. Hardcoded here because
+// the constants are internal in the contract and have no public getter.
+const arbiterRole      = '0xbb08418a67729a078f87bbc8d02a770929bb68f5bfdf134ae2ead6ed38e2f4ae';
+const pauserRole       = '0x65d7a28e3265b37a6474929f336521b332c1681b933f6cb9f3376673440d862a';
+const domainManagerRole = '0x7792e66be7e1c65b630a8198da6bf1636e24cd26934ca652e146dd12060d06fb';
+const feeManagerRole   = '0x6c0757dc3e6b28b2580c03fd9e96c274acf4f99d91fbec9b418fa1d70604ff1c';
+const recoveryManagerRole = '0x926fb51ac9583c9ff853ed9f763f17034aa5e977d332565b8a7360cd393448b1';
 
 console.log('ARBITER_ROLE:', arbiterRole);
 console.log('PAUSER_ROLE:', pauserRole);

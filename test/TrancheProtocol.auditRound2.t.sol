@@ -28,7 +28,7 @@ contract TrancheProtocolAuditRound2Test is Base {
             ms,
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -59,7 +59,7 @@ contract TrancheProtocolAuditRound2Test is Base {
             ms,
             block.timestamp + 30 days,
             _noSplits(),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -71,7 +71,7 @@ contract TrancheProtocolAuditRound2Test is Base {
     }
 
     function test_M02_Deposit_AllowsSameChainTinyMilestone() public {
-        uint32 arc = escrow.ARC_DOMAIN();
+        uint32 arc = 26;
         vm.prank(domainManager);
         escrow.addSupportedDomain(arc);
 
@@ -100,7 +100,7 @@ contract TrancheProtocolAuditRound2Test is Base {
             ms,
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }

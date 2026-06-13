@@ -14,7 +14,7 @@ contract TrancheProtocolAuditRound4Test is Base {
 
     function setUp() public override {
         super.setUp();
-        arcDomain = escrow.ARC_DOMAIN();
+        arcDomain = 26;
     }
 
     // ---------------------------------------------------------------- helpers
@@ -39,7 +39,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             ms,
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -145,7 +145,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -170,7 +170,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -194,7 +194,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -224,7 +224,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
         assertEq(_getMilestoneAmount(id, 0), amount);
@@ -257,7 +257,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             ms,
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
     }
@@ -296,7 +296,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             sp,
-            new string[](0)
+            ""
         );
         vm.stopPrank();
 
@@ -331,7 +331,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
 
@@ -392,7 +392,7 @@ contract TrancheProtocolAuditRound4Test is Base {
             _singleMilestone(amount),
             block.timestamp + 30 days,
             new SplitRecipient[](0),
-            new string[](0)
+            ""
         );
         vm.stopPrank();
 

@@ -367,7 +367,14 @@ interface ITrancheProtocol {
         uint256 timestamp
     );
 
-    /// @notice Milestone titles emitted at deposit for off-chain indexing.
-    ///         Nothing stored on-chain.
-    event MilestoneTitles(uint256 indexed escrowId, string[] titles);
+    /// @notice Invoice data string emitted at deposit. Nothing stored on-chain —
+    ///         the subgraph indexes the full JSON from this event.
+    event InvoiceSnapshotted(uint256 indexed escrowId, string invoiceData);
+
+    /// @notice Recipient acknowledged the invoice on-chain.
+    event InvoiceAcknowledged(uint256 indexed escrowId, address indexed acknowledger, bytes32 invoiceHash);
+
+    /// @notice Depositor updated the external invoice URI for an active escrow.
+    event InvoiceURIUpdated(uint256 indexed escrowId, string oldURI, string newURI);
+
 }
