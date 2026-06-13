@@ -6,6 +6,33 @@ Tranche Protocol V2 is an on-chain escrow protocol on Circle's Arc Testnet. Paym
 
 ---
 
+## README Maintenance
+
+README.md must stay in sync with the codebase. Whenever you 
+make changes that affect any of the following, update README.md 
+in the same session before committing:
+
+- New or removed contract functions or events
+- New or removed npm scripts in any package.json
+- New or removed environment variables in any .env.example
+- New or removed routes in the frontend
+- New or removed directories or key files
+- Changes to the deployment process or command names
+- Changes to role definitions
+- Subgraph version updates
+- Test count changes (update the 236 tests figure)
+- Contract size changes (update the 23,211 bytes figure)
+
+When updating README.md:
+- Check the relevant section and update it precisely
+- Do not rewrite sections that were not affected
+- Do not add files or directories that are build artifacts, 
+  log files, editor config, or internal tooling 
+  (.next/, out/, dist/, build/, *.log, .vscode/, etc.)
+- Keep the writing style consistent with the existing README
+
+---
+
 ## Current deployment
 
 | Key | Value |
