@@ -1,67 +1,164 @@
-# Tranche Protocol V2
+# Tranche Protocol
 
-A milestone-based USDC escrow system built for Arc Testnet with Circle CCTP V2 settlement, dispute resolution, role-based administration, a React dashboard, Circle deployment scripts, and a Telegram notification bot.
+Freelance payments are broken because there's no neutral place for 
+money to sit while work is being done. Tranche is that place.
 
-Tranche Protocol lets a depositor lock USDC upfront, define one or more milestones, and release each milestone to a recipient after approval, silent approval, or arbiter resolution. Released funds are burned through Circle CCTP V2 from Arc and minted to the recipient's selected destination domain.
+Tranche Protocol is a USDC milestone escrow system built on Arc, 
+Circle's EVM-compatible L1. A payer locks funds upfront, defines 
+milestones, and each one releases only when the work is approved. 
+If there's a dispute, an arbiter resolves it. If the payer goes 
+silent, the recipient can claim silent approval. Nobody needs to 
+trust anybody. The contract holds the money and enforces the rules.
 
-> Status: active testnet project. Contracts are not presented as audited production code.
+Cross-chain settlement runs through Circle CCTP V2, so recipients 
+can receive funds on any supported chain without the payer worrying 
+about destination logistics.
 
-## Table of Contents
+## Status
 
-- [What It Does](#what-it-does)
-- [Architecture](#architecture)
-- [Repository Layout](#repository-layout)
-- [Smart Contract](#smart-contract)
-- [Frontend](#frontend)
-- [Telegram Bot](#telegram-bot)
-- [Deployment](#deployment)
-- [Getting Started](#getting-started)
-- [Testing](#testing)
-- [Environment Variables](#environment-variables)
-- [Operational Notes](#operational-notes)
-- [Security Model](#security-model)
+| | |
+|---|---|
+| Network | Arc testnet |
+| Contract | `0x…` (updated after each deploy) |
+| Audit rounds | 5 complete, 0 Critical/High findings |
+| Test suite | 236 tests passing |
+| Contract size | 23,211 bytes (EIP-170 limit: 24,576) |
+| Subgraph | Goldsky, live |
 
 ## What It Does
 
-- Locks USDC into milestone escrows.
-- Supports single and multi-milestone project payments.
-- Requires invoice metadata through `invoiceHash` and `invoiceURI`.
-- Allows a depositor to mark milestones fulfilled.
-- Allows either party to raise disputes during the dispute window.
-- Allows an arbiter to release or refund disputed milestones.
-- Lets recipients signal delivery and claim silent approval if the depositor does not respond.
-- Lets both parties mutually cancel active escrows and refund unreleased funds.
-- Supports recipient-controlled mint-recipient updates for future releases.
-- Supports optional split recipients, where each split can target a different CCTP destination domain.
+- Locks USDC into milestone escrows at deposit. The money doesn't 
+  move until conditions are met.
+- Supports single and multi-milestone project payments with 
+  independent dispute windows per milestone.
+- Requires a verifiable invoice at creation. The invoice JSON is 
+  committed on-chain via the `InvoiceSnapshotted` event, so both 
+  parties and any arbiter can verify the agreed scope without 
+  trusting a third-party URL.
+- Lets recipients acknowledge invoice terms on-chain before work 
+  begins, and decline escrows they don't agree to.
+- Lets the depositor mark milestones fulfilled, opening a 
+  configurable review window.
+- Lets the recipient signal delivery and claim silent approval if 
+  the depositor goes silent past the review window.
+- Lets an arbiter release or refund disputed milestones, with a 
+  mandatory evidence hash from both sides.
+- Lets both parties mutually settle at any agreed split, or 
+  mutually cancel and refund unreleased funds.
+- Lets the depositor extend the project deadline.
+- Supports split recipients, where each split address can be on 
+  a different CCTP destination chain.
 - Charges a configurable protocol fee, capped at 5%.
-- Uses Circle CCTP V2 `depositForBurnWithHook` with the forwarding-service hook.
-- Provides a dashboard for users and a separate arbiter/admin workspace.
-- Sends Telegram notifications and deadline/dispute reminders.
+- Uses Circle CCTP V2 `depositForBurnWithHook` with the 
+  forwarding-service hook. Same-chain Arc releases use direct 
+  transfer.
 
 ## Architecture
 
 ```text
 Depositor
   |
-  | approve USDC + create escrow
+  | approve USDC + create escrow (with invoice JSON)
   v
-TrancheProtocol.sol on Arc Testnet
+TrancheProtocol.sol on Arc
   |
   | milestone release / arbiter resolution / silent approval
   v
-Circle TokenMessengerV2
+Circle TokenMessengerV2 (cross-chain) 
+or direct safeTransfer (same-chain Arc)
   |
-  | CCTP V2 burn with forwarding hook
   v
-Destination chain recipient
+Recipient on destination chain
 ```
 
-The project has four main parts:
+The project has five main parts:
 
-- **Contracts**: Foundry Solidity contracts and tests in `src/`, `script/`, and `test/`.
-- **Frontend**: Vite + React + TypeScript app in `frontend/`.
-- **Deployment tools**: Circle Smart Contract Platform / developer-controlled wallet scripts in `deploy/`.
-- **Telegram bot**: Event listener, reminder scheduler, and wallet-linking bot in `bot/`.
+- **Contract**: Foundry Solidity in `src/` and `test/`
+- **Frontend**: Vite + React app in `frontend/`
+- **Subgraph**: Goldsky indexer in `indexer/`
+- **Deployment**: Circle Smart Contract Platform scripts in `deploy/`
+- **Bot**: Telegram notification bot in `bot/`
+
+## Invoice System
+
+Every escrow requires an invoice. The invoice is a structured JSON 
+document containing an invoice number, line items derived from the 
+escrow milestones, optional notes, and optional file attachments 
+with client-side content hashes.
+
+At deposit, the frontend serializes the JSON, hashes it, and passes 
+both the hash and the full JSON string to the contract. The contract 
+stores the hash in escrow state and emits the full JSON in the 
+`InvoiceSnapshotted` event. The hash is the on-chain commitment. 
+The event is the permanent, verifiable preimage.
+
+This means:
+- The invoice is retrievable from chain forever without trusting 
+  any third-party URL
+- Anyone can verify integrity by hashing the subgraph's stored 
+  JSON and comparing it to the on-chain `invoiceHash`
+- File attachments include client-side content hashes, so the 
+  actual file is verifiable even if the link dies
+- Private mode: the frontend hashes the JSON but emits an empty 
+  string in the event. Both parties keep a local copy. Verification 
+  works by dragging the file into the verify UI.
+
+Recipients can call `acknowledgeInvoice` to create an on-chain 
+record of acceptance. This is never required to claim payment, 
+but it's a strong signal in any dispute. The payer can update 
+the invoice URI via `updateInvoiceURI` without touching the hash.
+
+## Protocol Lifecycle
+
+**1. Deposit**
+The depositor approves USDC, builds the invoice JSON, and calls 
+`deposit()` with milestone definitions, invoice data, deadlines, 
+and recipient details. USDC transfers into the contract.
+
+**2. Recipient review**
+The recipient sees the rendered invoice and can accept terms via 
+`acknowledgeInvoice` or decline and trigger a refund via 
+`declineEscrow`.
+
+**3. Milestone fulfillment**
+The depositor marks a milestone fulfilled. A review window opens 
+(1-7 days, set at deposit). The recipient can raise a dispute 
+during this window with a mandatory evidence hash.
+
+**4. Release paths**
+- No dispute: after the review window, anyone calls 
+  `releaseAfterWindow`. Funds settle via CCTP or direct transfer.
+- Dispute raised: both parties submit evidence hashes. An arbiter 
+  resolves within 14 days.
+- Arbiter timeout: if unresolved after 14 days, either party can 
+  call `resolveDisputeByTimeout` for an unconditional 50/50 split.
+- Silent approval: the recipient signals delivery. If the depositor 
+  doesn't respond within 72 hours, anyone can trigger release.
+
+**5. Exits**
+- Mutual cancel: both parties agree to cancel. Unreleased funds 
+  credit to `refundBalances`, withdrawn via `withdrawRefund`.
+- Mutual settle: both parties agree on a recipient percentage 
+  off-chain, both submit the same number on-chain. Executes 
+  immediately.
+- Deadline missed: after deadline plus 72-hour grace period, 
+  the depositor can trigger a refund.
+
+## Audit Status
+
+Five rounds of audit completed. No Critical or High findings across 
+all rounds.
+
+Rounds 1-4 focused on contract security: access control, 
+reentrancy, CCTP integration, economic edge cases.
+
+Round 5 was a full UX audit: 8 critical UX issues and 20+ frontend 
+and dispute issues identified and fixed. Key areas: dispute 
+visibility, grace period handling, evidence integrity, mutual cancel 
+trap, cross-chain delivery tracking, onboarding friction.
+
+This is an active testnet project. It is not presented as 
+production-ready.
 
 ## Repository Layout
 
@@ -89,162 +186,88 @@ The project has four main parts:
 │   ├── src/
 │   ├── package.json
 │   └── README.md
+├── indexer/
+│   ├── schema.graphql
+│   ├── subgraph.yaml
+│   ├── src/mapping.ts
+│   └── package.json
 ├── bot/
 │   ├── src/
 │   ├── package.json
 │   └── README.md
 ├── foundry.toml
-├── remappings.txt
 └── .env.example
 ```
 
 ## Smart Contract
 
-Main contract: `src/TrancheProtocol.sol`
+`src/TrancheProtocol.sol`
 
-### Core Concepts
+### Escrow
 
-**Escrow**
+An escrow stores: depositor, recipient, refund recipient, total 
+USDC amount, destination CCTP domain, mint recipient, review window, 
+invoice hash and URI, escrow-level CCTP forward fee snapshot, 
+deadline, milestone count, and escrow state.
 
-An escrow stores:
+Escrow states: `ACTIVE`, `COMPLETED`, `CANCELLED`
 
-- depositor
-- recipient
-- refund recipient
-- total USDC amount
-- destination CCTP domain
-- CCTP mint recipient
-- dispute window
-- delivery notice window
-- invoice metadata
-- deadline
-- milestone count
-- escrow state
+### Milestone
 
-**Milestone**
+Each milestone stores: amount, title, fulfilled timestamp, 
+delivery-signaled timestamp, and milestone state.
 
-Each milestone stores:
-
-- amount
-- fulfilled timestamp
-- milestone state
-- delivery-signaled timestamp
-
-**States**
-
-Escrow states:
-
-- `ACTIVE`
-- `COMPLETED`
-- `CANCELLED`
-
-Milestone states:
-
-- `PENDING`
-- `FULFILLED`
-- `DISPUTED`
-- `RELEASED`
-- `REFUNDED`
-
-### Main Lifecycle
-
-1. **Deposit**
-   - Depositor approves USDC.
-   - Depositor calls `deposit(...)`.
-   - Contract validates invoice metadata, deadline, windows, milestones, domains, and splits.
-   - USDC is transferred into escrow.
-
-2. **Fulfillment**
-   - Depositor calls `fulfillCondition(escrowId, milestoneIndex)`.
-   - Milestone becomes `FULFILLED`.
-   - Dispute window starts.
-
-3. **Dispute path**
-   - Depositor or recipient can call `raiseDispute(...)` before the dispute window expires.
-   - The other party can submit counter-evidence.
-   - An address with `ARBITER_ROLE` calls `resolveDispute(...)`.
-   - Arbiter either releases the milestone to the recipient or refunds it.
-
-4. **No-dispute release path**
-   - After the dispute window expires, anyone can call `releaseAfterWindow(...)`.
-   - Protocol fee is sent to the treasury.
-   - Remaining USDC is released through CCTP.
-
-5. **Silent approval path**
-   - Recipient calls `signalDelivery(...)`.
-   - If the depositor does nothing until `deliveryNoticeWindow` expires, anyone can call `claimSilentApproval(...)`.
-   - The milestone is released through the same CCTP settlement path.
-
-6. **Cancellation path**
-   - Depositor and recipient both call `mutualCancel(...)`.
-   - Unreleased and undisputed funds are credited to `refundBalances`.
-   - Refunds are withdrawn with `withdrawRefund(recipient)`.
+Milestone states: `PENDING`, `IN_REVIEW`, `DISPUTED`, `RELEASED`, 
+`REFUNDED`
 
 ### CCTP Settlement
 
-The contract uses Circle CCTP V2:
+- Source domain: Arc domain `26`
+- Same-chain Arc releases: direct `safeTransfer`, no fee
+- Cross-chain: CCTP V2 `depositForBurnWithHook` with Circle 
+  forwarding-service hook
+- `CCTP_MIN_FINALITY_THRESHOLD`: fixed at `2000` (Standard Transfer)
+- CCTP forward fee: snapshotted per escrow at deposit time
 
-- Source domain: Arc domain `26`.
-- Same-chain Arc releases use `maxFee = 0`.
-- Cross-chain releases use a caller-supplied `cctpMaxFee`.
-- `CCTP_MIN_FINALITY_THRESHOLD` is fixed to `2000` for Standard Transfer.
-- The contract uses Circle's forwarding-service hook data so Circle can relay the destination-chain mint.
+The frontend fetches the live fee from Circle's Iris API before 
+each cross-chain call:
 
-The frontend fetches Circle's sandbox forwarding fee from:
-
-```text
 https://iris-api-sandbox.circle.com/v2/burn/USDC/fees/26/{destinationDomain}?forward=true
-```
 
 ### Roles
 
-The contract uses OpenZeppelin `AccessControl`.
-
-- `DEFAULT_ADMIN_ROLE`: manages protocol fee, treasury, CCTP forward fee, and role grants.
-- `ARBITER_ROLE`: resolves disputes.
-- `PAUSER_ROLE`: pauses and unpauses deposits.
-- `DOMAIN_MANAGER_ROLE`: adds and removes supported CCTP domains.
+| Role | Permissions |
+|---|---|
+| `DEFAULT_ADMIN_ROLE` | protocol fee, treasury, CCTP forward fee, role grants |
+| `ARBITER_ROLE` | resolve disputes |
+| `PAUSER_ROLE` | pause and unpause deposits |
+| `DOMAIN_MANAGER_ROLE` | add and remove supported CCTP domains |
 
 ### Protocol Fee
 
-- Default protocol fee: `199` bps, or 1.99%.
-- Maximum protocol fee: `500` bps, or 5%.
-- Fees are collected on release and sent to `protocolTreasury`.
+- Default: `199` bps (1.99%)
+- Maximum: `500` bps (5%)
+- Collected at release, sent to `protocolTreasury`
+- Not collected on mutual cancel. Collected on timeout settlement.
 
 ## Frontend
 
-Location: `frontend/`
+`frontend/`
 
-Stack:
+Stack: Vite, React 19, TypeScript, Tailwind CSS, RainbowKit, 
+wagmi v2, viem, React Router, TanStack Query, Framer Motion
 
-- Vite
-- React 19
-- TypeScript
-- Tailwind CSS
-- RainbowKit
-- wagmi
-- viem
-- React Router
-- TanStack Query
-- Framer Motion
+Design system: Switzer (body), Fraunces (display), Geist Mono 
+(data and amounts), warm clay accent.
 
 Main screens:
 
-- `/` user dashboard
-- `/create` escrow creation flow
-- `/escrow/:id` escrow detail and milestone actions
-- `/withdraw` refund withdrawal
-- `/arbiter` arbiter/admin workspace
-
-Frontend config lives in:
-
-```text
-frontend/src/lib/config.ts
-```
-
-That file contains the escrow contract address, Arc USDC address, explorer URL, CCTP domain catalog, UI presets, and displayed protocol fee.
-
-Run locally:
+- `/` dashboard with escrow list and state filters
+- `/create` five-step escrow creation flow with live invoice builder
+- `/escrow/:id` escrow detail, milestone actions, invoice 
+  verification card
+- `/withdraw` refund balance withdrawal with cross-chain option
+- `/arbiter` arbiter workspace
 
 ```sh
 cd frontend
@@ -252,45 +275,48 @@ npm install
 npm run dev
 ```
 
-Build:
+## Subgraph
+
+`indexer/`
+
+Goldsky subgraph indexing all protocol events. Used by the frontend 
+as the primary data source.
+
+Indexed entities: `Escrow`, `Milestone`, `Dispute`, `Split`, 
+`RefundBalance`, `RefundCredit`, `EvidenceEntry`, `InvoiceURIUpdate`
+
+The `Escrow` entity includes parsed invoice fields: `invoiceData`, 
+`invoiceNumber`, `invoiceAcknowledgedAt`, `invoiceAcknowledgedBy`.
 
 ```sh
-cd frontend
-npm run build
+cd indexer
+npm run sync     # sync ABI and address from deploy/.env
+npm run codegen  # generate AssemblyScript types
+npm run build    # compile to WASM
 ```
 
-Lint:
+Deploy:
 
 ```sh
-cd frontend
-npm run lint
+~/.local/bin/goldsky subgraph deploy tranche-protocol/0.x.x --path .
 ```
-
-Optional frontend environment:
-
-```sh
-VITE_WC_PROJECT_ID=your_walletconnect_project_id
-```
-
-If omitted, the app uses the public project ID currently configured in `frontend/src/lib/wagmi.ts`.
 
 ## Telegram Bot
 
-Location: `bot/`
+`bot/`
 
-The bot listens to escrow events, links wallets to Telegram users via signature verification, and sends reminders.
+Listens to escrow events, links wallets to Telegram users via 
+signature verification, and sends reminders.
 
 Features:
-
-- `/link <wallet>` challenge flow.
-- `/verify <signature>` wallet ownership verification.
-- `/wallets` and `/unlink <wallet>` wallet management.
-- `/status` listener status.
-- Event notifications for escrow creation, disputes, releases, refunds, cancellations, and escalations.
-- Deadline reminders and dispute-window reminders.
-- Durable SQLite storage in `bot/data/bot.sqlite`.
-
-Run locally:
+- `/link <wallet>` challenge flow
+- `/verify <signature>` wallet ownership verification
+- `/wallets` and `/unlink <wallet>` wallet management
+- `/status` listener status
+- Event notifications: creation, disputes, releases, refunds, 
+  cancellations
+- Deadline and dispute-window reminders
+- Durable SQLite storage in `bot/data/bot.sqlite`
 
 ```sh
 cd bot
@@ -299,128 +325,73 @@ cp .env.example .env
 npm start
 ```
 
-Development mode:
-
-```sh
-cd bot
-npm run dev
-```
-
-See `bot/README.md` for command details and notification routing.
-
 ## Deployment
 
-There are two deployment paths.
+### Circle Deployment Scripts (primary path)
 
-### Circle Deployment Scripts
-
-Location: `deploy/`
-
-This is the richer deployment path and uses:
-
-- Circle Smart Contract Platform
-- Circle developer-controlled wallets
-- viem
-
-Setup:
+`deploy/`
 
 ```sh
 forge build
 cd deploy
 npm install
 cp .env.example .env
-```
-
-Fill `deploy/.env`, then run:
-
-```sh
 npm run deploy
 npm run setup
 npm run verify
 ```
 
-Or run all three:
+Or all three:
 
 ```sh
 npm run full
 ```
 
-`setup.js` grants or confirms roles, adds Arc domain `26`, sets the initial CCTP forward fee to `0`, revokes deployer domain-manager power if present, and updates downstream config in `bot/.env` and `frontend/src/lib/config.ts`.
-
-More details are in `deploy/README.md`.
+`setup.js` grants roles, adds Arc domain `26`, sets the initial 
+CCTP forward fee, and syncs the new contract address to `bot/.env` 
+and `frontend/src/lib/config.ts`.
 
 ### Foundry Script
 
-Location: `script/Deploy.s.sol`
-
-Example:
+`script/Deploy.s.sol`
 
 ```sh
 cp .env.example .env
-# Ensure .env includes DOMAIN_MANAGER_ADDRESS; Deploy.s.sol requires it.
 set -a; source .env; set +a
-
 forge script script/Deploy.s.sol:Deploy \
   --rpc-url "$ARC_TESTNET_RPC" \
   --broadcast
 ```
 
-The Foundry script deploys the contract using:
-
-- Arc native USDC precompile by default: `0x3600000000000000000000000000000000000000`
-- Arc TokenMessengerV2 by default: `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA`
-
-Supported domains must be seeded by the domain manager after deployment.
+Defaults: Arc native USDC precompile 
+`0x3600000000000000000000000000000000000000`, Arc TokenMessengerV2 
+`0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA`
 
 ## Getting Started
 
-### Prerequisites
-
-- Foundry
-- Node.js 18+
-- npm
-- Git submodules initialized
-- An Arc Testnet RPC endpoint
-- Arc Testnet gas for deploy/admin wallets
-- USDC on Arc Testnet for test deposits
-- Circle developer account for the Circle deployment path
-- Telegram bot token if running notifications
-
-### Install Contract Dependencies
+Prerequisites: Foundry, Node.js 18+, Arc testnet RPC, Arc testnet 
+USDC, Circle developer account (Circle deployment path), Telegram 
+bot token (notifications)
 
 ```sh
+# install contract dependencies
 git submodule update --init --recursive
 forge build
-```
 
-### Run the Contract Tests
-
-```sh
+# run tests
 forge test
-```
 
-### Run the Frontend
+# run frontend
+cd frontend && npm install && npm run dev
 
-```sh
-cd frontend
-npm install
-npm run dev
-```
-
-### Run the Bot
-
-```sh
-cd bot
-npm install
-cp .env.example .env
-npm start
+# run bot
+cd bot && npm install && cp .env.example .env && npm start
 ```
 
 ## Testing
 
-The test suite covers unit, adversarial, CCTP/silent-approval, upgrade-regression, fuzz, and invariant cases.
-
-Useful commands:
+236 tests across unit, adversarial, CCTP, fuzz, invariant, and 
+upgrade-regression suites.
 
 ```sh
 forge test
@@ -430,113 +401,98 @@ forge test --match-contract TrancheProtocolFuzzTest
 forge coverage
 ```
 
-Notable coverage areas:
-
-- deposits and milestone accounting
-- invoice validation
-- dispute creation and counter-evidence
-- arbiter release/refund decisions
-- mutual cancellation
-- refund withdrawals
-- role permissions
-- pause behavior
-- reentrancy protections
-- CCTP hook data and forwarding fee behavior
-- same-chain Arc releases
-- silent approval
-- split-recipient validation
-- protocol fee bounds
-- invariant solvency and milestone ordering
+Coverage: deposits and milestone accounting, invoice validation, 
+dispute creation and counter-evidence, arbiter resolution, mutual 
+cancel and settle, refund withdrawals, role permissions, pause 
+behavior, reentrancy, CCTP hook data, same-chain releases, silent 
+approval, split validation, protocol fee bounds, invariant solvency.
 
 ## Environment Variables
 
 ### Root `.env`
 
-Template: `.env.example`
-
-Used by the Foundry deployment script.
-
-Important values:
-
-- `ARC_TESTNET_RPC`
-- `PRIVATE_KEY`
-- `ARBITER_ADDRESS`
-- `PAUSER_ADDRESS`
-- `DOMAIN_MANAGER_ADDRESS`
-- `PROTOCOL_TREASURY`
-- optional `USDC_ADDRESS`
-- optional `TOKEN_MESSENGER`
+| Variable | Purpose |
+|---|---|
+| `ARC_TESTNET_RPC` | Arc testnet RPC URL |
+| `PRIVATE_KEY` | Deployer private key |
+| `ARBITER_ADDRESS` | Arbiter wallet |
+| `PAUSER_ADDRESS` | Pauser wallet |
+| `DOMAIN_MANAGER_ADDRESS` | Domain manager wallet |
+| `PROTOCOL_TREASURY` | Fee collection address |
+| `USDC_ADDRESS` | Optional override |
+| `TOKEN_MESSENGER` | Optional override |
 
 ### Deploy `.env`
 
-Template: `deploy/.env.example`
-
-Used by Circle deployment scripts.
-
-Important values:
-
-- `CIRCLE_API_KEY`
-- `CIRCLE_ENTITY_SECRET`
-- `DEPLOYER_WALLET_ID`
-- `DEPLOYER_ADDRESS`
-- `ARBITER_ADDRESS`
-- `PAUSER_ADDRESS`
-- `DOMAIN_MANAGER_ADDRESS`
-- `DOMAIN_MANAGER_PRIVATE_KEY`
-- `PROTOCOL_TREASURY`
-- `ARC_RPC_URL`
-- `CONTRACT_ADDRESS`, filled after deployment
+| Variable | Purpose |
+|---|---|
+| `CIRCLE_API_KEY` | Circle API key |
+| `CIRCLE_ENTITY_SECRET` | Circle entity secret |
+| `DEPLOYER_WALLET_ID` | Circle wallet ID |
+| `DEPLOYER_ADDRESS` | Deployer address |
+| `ARBITER_ADDRESS` | Arbiter address |
+| `PAUSER_ADDRESS` | Pauser address |
+| `DOMAIN_MANAGER_ADDRESS` | Domain manager address |
+| `DOMAIN_MANAGER_PRIVATE_KEY` | Domain manager key |
+| `PROTOCOL_TREASURY` | Fee collection address |
+| `ARC_RPC_URL` | Arc RPC URL |
+| `CONTRACT_ADDRESS` | Filled after deployment |
 
 ### Bot `.env`
 
-Template: `bot/.env.example`
-
-Important values:
-
-- `TELEGRAM_BOT_TOKEN`
-- `ARC_TESTNET_RPC_URL`
-- `ARC_CHAIN_ID`
-- `CONTRACT_ADDRESS`
-- `ARBITER_TELEGRAM_ID`
-- optional `REMINDER_CRON`
-- optional `DEBUG`
-
-## Operational Notes
-
-- `deploy/.env`, root `.env`, `bot/.env`, and other real dotenv files are git-ignored.
-- The frontend currently stores its contract address in `frontend/src/lib/config.ts`.
-- Run `forge build` before running deployment scripts or the bot; both depend on the generated contract artifact.
-- For cross-chain releases, fetch the current Circle forwarding fee close to transaction submission.
-- Domain support is controlled on-chain through `addSupportedDomain` and `removeSupportedDomain`.
-- Same-chain Arc releases use domain `26` and do not require a CCTP forwarding fee.
-- The bot's SQLite database is created under `bot/data/` on first run.
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
+| `ARC_TESTNET_RPC_URL` | Arc RPC URL |
+| `ARC_CHAIN_ID` | Arc chain ID |
+| `CONTRACT_ADDRESS` | Deployed contract address |
+| `ARBITER_TELEGRAM_ID` | Arbiter's Telegram user ID |
+| `REMINDER_CRON` | Optional cron schedule |
+| `DEBUG` | Optional debug flag |
 
 ## Security Model
 
-This project includes several defensive measures:
+Defensive measures:
+- `ReentrancyGuard` on all token-moving entry points
+- `Pausable` deposits
+- OpenZeppelin role-based access control
+- Configurable review window with independent dispute handling 
+  per milestone
+- Sequential milestone enforcement
+- Refund accounting before withdrawal
+- Protocol fee cap at 5%
+- Supported-domain allowlist for CCTP destinations
+- CCTP Standard Transfer finality threshold only
+- Invoice JSON committed on-chain at deposit via 
+  `InvoiceSnapshotted` event, not just a URI reference
 
-- `ReentrancyGuard` on token-moving entry points.
-- `Pausable` deposits.
-- OpenZeppelin role-based access control.
-- Explicit dispute and delivery windows.
-- Sequential milestone enforcement.
-- Refund accounting before withdrawal.
-- Protocol fee cap.
-- Supported-domain allowlist.
-- CCTP Standard Transfer finality threshold only.
+Assumptions:
+- The arbiter is trusted to resolve disputes fairly
+- The default admin is trusted to manage roles, treasury, 
+  and fee settings
+- Supported CCTP domains must stay aligned with Circle's 
+  active domain support
+- Cross-chain completion depends on Circle CCTP V2 and its 
+  forwarding service
 
-Important assumptions:
+## Roadmap
 
-- The arbiter is trusted to resolve disputes fairly.
-- The default admin is trusted to manage roles, treasury, fee settings, and CCTP forward-fee configuration.
-- Supported CCTP domains must be kept aligned with Circle's active domain support.
-- Invoice and evidence URIs/hashes are application-level records; the contract stores references, not the underlying documents.
-- Cross-chain completion depends on Circle CCTP V2 and its forwarding service.
+Tranche is currently in testnet phase on Arc.
+
+**Phase 2 (pre-mainnet):** Embedded wallets via Turnkey. The payer 
+enters a recipient email at escrow creation. Turnkey creates a 
+wallet silently. The recipient logs in to find the escrow waiting. 
+Gas is sponsored via Circle Gas Station. Private key export is 
+available as an escape hatch. Off-ramp via MoonPay, Transak, or 
+Yellow Card.
+
+**Mainnet:** Role management migrated from deployer wallet to 
+multisig.
 
 ## Common Commands
 
 ```sh
-# Contracts
+# contracts
 forge build
 forge test
 forge fmt
@@ -544,14 +500,17 @@ forge fmt
 # Circle deployment
 cd deploy && npm run full
 
-# Frontend
+# sync ABI and address
+cd indexer && npm run sync
+
+# frontend
 cd frontend && npm run dev
 cd frontend && npm run build
 
-# Bot
+# bot
 cd bot && npm start
 ```
 
 ## License
 
-MIT, matching the Solidity SPDX headers.
+MIT
