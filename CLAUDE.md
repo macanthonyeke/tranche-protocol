@@ -21,7 +21,7 @@ in the same session before committing:
 - Changes to role definitions
 - Subgraph version updates
 - Test count changes (update the 236 tests figure)
-- Contract size changes (update the 23,211 bytes figure)
+- Contract size changes (update the 23,196 bytes figure)
 
 When updating README.md:
 - Check the relevant section and update it precisely
@@ -37,16 +37,16 @@ When updating README.md:
 
 | Key | Value |
 |-----|-------|
-| Contract address | `0x5e477f506aac4c2b422e769fdfbffafa939f5107` |
-| Deploy block | `46357272` |
+| Contract address | `0xe27e0b1aba2ff3ef95bac061e36283c544d78503` |
+| Deploy block | `46872189` |
 | Chain | Arc Testnet (chain ID 5042002) |
 | USDC | `0x3600000000000000000000000000000000000000` |
 | TokenMessenger | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
 | Deployer | `0x179cc4c8f23d257b7f4acb785464025570e3af86` |
 | Arbiter / Pauser / Treasury | `0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03` |
 | Explorer | https://testnet.arcscan.app |
-| Contract on explorer | https://testnet.arcscan.app/address/0x5e477f506aac4c2b422e769fdfbffafa939f5107 |
-| Source verified | Yes (Blockscout, 2026-06-09) |
+| Contract on explorer | https://testnet.arcscan.app/address/0xe27e0b1aba2ff3ef95bac061e36283c544d78503 |
+| Source verified | Yes (Blockscout, 2026-06-13) |
 
 ---
 
@@ -93,7 +93,7 @@ node setFee.js
 ```
 
 ### Bytecode size budget
-EIP-170 limit is **24,576 bytes**. Current runtime is **23,211 bytes — 1,365 bytes under the limit** (as of 2026-06-12). Arc Testnet does not enforce EIP-170 at the chain level, but Circle's `eth_estimateGas` does — always deploy via `npm run full-gas`. The contract is at `optimizer_runs = 1` and `via_ir = true` — both already at maximum size-reduction settings. The bulk-read views (`getDashboard`, `getEscrowsForPayer`, `getEscrowsForFreelancer`) were removed permanently; the Goldsky subgraph is the only bulk-read path.
+EIP-170 limit is **24,576 bytes**. Current runtime is **23,196 bytes — 1,380 bytes under the limit** (as of 2026-06-13). Arc Testnet does not enforce EIP-170 at the chain level, but Circle's `eth_estimateGas` does — always deploy via `npm run full-gas`. The contract is at `optimizer_runs = 1` and `via_ir = true` — both already at maximum size-reduction settings. The bulk-read views (`getDashboard`, `getEscrowsForPayer`, `getEscrowsForFreelancer`) were removed permanently; the Goldsky subgraph is the only bulk-read path.
 
 Constants that are `internal` (no public getter, not readable via RPC):
 `MAX_PROTOCOL_FEE`, `MAX_MILESTONES`, `MAX_SPLITS`, `MAX_CCTP_FORWARD_FEE`, `FORWARD_HOOK_DATA`, `CCTP_MIN_FINALITY_THRESHOLD`, `MIN_REVIEW_WINDOW`, `MAX_REVIEW_WINDOW`, `DELIVERY_GRACE_PERIOD`, `RECOVERY_MANAGER_ROLE`
@@ -139,15 +139,15 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.4.0/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.5.0/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.4.0` |
+| Subgraph name/version | `tranche-protocol/0.5.0` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
 The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; bulk reads (dashboard, arbiter queue) require Goldsky and throw if the endpoint is unset — there is no on-chain fallback. The endpoint is currently set.
 
-**Note:** Version 0.5.0 is staged in the local indexer (built, passing) but not yet deployed to Goldsky. It adds `InvoiceAcknowledged` and `InvoiceURIUpdated` handlers and the `InvoiceURIUpdate` entity. Deploy with `~/.local/bin/goldsky subgraph deploy tranche-protocol/0.5.0 --path .` from `indexer/` after the next contract redeploy.
+**Current live version:** 0.5.0 (deployed 2026-06-13). Adds `InvoiceAcknowledged` and `InvoiceURIUpdated` handlers and the `InvoiceURIUpdate` entity.
 
 ### Event handlers (current mapping — 0.4.0 live; 0.5.0 adds last two rows)
 

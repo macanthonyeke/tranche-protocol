@@ -22,7 +22,7 @@ about destination logistics.
 | Contract | `0x…` (updated after each deploy) |
 | Audit rounds | 5 complete, 0 Critical/High findings |
 | Test suite | 236 tests passing |
-| Contract size | 23,211 bytes (EIP-170 limit: 24,576) |
+| Contract size | 23,196 bytes (EIP-170 limit: 24,576) |
 | Subgraph | Goldsky v0.4.0 live (v0.5.0 built, pending deploy) |
 
 ## What It Does
