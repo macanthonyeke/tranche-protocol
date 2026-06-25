@@ -10,7 +10,7 @@
 
 ## Round 6 Verification Phase — Summary
 
-Four Trail of Bits plugins were run in order against the Round 6 surface:
+Four Trail of Bits plugins were run in order against the Round 6 surface, followed by a post-verification confirmation pass with variant-analysis:
 
 | Phase | Plugin | Result |
 |-------|--------|--------|
@@ -18,6 +18,7 @@ Four Trail of Bits plugins were run in order against the Round 6 surface:
 | 2 | sharp-edges | 6 findings — SE-1 / SE-5 fixed; SE-2 / SE-3 / SE-4 / SE-6 accepted as intentional |
 | 3 | spec-to-code-compliance | Fully compliant; 5 coverage gaps closed (CF-1..CF-5) |
 | 4 | differential-review | 2 off-manifest changes surfaced (DR-1, DR-2) |
+| post | variant-analysis | 0 untreated variants across all 3 seeds; 1 by-design asymmetry (VA-1) accepted |
 
 Final state: **264/264 tests, 14 suites, 23,722 bytes runtime, 854 under the 24,576 EIP-170 limit.**
 
@@ -55,3 +56,27 @@ Final state: **264/264 tests, 14 suites, 23,722 bytes runtime, 854 under the 24,
 ## SE-2 note for AuditBase (cross-reference)
 
 The `maxFee` split-vs-no-split asymmetry (no-split honors caller `maxFee` for H-04; split uses the `escrowCctpForwardFee` snapshot) is deliberate and pre-documented. See the existing `maxFee` asymmetry design note before the AuditBase call so it is not flagged as a fresh finding.
+
+---
+
+## VA-1 — resolveDispute vs mutualSettle maxFee asymmetry (variant-analysis, accepted)
+
+Surfaced by variant-analysis (SEED 2). resolveDispute forwards the arbiter-supplied
+maxFee into _assertCrossChainFee and _executePartialRelease; mutualSettle
+deliberately substitutes the snapshot e.escrowCctpForwardFee instead. This
+asymmetry is intentional, not an oversight:
+
+- The arbiter value is bounded [snapshot, burnAmount): floored by _assertCrossChainFee
+  (no under-quote) and capped below burn by H-04 (no full-payout consumption). It
+  only reaches _approveAndBurn in the no-split case; the split branch ignores it and
+  burns each leg at the snapshot.
+- ARBITER_ROLE already sets _recipientBps directly (0..10000) and can route 100% away
+  from the recipient. Any harm reachable via maxFee is strictly dominated by that
+  existing intended power. A compromised arbiter is out-of-model by design.
+- mutualSettle hardens against maxFee because its two completing parties are
+  mutually-distrusting counterparties, either of whom could grief the other via fee
+  choice — a real conflict of interest the snapshot neutralizes. resolveDispute has
+  a single trusted neutral, so the substitution is unnecessary. Each path's maxFee
+  treatment correctly reflects its own trust model.
+
+Verdict: accepted, no code change.
