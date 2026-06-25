@@ -116,9 +116,37 @@ contract TrancheProtocolInvoiceAckTest is Base {
     }
 
     function test_UpdateInvoiceURI_RevertOn_EmptyURI() public {
-        uint256 id = _depositSingle(1000e6);
+        // Use an un-acknowledged escrow so the empty-URI check is reached; on an
+        // acknowledged escrow the InvoiceLocked freeze would short-circuit first.
+        uint256 id = _depositUnacknowledged(1000e6);
         vm.prank(depositor);
         vm.expectRevert(NoInvoiceURI.selector);
         escrow.updateInvoiceURI(id, "");
+    }
+
+    function test_UpdateInvoiceURI_RevertOn_PostAck() public {
+        // SE-1 core proof: once the recipient acknowledges, the depositor can no
+        // longer mutate the invoice URI (no bait-and-switch).
+        uint256 id = _depositUnacknowledged(1000e6);
+        vm.prank(recipient);
+        escrow.acknowledgeInvoice(id);
+
+        vm.prank(depositor);
+        vm.expectRevert(InvoiceLocked.selector);
+        escrow.updateInvoiceURI(id, "ipfs://new");
+    }
+
+    function test_UpdateInvoiceURI_Succeeds_PreAck() public {
+        // The freeze only restricts post-ack updates; before ack the depositor
+        // may still correct the URI.
+        uint256 id = _depositUnacknowledged(1000e6);
+
+        vm.expectEmit(true, false, false, true);
+        emit InvoiceURIUpdated(id, INVOICE_URI, "ipfs://updated");
+
+        vm.prank(depositor);
+        escrow.updateInvoiceURI(id, "ipfs://updated");
+
+        assertEq(escrow.getEscrow(id).invoiceURI, "ipfs://updated");
     }
 }

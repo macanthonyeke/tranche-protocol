@@ -367,6 +367,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (msg.sender != e.depositor) revert NotEscrowOwner();
         if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        if (e.invoiceAcknowledgedAt != 0) revert InvoiceLocked();
         if (bytes(newURI).length == 0) revert NoInvoiceURI();
         string memory oldURI = e.invoiceURI;
         e.invoiceURI = newURI;

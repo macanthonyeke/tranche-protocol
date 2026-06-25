@@ -273,6 +273,9 @@ interface ITrancheProtocol {
     error InvoiceNotAcknowledged();
     /// @dev Thrown by acknowledgeInvoice when the invoice has already been acknowledged.
     error InvoiceAlreadyAcknowledged();
+    /// @dev Thrown by updateInvoiceURI when the invoice is already acknowledged;
+    ///      the URI is frozen post-ack so it cannot be bait-and-switched.
+    error InvoiceLocked();
     error NoEvidence();
     error NoEvidenceURI();
     error NoDisputeReason();
