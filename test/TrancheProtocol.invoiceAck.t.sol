@@ -181,4 +181,91 @@ contract TrancheProtocolInvoiceAckTest is Base {
 
         assertEq(escrow.getEscrow(id).invoiceURI, "ipfs://updated");
     }
+
+    function test_UpdateInvoiceURI_Freeze_Precedes_EmptyCheck() public {
+        // CF-5: on an ACKNOWLEDGED escrow, an empty-URI update must hit the
+        // InvoiceLocked freeze (SE-1), NOT the NoInvoiceURI empty-string check.
+        // Pins the guard ordering at TrancheProtocol.sol: the freeze precedes
+        // the empty-URI validation, so the freeze takes precedence.
+        uint256 id = _depositUnacknowledged(1000e6);
+        vm.prank(recipient);
+        escrow.acknowledgeInvoice(id);
+
+        vm.prank(depositor);
+        vm.expectRevert(InvoiceLocked.selector);
+        escrow.updateInvoiceURI(id, "");
+    }
+
+    // ----------------------------------------------------------------------
+    // acknowledgeInvoice event
+    // ----------------------------------------------------------------------
+
+    function test_AcknowledgeInvoice_EmitsEvent() public {
+        // CF-2: acknowledgeInvoice must emit InvoiceAcknowledged binding the
+        // escrow's immutable invoiceHash (third, non-indexed arg) — NOT the
+        // mutable invoiceURI. Checking the data field with INVOICE_HASH proves
+        // the binding.
+        uint256 id = _depositUnacknowledged(1000e6);
+
+        // topic1 escrowId, topic2 acknowledger, no topic3, check data (hash).
+        vm.expectEmit(true, true, false, true);
+        emit InvoiceAcknowledged(id, recipient, INVOICE_HASH);
+
+        vm.prank(recipient);
+        escrow.acknowledgeInvoice(id);
+    }
+
+    // ----------------------------------------------------------------------
+    // Invoice-surface revert hygiene
+    // ----------------------------------------------------------------------
+
+    function test_Deposit_RevertOn_ZeroHash() public {
+        // CF-1: a zero invoiceHash is rejected even with a valid non-empty URI.
+        uint256 amount = 1000e6;
+        SplitRecipient[] memory noSplits = new SplitRecipient[](0);
+        vm.startPrank(depositor);
+        usdc.approve(address(escrow), amount);
+        vm.expectRevert(NoInvoice.selector);
+        escrow.deposit(
+            recipient,
+            refundTo,
+            amount,
+            DEST_DOMAIN,
+            MINT_RECIPIENT,
+            REVIEW_WINDOW,
+            bytes32(0),
+            INVOICE_URI,
+            _singleMilestone(amount),
+            block.timestamp + 30 days,
+            noSplits,
+            ""
+        );
+        vm.stopPrank();
+    }
+
+    function test_UpdateInvoiceURI_RevertOn_NonDepositor() public {
+        // CF-3: only the depositor may mutate the invoice URI. The recipient is
+        // a non-depositor and must hit NotEscrowOwner.
+        uint256 id = _depositUnacknowledged(1000e6);
+        vm.prank(recipient);
+        vm.expectRevert(NotEscrowOwner.selector);
+        escrow.updateInvoiceURI(id, "ipfs://x");
+    }
+
+    function test_UpdateInvoiceURI_RevertOn_NonActive() public {
+        // CF-4: the URI cannot be mutated once the escrow leaves ACTIVE. Drive
+        // it to CANCELLED via mutualCancel BEFORE any ack, so the non-ACTIVE
+        // NoDeposit guard fires — not the InvoiceLocked freeze (which never
+        // arms on an un-acknowledged escrow).
+        uint256 id = _depositUnacknowledged(1000e6);
+        vm.prank(depositor);
+        escrow.mutualCancel(id);
+        vm.prank(recipient);
+        escrow.mutualCancel(id);
+        assertEq(uint256(_getEscrowState(id)), uint256(EscrowState.CANCELLED));
+
+        vm.prank(depositor);
+        vm.expectRevert(NoDeposit.selector);
+        escrow.updateInvoiceURI(id, "ipfs://x");
+    }
 }
