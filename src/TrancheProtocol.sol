@@ -357,6 +357,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         Escrow storage e = escrows[escrowId];
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (msg.sender != e.recipient) revert NotRecipient();
+        // SE-5: acknowledgment is only meaningful on an ACTIVE escrow — it
+        // exists solely to unlock claimDelivery, which itself requires ACTIVE.
+        // Block it on terminal states (COMPLETED/CANCELLED). Mirrors the state
+        // guard on updateInvoiceURI; reuses NoDeposit. No whenNotPaused: ack is
+        // a release precondition and must not be censorable by a pause.
+        if (e.state != EscrowState.ACTIVE) revert NoDeposit();
         if (e.invoiceAcknowledgedAt != 0) revert InvoiceAlreadyAcknowledged();
         e.invoiceAcknowledgedAt = block.timestamp;
         emit InvoiceAcknowledged(escrowId, msg.sender, e.invoiceHash);

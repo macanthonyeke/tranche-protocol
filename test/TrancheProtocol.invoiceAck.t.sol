@@ -67,6 +67,38 @@ contract TrancheProtocolInvoiceAckTest is Base {
         escrow.acknowledgeInvoice(99999);
     }
 
+    function test_AcknowledgeInvoice_RevertOn_TerminalState() public {
+        // SE-5: ack is blocked once an escrow leaves ACTIVE. Both terminal
+        // states are reachable WITHOUT acknowledging first, so each cleanly
+        // proves the NoDeposit guard.
+
+        // CANCELLED — via mutualCancel (both parties agree; PENDING milestones
+        // are refunded). Not ack-gated, no time warp needed.
+        uint256 cancelled = _depositUnacknowledged(1000e6);
+        vm.prank(depositor);
+        escrow.mutualCancel(cancelled);
+        vm.prank(recipient);
+        escrow.mutualCancel(cancelled);
+        assertEq(uint256(_getEscrowState(cancelled)), uint256(EscrowState.CANCELLED));
+
+        vm.prank(recipient);
+        vm.expectRevert(NoDeposit.selector);
+        escrow.acknowledgeInvoice(cancelled);
+
+        // COMPLETED — via refundAfterDeadline on every milestone (the no-claim
+        // path, which is not ack-gated). The normal release route to COMPLETED
+        // runs through claimDelivery, which IS ack-gated, so COMPLETED cannot be
+        // reached pre-ack any other way.
+        uint256 completed = _depositUnacknowledged(1000e6);
+        vm.warp(block.timestamp + 30 days + 72 hours + 1);
+        escrow.refundAfterDeadline(completed, 0);
+        assertEq(uint256(_getEscrowState(completed)), uint256(EscrowState.COMPLETED));
+
+        vm.prank(recipient);
+        vm.expectRevert(NoDeposit.selector);
+        escrow.acknowledgeInvoice(completed);
+    }
+
     // ----------------------------------------------------------------------
     // claimDelivery gating on acknowledgement
     // ----------------------------------------------------------------------
