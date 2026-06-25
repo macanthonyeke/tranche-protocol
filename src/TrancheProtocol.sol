@@ -128,6 +128,12 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     ///         {claimRefundCreditTransfer}, proving it is real and controlled.
     mapping(address => address) public pendingRefundRecovery;
 
+    /// @notice Proposal timestamp for the matching {pendingRefundRecovery}
+    ///         entry. A claim is rejected once block.timestamp exceeds
+    ///         proposedAt + ARBITER_WINDOW (14 days), bounding how long an
+    ///         unclaimed recovery proposal stays open.
+    mapping(address => uint256) public pendingRefundRecoveryAt;
+
     constructor(
         address _usdc,
         address _arbiter,
@@ -225,9 +231,11 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (_totalAmount == 0) revert InvalidAmount();
         if (_recipient == address(0)) revert ZeroAddress();
         if (address(uint160(uint256(_mintRecipient))) == address(0)) revert ZeroAddress();
+        if (uint256(_mintRecipient) >> 160 != 0) revert InvalidMintRecipient();
         if (_reviewWindow < MIN_REVIEW_WINDOW) revert ReviewWindowTooShort();
         if (_reviewWindow > MAX_REVIEW_WINDOW) revert ReviewWindowTooLong();
         if (_invoiceHash == bytes32(0)) revert NoInvoice();
+        if (bytes(_invoiceURI).length == 0) revert NoInvoiceURI();
         if (_deadline == 0) revert DeadlineRequired();
         if (_deadline <= block.timestamp + 1 hours) revert DeadlineTooSoon();
         if (_deadline >= block.timestamp + 3650 days) revert DeadlineTooFar();
@@ -308,6 +316,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             recipientApproveCancel: false,
             invoiceHash: _invoiceHash,
             invoiceURI: _invoiceURI,
+            invoiceAcknowledgedAt: 0,
             deadline: _deadline,
             milestoneCount: _milestoneAmounts.length,
             state: EscrowState.ACTIVE,
@@ -348,6 +357,8 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         Escrow storage e = escrows[escrowId];
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (msg.sender != e.recipient) revert NotRecipient();
+        if (e.invoiceAcknowledgedAt != 0) revert InvoiceAlreadyAcknowledged();
+        e.invoiceAcknowledgedAt = block.timestamp;
         emit InvoiceAcknowledged(escrowId, msg.sender, e.invoiceHash);
     }
 
@@ -356,6 +367,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (msg.sender != e.depositor) revert NotEscrowOwner();
         if (e.state != EscrowState.ACTIVE) revert NoDeposit();
+        if (bytes(newURI).length == 0) revert NoInvoiceURI();
         string memory oldURI = e.invoiceURI;
         e.invoiceURI = newURI;
         emit InvoiceURIUpdated(escrowId, oldURI, newURI);
@@ -378,6 +390,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (e.depositor == address(0)) revert EscrowDoesNotExist();
         if (e.state != EscrowState.ACTIVE) revert NoDeposit();
         if (msg.sender != e.recipient) revert NotRecipient();
+        if (e.invoiceAcknowledgedAt == 0) revert InvoiceNotAcknowledged();
         if (milestoneIndex >= e.milestoneCount) revert InvalidMilestoneIndex();
         if (m.state != MilestoneState.PENDING) revert InvalidState();
         // Delivery may be claimed up to DELIVERY_GRACE_PERIOD past the nominal
@@ -829,6 +842,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // so any pending two-step recovery proposal targeting it is moot. Clear
         // it so a stale nominee cannot later sweep credit this wallet re-accrues.
         delete pendingRefundRecovery[msg.sender];
+        delete pendingRefundRecoveryAt[msg.sender];
 
         if (destinationDomain == 0) {
             // Arc path: unchanged behaviour.
@@ -847,11 +861,13 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // Users always pass a normal wallet address; the contract handles the
         // bytes32 conversion CCTP expects.
         bytes32 recipientB32 = bytes32(uint256(uint160(mintRecipient)));
-        uint256 burnAmount = amount - maxFee;
 
         refundBalances[msg.sender] = 0;
 
-        _approveAndBurn(burnAmount, destinationDomain, recipientB32, maxFee);
+        // Burn the FULL amount and pass maxFee only as the cap; CCTP deducts its
+        // forwarding fee from the burned amount on the destination (mirrors the
+        // release path). Subtracting maxFee here would strand that slice.
+        _approveAndBurn(amount, destinationDomain, recipientB32, maxFee);
 
         emit RefundWithdrawn(recipient, amount);
     }
@@ -872,6 +888,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // F5: re-keying credit from this wallet proves it is live, so clear any
         // pending recovery proposal targeting it (see {withdrawRefund}).
         delete pendingRefundRecovery[msg.sender];
+        delete pendingRefundRecoveryAt[msg.sender];
 
         refundBalances[msg.sender] = 0;
         refundBalances[newOwner] += amount;
@@ -900,6 +917,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         if (refundBalances[blacklistedWallet] == 0) revert NothingToWithdraw();
 
         pendingRefundRecovery[blacklistedWallet] = newOwner;
+        pendingRefundRecoveryAt[blacklistedWallet] = block.timestamp;
 
         emit RefundCreditTransferProposed(blacklistedWallet, newOwner, block.timestamp);
     }
@@ -912,6 +930,9 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
     function claimRefundCreditTransfer(address blacklistedWallet) external nonReentrant {
         address proposed = pendingRefundRecovery[blacklistedWallet];
         if (proposed == address(0)) revert NoPendingRecovery();
+        if (block.timestamp > pendingRefundRecoveryAt[blacklistedWallet] + ARBITER_WINDOW) {
+            revert RecoveryProposalExpired();
+        }
         if (msg.sender != proposed) revert NotProposedOwner();
 
         uint256 amount = refundBalances[blacklistedWallet];
@@ -920,6 +941,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         refundBalances[blacklistedWallet] = 0;
         refundBalances[msg.sender] += amount;
         delete pendingRefundRecovery[blacklistedWallet];
+        delete pendingRefundRecoveryAt[blacklistedWallet];
 
         emit RefundCreditTransferred(blacklistedWallet, msg.sender, amount);
     }
@@ -939,6 +961,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // A zero bytes32 decodes to address(0), so the decode check below covers
         // both the all-zero case and a non-zero word with a zero low-160 address.
         if (address(uint160(uint256(newAddress))) == address(0)) revert ZeroAddress();
+        if (uint256(newAddress) >> 160 != 0) revert InvalidMintRecipient();
         // ARC_DOMAIN is the home chain — same-chain transfer is always
         // available even if the domain manager removed it from
         // supportedDomains. Other domains must be on the allow-list.
@@ -993,6 +1016,7 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         // A zero bytes32 decodes to address(0), so the decode check below covers
         // both the all-zero case and a non-zero word with a zero low-160 address.
         if (address(uint160(uint256(newAddress))) == address(0)) revert ZeroAddress();
+        if (uint256(newAddress) >> 160 != 0) revert InvalidSplitMintRecipient();
         if (newDestinationDomain != ARC_DOMAIN && !supportedDomains[newDestinationDomain]) revert UnsupportedDomain();
 
         // F3: an Arc split's share was never floor-validated for a cross-chain
@@ -1184,27 +1208,6 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
         c.paused = paused();
     }
 
-    /// @notice Returns IDs of all escrows that have at least one DISPUTED
-    ///         milestone. View-only; intended for the arbiter panel.
-    function getDisputedEscrows() external view returns (uint256[] memory ids) {
-        uint256 count = escrowCount;
-        uint256[] memory buf = new uint256[](count);
-        uint256 found = 0;
-        for (uint256 id = 1; id <= count; id++) {
-            uint256 mc = escrows[id].milestoneCount;
-            for (uint256 i = 0; i < mc; i++) {
-                if (milestones[id][i].state == MilestoneState.DISPUTED) {
-                    buf[found++] = id;
-                    break;
-                }
-            }
-        }
-        ids = new uint256[](found);
-        for (uint256 i = 0; i < found; i++) {
-            ids[i] = buf[i];
-        }
-    }
-
     // =========================================================================
     // Internal: CCTP release with protocol fee + optional splits
     // =========================================================================
@@ -1269,10 +1272,24 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
 
         SplitRecipient[] storage s = splits[escrowId];
         if (s.length == 0) {
-            // H-04: bound the maxFee at burnAmount-1. CCTP's forwarder
-            // reverts when maxFee >= amount, but failing here gives a clear
-            // custom error instead of a generic CCTP revert.
-            _approveAndBurn(remainder, e.destinationDomain, e.mintRecipient, cctpMaxFee);
+            // Finding 3: a partial release (resolveDispute / mutualSettle) can
+            // scale the recipient share below the CCTP forwarding-fee floor,
+            // which would revert MaxFeeExceedsBurnAmount in _approveAndBurn and
+            // leave the milestone unsettleable. A full release can never reach
+            // this branch (the deposit-time fee-floor guard proves it), so a
+            // cross-chain leg at-or-below the floor here is, by construction, a
+            // partial leg too small to mail. Credit it to the recipient's Arc
+            // refundBalances instead, withdrawable via withdrawRefund. ARC legs
+            // transfer fine and are never diverted.
+            if (e.destinationDomain != ARC_DOMAIN && remainder <= e.escrowCctpForwardFee) {
+                refundBalances[e.recipient] += remainder;
+                emit CrossChainLegCreditedOnArc(escrowId, milestoneIndex, e.recipient, remainder);
+            } else {
+                // H-04: bound the maxFee at burnAmount-1. CCTP's forwarder
+                // reverts when maxFee >= amount, but failing here gives a clear
+                // custom error instead of a generic CCTP revert.
+                _approveAndBurn(remainder, e.destinationDomain, e.mintRecipient, cctpMaxFee);
+            }
         } else {
             uint256 distributed = 0;
             uint256 last = s.length - 1;
@@ -1286,14 +1303,24 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
                     distributed += share;
                 }
                 if (share > 0) {
-                    // F1: each split is an independent CCTP burn that incurs
-                    // Circle's full per-burn forwarding fee, which is keyed to
-                    // destination gas, not to the share size. The old bps-scaled
-                    // `perShareMaxFee` under-quoted every non-100% split, so the
-                    // burn was attested but never minted (INSUFFICIENT_FEE). Use
-                    // the per-escrow floor for every cross-chain leg; ARC legs are
-                    // forced to maxFee = 0 inside `_approveAndBurn`.
-                    _approveAndBurn(share, s[i].destinationDomain, s[i].mintRecipient, e.escrowCctpForwardFee);
+                    // Finding 3 (split leg variant): same divert-to-Arc fallback
+                    // as the no-split branch. A cross-chain split leg whose share
+                    // is at-or-below the per-escrow forwarding-fee floor would
+                    // revert in _approveAndBurn; credit the leg's decoded Arc
+                    // address instead. Matches resolveDisputeByTimeout's split
+                    // crediting. ARC legs are never diverted (they transfer fine).
+                    if (s[i].destinationDomain != ARC_DOMAIN && share <= e.escrowCctpForwardFee) {
+                        address legAddr = address(uint160(uint256(s[i].mintRecipient)));
+                        refundBalances[legAddr] += share;
+                        emit CrossChainLegCreditedOnArc(escrowId, milestoneIndex, legAddr, share);
+                    } else {
+                        // F1: each split is an independent CCTP burn that incurs
+                        // Circle's full per-burn forwarding fee, which is keyed to
+                        // destination gas, not to the share size. Use the per-escrow
+                        // floor for every cross-chain leg; ARC legs are forced to
+                        // maxFee = 0 inside `_approveAndBurn`.
+                        _approveAndBurn(share, s[i].destinationDomain, s[i].mintRecipient, e.escrowCctpForwardFee);
+                    }
                 }
             }
         }
@@ -1351,8 +1378,10 @@ contract TrancheProtocol is ITrancheProtocol, AccessControl, Pausable, Reentranc
             crossChain = e.destinationDomain != ARC_DOMAIN;
         } else {
             for (uint256 i = 0; i < s.length; i++) {
-                if (s[i].destinationDomain != ARC_DOMAIN) crossChain = true;
-                break;
+                if (s[i].destinationDomain != ARC_DOMAIN) {
+                    crossChain = true;
+                    break;
+                }
             }
         }
         if (crossChain) {

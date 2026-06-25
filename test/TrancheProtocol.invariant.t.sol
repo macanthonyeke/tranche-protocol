@@ -109,7 +109,10 @@ contract Handler is Test, ITrancheProtocol {
         uint256 count = escrow.getEscrow(id).milestoneCount;
         if (count == 0) return;
         uint256 idx = idxSeed % count;
-        vm.prank(escrow.getEscrow(id).recipient);
+        address recip = escrow.getEscrow(id).recipient;
+        vm.prank(recip);
+        try escrow.acknowledgeInvoice(id) {} catch {}
+        vm.prank(recip);
         try escrow.claimDelivery(id, idx) {
             claimCalls++;
         } catch {}

@@ -177,6 +177,9 @@ contract TrancheProtocolCctpSignalTest is Base {
             ""
         );
         vm.stopPrank();
+
+        vm.prank(recipient);
+        escrow.acknowledgeInvoice(id);
     }
 
     /// @dev Most recent CCTP burn call in MockTokenMessenger's storage order.

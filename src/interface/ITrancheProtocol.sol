@@ -38,6 +38,9 @@ interface ITrancheProtocol {
         bool recipientApproveCancel;
         bytes32 invoiceHash;
         string invoiceURI;
+        // Zero means not acknowledged. Non-zero is the block.timestamp at which
+        // the recipient called acknowledgeInvoice.
+        uint256 invoiceAcknowledgedAt;
         uint256 deadline;
         uint256 milestoneCount;
         EscrowState state;
@@ -97,6 +100,7 @@ interface ITrancheProtocol {
         uint256 disputedMilestoneCount;
         bytes32 invoiceHash;
         string invoiceURI;
+        uint256 invoiceAcknowledgedAt;
     }
 
     /// @notice Everything the escrow detail page needs in one call.
@@ -229,6 +233,15 @@ interface ITrancheProtocol {
     event PartialRefundCredited(
         uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed refundTo, uint256 amount
     );
+    /// @dev Emitted when a cross-chain recipient leg in a partial release
+    ///      (resolveDispute / mutualSettle) is too small to clear the CCTP
+    ///      forwarding-fee floor, so the amount is credited to the recipient's
+    ///      Arc refundBalances instead of being burned cross-chain. The credited
+    ///      party withdraws it via withdrawRefund (to Arc, or cross-chain once
+    ///      it clears the floor).
+    event CrossChainLegCreditedOnArc(
+        uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed creditedTo, uint256 amount
+    );
     event MutualSettlementProposed(
         uint256 indexed escrowId, uint256 indexed milestoneIndex, address indexed proposer, uint256 bps
     );
@@ -256,6 +269,10 @@ interface ITrancheProtocol {
     error NothingToWithdraw();
     error NoInvoice();
     error NoInvoiceURI();
+    /// @dev Thrown by claimDelivery when the recipient has not yet acknowledged the invoice.
+    error InvoiceNotAcknowledged();
+    /// @dev Thrown by acknowledgeInvoice when the invoice has already been acknowledged.
+    error InvoiceAlreadyAcknowledged();
     error NoEvidence();
     error NoEvidenceURI();
     error NoDisputeReason();
@@ -317,6 +334,9 @@ interface ITrancheProtocol {
     error NoPendingRecovery();
     /// @notice Caller is not the wallet proposed in the pending recovery (M-03).
     error NotProposedOwner();
+    /// @notice The pending recovery proposal has expired (more than
+    ///         ARBITER_WINDOW elapsed since it was proposed).
+    error RecoveryProposalExpired();
     /// @notice `splitIndex` is out of range for the escrow's splits (L-03).
     error InvalidSplitIndex();
 
@@ -340,6 +360,11 @@ interface ITrancheProtocol {
     ///         top 12 bytes, indicating it is not a valid left-padded EVM
     ///         address. Depositing silently would strand funds on release.
     error InvalidSplitMintRecipient();
+
+    /// @notice A single-recipient `mintRecipient` has non-zero bytes in the top
+    ///         12 bytes, indicating it is not a valid left-padded EVM address.
+    ///         Accepting it silently would strand funds on a cross-chain release.
+    error InvalidMintRecipient();
 
     /// @notice {extendDeadline} was called with a `newDeadline` that is not
     ///         strictly greater than the escrow's current deadline.

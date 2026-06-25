@@ -103,6 +103,8 @@ abstract contract Base is Test, ITrancheProtocol {
             ""
         );
         vm.stopPrank();
+        vm.prank(_recipient);
+        escrow.acknowledgeInvoice(escrowId);
     }
 
     /// @notice Recipient claims delivery, opening the review window (replaces
@@ -160,19 +162,19 @@ abstract contract Base is Test, ITrancheProtocol {
     }
 
     function _getEscrowState(uint256 escrowId) internal view returns (EscrowState) {
-        (,,,,,,,,,,,,, EscrowState s,) = escrow.escrows(escrowId);
+        (,,,,,,,,,,,,,, EscrowState s,) = escrow.escrows(escrowId);
         return s;
     }
 
     function _getEscrowDepositor(uint256 escrowId) internal view returns (address d) {
-        (d,,,,,,,,,,,,,,) = escrow.escrows(escrowId);
+        (d,,,,,,,,,,,,,,,) = escrow.escrows(escrowId);
     }
 
     function _getEscrowMilestoneCount(uint256 escrowId) internal view returns (uint256 c) {
-        (,,,,,,,,,,,, c,,) = escrow.escrows(escrowId);
+        (,,,,,,,,,,,,, c,,) = escrow.escrows(escrowId);
     }
 
     function _getEscrowTotalAmount(uint256 escrowId) internal view returns (uint256 t) {
-        (,,, t,,,,,,,,,,,) = escrow.escrows(escrowId);
+        (,,, t,,,,,,,,,,,,) = escrow.escrows(escrowId);
     }
 }
