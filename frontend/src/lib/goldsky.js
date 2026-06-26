@@ -1,6 +1,5 @@
 // Goldsky subgraph client. Replaces the contract's gas-bomb looping view
-// functions (getDashboard / getDisputedEscrows / getEscrowsForPayer /
-// getEscrowsForFreelancer) as the frontend's bulk data source.
+// functions as the frontend's bulk data source.
 //
 // Cutover is gated on VITE_GOLDSKY_ENDPOINT: when unset, the hooks in
 // useEscrows.js fall back to the on-chain reads, so the app keeps working
@@ -8,7 +7,7 @@
 //
 // Known limitations inherited from the contract's events (see indexer/README):
 //   - escrow COMPLETED state is not emitted, so `state` is ACTIVE until a
-//     mutual cancel; activeEscrowCount may over-count vs on-chain getDashboard.
+//     mutual cancel; activeEscrowCount may over-count the true active set.
 //   - milestoneCount is best-effort (highest milestone index seen + 1).
 
 const ENDPOINT = import.meta.env.VITE_GOLDSKY_ENDPOINT || ''

@@ -1,10 +1,9 @@
 # Tranche Protocol indexer (Goldsky subgraph)
 
 Indexes Tranche Protocol events on **Arc testnet** and exposes a GraphQL API so
-the frontend stops depending on the contract's looping view functions
-(`getDashboard`, `getDisputedEscrows`, `getEscrowsForPayer/Freelancer`,
-`_collectByParticipant`), which scan every escrow per `eth_call` and will hit the
-gas limit as the protocol grows. Single-escrow reads stay on-chain.
+the frontend stops depending on the contract's looping view functions, which
+scanned every escrow per `eth_call` and would hit the gas limit as the protocol
+grows. Single-escrow reads stay on-chain.
 
 Goldsky supports Arc via the Arc Builders Fund (Subgraphs + Turbo).
 
@@ -78,7 +77,7 @@ The events alone can't fully reconstruct every dashboard field:
    on-chain `getMilestones(escrowId)`.
 2. **No event signals escrow `COMPLETED`.** `Escrow.state` is `ACTIVE` until a
    mutual cancel (`CANCELLED`); the dashboard's `activeEscrowCount` may over-count
-   vs on-chain `getDashboard`.
+   the true active set.
 
 **Recommendation:** add `milestoneCount` (and ideally per-milestone amounts) to
 `EscrowCreated`, and emit an `EscrowCompleted` event, to make the dashboard fully
@@ -88,6 +87,6 @@ event-sourced. Cheap to add; no logic change. Until then the gaps above stand.
 
 - Goldsky dashboard shows the subgraph syncing / processing blocks.
 - Frontend dashboard + arbiter panel load lists with `VITE_GOLDSKY_ENDPOINT` set
-  (Network tab shows GraphQL POSTs, no `getDashboard`/`getDisputedEscrows` calls).
+  (Network tab shows GraphQL POSTs, not on-chain bulk-read calls).
 - Spot-check: `refundBalance.balance` from the subgraph matches on-chain
   `getRefundBalance(wallet)`.
