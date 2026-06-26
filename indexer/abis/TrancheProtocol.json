@@ -422,6 +422,11 @@
         "internalType": "string"
       },
       {
+        "name": "invoiceAcknowledgedAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "deadline",
         "type": "uint256",
         "internalType": "uint256"
@@ -505,19 +510,6 @@
   },
   {
     "type": "function",
-    "name": "getDisputedEscrows",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "ids",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "getEscrow",
     "inputs": [
       {
@@ -586,6 +578,11 @@
             "name": "invoiceURI",
             "type": "string",
             "internalType": "string"
+          },
+          {
+            "name": "invoiceAcknowledgedAt",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
             "name": "deadline",
@@ -697,6 +694,11 @@
                 "name": "invoiceURI",
                 "type": "string",
                 "internalType": "string"
+              },
+              {
+                "name": "invoiceAcknowledgedAt",
+                "type": "uint256",
+                "internalType": "uint256"
               },
               {
                 "name": "deadline",
@@ -1236,6 +1238,25 @@
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingRefundRecoveryAt",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -1854,6 +1875,37 @@
         "type": "bytes32",
         "indexed": false,
         "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CrossChainLegCreditedOnArc",
+    "inputs": [
+      {
+        "name": "escrowId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "milestoneIndex",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "creditedTo",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -2985,6 +3037,11 @@
   },
   {
     "type": "error",
+    "name": "InvalidMintRecipient",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidRefundRecipient",
     "inputs": []
   },
@@ -3001,6 +3058,21 @@
   {
     "type": "error",
     "name": "InvalidState",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvoiceAlreadyAcknowledged",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvoiceLocked",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvoiceNotAcknowledged",
     "inputs": []
   },
   {
@@ -3121,6 +3193,11 @@
   {
     "type": "error",
     "name": "PreviousMilestoneNotComplete",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RecoveryProposalExpired",
     "inputs": []
   },
   {
