@@ -579,15 +579,11 @@ Either party proposes cancellation for a `PENDING` or `IN_REVIEW` milestone. Whe
 
 The view layer is frontend-friendly:
 
-- `splitsLength`
-- `getRefundBalance`
 - `getEscrow`
 - `getMilestones`
-- `getDisputes`
 - `getSplits`
 - `isReviewWindowExpired`
 - `isClaimed`
-- `getRole`
 - `getEscrowDetail`
 - `getCallerRoles`
 - `getProtocolConfig`

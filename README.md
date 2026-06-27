@@ -133,7 +133,8 @@ during this window with a mandatory evidence hash.
 - Arbiter timeout: if unresolved after 14 days, either party can 
   call `resolveDisputeByTimeout` for an unconditional 50/50 split.
 - Silent approval: the recipient signals delivery. If the depositor 
-  doesn't respond within 72 hours, anyone can trigger release.
+  doesn't dispute within the review window (1-7 days, set at deposit), 
+  anyone can call `release`.
 
 **5. Exits**
 - Mutual cancel: both parties agree to cancel. Unreleased funds 
