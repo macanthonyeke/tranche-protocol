@@ -24,6 +24,12 @@ type Escrow @entity(immutable: false) {
   escrowId: BigInt!
   depositor: Bytes!
   recipient: Bytes!
+
+  "Single-recipient cross-chain payout target (bytes32 mintRecipient). Populated at create from getEscrow(); overwritten by ReceivingAddressUpdated. Null only if the create-time bind reverted."
+  mintRecipient: Bytes
+  "Single-recipient CCTP destination domain (26 = Arc / same-chain). Populated at create; overwritten by ReceivingAddressUpdated."
+  destinationDomain: Int
+
   totalAmount: BigInt!
   invoiceHash: Bytes!
   invoiceURI: String!
@@ -69,6 +75,7 @@ type Escrow @entity(immutable: false) {
   splits: [Split!]! @derivedFrom(field: "escrow")
   disputes: [Dispute!]! @derivedFrom(field: "escrow")
   refundCredits: [RefundCredit!]! @derivedFrom(field: "escrow")
+  crossChainCredits: [CrossChainLegCredit!]! @derivedFrom(field: "escrow")
   evidenceEntries: [EvidenceEntry!]! @derivedFrom(field: "escrow")
 }
 
@@ -125,7 +132,7 @@ type Dispute @entity(immutable: false) {
   resolutionType: String
 }
 
-type Split @entity(immutable: true) {
+type Split @entity(immutable: false) {
   "escrowId-index"
   id: ID!
   escrow: Escrow!
@@ -159,6 +166,19 @@ type EvidenceEntry @entity(immutable: true) {
   tx: Bytes!
 }
 
+
+"Immutable ledger of cross-chain legs diverted to an Arc refund credit (CrossChainLegCreditedOnArc — Finding 3 / SE-3). Append-only; powers the 'small leg credited on Arc, withdraw here' UI."
+type CrossChainLegCredit @entity(immutable: true) {
+  "txHash-logIndex"
+  id: ID!
+  escrow: Escrow!
+  escrowId: BigInt!
+  milestoneIndex: Int!
+  creditedTo: Bytes!
+  amount: BigInt!
+  timestamp: BigInt!
+  tx: Bytes!
+}
 
 "Immutable ledger of partial refund credits (PartialRefundCredited)."
 type RefundCredit @entity(immutable: true) {
