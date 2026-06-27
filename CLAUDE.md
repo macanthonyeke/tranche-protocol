@@ -177,15 +177,21 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.5.0/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.5.2/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.5.0` |
+| Subgraph name/version | `tranche-protocol/0.5.2` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
 The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; bulk reads (dashboard, arbiter queue) require Goldsky and throw if the endpoint is unset — there is no on-chain fallback. The endpoint is currently set.
 
-**Current live version:** 0.4.0 live; 0.5.0 built, pending this round's deploy (the step-3 post-deploy work deploys it and updates the endpoint above). 0.5.0 adds `InvoiceAcknowledged` and `InvoiceURIUpdated` handlers and the `InvoiceURIUpdate` entity.
+**Current live version:** 0.5.2 — the new contract (`0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d`) with full event coverage, including the five gap-fix handlers (`EscrowDeclined`, `DeadlineExtended`, `ReceivingAddressUpdated`, `SplitReceivingAddressUpdated`, `CrossChainLegCreditedOnArc`) and the new `CrossChainLegCredit` entity.
+
+Version lineage (for the record):
+- `0.5.0` indexed the OLD contract (superseded; retained for now).
+- `0.5.1` indexes the new contract with the pre-gap-fix handler set (retained as rollback fallback).
+- `0.5.2` is the new contract with full event coverage — the live endpoint.
+- `0.4.0` was deleted to free a Goldsky plan slot for the `0.5.2` deploy.
 
 ### Event handlers (current mapping — 0.4.0 live; 0.5.0 adds last two rows)
 
