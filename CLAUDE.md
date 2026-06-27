@@ -193,7 +193,7 @@ Version lineage (for the record):
 - `0.5.2` is the new contract with full event coverage — the live endpoint.
 - `0.4.0` was deleted to free a Goldsky plan slot for the `0.5.2` deploy.
 
-### Event handlers (current mapping — 0.4.0 live; 0.5.0 adds last two rows)
+### Event handlers (live mapping — 0.5.2; rows tagged *(0.5.0)* / *(0.5.2)* mark the version each handler was added in)
 
 | Event | Handler | Effect |
 |-------|---------|--------|
@@ -218,8 +218,13 @@ Version lineage (for the record):
 | `InvoiceSnapshotted` | `handleInvoiceSnapshotted` | Sets Escrow.invoiceData, invoiceNumber, titles |
 | `InvoiceAcknowledged` *(0.5.0)* | `handleInvoiceAcknowledged` | Sets Escrow.invoiceAcknowledgedAt + invoiceAcknowledgedBy |
 | `InvoiceURIUpdated` *(0.5.0)* | `handleInvoiceURIUpdated` | Creates InvoiceURIUpdate entity, updates Escrow.invoiceURI |
+| `EscrowDeclined` *(0.5.2)* | `handleEscrowDeclined` | Escrow → CANCELLED (recipient decline) |
+| `DeadlineExtended` *(0.5.2)* | `handleDeadlineExtended` | Sets Escrow.deadline to the new value |
+| `ReceivingAddressUpdated` *(0.5.2)* | `handleReceivingAddressUpdated` | Updates Escrow.mintRecipient + destinationDomain (single-recipient redirect) |
+| `SplitReceivingAddressUpdated` *(0.5.2)* | `handleSplitReceivingAddressUpdated` | Updates Split.mintRecipient + destinationDomain (split redirect; Split now mutable) |
+| `CrossChainLegCreditedOnArc` *(0.5.2)* | `handleCrossChainLegCreditedOnArc` | Creates CrossChainLegCredit (immutable ledger; SE-3 divert-to-Arc) |
 
-Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by the current contract — their handlers were removed.
+Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by the current contract — their handlers were removed. Other emitted-but-unindexed events (admin config, role/pause infra, proposal/`ProtocolFeeCollected`) are intentionally not handled.
 
 ---
 
