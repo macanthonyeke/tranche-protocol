@@ -12,7 +12,7 @@ via_ir = true
 arc-testnet = { key = "placeholder", url = "https://testnet.arcscan.app/api" }
 
 [invariant]
-runs = 32
-depth = 32
+runs = 64
+depth = 64
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

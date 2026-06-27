@@ -19,10 +19,10 @@ about destination logistics.
 | | |
 |---|---|
 | Network | Arc testnet |
-| Contract | `0x…` (updated after each deploy) |
-| Audit rounds | 5 complete, 0 Critical/High findings |
-| Test suite | 236 tests passing |
-| Contract size | 23,196 bytes (EIP-170 limit: 24,576) |
+| Contract | `0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d` |
+| Audit rounds | 6 complete, 0 Critical/High findings |
+| Test suite | 275 tests passing |
+| Contract size | 23,722 bytes (EIP-170 limit: 24,576) |
 | Subgraph | Goldsky v0.4.0 live (v0.5.0 built, pending deploy) |
 
 ## What It Does
@@ -127,7 +127,7 @@ during this window with a mandatory evidence hash.
 
 **4. Release paths**
 - No dispute: after the review window, anyone calls 
-  `releaseAfterWindow`. Funds settle via CCTP or direct transfer.
+  `release`. Funds settle via CCTP or direct transfer.
 - Dispute raised: both parties submit evidence hashes. An arbiter 
   resolves within 14 days.
 - Arbiter timeout: if unresolved after 14 days, either party can 
@@ -541,7 +541,7 @@ forge test
 forge fmt
 
 # Circle deployment
-cd deploy && npm run full
+cd deploy && npm run full-gas
 
 # sync ABI and address
 cd indexer && npm run sync

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAccount } from 'wagmi'
 import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from 'framer-motion'
 
@@ -78,6 +78,49 @@ export default function Dashboard() {
     <ConnectGate>
       <DashboardInner />
     </ConnectGate>
+  )
+}
+
+/* Jump straight to any escrow by its numeric ID. Independent of the subgraph,
+   so a recipient can open an escrow the moment the payer shares its ID — even
+   before the indexer surfaces it in the Incoming requests section. */
+function OpenByIdField() {
+  const navigate = useNavigate()
+  const [value, setValue] = useState('')
+  const id = value.trim()
+  const valid = id !== '' && /^\d+$/.test(id)
+
+  const submit = (e) => {
+    e.preventDefault()
+    if (valid) navigate(`/escrow/${id}`)
+  }
+
+  return (
+    <form onSubmit={submit} className="flex items-center gap-2">
+      <div className="relative">
+        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-3 font-mono text-sm">#</span>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={value}
+          onChange={(e) => setValue(e.target.value.replace(/[^\d]/g, ''))}
+          placeholder="Open by ID"
+          aria-label="Open escrow by ID"
+          className="w-32 pl-7 pr-3 py-2.5 text-sm bg-paper border border-rule rounded-xl text-ink placeholder:text-ink-3 font-mono tabular-nums focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper transition-colors"
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={!valid}
+        aria-label="Open escrow"
+        className="inline-flex items-center justify-center min-h-11 px-3 py-2.5 text-sm font-medium text-ink-2 hover:text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M5 12h14" />
+          <path d="m13 5 7 7-7 7" />
+        </svg>
+      </button>
+    </form>
   )
 }
 
@@ -172,9 +215,12 @@ function DashboardInner() {
     <div className="flex flex-col gap-10 md:gap-14">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-semibold tracking-tight text-ink">Dashboard</h1>
-        <Link to="/create" className="btn-primary text-sm py-2.5 self-start sm:self-auto whitespace-nowrap">
-          + New Escrow
-        </Link>
+        <div className="flex items-center gap-3 flex-wrap self-start sm:self-auto">
+          <OpenByIdField />
+          <Link to="/create" className="btn-primary text-sm py-2.5 whitespace-nowrap">
+            + New Escrow
+          </Link>
+        </div>
       </header>
 
       {isArbiter && <ArbiterDisputeBanner />}

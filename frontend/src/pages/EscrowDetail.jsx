@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useAccount } from 'wagmi'
+import { useAccount, useReadContract } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
@@ -27,6 +27,7 @@ import {
   getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS
 } from '../config/chains.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { GOLDSKY_ENABLED, fetchEscrowTitles } from '../lib/goldsky.js'
 import { useEscrowInvoice } from '../hooks/useEscrows.js'
 import InvoiceCard from '../components/InvoiceCard.jsx'
@@ -101,7 +102,12 @@ function DetailInner() {
   const detailHasInvoice = detail
     ? !!(detail.escrow.invoiceHash && detail.escrow.invoiceHash !== ZERO_BYTES32)
     : false
-  const { invoiceAcknowledgedAt: ackAt } = useEscrowInvoice(detailHasInvoice ? detail.escrow.id : null)
+  const { invoiceAcknowledgedAt: ackAt, refetch: refetchInvoice } = useEscrowInvoice(detailHasInvoice ? detail.escrow.id : null)
+
+  // The acknowledgment timestamp comes from the subgraph, which lags the
+  // confirmed tx. Hide the accept/decline banner the instant the recipient's
+  // acknowledge tx confirms, rather than waiting for the indexer to catch up.
+  const [localAck, setLocalAck] = useState(false)
 
   if (isLoading) return <EscrowDetailSkeleton />
   if (!detail) {
@@ -146,8 +152,12 @@ function DetailInner() {
         />
 
         <div className="lg:col-span-2 flex flex-col gap-4">
-          {isFreelancer && escrow.state === 0 && detailHasInvoice && !ackAt && (
-            <AckBanner escrow={escrow} onChange={handleChange} />
+          {isFreelancer && escrow.state === 0 && detailHasInvoice && !ackAt && !localAck && (
+            <AckBanner
+              escrow={escrow}
+              onChange={handleChange}
+              onAcknowledged={() => { setLocalAck(true); refetchInvoice?.() }}
+            />
           )}
           <MilestoneStack
             escrow={escrow}
@@ -245,8 +255,10 @@ function StateGlowPill({ state }) {
 /* ---------- Invoice acknowledgment banner ----------
    Shown to the freelancer when the escrow is active, has an invoice, and the
    recipient hasn't yet emitted InvoiceAcknowledged on-chain. */
-function AckBanner({ escrow, onChange }) {
-  const tx = useTx({ onConfirmed: () => onChange?.() })
+function AckBanner({ escrow, onChange, onAcknowledged }) {
+  const acceptTx = useTx({ onConfirmed: () => { onAcknowledged?.(); onChange?.() } })
+  const declineTx = useTx({ onConfirmed: () => onChange?.() })
+  const busy = acceptTx.isBusy || declineTx.isBusy
   return (
     <div className="bg-paper border border-clay/30 rounded-2xl p-6 flex flex-col gap-4">
       <div className="flex flex-col gap-1">
@@ -259,24 +271,25 @@ function AckBanner({ escrow, onChange }) {
         <button
           type="button"
           className="btn-primary text-sm py-2"
-          disabled={tx.isBusy}
-          onClick={() => tx.run(
+          disabled={busy}
+          onClick={() => acceptTx.run(
             escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
             { loadingMessage: 'Check your wallet.' }
           )}
         >
-          {tx.isBusy ? 'Working…' : 'Accept terms'}
+          {acceptTx.isBusy ? 'Working…' : 'Accept terms'}
         </button>
         <button
           type="button"
           className="btn-danger text-sm py-2"
-          disabled={tx.isBusy}
-          onClick={() => tx.run(
-            escrowWrite('mutualCancel', [BigInt(escrow.id)]),
+          disabled={busy}
+          onClick={() => declineTx.run(
+            escrowWrite('declineEscrow', [BigInt(escrow.id)]),
             { loadingMessage: 'Check your wallet.' }
           )}
+          title="Reject the whole escrow. Refunds the full amount to the payer — no protocol fee. Only available while every milestone is still pending."
         >
-          Decline escrow
+          {declineTx.isBusy ? 'Working…' : 'Decline escrow'}
         </button>
       </div>
     </div>
@@ -342,6 +355,12 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
           escrow={escrow} role={role} onChange={onChange}
           optimistic={optimistic} setOpt={setOpt} clearOpt={clearOpt}
         />
+      )}
+      {role === 'payer' && escrow.state === 0 && (
+        <ExtendDeadlineCard escrow={escrow} onChange={onChange} />
+      )}
+      {role === 'payer' && escrow.state === 0 && hasInvoice && (
+        <EditInvoiceURICard escrow={escrow} onChange={onChange} />
       )}
       {role === 'freelancer' && escrow.state === 0 && (
         <UpdateReceivingAddressCard escrow={escrow} onChange={onChange} />
@@ -597,6 +616,9 @@ function MilestoneStack({
         <AnimatePresence>
           {milestones.map((m, i) => {
             const opt = optimistic[`milestone_${i}`]
+            // proposeMilestoneCancel is sequential: the previous milestone must
+            // already be terminal (RELEASED=3 / REFUNDED=4).
+            const prevTerminal = i === 0 || milestones[i - 1].state === 3 || milestones[i - 1].state === 4
             return (
               <motion.div
                 key={i}
@@ -616,6 +638,7 @@ function MilestoneStack({
                   claimed={!!claimed[i] || opt?.claimedDelivery}
                   reviewDeadline={Number(reviewDeadlines[i] || 0n)}
                   optimisticBadge={opt?.badge}
+                  prevTerminal={prevTerminal}
                   onChange={onChange}
                   setOpt={setOpt}
                   clearOpt={clearOpt}
@@ -674,7 +697,7 @@ function readCctpTrack(escrowId, milestoneIndex) {
 function MilestoneRow({
   escrow, milestone, dispute, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadline,
-  optimisticBadge, onChange, setOpt, clearOpt
+  optimisticBadge, prevTerminal, onChange, setOpt, clearOpt
 }) {
   const titles = useMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
@@ -825,7 +848,95 @@ function MilestoneRow({
         />
       )}
 
+      {(role === 'payer' || role === 'freelancer') && prevTerminal &&
+        (milestone.state === 0 || milestone.state === 1) && (
+          <MilestoneCancelControl
+            escrow={escrow}
+            milestoneIndex={milestone.index}
+            role={role}
+            onChange={onChange}
+          />
+        )}
+
       <ConfettiBurst active={burst} />
+    </div>
+  )
+}
+
+/* ---------- Per-milestone mutual cancel ----------
+   Cancels a single milestone (refunds its amount to the payer) once both
+   parties have proposed — the milestone-level analogue of {mutualCancel}. The
+   public `milestoneCancelProposals` mapping is read directly for both parties
+   so each side sees the live approval state. */
+function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
+  const [open, setOpen] = useState(false)
+
+  const baseArgs = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'milestoneCancelProposals' }
+  const { data: payerProposedRaw, refetch: refetchPayer } = useReadContract({
+    ...baseArgs,
+    args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.depositor],
+    query: { refetchInterval: POLL_MS }
+  })
+  const { data: freelancerProposedRaw, refetch: refetchFreelancer } = useReadContract({
+    ...baseArgs,
+    args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.recipient],
+    query: { refetchInterval: POLL_MS }
+  })
+
+  const tx = useTx({
+    onConfirmed: () => { refetchPayer(); refetchFreelancer(); onChange?.() }
+  })
+
+  const payerProposed = !!payerProposedRaw
+  const freelancerProposed = !!freelancerProposedRaw
+  const iProposed = role === 'payer' ? payerProposed : freelancerProposed
+
+  const submit = () => tx.run(
+    escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
+    { loadingMessage: 'Submitting. Check your wallet.' }
+  )
+
+  if (!open) {
+    return (
+      <div className="mt-4 pt-3 border-t border-rule/50 flex items-center justify-between gap-3">
+        <span className="text-xs text-ink-3">Need to drop just this milestone?</span>
+        <button
+          type="button"
+          className="text-xs text-ink-2 hover:text-ink transition-colors"
+          onClick={() => setOpen(true)}
+        >
+          Cancel milestone
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-4 pt-4 border-t border-rule/50 flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Cancel this milestone</h4>
+        <button type="button" className="text-xs text-ink-3 hover:text-ink-2 transition-colors" onClick={() => setOpen(false)}>
+          Close
+        </button>
+      </div>
+      <p className="text-xs text-ink-2 leading-relaxed">
+        Both the payer and freelancer must propose. Once both agree, this milestone's amount is refunded to the payer and the rest of the escrow continues.
+      </p>
+      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
+        <ApprovalRow label="Payer" approved={payerProposed} />
+        <ApprovalRow label="Freelancer" approved={freelancerProposed} />
+      </div>
+      <TxButton
+        className="btn-danger text-sm py-2"
+        onClick={submit}
+        disabled={iProposed || tx.isBusy}
+        loading={tx.isBusy}
+        label={iProposed
+          ? 'You proposed this'
+          : (role === 'payer' ? freelancerProposed : payerProposed)
+          ? 'Finalize cancellation'
+          : 'Propose cancellation'}
+      />
     </div>
   )
 }
@@ -1947,8 +2058,16 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
   const optApproved = optimistic.cancel === 'approved'
 
+  const optRetracted = optimistic.cancel === 'retracted'
+
   const tx = useTx({
     onSign: () => setOpt('cancel', 'approved'),
+    onConfirmed: () => { clearOpt('cancel'); onChange?.() },
+    onReverted: () => clearOpt('cancel')
+  })
+
+  const retractTx = useTx({
+    onSign: () => setOpt('cancel', 'retracted'),
     onConfirmed: () => { clearOpt('cancel'); onChange?.() },
     onReverted: () => clearOpt('cancel')
   })
@@ -1958,8 +2077,15 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
     { loadingMessage: 'Submitting. Check your wallet.' }
   )
 
-  const payerApproved = (role === 'payer' && optApproved) || escrow.depositorApproveCancel
-  const freelancerApproved = (role === 'freelancer' && optApproved) || escrow.recipientApproveCancel
+  const retract = () => retractTx.run(
+    escrowWrite('retractCancelApproval', [BigInt(escrow.id)]),
+    { loadingMessage: 'Retracting. Check your wallet.' }
+  )
+
+  // Has the caller approved on-chain, and not yet optimistically retracted?
+  const iApproved = (myFlag || optApproved) && !optRetracted
+  const payerApproved = role === 'payer' ? iApproved : escrow.depositorApproveCancel
+  const freelancerApproved = role === 'freelancer' ? iApproved : escrow.recipientApproveCancel
 
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
@@ -1972,10 +2098,20 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
       <TxButton
         className="btn-danger text-sm py-2"
         onClick={submit}
-        disabled={myFlag || optApproved}
+        disabled={iApproved || tx.isBusy || retractTx.isBusy}
         loading={tx.isBusy}
-        label={myFlag || optApproved ? 'You approved this' : otherFlag ? 'Finalize cancellation' : 'Approve cancellation'}
+        label={iApproved ? 'You approved this' : otherFlag ? 'Finalize cancellation' : 'Approve cancellation'}
       />
+      {iApproved && (
+        <button
+          type="button"
+          className="self-center text-xs text-ink-2 hover:text-ink transition-colors disabled:opacity-60"
+          onClick={retract}
+          disabled={retractTx.isBusy}
+        >
+          {retractTx.isBusy ? 'Retracting…' : 'Retract my approval'}
+        </button>
+      )}
     </div>
   )
 }
@@ -2108,6 +2244,226 @@ function UpdateReceivingAddressCard({ escrow, onChange }) {
                 className="btn-secondary text-sm py-2"
                 disabled={tx.isBusy}
                 onClick={() => { setEditing(false); setAddr('') }}
+              >
+                Cancel
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+/* ---------- Extend deadline (payer, inline-edit card) ----------
+   Payer-only. The contract only allows pushing the deadline later, never
+   earlier, so the picker is floored at the current deadline + 1 minute. */
+function ExtendDeadlineCard({ escrow, onChange }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [successTs, setSuccessTs] = useState(null)
+  const inputId = useId()
+
+  const currentTs = Number(escrow.deadline)
+  // datetime-local needs a local-time string; floor at one minute past current.
+  const minStr = useMemo(() => {
+    const d = new Date((currentTs + 60) * 1000)
+    const off = d.getTimezoneOffset() * 60_000
+    return new Date(d.getTime() - off).toISOString().slice(0, 16)
+  }, [currentTs])
+
+  const newTs = value ? Math.floor(new Date(value).getTime() / 1000) : 0
+  const valid = newTs > currentTs
+
+  const tx = useTx({
+    onConfirmed: () => {
+      setSuccessTs(newTs)
+      setEditing(false); setValue('')
+      onChange?.()
+    }
+  })
+
+  const submit = () => {
+    if (!valid) return
+    return tx.run(
+      escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]),
+      { loadingMessage: 'Extending. Check your wallet.' }
+    )
+  }
+
+  return (
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Extend deadline</h3>
+        {!editing && (
+          <button
+            type="button"
+            className="text-xs text-clay hover:text-clay-hover transition-colors"
+            onClick={() => { setEditing(true); setSuccessTs(null) }}
+          >
+            Extend
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-3">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
+        <span className="font-mono tabular-nums text-sm text-ink">{formatDeadline(escrow.deadline)}</span>
+      </div>
+
+      <p className="text-xs text-ink-2 leading-relaxed">You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you.</p>
+
+      {successTs && !editing && (
+        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
+            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span>Extended to <span className="font-mono">{formatDeadline(BigInt(successTs))}</span>.</span>
+        </div>
+      )}
+
+      <AnimatePresence initial={false}>
+        {editing && (
+          <motion.div
+            key="edit"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="flex flex-col gap-3 overflow-hidden"
+          >
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor={inputId} className="text-xs font-medium text-ink-2">New deadline</label>
+              <input
+                id={inputId}
+                type="datetime-local"
+                className="input-field text-sm"
+                min={minStr}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <TxButton
+                className="btn-primary text-sm py-2 flex-1"
+                onClick={submit}
+                disabled={!valid}
+                loading={tx.isBusy}
+                label="Extend deadline"
+              />
+              <button
+                className="btn-secondary text-sm py-2"
+                disabled={tx.isBusy}
+                onClick={() => { setEditing(false); setValue('') }}
+              >
+                Cancel
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+/* ---------- Edit invoice link (payer, inline-edit card) ----------
+   Payer-only. Updates the off-chain invoice URI on an active escrow. The
+   structured invoice body (hash-committed at deposit) is immutable; only the
+   convenience link can change. */
+function EditInvoiceURICard({ escrow, onChange }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [successUri, setSuccessUri] = useState(null)
+  const inputId = useId()
+
+  const current = escrow.invoiceURI || ''
+  const trimmed = value.trim()
+  const valid = trimmed !== '' && trimmed !== current && isValidUrl(trimmed)
+
+  const tx = useTx({
+    onConfirmed: () => {
+      setSuccessUri(trimmed)
+      setEditing(false); setValue('')
+      onChange?.()
+    }
+  })
+
+  const submit = () => {
+    if (!valid) return
+    return tx.run(
+      escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]),
+      { loadingMessage: 'Updating. Check your wallet.' }
+    )
+  }
+
+  return (
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Invoice link</h3>
+        {!editing && (
+          <button
+            type="button"
+            className="text-xs text-clay hover:text-clay-hover transition-colors"
+            onClick={() => { setEditing(true); setSuccessUri(null); setValue(current) }}
+          >
+            {current ? 'Edit' : 'Add'}
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-1.5 bg-sunk rounded-xl px-3 py-3">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
+        {current
+          ? <span className="text-xs text-ink-2 font-mono break-all">{current}</span>
+          : <span className="text-sm text-ink-3">— none set —</span>}
+      </div>
+
+      <p className="text-xs text-ink-2 leading-relaxed">An optional link to the full invoice. The structured invoice terms committed on-chain don't change — only this convenience link.</p>
+
+      {successUri && !editing && (
+        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
+            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span>Invoice link updated.</span>
+        </div>
+      )}
+
+      <AnimatePresence initial={false}>
+        {editing && (
+          <motion.div
+            key="edit"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="flex flex-col gap-3 overflow-hidden"
+          >
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor={inputId} className="text-xs font-medium text-ink-2">New invoice link</label>
+              <input
+                id={inputId}
+                type="url"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://…"
+                className="input-field text-sm"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <TxButton
+                className="btn-primary text-sm py-2 flex-1"
+                onClick={submit}
+                disabled={!valid}
+                loading={tx.isBusy}
+                label="Save link"
+              />
+              <button
+                className="btn-secondary text-sm py-2"
+                disabled={tx.isBusy}
+                onClick={() => { setEditing(false); setValue('') }}
               >
                 Cancel
               </button>

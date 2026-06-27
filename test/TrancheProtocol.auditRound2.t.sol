@@ -31,6 +31,9 @@ contract TrancheProtocolAuditRound2Test is Base {
             ""
         );
         vm.stopPrank();
+
+        vm.prank(recipient);
+        escrow.acknowledgeInvoice(id);
     }
 
     function _noSplits() internal pure returns (SplitRecipient[] memory) {

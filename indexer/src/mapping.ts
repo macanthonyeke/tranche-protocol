@@ -6,6 +6,7 @@ import {
   Split,
   RefundBalance,
   RefundCredit,
+  CrossChainLegCredit,
   EvidenceEntry,
   InvoiceURIUpdate,
 } from "../generated/schema";
@@ -28,6 +29,11 @@ import {
   DisputeTimedOutSettled,
   MutualSettlementExecuted,
   EscrowRefundedViaMutualCancel,
+  EscrowDeclined,
+  DeadlineExtended,
+  ReceivingAddressUpdated,
+  SplitReceivingAddressUpdated,
+  CrossChainLegCreditedOnArc,
   PartialRefundCredited,
   RefundWithdrawn,
   RefundCreditTransferred,
@@ -186,6 +192,10 @@ export function handleEscrowCreated(event: EscrowCreated): void {
   let escrowData = contract.try_getEscrow(event.params.escrowId);
   if (!escrowData.reverted) {
     escrow.milestoneCount = escrowData.value.milestoneCount.toI32();
+    // Single-recipient cross-chain target — not carried by EscrowCreated, so
+    // read from the same struct. Mutated later by ReceivingAddressUpdated.
+    escrow.mintRecipient = escrowData.value.mintRecipient;
+    escrow.destinationDomain = escrowData.value.destinationDomain.toI32();
   }
 
   escrow.save();
@@ -475,6 +485,82 @@ export function handleEscrowRefundedViaMutualCancel(
   escrow.state = ESCROW_CANCELLED;
   escrow.updatedAt = event.block.timestamp;
   escrow.save();
+}
+
+// Recipient declines an escrow while every milestone is still PENDING; the
+// contract refunds the payer and flips the escrow to CANCELLED. Mirrors
+// handleEscrowRefundedViaMutualCancel: state-only. RefundBalance is left to
+// the on-chain mapping (deliberate partial mirror); milestones are left as-is
+// to match the mutual-cancel handler (no asymmetry).
+export function handleEscrowDeclined(event: EscrowDeclined): void {
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.state = ESCROW_CANCELLED;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
+}
+
+// Depositor extends the escrow deadline. The event carries the new deadline
+// value directly, so we mirror it onto the entity (no contract read). No
+// state change, no counters.
+export function handleDeadlineExtended(event: DeadlineExtended): void {
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.deadline = event.params.newDeadline;
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
+}
+
+// Recipient redirects the single-recipient cross-chain payout target. The
+// event carries the full new state, so we overwrite the mirrored fields
+// directly (the on-chain log is the history if ever needed). No state change,
+// no counters, no RefundBalance.
+export function handleReceivingAddressUpdated(
+  event: ReceivingAddressUpdated
+): void {
+  let escrow = getOrCreateEscrow(event.params.escrowId, event);
+  escrow.mintRecipient = event.params.newAddress;
+  escrow.destinationDomain = event.params.newDomain.toI32();
+  escrow.updatedAt = event.block.timestamp;
+  escrow.save();
+}
+
+// A split recipient redirects its own cross-chain payout target. The Split
+// fields already exist (set at create in handleSplitConfigured); overwrite
+// them. Pure load — guard on null like the other load-only handlers. No
+// history entity, no escrow state change, no counters. (Split now mutable.)
+export function handleSplitReceivingAddressUpdated(
+  event: SplitReceivingAddressUpdated
+): void {
+  let id =
+    event.params.escrowId.toString() + "-" + event.params.splitIndex.toString();
+  let split = Split.load(id);
+  if (split == null) return;
+  split.mintRecipient = event.params.newAddress;
+  split.destinationDomain = event.params.newDomain.toI32();
+  split.save();
+}
+
+// SE-3 / Finding 3: a cross-chain release/settle leg too small to clear the
+// CCTP forwarding-fee floor is diverted to an Arc refund credit instead of
+// being burned. Append-only ledger so the frontend can surface "small leg
+// credited on Arc, withdraw here". Accounting event only — the milestone was
+// already set RELEASED by the contract, so no state/counter change here, and
+// no RefundBalance touch (on-chain mapping is source of truth).
+export function handleCrossChainLegCreditedOnArc(
+  event: CrossChainLegCreditedOnArc
+): void {
+  let id =
+    event.transaction.hash.toHexString() +
+    "-" +
+    event.logIndex.toString();
+  let credit = new CrossChainLegCredit(id);
+  credit.escrow = event.params.escrowId.toString();
+  credit.escrowId = event.params.escrowId;
+  credit.milestoneIndex = event.params.milestoneIndex.toI32();
+  credit.creditedTo = event.params.creditedTo;
+  credit.amount = event.params.amount;
+  credit.timestamp = event.block.timestamp;
+  credit.tx = event.transaction.hash;
+  credit.save();
 }
 
 export function handlePartialRefundCredited(

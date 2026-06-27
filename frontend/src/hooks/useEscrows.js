@@ -186,7 +186,12 @@ function useDashboardGoldsky(address, active) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['gs-dashboard', address?.toLowerCase()],
     queryFn: () => fetchDashboard(address),
-    enabled: active
+    enabled: active,
+    // Auto-poll so newly created escrows (e.g. an incoming request to a
+    // recipient) surface on their own once the subgraph indexes them, without
+    // requiring a manual refresh.
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false
   })
   return { dashboard: data ?? null, isLoading, error: error ?? null, refetch }
 }
@@ -260,15 +265,19 @@ export function useUsdcBalance(address) {
 // Invoice data (invoiceData JSON + ack timestamp) from the subgraph.
 // Separate from useEscrowDetail because it's only needed where InvoiceCard is rendered.
 export function useEscrowInvoice(escrowId) {
-  const { data } = useQuery({
+  const { data, refetch } = useQuery({
     queryKey: ['invoice', escrowId],
     queryFn: () => fetchEscrowInvoice(escrowId),
     enabled: GOLDSKY_ENABLED && escrowId != null,
-    staleTime: Infinity
+    // invoiceData is immutable, but invoiceAcknowledgedAt flips when the
+    // recipient acknowledges. Poll until that's indexed, then stop.
+    refetchInterval: (query) => (query.state.data?.invoiceAcknowledgedAt ? false : 15_000),
+    refetchIntervalInBackground: false
   })
   return {
     invoiceData: data?.invoiceData ?? null,
-    invoiceAcknowledgedAt: data?.invoiceAcknowledgedAt ?? null
+    invoiceAcknowledgedAt: data?.invoiceAcknowledgedAt ?? null,
+    refetch
   }
 }
 

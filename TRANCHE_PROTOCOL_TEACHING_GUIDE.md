@@ -73,7 +73,7 @@ TrancheProtocol
 
 Frontend / Indexer
   -> events
-  -> getEscrowDetail / getDashboard / getDisputedEscrows / getProtocolConfig
+  -> getEscrowDetail / getProtocolConfig
 ```
 
 ### Contract Interaction Map
@@ -589,14 +589,10 @@ The view layer is frontend-friendly:
 - `isClaimed`
 - `getRole`
 - `getEscrowDetail`
-- `getEscrowsForPayer`
-- `getEscrowsForFreelancer`
-- `getDashboard`
 - `getCallerRoles`
 - `getProtocolConfig`
-- `getDisputedEscrows`
 
-Internal summary helpers scan all escrows and milestones, which is acceptable for local/frontend calls but could grow expensive as on-chain calls if `escrowCount` becomes large.
+The remaining views are per-escrow reads bounded by `milestoneCount` / split count; the contract exposes no `1..escrowCount` scan view. Bulk listing is served by the Goldsky subgraph.
 
 ## 9. CCTP And Fee Accounting
 
@@ -847,7 +843,7 @@ Explain why `resolveDisputeByTimeout` credits recipient shares as refund credit 
 
 - `EscrowReleased` and `EscrowRefunded` are declared in the interface but not emitted in the implementation. They appear to be legacy events.
 - `raiseDispute` and `submitCounterEvidence` are not marked `nonReentrant`, but they do not transfer tokens or make external calls.
-- `getDashboard`, `getEscrowsForPayer`, `getEscrowsForFreelancer`, and `getDisputedEscrows` scan from `1` to `escrowCount`; this is convenient for small/medium deployments and frontend reads, but not a scalable on-chain indexing pattern.
+- Bulk reads (dashboard, arbiter queue, per-party escrow lists) are served exclusively by the Goldsky subgraph. The contract intentionally exposes no `1..escrowCount` scan view — that gas cost is kept off-chain.
 - Same-chain Arc payouts still call CCTP TokenMessenger with `maxFee = 0`; the code treats Arc as a no-forwarding-fee domain.
 - The protocol is intentionally sequential at the milestone level, which simplifies accounting and dispute/cancel reasoning.
 

@@ -10,10 +10,10 @@ dataSources:
     network: arc-testnet
     source:
       # Live Tranche Protocol proxy — from deploy/.env CONTRACT_ADDRESS (matches frontend/.env).
-      address: "0xe27e0b1aba2ff3ef95bac061e36283c544d78503"
+      address: "0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d"
       abi: TrancheProtocol
       # Proxy deployment block (found via on-chain getCode binary search).
-      startBlock: 46872189
+      startBlock: 48857059
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9
@@ -62,6 +62,16 @@ dataSources:
           handler: handleMutualSettlementExecuted
         - event: EscrowRefundedViaMutualCancel(indexed uint256)
           handler: handleEscrowRefundedViaMutualCancel
+        - event: EscrowDeclined(indexed uint256,address)
+          handler: handleEscrowDeclined
+        - event: DeadlineExtended(indexed uint256,uint256)
+          handler: handleDeadlineExtended
+        - event: ReceivingAddressUpdated(indexed uint256,bytes32,bytes32,uint32,uint32)
+          handler: handleReceivingAddressUpdated
+        - event: SplitReceivingAddressUpdated(indexed uint256,uint256,bytes32,bytes32,uint32,uint32)
+          handler: handleSplitReceivingAddressUpdated
+        - event: CrossChainLegCreditedOnArc(indexed uint256,indexed uint256,indexed address,uint256)
+          handler: handleCrossChainLegCreditedOnArc
         - event: PartialRefundCredited(indexed uint256,indexed uint256,indexed address,uint256)
           handler: handlePartialRefundCredited
         - event: RefundWithdrawn(indexed address,uint256)

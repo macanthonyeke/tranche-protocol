@@ -30,7 +30,7 @@ contract TrancheProtocolCrossChainRefundTest is Base {
         _seedRefundCredit(100e6);
 
         uint256 maxFee = 1e6;
-        uint256 expectedBurn = 100e6 - maxFee;
+        uint256 expectedBurn = 100e6;
         uint256 callsBefore = tokenMessenger.callsLength();
 
         vm.expectEmit(true, false, false, true, address(escrow));
@@ -45,7 +45,7 @@ contract TrancheProtocolCrossChainRefundTest is Base {
         // Exactly one new CCTP burn was issued with the right parameters.
         assertEq(tokenMessenger.callsLength(), callsBefore + 1, "no burn issued");
         MockTokenMessenger.BurnCall memory c = tokenMessenger.lastCall();
-        assertEq(c.amount, expectedBurn, "burn amount should be credit minus maxFee");
+        assertEq(c.amount, expectedBurn, "burn amount should be the full credit; CCTP deducts maxFee from it");
         assertEq(c.maxFee, maxFee, "maxFee passed through");
         assertEq(c.destinationDomain, DEST_DOMAIN, "destination domain");
         // Address converted to bytes32 internally; user never passes bytes32.
