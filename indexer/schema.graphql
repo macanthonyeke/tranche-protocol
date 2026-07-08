@@ -103,6 +103,9 @@ type Milestone @entity(immutable: false) {
 
   dispute: Dispute
   updatedAt: BigInt!
+
+  "Tx hash of the settlement event that moved this milestone to RELEASED (MilestoneApproved / MilestoneReleased / DisputeResolved / DisputeTimedOutSettled / MutualSettlementExecuted). Read by both parties to find the CCTP burn for a cross-chain release, not just the device that submitted it."
+  releaseTx: Bytes
 }
 
 type Dispute @entity(immutable: false) {

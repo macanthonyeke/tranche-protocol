@@ -130,6 +130,24 @@ export async function fetchEscrowTitles(escrowId) {
   return data.escrow?.titles || []
 }
 
+// Per-milestone release tx hash — the settlement event (MilestoneApproved /
+// MilestoneReleased / DisputeResolved / DisputeTimedOutSettled /
+// MutualSettlementExecuted) that carries the CCTP burn for a cross-chain
+// release. Indexed on-chain so any device can find it, not just the one that
+// submitted the tx. Returns { [milestoneIndex]: '0x...' }, only for
+// milestones that have released.
+export async function fetchMilestoneReleaseTxs(escrowId) {
+  const data = await gql(
+    `query ReleaseTx($id: ID!) { escrow(id: $id) { milestones { index releaseTx } } }`,
+    { id: String(escrowId) }
+  )
+  const out = {}
+  for (const m of data.escrow?.milestones || []) {
+    if (m.releaseTx) out[m.index] = m.releaseTx
+  }
+  return out
+}
+
 export async function fetchEscrowInvoice(escrowId) {
   const data = await gql(
     `query Invoice($id: ID!) {

@@ -177,23 +177,23 @@ indexer/                      — Goldsky subgraph
 
 | Key | Value |
 |-----|-------|
-| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.5.2/gn` |
+| Endpoint | `https://api.goldsky.com/api/public/project_cmpuerrux1uoo01x8gljs18vq/subgraphs/tranche-protocol/0.5.3/gn` |
 | Goldsky project | `project_cmpuerrux1uoo01x8gljs18vq` |
-| Subgraph name/version | `tranche-protocol/0.5.2` |
+| Subgraph name/version | `tranche-protocol/0.5.3` |
 | Network slug | `arc-testnet` |
 | goldsky CLI | `~/.local/bin/goldsky` (not on PATH — use full path) |
 
 The frontend reads from the subgraph only when `VITE_GOLDSKY_ENDPOINT` is set in `frontend/.env`; bulk reads (dashboard, arbiter queue) require Goldsky and throw if the endpoint is unset — there is no on-chain fallback. The endpoint is currently set.
 
-**Current live version:** 0.5.2 — the new contract (`0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d`) with full event coverage, including the five gap-fix handlers (`EscrowDeclined`, `DeadlineExtended`, `ReceivingAddressUpdated`, `SplitReceivingAddressUpdated`, `CrossChainLegCreditedOnArc`) and the new `CrossChainLegCredit` entity.
+**Current live version:** 0.5.3 — same contract as 0.5.2 (`0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d`), adds `Milestone.releaseTx` (the settlement tx hash, stamped by all 5 release-type handlers) so the cross-chain delivery tracker is chain-readable by both parties instead of only the device that submitted the release.
 
 Version lineage (for the record):
-- `0.5.0` indexed the OLD contract (superseded; retained for now).
 - `0.5.1` indexes the new contract with the pre-gap-fix handler set (retained as rollback fallback).
-- `0.5.2` is the new contract with full event coverage — the live endpoint.
-- `0.4.0` was deleted to free a Goldsky plan slot for the `0.5.2` deploy.
+- `0.5.2` added full event coverage (superseded by 0.5.3; retained for now).
+- `0.5.3` adds `Milestone.releaseTx` — the live endpoint.
+- `0.4.0` was deleted to free a Goldsky plan slot for the `0.5.2` deploy; `0.5.0` was deleted to free a slot for the `0.5.3` deploy.
 
-### Event handlers (live mapping — 0.5.2; rows tagged *(0.5.0)* / *(0.5.2)* mark the version each handler was added in)
+### Event handlers (live mapping — 0.5.3; rows tagged *(0.5.0)* / *(0.5.2)* mark the version each handler was added in)
 
 | Event | Handler | Effect |
 |-------|---------|--------|
@@ -201,15 +201,15 @@ Version lineage (for the record):
 | `EscrowTermsSnapshotted` | `handleEscrowTermsSnapshotted` | Sets fee snapshot |
 | `SplitConfigured` / `SplitsConfigured` | split handlers | Creates Split entities |
 | `DeliveryClaimed` | `handleDeliveryClaimed` | Milestone → FULFILLED, sets reviewDeadline |
-| `MilestoneApproved` | `handleMilestoneApproved` | Milestone → RELEASED, settledVia=APPROVED |
-| `MilestoneReleased` | `handleMilestoneReleased` | Milestone → RELEASED, settledVia=RELEASED_NO_DISPUTE |
+| `MilestoneApproved` | `handleMilestoneApproved` | Milestone → RELEASED, settledVia=APPROVED, sets releaseTx *(0.5.3)* |
+| `MilestoneReleased` | `handleMilestoneReleased` | Milestone → RELEASED, settledVia=RELEASED_NO_DISPUTE, sets releaseTx *(0.5.3)* |
 | `MilestoneCancelled` | `handleMilestoneCancelled` | Milestone → REFUNDED, settledVia=MILESTONE_CANCELLED |
 | `RefundedAfterDeadline` | `handleRefundedAfterDeadline` | Milestone → REFUNDED, settledVia=REFUNDED_AFTER_DEADLINE |
 | `DisputeRaised` | `handleDisputeRaised` | Milestone → DISPUTED, creates Dispute |
 | `CounterEvidenceSubmitted` | `handleCounterEvidenceSubmitted` | Updates Dispute |
-| `DisputeResolved` | `handleDisputeResolved` | Milestone → RELEASED, settledVia=DISPUTE_RESOLVED |
-| `DisputeTimedOutSettled` | `handleDisputeTimedOutSettled` | Milestone → RELEASED, settledVia=DISPUTE_TIMEOUT |
-| `MutualSettlementExecuted` | `handleMutualSettlementExecuted` | Milestone → RELEASED, settledVia=MUTUAL_SETTLEMENT |
+| `DisputeResolved` | `handleDisputeResolved` | Milestone → RELEASED, settledVia=DISPUTE_RESOLVED, sets releaseTx *(0.5.3)* |
+| `DisputeTimedOutSettled` | `handleDisputeTimedOutSettled` | Milestone → RELEASED, settledVia=DISPUTE_TIMEOUT, sets releaseTx *(0.5.3)* |
+| `MutualSettlementExecuted` | `handleMutualSettlementExecuted` | Milestone → RELEASED, settledVia=MUTUAL_SETTLEMENT, sets releaseTx *(0.5.3)* |
 | `EscrowRefundedViaMutualCancel` | `handleEscrowRefundedViaMutualCancel` | Escrow → CANCELLED |
 | `PartialRefundCredited` | `handlePartialRefundCredited` | Updates RefundBalance + RefundCredit |
 | `RefundWithdrawn` | `handleRefundWithdrawn` | Decrements RefundBalance |

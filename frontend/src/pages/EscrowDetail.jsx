@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAccount, useReadContract } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
-import CustomSelect from '../components/CustomSelect.jsx'
 import IconButton from '../components/IconButton.jsx'
 import Modal from '../components/Modal.jsx'
 import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
+import EditableRow from '../components/EditableRow.jsx'
 import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
@@ -29,7 +29,7 @@ import {
 } from '../config/chains.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
-import { GOLDSKY_ENABLED, fetchEscrowTitles } from '../lib/goldsky.js'
+import { GOLDSKY_ENABLED, fetchEscrowTitles, fetchMilestoneReleaseTxs } from '../lib/goldsky.js'
 import { useEscrowInvoice } from '../hooks/useEscrows.js'
 import InvoiceCard from '../components/InvoiceCard.jsx'
 
@@ -100,6 +100,28 @@ function DetailInner() {
     refetch()
   }, [refetch])
 
+  // Focus-bar "jump to milestone": expand it (via MilestoneStack's imperative
+  // openRef), flash a clay ring for ~1.5s, and scroll to the row itself
+  // (a scoped element scroll, not scrollIntoView against the whole page).
+  const openRef = useRef(null)
+  const [flashIndex, setFlashIndex] = useState(null)
+  const reduceMotion = useReducedMotion()
+  // Below `lg`, the two desktop columns become a Milestones / Details & terms
+  // tab (see the mobile tab bar below) instead of stacking into one long
+  // scroll; jumping to a milestone switches back to Milestones first.
+  const [mobileTab, setMobileTab] = useState('milestones')
+  const jump = useCallback((index) => {
+    openRef.current?.(index)
+    setFlashIndex(index)
+    setMobileTab('milestones')
+    setTimeout(() => {
+      document.getElementById(`milestone-${index}`)?.scrollIntoView({
+        behavior: reduceMotion ? 'auto' : 'smooth', block: 'center'
+      })
+    }, 60)
+    setTimeout(() => setFlashIndex(null), 1500)
+  }, [reduceMotion])
+
   const detailHasInvoice = detail
     ? !!(detail.escrow.invoiceHash && detail.escrow.invoiceHash !== ZERO_BYTES32)
     : false
@@ -141,18 +163,48 @@ function DetailInner() {
     <div className="flex flex-col">
       <InspectionHeader escrow={escrow} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-6">
-        <LedgerColumn
-          escrow={escrow}
-          role={role}
-          splits={splits}
-          onChange={handleChange}
-          optimistic={optimistic}
-          setOpt={setOpt}
-          clearOpt={clearOpt}
-        />
+      {role && (
+        <div className="mt-6">
+          <FocusBar
+            escrow={escrow}
+            milestones={milestones}
+            role={role}
+            reviewWindowExpired={reviewWindowExpired}
+            onJump={jump}
+          />
+        </div>
+      )}
 
-        <div className="lg:col-span-2 flex flex-col gap-4">
+      <div role="tablist" aria-label="Escrow sections" className="lg:hidden mt-6 flex items-center gap-1 p-1 bg-sunk rounded-xl">
+        {[['milestones', 'Milestones'], ['details', 'Details & terms']].map(([key, label]) => {
+          const active = mobileTab === key
+          return (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setMobileTab(key)}
+              className={`relative flex-1 inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg
+                transition-colors duration-200
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk
+                ${active ? 'text-ink' : 'text-ink-2 hover:text-ink'}`}
+            >
+              {active && (
+                <motion.span
+                  layoutId="mobile-tab-pill"
+                  className="absolute inset-0 rounded-lg bg-paper shadow-sm"
+                  transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                />
+              )}
+              <span className="relative">{label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.75fr)_minmax(320px,1fr)] gap-8 mt-6">
+        <div className={`flex-col gap-4 lg:order-1 lg:flex ${mobileTab === 'milestones' ? 'flex' : 'hidden'}`}>
           {isFreelancer && escrow.state === 0 && detailHasInvoice && !ackAt && !localAck && (
             <AckBanner
               escrow={escrow}
@@ -171,6 +223,20 @@ function DetailInner() {
             reviewDeadlines={reviewDeadlines}
             optimistic={optimistic}
             onChange={handleChange}
+            setOpt={setOpt}
+            clearOpt={clearOpt}
+            flashIndex={flashIndex}
+            openRef={openRef}
+          />
+        </div>
+
+        <div className={`lg:order-2 lg:block ${mobileTab === 'details' ? 'block' : 'hidden'}`}>
+          <LedgerColumn
+            escrow={escrow}
+            role={role}
+            splits={splits}
+            onChange={handleChange}
+            optimistic={optimistic}
             setOpt={setOpt}
             clearOpt={clearOpt}
           />
@@ -297,6 +363,157 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
   )
 }
 
+/* ---------- Focus bar — "what to act on now" ----------
+   Computes the single most relevant thing for the current viewer across all
+   milestones, using the same computeMilestoneAction priority a milestone's
+   own action button uses (defined near MilestoneAction, below). Priority:
+   an action that's yours > an open dispute > a permissionless action anyone
+   can trigger > nothing pending > escrow complete. */
+function FocusBar({ escrow, milestones, role, reviewWindowExpired, onJump }) {
+  const titles = useMilestoneTitles(escrow.id)
+
+  if (escrow.state === 1) {
+    return (
+      <FocusBarShell
+        tone="ok"
+        eyebrow="Complete"
+        title="This escrow is complete."
+        body={`All ${formatUSDCNumber(escrow.totalAmount)} USDC has been released across ${milestones.length} milestone${milestones.length === 1 ? '' : 's'}. Nothing further is required.`}
+      />
+    )
+  }
+  if (escrow.state === 2) return null
+
+  const now = Math.floor(Date.now() / 1000)
+  const gracePassed = Number(escrow.deadline) > 0 && now > Number(escrow.deadline) + DELIVERY_GRACE_PERIOD
+
+  let mine = null, disputed = null, permissionless = null
+  milestones.forEach((m, i) => {
+    const a = computeMilestoneAction(escrow, m, role, { reviewWindowExpired: !!reviewWindowExpired[i], gracePassed })
+    if (a && !a.permissionless && !mine) mine = { m, a }
+    if (m.state === 2 && !disputed) disputed = { m }
+    if (a?.permissionless && !permissionless) permissionless = { m, a }
+  })
+
+  if (mine) {
+    const { m, a } = mine
+    const title = titles[m.index] || `Milestone ${m.index + 1}`
+    const body = role === 'payer'
+      ? `The freelancer marked "${title}" delivered. Approve to release ${formatUSDCNumber(m.amount)} USDC, or raise a dispute if it is not right.`
+      : `Milestone ${m.index + 1} is ready. Mark it delivered to start the payer's ${formatWindow(escrow.reviewWindow)} review window.`
+    return (
+      <FocusBarShell tone="clay" eyebrow="Your move" title={`${a.label}, Milestone ${m.index + 1}`} body={body} cta={a.label} onClick={() => onJump(m.index)} />
+    )
+  }
+  if (disputed) {
+    return (
+      <FocusBarShell
+        tone="warn"
+        eyebrow="Needs your attention"
+        title={`Milestone ${disputed.m.index + 1} is in tribunal`}
+        body="Review the evidence and propose a settlement. If neither side acts, the milestone settles automatically once the arbitration window closes."
+        cta="Review dispute"
+        onClick={() => onJump(disputed.m.index)}
+      />
+    )
+  }
+  if (permissionless) {
+    const { m, a } = permissionless
+    return (
+      <FocusBarShell
+        tone="neutral"
+        eyebrow="Available now"
+        title={`Milestone ${m.index + 1} can be ${a.key === 'refund' ? 'refunded' : 'released'}`}
+        body={`${a.label} is permissionless now, anyone can trigger it.`}
+        cta={a.label}
+        onClick={() => onJump(m.index)}
+      />
+    )
+  }
+
+  const other = role === 'payer' ? 'the freelancer' : 'the payer'
+  return (
+    <FocusBarShell
+      tone="neutral"
+      eyebrow="Nothing needs you"
+      title="You are all caught up."
+      body={`Waiting on ${other}. The next action will show up here.`}
+    />
+  )
+}
+
+const FOCUS_TONE = {
+  clay:    { bg: 'var(--clay-soft)', bd: 'color-mix(in oklch, var(--clay) 35%, transparent)', ac: 'var(--clay)' },
+  warn:    { bg: 'color-mix(in oklch, var(--warn) 12%, transparent)', bd: 'color-mix(in oklch, var(--warn) 35%, transparent)', ac: 'var(--warn)' },
+  ok:      { bg: 'color-mix(in oklch, var(--ok) 10%, transparent)', bd: 'color-mix(in oklch, var(--ok) 30%, transparent)', ac: 'var(--ok)' },
+  neutral: { bg: 'var(--sunk)', bd: 'var(--rule)', ac: 'var(--ink-3)' }
+}
+
+function FocusBarShell({ tone, eyebrow, title, body, cta, onClick }) {
+  const t = FOCUS_TONE[tone] ?? FOCUS_TONE.neutral
+  return (
+    <div
+      className="rounded-2xl border p-5 flex items-center justify-between gap-5 flex-wrap"
+      style={{ background: t.bg, borderColor: t.bd }}
+    >
+      <div className="flex items-start gap-3.5 min-w-0 flex-1">
+        <span
+          className="rounded-md inline-flex items-center justify-center shrink-0 h-9 w-9 mt-0.5"
+          style={{ background: 'color-mix(in oklch, var(--paper) 55%, transparent)', color: t.ac }}
+        >
+          <FocusIcon tone={tone} />
+        </span>
+        <div className="min-w-0">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.14em] mb-0.5" style={{ color: t.ac }}>
+            {eyebrow}
+          </div>
+          <div className="text-[15px] font-semibold text-ink mb-1">{title}</div>
+          <p className="text-[13px] leading-relaxed text-ink-2 max-w-[60ch]">{body}</p>
+        </div>
+      </div>
+      {cta && (
+        <button
+          type="button"
+          onClick={onClick}
+          className="inline-flex items-center justify-center gap-2 rounded-md px-4 h-10 shrink-0 font-medium text-[13.5px] transition-all active:scale-[0.98]"
+          style={tone === 'warn'
+            ? { background: 'transparent', color: 'var(--warn)', border: '1px solid color-mix(in oklch, var(--warn) 45%, transparent)' }
+            : { background: 'var(--clay)', color: 'var(--paper)' }}
+        >
+          {cta}
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M4 10h11M11 6l4 4-4 4" />
+          </svg>
+        </button>
+      )}
+    </div>
+  )
+}
+
+function FocusIcon({ tone }) {
+  if (tone === 'ok') return (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 10.5 8 14.5l8-9" />
+    </svg>
+  )
+  if (tone === 'warn') return (
+    <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M10 3v14M5 6h10M5 6 3 11h4zM15 6l-2 5h4zM6.5 17h7" />
+    </svg>
+  )
+  if (tone === 'clay') return (
+    <svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 10h11M11 6l4 4-4 4" />
+    </svg>
+  )
+  return (
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 6v4l2.5 1.5" />
+    </svg>
+  )
+}
+
 /* ---------- Column 1 — Metadata & financial ledger ----------
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
@@ -349,7 +566,11 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
         )}
       </div>
 
-      {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} onChange={onChange} />}
+      {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} />}
+
+      {role && escrow.state === 0 && (
+        <EditableParamsPanel escrow={escrow} role={role} splits={splits} hasInvoice={hasInvoice} onChange={onChange} />
+      )}
 
       {role && escrow.state === 0 && (
         <CancelCard
@@ -357,16 +578,216 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
           optimistic={optimistic} setOpt={setOpt} clearOpt={clearOpt}
         />
       )}
-      {role === 'payer' && escrow.state === 0 && (
-        <ExtendDeadlineCard escrow={escrow} onChange={onChange} />
-      )}
-      {role === 'payer' && escrow.state === 0 && hasInvoice && (
-        <EditInvoiceURICard escrow={escrow} onChange={onChange} />
-      )}
-      {role === 'freelancer' && escrow.state === 0 && (
-        <UpdateReceivingAddressCard escrow={escrow} onChange={onChange} />
-      )}
     </aside>
+  )
+}
+
+/* ---------- Editable parameters ----------
+   One place for every parameter the caller can change on a live escrow,
+   built on the shared EditableRow primitive so the deadline / invoice link /
+   receiving address / split address flows share one interaction pattern
+   instead of four hand-rolled inline-edit cards. */
+function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+  const { address } = useAccount()
+  const mySplitIndex = role === 'freelancer' && splits
+    ? splits.findIndex((s) => {
+        const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+        return addr && address && addr.toLowerCase() === address.toLowerCase()
+      })
+    : -1
+
+  const rows = []
+  if (role === 'payer') rows.push('deadline')
+  if (role === 'payer' && hasInvoice) rows.push('invoice')
+  if (role === 'freelancer') rows.push('receiving')
+  if (role === 'freelancer' && mySplitIndex >= 0) rows.push('split')
+  if (rows.length === 0) return null
+
+  return (
+    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-1">
+      <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Editable parameters</h3>
+      <p className="text-xs text-ink-3 leading-relaxed mb-1">Everything you can change on this live escrow, in one place.</p>
+      <div className="flex flex-col">
+        {rows.map((key, i) => {
+          const last = i === rows.length - 1
+          if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+          if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+          if (key === 'split') {
+            const s = splits[mySplitIndex]
+            return (
+              <SplitAddressEditRow
+                key={key}
+                escrow={escrow}
+                splitIndex={mySplitIndex}
+                currentDomain={Number(s.destinationDomain)}
+                currentAddress={s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null}
+                pct={Number(s.bps) / 100}
+                onChange={onChange}
+                last={last}
+              />
+            )
+          }
+          return null
+        })}
+      </div>
+    </div>
+  )
+}
+
+function DeadlineEditRow({ escrow, onChange, last }) {
+  const [saveNonce, setSaveNonce] = useState(0)
+  const [successTs, setSuccessTs] = useState(null)
+  const currentTs = Number(escrow.deadline)
+  const minStr = useMemo(() => {
+    const d = new Date((currentTs + 60) * 1000)
+    const off = d.getTimezoneOffset() * 60_000
+    return new Date(d.getTime() - off).toISOString().slice(0, 16)
+  }, [currentTs])
+
+  const tx = useTx({
+    onConfirmed: () => { setSaveNonce((n) => n + 1); onChange?.() }
+  })
+
+  const toTs = (d) => (d.deadline ? Math.floor(new Date(d.deadline).getTime() / 1000) : 0)
+
+  return (
+    <EditableRow
+      key={saveNonce}
+      label="Deadline"
+      ownerTag="Payer"
+      currentDisplay={formatDeadline(escrow.deadline)}
+      help="You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you."
+      fields={[{ key: 'deadline', label: 'New deadline', type: 'datetime', min: minStr }]}
+      validate={(d) => toTs(d) > currentTs}
+      busy={tx.isBusy}
+      successMessage={successTs ? `Extended to ${formatDeadline(BigInt(successTs))}.` : null}
+      onSubmit={(d) => {
+        const newTs = toTs(d)
+        setSuccessTs(newTs)
+        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), { loadingMessage: 'Extending. Check your wallet.' })
+      }}
+      last={last}
+    />
+  )
+}
+
+function InvoiceLinkEditRow({ escrow, onChange, last }) {
+  const [saveNonce, setSaveNonce] = useState(0)
+  const [saved, setSaved] = useState(false)
+  const current = (escrow.invoiceURI && escrow.invoiceURI !== NO_ATTACHMENT_URI) ? escrow.invoiceURI : ''
+
+  const tx = useTx({
+    onConfirmed: () => { setSaveNonce((n) => n + 1); onChange?.() }
+  })
+
+  return (
+    <EditableRow
+      key={saveNonce}
+      label="Invoice link"
+      ownerTag="Payer"
+      currentDisplay={current}
+      help="An optional link to the full invoice. The structured invoice terms committed on-chain don't change, only this convenience link."
+      fields={[{ key: 'url', label: 'New invoice link', type: 'text', mono: true, placeholder: 'https://…' }]}
+      validate={(d) => {
+        const trimmed = (d.url || '').trim()
+        return trimmed !== '' && trimmed !== current && isValidUrl(trimmed)
+      }}
+      busy={tx.isBusy}
+      successMessage={saved ? 'Invoice link updated.' : null}
+      onSubmit={(d) => {
+        const trimmed = d.url.trim()
+        setSaved(true)
+        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), { loadingMessage: 'Updating. Check your wallet.' })
+      }}
+      last={last}
+    />
+  )
+}
+
+function ReceivingAddressEditRow({ escrow, onChange, last }) {
+  const [saveNonce, setSaveNonce] = useState(0)
+  const [successInfo, setSuccessInfo] = useState(null)
+  const { supported } = useSupportedDomains()
+  const currentAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : null
+  const currentDomain = Number(escrow.destinationDomain)
+
+  const domainOptions = useMemo(() => {
+    const set = new Set(supported.filter(isEvmDomain))
+    set.add(ARC_DOMAIN)
+    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
+  }, [supported])
+
+  const tx = useTx({
+    onConfirmed: () => { setSaveNonce((n) => n + 1); onChange?.() }
+  })
+
+  return (
+    <EditableRow
+      key={saveNonce}
+      label="Receiving address"
+      ownerTag="Freelancer"
+      currentDisplay={currentAddress ? `${truncateAddr(currentAddress)} · ${getDomainName(currentDomain)}` : null}
+      help="Where approved milestone payments get sent. You can update this anytime before the escrow is completed or cancelled."
+      fields={[
+        { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
+        { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain || ARC_DOMAIN }
+      ]}
+      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      busy={tx.isBusy}
+      successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
+      onSubmit={(d) => {
+        setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
+        tx.run(
+          escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
+          { loadingMessage: 'Updating. Check your wallet.' }
+        )
+      }}
+      last={last}
+    />
+  )
+}
+
+function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, onChange, last }) {
+  const [saveNonce, setSaveNonce] = useState(0)
+  const [successInfo, setSuccessInfo] = useState(null)
+  const { supported } = useSupportedDomains()
+
+  const domainOptions = useMemo(() => {
+    const set = new Set(supported.filter(isEvmDomain))
+    set.add(ARC_DOMAIN)
+    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
+  }, [supported])
+
+  const tx = useTx({
+    onConfirmed: () => { setSaveNonce((n) => n + 1); onChange?.() }
+  })
+
+  const pctLabel = pct.toLocaleString('en-US', { maximumFractionDigits: 2 })
+
+  return (
+    <EditableRow
+      key={saveNonce}
+      label="My split address"
+      ownerTag="Your split"
+      currentDisplay={currentAddress ? `${truncateAddr(currentAddress)} · ${pctLabel}%` : null}
+      help="Update the wallet and destination chain for your share of split payouts."
+      fields={[
+        { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
+        { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain }
+      ]}
+      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      busy={tx.isBusy}
+      successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
+      onSubmit={(d) => {
+        setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
+        tx.run(
+          escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
+          { loadingMessage: 'Updating. Check your wallet.' }
+        )
+      }}
+      last={last}
+    />
   )
 }
 
@@ -374,8 +795,7 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
    Only present when the escrow was created with a multi-party split. Each
    released milestone's remainder (after the protocol fee) is divided across
    these recipients by their bps share, each on its own CCTP destination. */
-function SplitRecipients({ splits, escrow, onChange }) {
-  const { address } = useAccount()
+function SplitRecipients({ splits }) {
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
@@ -386,123 +806,20 @@ function SplitRecipients({ splits, escrow, onChange }) {
         {splits.map((s, i) => {
           const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
           const pct = (Number(s.bps) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
-          const isMyEntry = addr && address && addr.toLowerCase() === address.toLowerCase()
           return (
             <div
               key={i}
-              className={`flex flex-col gap-2 py-3 ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
+              className={`flex items-center justify-between gap-3 py-3 text-sm ${i === splits.length - 1 ? '' : 'border-b border-rule/50'}`}
             >
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <div className="flex flex-col gap-0.5 min-w-0">
-                  {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
-                  <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
-                </div>
-                <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                {addr ? <AddressInline address={addr} /> : <span className="text-ink-3">—</span>}
+                <span className="text-xs text-ink-2 font-mono">{getDomainName(s.destinationDomain)}</span>
               </div>
-              {isMyEntry && escrow && escrow.state === 0 && (
-                <UpdateSplitAddressRow escrow={escrow} splitIndex={i} currentDomain={Number(s.destinationDomain)} onChange={onChange} />
-              )}
+              <span className="font-mono tabular-nums text-sm text-ink shrink-0">{pct}%</span>
             </div>
           )
         })}
       </div>
-    </div>
-  )
-}
-
-function UpdateSplitAddressRow({ escrow, splitIndex, currentDomain, onChange }) {
-  const [editing, setEditing] = useState(false)
-  const [addr, setAddr] = useState('')
-  const [domain, setDomain] = useState(currentDomain)
-  const [successInfo, setSuccessInfo] = useState(null)
-  const { supported } = useSupportedDomains()
-  const addrId = useId()
-
-  const domainOptions = useMemo(() => {
-    const set = new Set(supported.filter(isEvmDomain))
-    set.add(ARC_DOMAIN)
-    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
-  }, [supported])
-
-  const tx = useTx({
-    onConfirmed: () => {
-      setSuccessInfo({ address: addr, domain })
-      setEditing(false); setAddr('')
-      onChange?.()
-    }
-  })
-
-  const submit = () => {
-    if (!isValidAddress(addr)) return
-    return tx.run(
-      escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(addr), Number(domain)]),
-      { loadingMessage: 'Updating. Check your wallet.' }
-    )
-  }
-
-  if (!editing && !successInfo) {
-    return (
-      <button
-        type="button"
-        className="self-start text-xs text-clay hover:text-clay-hover transition-colors"
-        onClick={() => setEditing(true)}
-      >
-        Update my address
-      </button>
-    )
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      {successInfo && !editing && (
-        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2 text-xs text-ok flex items-center gap-2">
-          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
-            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Updated to <span className="font-mono ml-1">{truncateAddr(successInfo.address)}</span>
-          <button type="button" onClick={() => { setSuccessInfo(null); setEditing(true) }} className="ml-auto text-ok/70 hover:text-ok transition-colors">Edit again</button>
-        </div>
-      )}
-      {editing && (
-        <div className="flex flex-col gap-2 pt-1">
-          <div className="flex flex-col gap-1">
-            <label htmlFor={addrId} className="text-[11px] font-medium text-ink-2">New address</label>
-            <input
-              id={addrId}
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="0x…"
-              value={addr}
-              onChange={(e) => setAddr(e.target.value.trim())}
-              className="input-field font-mono text-sm"
-            />
-          </div>
-          <CustomSelect
-            value={domain}
-            onChange={setDomain}
-            options={domainOptions}
-            label="Destination chain"
-          />
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className="btn-primary text-xs py-1.5 px-3"
-              disabled={!isValidAddress(addr) || tx.isBusy}
-              onClick={submit}
-            >
-              {tx.isBusy ? 'Working…' : 'Save'}
-            </button>
-            <button
-              type="button"
-              className="text-xs text-ink-2 hover:text-ink transition-colors"
-              onClick={() => setEditing(false)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -586,13 +903,41 @@ function ConfettiBurst({ active }) {
   )
 }
 
+// The first non-terminal milestone (state !== RELEASED, !== REFUNDED)
+// defaults expanded; settled milestones default collapsed. Falls back to
+// the last milestone once everything is terminal.
+function defaultOpenIndex(milestones) {
+  const active = milestones.find((m) => m.state !== 3 && m.state !== 4)
+  return active ? active.index : milestones[milestones.length - 1]?.index ?? 0
+}
+
 function MilestoneStack({
   escrow, milestones, disputes, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadlines,
-  optimistic, onChange, setOpt, clearOpt
+  optimistic, onChange, setOpt, clearOpt, flashIndex, openRef
 }) {
   const hasDispute = milestones.some((m) => m.state === 2)
   const releasedCount = useIntCountUp(milestones.filter((m) => m.state === 3).length)
+  const [openSet, setOpenSet] = useState(() => new Set([defaultOpenIndex(milestones)]))
+
+  // Reset the default expand target when the viewer switches escrows (route
+  // param change on the same page instance, not a remount).
+  useEffect(() => {
+    setOpenSet(new Set([defaultOpenIndex(milestones)]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [escrow.id])
+
+  const toggle = (i) => setOpenSet((s) => {
+    const next = new Set(s)
+    next.has(i) ? next.delete(i) : next.add(i)
+    return next
+  })
+
+  // Exposes an imperative "open + track" entry point for the focus bar's
+  // jump-to-milestone action (Step 3), without those callers needing to
+  // know this component owns a Set internally.
+  if (openRef) openRef.current = (i) => setOpenSet((s) => new Set(s).add(i))
+
   return (
     <div className="bg-paper border border-rule rounded-2xl p-6">
       <div className="flex items-baseline justify-between mb-2">
@@ -643,6 +988,9 @@ function MilestoneStack({
                   onChange={onChange}
                   setOpt={setOpt}
                   clearOpt={clearOpt}
+                  open={openSet.has(m.index)}
+                  onToggle={() => toggle(m.index)}
+                  flash={flashIndex === m.index}
                 />
               </motion.div>
             )
@@ -678,6 +1026,23 @@ function useMilestoneTitles(escrowId) {
   return data && data.length > 0 ? data : loadMilestoneTitles(escrowId)
 }
 
+// Chain-readable fallback for the cross-chain tracker's txHash — indexed on
+// the Milestone entity's releaseTx field (see indexer/schema.graphql), so
+// the counterparty's device can find the same burn tx even though it didn't
+// submit it. localStorage (see readCctpTrack below) stays the instant local
+// echo for the submitting device, since indexing lags the tx by a few
+// seconds; this hook is the fallback once that lag clears.
+function useMilestoneReleaseTxs(escrowId) {
+  const { data } = useQuery({
+    queryKey: ['gs-release-tx', escrowId],
+    queryFn: () => fetchMilestoneReleaseTxs(escrowId),
+    enabled: GOLDSKY_ENABLED && escrowId !== undefined && escrowId !== null,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false
+  })
+  return data || {}
+}
+
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 function readCctpTrack(escrowId, milestoneIndex) {
@@ -698,16 +1063,22 @@ function readCctpTrack(escrowId, milestoneIndex) {
 function MilestoneRow({
   escrow, milestone, dispute, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadline,
-  optimisticBadge, prevTerminal, onChange, setOpt, clearOpt
+  optimisticBadge, prevTerminal, onChange, setOpt, clearOpt,
+  open, onToggle, flash
 }) {
   const titles = useMilestoneTitles(escrow.id)
   const title = titles[milestone.index] || `Milestone ${milestone.index + 1}`
 
-  // Persistent cross-chain delivery tracker — read once on mount, updated by
-  // MilestoneAction/SettlementPanel when a release tx is submitted from this device.
+  // Cross-chain delivery tracker's txHash: localStorage is the instant local
+  // echo (set by MilestoneAction/SettlementPanel right after this device
+  // submits the release), the subgraph's releaseTx is the chain-readable
+  // fallback so the counterparty sees the same tracker without having
+  // submitted anything themselves.
   const [cctpTrack, setCctpTrack] = useState(() =>
     readCctpTrack(escrow.id, milestone.index)
   )
+  const releaseTxs = useMilestoneReleaseTxs(escrow.id)
+  const cctpTxHash = cctpTrack?.txHash || releaseTxs[milestone.index] || null
 
   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
   // device, they write to localStorage and call onCrossChainRelease so we re-read.
@@ -740,127 +1111,150 @@ function MilestoneRow({
 
   const inDispute = milestone.state === 2
   const rowCls = inDispute
-    ? 'border border-warn/40 bg-warn/[0.04] rounded-xl p-5 relative'
-    : 'border border-rule bg-paper rounded-xl p-5 relative'
+    ? 'border border-warn/40 bg-warn/[0.04] rounded-xl relative transition-shadow'
+    : 'border border-rule bg-paper rounded-xl relative transition-shadow'
   return (
-    <div className={rowCls}>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-2 min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={`font-mono text-[10px] uppercase tracking-[0.18em] ${inDispute ? 'text-warn' : 'text-ink-3'}`}>
-              M{milestone.index + 1}
-            </span>
-            <h3 className="text-base font-semibold text-ink truncate">{title}</h3>
-            {optimisticBadge && (
-              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-clay/30 bg-clay-soft text-clay">
-                {optimisticBadge}
-              </span>
-            )}
-          </div>
-
-          {description && (
-            <p className="text-sm text-ink-2 leading-relaxed">{description}</p>
-          )}
-
-          <div className="font-mono tabular-nums text-xl font-bold text-ink mt-1">
-            {formatUSDCNumber(milestone.amount)}
-            <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
-          </div>
-
-          {claimed && Number(milestone.claimedAt) > 0 ? (
-            <div className="flex flex-wrap gap-4 text-xs mt-1">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
-                <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.claimedAt)}</span>
-              </div>
-            </div>
-          ) : null}
-
-          {milestone.state === 1 && reviewDeadline > 0 && !reviewWindowExpired && (
-            <Countdown label="Auto-releases in" target={reviewDeadline} tone="warning" />
-          )}
-        </div>
-
-        <div className="shrink-0 flex flex-col items-end gap-2">
+    <div
+      id={`milestone-${milestone.index}`}
+      className={rowCls}
+      style={flash ? { boxShadow: '0 0 0 3px var(--clay-soft)', borderColor: 'var(--clay)' } : undefined}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full flex items-center justify-between gap-3 text-left p-5"
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className={`font-mono text-[10px] uppercase tracking-[0.18em] shrink-0 ${inDispute ? 'text-warn' : 'text-ink-3'}`}>
+            M{milestone.index + 1}
+          </span>
+          <span className="text-[15px] font-semibold text-ink truncate">{title}</span>
           <MilestoneStateGlyph state={milestone.state} />
-          <MilestoneAction
-            escrow={escrow}
-            milestone={milestone}
-            role={role}
-            deadlinePassed={deadlinePassed}
-            gracePassed={gracePassed}
-            reviewWindowExpired={reviewWindowExpired}
-            setOpt={setOpt}
-            clearOpt={clearOpt}
-            onChange={onChange}
-            onCrossChainRelease={handleCrossChainRelease}
-          />
-          <DisputeActions
-            escrow={escrow}
-            milestone={milestone}
-            dispute={dispute}
-            role={role}
-            userAddress={userAddress}
-            deadlinePassed={deadlinePassed}
-            reviewWindowExpired={reviewWindowExpired}
-            onChange={onChange}
-          />
-        </div>
-      </div>
-
-      {milestone.state === 2 && (
-        <div className="mt-4 pt-4 border-t border-warn/30 flex flex-col gap-4">
-          <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
-            In review by the arbiter panel
-          </div>
-          {(role === 'payer' || role === 'freelancer') && (
-            <DisputeStepper dispute={dispute} role={role} />
-          )}
-          {Number(dispute?.raisedAt ?? 0) > 0 && (role === 'payer' || role === 'freelancer') && (
-            <DisputeDetails dispute={dispute} />
-          )}
-          <ArbiterTimeoutNote dispute={dispute} />
-          {(role === 'payer' || role === 'freelancer') && (
-            <SettlementPanel
-              escrow={escrow}
-              milestone={milestone}
-              role={role}
-              onChange={onChange}
-              onCrossChainRelease={handleCrossChainRelease}
-            />
+          {optimisticBadge && (
+            <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border border-clay/30 bg-clay-soft text-clay shrink-0">
+              {optimisticBadge}
+            </span>
           )}
         </div>
-      )}
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="font-mono font-semibold tabular-nums text-[15px] text-ink">
+            {formatUSDCNumber(milestone.amount)}
+          </span>
+          <ChevronIcon open={open} />
+        </div>
+      </button>
 
-      {(milestone.state === 3 || milestone.state === 4) &&
-        dispute?.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
-          <ResolutionNote dispute={dispute} />
-        )}
-      {milestone.state === 4 && Number(dispute?.raisedAt ?? 0) > 0 &&
-        (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
-          <TimeoutOutcomeCard milestone={milestone} role={role} />
-        )}
-      {milestone.state === 3 && cctpTrack && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
-        <CrossChainDelivery
-          txHash={cctpTrack.txHash}
-          destinationDomain={escrow.destinationDomain}
-          escrowId={escrow.id}
-          milestoneIndex={milestone.index}
-        />
-      )}
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="px-5 pb-5 border-t border-rule/60 pt-4 flex flex-col gap-3.5">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="flex flex-col gap-2 min-w-0 flex-1">
+                  {description && (
+                    <p className="text-sm text-ink-2 leading-relaxed">{description}</p>
+                  )}
 
-      {(role === 'payer' || role === 'freelancer') && prevTerminal &&
-        (milestone.state === 0 || milestone.state === 1) && (
-          <MilestoneCancelControl
-            escrow={escrow}
-            milestoneIndex={milestone.index}
-            role={role}
-            onChange={onChange}
-          />
+                  {claimed && Number(milestone.claimedAt) > 0 ? (
+                    <div className="flex flex-wrap gap-4 text-xs mt-1">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-ink-3 text-[10px] uppercase tracking-wider">Delivered</span>
+                        <span className="font-mono tabular-nums text-ink-2">{formatTimestamp(milestone.claimedAt)}</span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {milestone.state === 1 && reviewDeadline > 0 && !reviewWindowExpired && (
+                    <Countdown label="Auto-releases in" target={reviewDeadline} tone="warning" />
+                  )}
+                </div>
+
+                <div className="shrink-0 flex flex-col items-end gap-2">
+                  <MilestoneAction
+                    escrow={escrow}
+                    milestone={milestone}
+                    role={role}
+                    gracePassed={gracePassed}
+                    reviewWindowExpired={reviewWindowExpired}
+                    setOpt={setOpt}
+                    clearOpt={clearOpt}
+                    onChange={onChange}
+                    onCrossChainRelease={handleCrossChainRelease}
+                  />
+                  <RaiseDisputeButton
+                    escrow={escrow}
+                    milestone={milestone}
+                    role={role}
+                    reviewWindowExpired={reviewWindowExpired}
+                    onChange={onChange}
+                  />
+                </div>
+              </div>
+
+              {milestone.state === 2 && (role === 'payer' || role === 'freelancer') && (
+                <DisputePanel
+                  escrow={escrow}
+                  milestone={milestone}
+                  dispute={dispute}
+                  role={role}
+                  userAddress={userAddress}
+                  onChange={onChange}
+                  onCrossChainRelease={handleCrossChainRelease}
+                />
+              )}
+
+              {(milestone.state === 3 || milestone.state === 4) &&
+                dispute?.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
+                  <ResolutionNote dispute={dispute} />
+                )}
+              {milestone.state === 4 && Number(dispute?.raisedAt ?? 0) > 0 &&
+                (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
+                  <TimeoutOutcomeCard milestone={milestone} role={role} />
+                )}
+              {milestone.state === 3 && cctpTxHash && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
+                <CrossChainDelivery
+                  txHash={cctpTxHash}
+                  destinationDomain={escrow.destinationDomain}
+                  escrowId={escrow.id}
+                  milestoneIndex={milestone.index}
+                />
+              )}
+
+              {(role === 'payer' || role === 'freelancer') && prevTerminal &&
+                (milestone.state === 0 || milestone.state === 1) && (
+                  <MilestoneCancelControl
+                    escrow={escrow}
+                    milestoneIndex={milestone.index}
+                    role={role}
+                    onChange={onChange}
+                  />
+                )}
+            </div>
+          </motion.div>
         )}
+      </AnimatePresence>
 
       <ConfettiBurst active={burst} />
     </div>
+  )
+}
+
+function ChevronIcon({ open }) {
+  return (
+    <svg
+      width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden
+      style={{ color: 'var(--ink-3)', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 200ms' }}
+    >
+      <path d="m5.5 8 4.5 4.5L14.5 8" />
+    </svg>
   )
 }
 
@@ -938,6 +1332,85 @@ function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
           ? 'Finalize cancellation'
           : 'Propose cancellation'}
       />
+    </div>
+  )
+}
+
+/* ---------- Tabbed dispute panel ----------
+   Collapses the density spike a disputed milestone used to be (stepper +
+   details + timeout note + settlement panel, all stacked) into three tabs.
+   Pure recomposition of already-fetched data — dispute, settlement
+   proposals, arbiter window — no new reads. Tab pill mirrors the segmented
+   control already used on Dashboard/Ledger (bg-sunk pill, animated
+   layoutId), so this doesn't invent a new control style. */
+const DISPUTE_TABS = [
+  ['overview', 'Overview'],
+  ['evidence', 'Evidence'],
+  ['settle', 'Settle']
+]
+
+function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange, onCrossChainRelease }) {
+  const [tab, setTab] = useState('overview')
+
+  return (
+    <div className="pt-2 flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-xs uppercase tracking-[0.18em] font-medium text-warn">
+          In review by the arbiter panel
+        </div>
+      </div>
+
+      <div role="tablist" aria-label="Dispute" className="inline-flex items-center gap-1 p-1 bg-sunk rounded-xl self-start">
+        {DISPUTE_TABS.map(([key, label]) => {
+          const active = tab === key
+          return (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(key)}
+              className={`relative inline-flex items-center justify-center min-h-8 px-3.5 py-1.5 text-xs font-medium rounded-lg
+                whitespace-nowrap transition-colors duration-200
+                focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk
+                ${active ? 'text-ink' : 'text-ink-2 hover:text-ink'}`}
+            >
+              {active && (
+                <motion.span
+                  layoutId={`dispute-tab-pill-${escrow.id}-${milestone.index}`}
+                  className="absolute inset-0 rounded-lg bg-paper shadow-sm"
+                  transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                />
+              )}
+              <span className="relative">{label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {tab === 'overview' && (
+        <div className="flex flex-col gap-4">
+          <DisputeStepper dispute={dispute} role={role} />
+          <ArbiterTimeoutNote dispute={dispute} />
+        </div>
+      )}
+
+      {tab === 'evidence' && (
+        <div className="flex flex-col gap-4">
+          {Number(dispute?.raisedAt ?? 0) > 0 && <DisputeDetails dispute={dispute} />}
+          <EvidenceTabActions escrow={escrow} milestone={milestone} dispute={dispute} role={role} userAddress={userAddress} onChange={onChange} />
+        </div>
+      )}
+
+      {tab === 'settle' && (
+        <SettlementPanel
+          escrow={escrow}
+          milestone={milestone}
+          role={role}
+          onChange={onChange}
+          onCrossChainRelease={onCrossChainRelease}
+        />
+      )}
     </div>
   )
 }
@@ -1660,8 +2133,39 @@ function MilestoneStateGlyph({ state }) {
    Single most relevant action per role/state. Glowing clay for primary
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
+// Picks the single highest-priority action available to a given caller role
+// on a milestone right now. Shared between MilestoneAction (which submits
+// the tx) and FocusBar (which only needs to know what's next). Lifecycle:
+// PENDING(0) → IN_REVIEW(1) → RELEASED(3); a missed deadline on a PENDING
+// milestone is permissionlessly refundable to the payer.
+function computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, gracePassed }) {
+  const id = BigInt(escrow.id)
+  const idx = BigInt(milestone.index)
+  const isPayer = role === 'payer'
+  const isFreelancer = role === 'freelancer'
+
+  if (milestone.state === 0) {
+    if (isFreelancer && !gracePassed) {
+      return { key: 'claim', label: 'Mark as Delivered', fn: 'claimDelivery', args: [id, idx], optimistic: { badge: 'Claiming…', claimedDelivery: true } }
+    }
+    if (gracePassed) {
+      return { key: 'refund', label: 'Refund (deadline passed)', fn: 'refundAfterDeadline', args: [id, idx], optimistic: { badge: 'Refunding…' }, permissionless: true }
+    }
+    return null
+  }
+  if (milestone.state === 1) {
+    if (isPayer) {
+      return { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Approving…' } }
+    }
+    if (reviewWindowExpired) {
+      return { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Releasing…' }, permissionless: true }
+    }
+  }
+  return null
+}
+
 function MilestoneAction({
-  escrow, milestone, role, deadlinePassed, gracePassed, reviewWindowExpired,
+  escrow, milestone, role, gracePassed, reviewWindowExpired,
   setOpt, clearOpt, onChange, onCrossChainRelease
 }) {
   const [activeKey, setActiveKey] = useState(null)
@@ -1680,29 +2184,7 @@ function MilestoneAction({
   const { config } = useProtocolConfig()
   const toast = useToast()
 
-  const id = BigInt(escrow.id)
-  const idx = BigInt(milestone.index)
-  const isPayer = role === 'payer'
-  const isFreelancer = role === 'freelancer'
-
-  // Pick the single highest-priority action available to this caller right now.
-  // Lifecycle: PENDING(0) → IN_REVIEW(1) → RELEASED(3); a missed deadline on a
-  // PENDING milestone is permissionlessly refundable to the payer.
-  let action = null
-  if (milestone.state === 0) {
-    if (isFreelancer && !gracePassed) {
-      action = { key: 'claim', label: 'Mark as Delivered', fn: 'claimDelivery', args: [id, idx], optimistic: { badge: 'Claiming…', claimedDelivery: true } }
-    } else if (gracePassed) {
-      action = { key: 'refund', label: 'Refund (deadline passed)', fn: 'refundAfterDeadline', args: [id, idx], optimistic: { badge: 'Refunding…' } }
-    }
-  } else if (milestone.state === 1) {
-    if (isPayer) {
-      action = { key: 'approve', label: 'Approve & Release', fn: 'approveRelease', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Approving…' } }
-    } else if (reviewWindowExpired) {
-      action = { key: 'release', label: 'Release Payment', fn: 'release', args: [id, idx], needsForwardFee: true, optimistic: { badge: 'Releasing…' } }
-    }
-  }
-
+  const action = computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, gracePassed })
   if (!action) return null
 
   const run = async () => {
@@ -1746,37 +2228,63 @@ function MilestoneAction({
   }
 
   const isLoading = activeKey === action.key && tx.isBusy
+  const permissionless = !!action.permissionless
   return (
-    <div className="relative">
-      <AnimatePresence>
-        {isLoading && (
-          <motion.span
-            key="ring"
-            className="absolute inset-0 rounded-xl border-2 border-clay pointer-events-none"
-            initial={{ opacity: 0.7, scale: 1 }}
-            animate={{ opacity: 0, scale: 1.4 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.9, ease: 'easeOut', repeat: Infinity, repeatType: 'loop' }}
-          />
-        )}
-      </AnimatePresence>
-      <button
-        type="button"
-        onClick={run}
-        disabled={tx.isBusy}
-        className="relative inline-flex items-center justify-center gap-2 px-4 py-2
-                   bg-clay text-paper rounded-xl font-medium text-sm
-                   hover:bg-clay-hover
-                   transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                   disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
-                   focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-      >
-        {isLoading && (
-          <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-paper/40 border-t-paper animate-spin" aria-hidden />
-        )}
-        {isLoading ? 'Pending…' : action.label}
-      </button>
+    <div className="flex flex-col items-end gap-1.5">
+      <div className="relative">
+        <AnimatePresence>
+          {isLoading && (
+            <motion.span
+              key="ring"
+              className="absolute inset-0 rounded-xl border-2 border-clay pointer-events-none"
+              initial={{ opacity: 0.7, scale: 1 }}
+              animate={{ opacity: 0, scale: 1.4 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.9, ease: 'easeOut', repeat: Infinity, repeatType: 'loop' }}
+            />
+          )}
+        </AnimatePresence>
+        <button
+          type="button"
+          onClick={run}
+          disabled={tx.isBusy}
+          className={`relative inline-flex items-center justify-center gap-2 px-4 py-2
+                     rounded-xl font-medium text-sm
+                     transition-[background-color,border-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
+                     disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]
+                     focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper
+                     ${permissionless
+                       ? 'bg-transparent text-clay border border-dashed border-clay/55 hover:bg-clay-soft/40'
+                       : 'bg-clay text-paper hover:bg-clay-hover'}`}
+        >
+          {isLoading && (
+            <span className={`inline-block h-3.5 w-3.5 rounded-full border-2 animate-spin ${permissionless ? 'border-clay/30 border-t-clay' : 'border-paper/40 border-t-paper'}`} aria-hidden />
+          )}
+          {!isLoading && permissionless && <KeyIcon />}
+          {isLoading ? 'Pending…' : action.label}
+        </button>
+      </div>
+      {permissionless && !isLoading && <PermissionlessHint />}
     </div>
+  )
+}
+
+function KeyIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="7" cy="7" r="3.2" />
+      <path d="m9.3 9.3 6 6" />
+      <path d="m12.5 12.5 1.5-1.5" />
+      <path d="m14.5 14.5 1.5-1.5" />
+    </svg>
+  )
+}
+
+function PermissionlessHint() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-3 text-right max-w-[180px]">
+      Anyone can run this now, it is permissionless once the condition is met.
+    </span>
   )
 }
 
@@ -1787,42 +2295,62 @@ function MilestoneAction({
    yet). At most one of these is reachable for any given milestone state. A
    missed-deadline PENDING milestone is no longer escalated — it is refunded via
    the primary {refundAfterDeadline} action. */
-function DisputeActions({
-  escrow, milestone, dispute, role, userAddress,
-  reviewWindowExpired, onChange
-}) {
-  const [modal, setModal] = useState(null) // 'raise' | 'counter' | 'append' | null
+// Action-zone-only: raiseDispute is depositor-only, from IN_REVIEW(1) within
+// the window, i.e. before any dispute exists — so this lives in the top
+// action row alongside MilestoneAction, not inside the (state===2-only)
+// dispute tabs below.
+function RaiseDisputeButton({ escrow, milestone, role, reviewWindowExpired, onChange }) {
+  const [modal, setModal] = useState(false)
+  const canRaise = milestone.state === 1 && role === 'payer' && !reviewWindowExpired
+  if (!canRaise) return null
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setModal(true)}
+        className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm
+                   border border-warn/40 text-warn hover:bg-warn/10 transition-colors
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-warn focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+      >
+        Raise Dispute
+      </button>
+      <EvidenceModal
+        open={modal}
+        mode="raise"
+        escrowId={escrow.id}
+        milestoneIndex={milestone.index}
+        onClose={() => setModal(false)}
+        onConfirmed={() => { setModal(false); onChange?.() }}
+      />
+    </>
+  )
+}
+
+// Evidence-tab-only: counter/append, both state===2 (dispute already open).
+function EvidenceTabActions({ escrow, milestone, dispute, role, userAddress, onChange }) {
+  const [modal, setModal] = useState(null) // 'counter' | 'append' | null
 
   const isParticipant = role === 'payer' || role === 'freelancer'
   if (!isParticipant) return null
 
-  const state = milestone.state
   const counterExists =
     dispute && dispute.counterEvidenceHash && dispute.counterEvidenceHash !== ZERO_BYTES32
   const raisedByMe =
     dispute?.raisedBy && userAddress &&
     dispute.raisedBy.toLowerCase() === userAddress.toLowerCase()
 
-  // raiseDispute is depositor-only and only from IN_REVIEW within the window.
-  const canRaise = state === 1 && role === 'payer' && !reviewWindowExpired
-  const canCounter = state === 2 && !!dispute?.raisedBy && !raisedByMe && !counterExists
+  const canCounter = !!dispute?.raisedBy && !raisedByMe && !counterExists
   // Either participant may append additional evidence while the dispute is open.
-  const canAppend = state === 2
-
-  if (!canRaise && !canCounter && !canAppend) return null
+  const canAppend = true
 
   const btnCls =
-    'inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-medium text-sm ' +
+    'inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl font-medium text-sm ' +
     'border border-warn/40 text-warn hover:bg-warn/10 transition-colors ' +
     'focus:outline-none focus-visible:ring-2 focus-visible:ring-warn focus-visible:ring-offset-2 focus-visible:ring-offset-paper'
 
   return (
-    <>
-      {canRaise && (
-        <button type="button" className={btnCls} onClick={() => setModal('raise')}>
-          Raise Dispute
-        </button>
-      )}
+    <div className="flex flex-wrap gap-2">
       {canCounter && (
         <button type="button" className={btnCls} onClick={() => setModal('counter')}>
           Submit Counter Evidence
@@ -1841,7 +2369,7 @@ function DisputeActions({
         onClose={() => setModal(null)}
         onConfirmed={() => { setModal(null); onChange?.() }}
       />
-    </>
+    </div>
   )
 }
 
@@ -2129,349 +2657,6 @@ function ApprovalRow({ label, approved }) {
         )}
         {approved ? 'Approved' : 'Not yet'}
       </span>
-    </div>
-  )
-}
-
-/* ---------- Receiving address (inline-edit card) ---------- */
-function UpdateReceivingAddressCard({ escrow, onChange }) {
-  const [editing, setEditing] = useState(false)
-  const [addr, setAddr] = useState('')
-  const [domain, setDomain] = useState(() => Number(escrow.destinationDomain ?? ARC_DOMAIN))
-  const [successInfo, setSuccessInfo] = useState(null)
-  const { supported } = useSupportedDomains()
-  const addrId = useId()
-  const chainId = useId()
-
-  const currentAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : null
-  const currentDomain = Number(escrow.destinationDomain)
-
-  const domainOptions = useMemo(() => {
-    const set = new Set(supported.filter(isEvmDomain))
-    set.add(ARC_DOMAIN)
-    return [...set].sort((a, b) => a - b).map((d) => ({ value: d, label: getDomainName(d) }))
-  }, [supported])
-
-  const tx = useTx({
-    onConfirmed: () => {
-      setSuccessInfo({ address: addr, domain })
-      setEditing(false); setAddr('')
-      onChange?.()
-    }
-  })
-
-  const submit = () => {
-    if (!isValidAddress(addr)) return
-    return tx.run(
-      escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(addr), Number(domain)]),
-      { loadingMessage: 'Updating. Check your wallet.' }
-    )
-  }
-
-  return (
-    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Receiving address</h3>
-        {!editing && (
-          <button
-            type="button"
-            className="text-xs text-clay hover:text-clay-hover transition-colors"
-            onClick={() => { setEditing(true); setSuccessInfo(null); setDomain(currentDomain || ARC_DOMAIN) }}
-          >
-            Edit
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-3">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
-        {currentAddress ? <AddressInline address={currentAddress} /> : <span className="text-sm text-ink-3">—</span>}
-        <div className="text-xs text-ink-2 font-mono">{getDomainName(currentDomain)}</div>
-      </div>
-
-      <p className="text-xs text-ink-2 leading-relaxed">Where approved milestone payments get sent. You can update this anytime before the escrow is completed or cancelled.</p>
-
-      {successInfo && !editing && (
-        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
-            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span>Updated to <span className="font-mono">{truncateAddr(successInfo.address)}</span> on {getDomainName(successInfo.domain)}.</span>
-        </div>
-      )}
-
-      <AnimatePresence initial={false}>
-        {editing && (
-          <motion.div
-            key="edit"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex flex-col gap-3 overflow-hidden"
-          >
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor={addrId} className="text-xs font-medium text-ink-2">New address</label>
-              <input
-                id={addrId}
-                className="input-field font-mono text-sm"
-                placeholder="0x…"
-                autoComplete="off"
-                spellCheck={false}
-                aria-invalid={addr && !isValidAddress(addr) ? true : undefined}
-                value={addr}
-                onChange={(e) => setAddr(e.target.value.trim())}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor={chainId} className="text-xs font-medium text-ink-2">Receiving chain</label>
-              <CustomSelect
-                id={chainId}
-                value={Number(domain)}
-                onChange={(v) => setDomain(Number(v))}
-                options={domainOptions}
-                placeholder="Select chain"
-              />
-            </div>
-            <div className="flex gap-2 pt-1">
-              <TxButton
-                className="btn-primary text-sm py-2 flex-1"
-                onClick={submit}
-                disabled={!isValidAddress(addr) || !domainOptions.some((o) => o.value === Number(domain))}
-                loading={tx.isBusy}
-                label="Save changes"
-              />
-              <button
-                className="btn-secondary text-sm py-2"
-                disabled={tx.isBusy}
-                onClick={() => { setEditing(false); setAddr('') }}
-              >
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
-/* ---------- Extend deadline (payer, inline-edit card) ----------
-   Payer-only. The contract only allows pushing the deadline later, never
-   earlier, so the picker is floored at the current deadline + 1 minute. */
-function ExtendDeadlineCard({ escrow, onChange }) {
-  const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState('')
-  const [successTs, setSuccessTs] = useState(null)
-  const inputId = useId()
-
-  const currentTs = Number(escrow.deadline)
-  // datetime-local needs a local-time string; floor at one minute past current.
-  const minStr = useMemo(() => {
-    const d = new Date((currentTs + 60) * 1000)
-    const off = d.getTimezoneOffset() * 60_000
-    return new Date(d.getTime() - off).toISOString().slice(0, 16)
-  }, [currentTs])
-
-  const newTs = value ? Math.floor(new Date(value).getTime() / 1000) : 0
-  const valid = newTs > currentTs
-
-  const tx = useTx({
-    onConfirmed: () => {
-      setSuccessTs(newTs)
-      setEditing(false); setValue('')
-      onChange?.()
-    }
-  })
-
-  const submit = () => {
-    if (!valid) return
-    return tx.run(
-      escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]),
-      { loadingMessage: 'Extending. Check your wallet.' }
-    )
-  }
-
-  return (
-    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Extend deadline</h3>
-        {!editing && (
-          <button
-            type="button"
-            className="text-xs text-clay hover:text-clay-hover transition-colors"
-            onClick={() => { setEditing(true); setSuccessTs(null) }}
-          >
-            Extend
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-3">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
-        <span className="font-mono tabular-nums text-sm text-ink">{formatDeadline(escrow.deadline)}</span>
-      </div>
-
-      <p className="text-xs text-ink-2 leading-relaxed">You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you.</p>
-
-      {successTs && !editing && (
-        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
-            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span>Extended to <span className="font-mono">{formatDeadline(BigInt(successTs))}</span>.</span>
-        </div>
-      )}
-
-      <AnimatePresence initial={false}>
-        {editing && (
-          <motion.div
-            key="edit"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex flex-col gap-3 overflow-hidden"
-          >
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor={inputId} className="text-xs font-medium text-ink-2">New deadline</label>
-              <input
-                id={inputId}
-                type="datetime-local"
-                className="input-field text-sm"
-                min={minStr}
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-              />
-            </div>
-            <div className="flex gap-2 pt-1">
-              <TxButton
-                className="btn-primary text-sm py-2 flex-1"
-                onClick={submit}
-                disabled={!valid}
-                loading={tx.isBusy}
-                label="Extend deadline"
-              />
-              <button
-                className="btn-secondary text-sm py-2"
-                disabled={tx.isBusy}
-                onClick={() => { setEditing(false); setValue('') }}
-              >
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
-/* ---------- Edit invoice link (payer, inline-edit card) ----------
-   Payer-only. Updates the off-chain invoice URI on an active escrow. The
-   structured invoice body (hash-committed at deposit) is immutable; only the
-   convenience link can change. */
-function EditInvoiceURICard({ escrow, onChange }) {
-  const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState('')
-  const [successUri, setSuccessUri] = useState(null)
-  const inputId = useId()
-
-  const current = (escrow.invoiceURI && escrow.invoiceURI !== NO_ATTACHMENT_URI) ? escrow.invoiceURI : ''
-  const trimmed = value.trim()
-  const valid = trimmed !== '' && trimmed !== current && isValidUrl(trimmed)
-
-  const tx = useTx({
-    onConfirmed: () => {
-      setSuccessUri(trimmed)
-      setEditing(false); setValue('')
-      onChange?.()
-    }
-  })
-
-  const submit = () => {
-    if (!valid) return
-    return tx.run(
-      escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]),
-      { loadingMessage: 'Updating. Check your wallet.' }
-    )
-  }
-
-  return (
-    <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Invoice link</h3>
-        {!editing && (
-          <button
-            type="button"
-            className="text-xs text-clay hover:text-clay-hover transition-colors"
-            onClick={() => { setEditing(true); setSuccessUri(null); setValue(current) }}
-          >
-            {current ? 'Edit' : 'Add'}
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-1.5 bg-sunk rounded-xl px-3 py-3">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-ink-3">Current</div>
-        {current
-          ? <span className="text-xs text-ink-2 font-mono break-all">{current}</span>
-          : <span className="text-sm text-ink-3">— none set —</span>}
-      </div>
-
-      <p className="text-xs text-ink-2 leading-relaxed">An optional link to the full invoice. The structured invoice terms committed on-chain don't change — only this convenience link.</p>
-
-      {successUri && !editing && (
-        <div className="rounded-xl border border-ok/40 bg-ok/10 px-3 py-2.5 text-xs text-ok flex items-start gap-2">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden className="mt-0.5 shrink-0">
-            <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span>Invoice link updated.</span>
-        </div>
-      )}
-
-      <AnimatePresence initial={false}>
-        {editing && (
-          <motion.div
-            key="edit"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex flex-col gap-3 overflow-hidden"
-          >
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor={inputId} className="text-xs font-medium text-ink-2">New invoice link</label>
-              <input
-                id={inputId}
-                type="url"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="https://…"
-                className="input-field text-sm"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-              />
-            </div>
-            <div className="flex gap-2 pt-1">
-              <TxButton
-                className="btn-primary text-sm py-2 flex-1"
-                onClick={submit}
-                disabled={!valid}
-                loading={tx.isBusy}
-                label="Save link"
-              />
-              <button
-                className="btn-secondary text-sm py-2"
-                disabled={tx.isBusy}
-                onClick={() => { setEditing(false); setValue('') }}
-              >
-                Cancel
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   )
 }

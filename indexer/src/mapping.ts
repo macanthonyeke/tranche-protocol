@@ -256,6 +256,7 @@ export function handleMilestoneApproved(event: MilestoneApproved): void {
   let was = m.state;
   m.state = MS_RELEASED;
   m.settledVia = "APPROVED";
+  m.releaseTx = event.transaction.hash;
   m.updatedAt = event.block.timestamp;
   m.save();
   if (was != MS_RELEASED) {
@@ -277,6 +278,7 @@ export function handleMilestoneReleased(event: MilestoneReleased): void {
   let was = m.state;
   m.state = MS_RELEASED;
   m.settledVia = "RELEASED_NO_DISPUTE";
+  m.releaseTx = event.transaction.hash;
   m.updatedAt = event.block.timestamp;
   m.save();
   if (was != MS_RELEASED) {
@@ -408,6 +410,7 @@ export function handleDisputeResolved(event: DisputeResolved): void {
   m.resolutionBps = event.params.recipientBps;
   m.resolutionURI = event.params.resolutionURI;
   m.resolutionHash = event.params.resolutionHash;
+  m.releaseTx = event.transaction.hash;
   m.updatedAt = event.block.timestamp;
   m.save();
 
@@ -438,6 +441,7 @@ export function handleDisputeTimedOutSettled(
   m.state = MS_RELEASED;
   m.settledVia = "DISPUTE_TIMEOUT";
   m.resolutionBps = event.params.defaultBps;
+  m.releaseTx = event.transaction.hash;
   m.updatedAt = event.block.timestamp;
   m.save();
 
@@ -468,6 +472,7 @@ export function handleMutualSettlementExecuted(
   m.state = MS_RELEASED;
   m.settledVia = "MUTUAL_SETTLEMENT";
   m.resolutionBps = event.params.bps;
+  m.releaseTx = event.transaction.hash;
   m.updatedAt = event.block.timestamp;
   m.save();
 
