@@ -20,7 +20,8 @@ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
-  formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS
+  formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+  NO_ATTACHMENT_URI
 } from '../utils/format.js'
 import {
   getDomainName, ARC_DOMAIN, isEvmDomain,
@@ -2376,7 +2377,7 @@ function EditInvoiceURICard({ escrow, onChange }) {
   const [successUri, setSuccessUri] = useState(null)
   const inputId = useId()
 
-  const current = escrow.invoiceURI || ''
+  const current = (escrow.invoiceURI && escrow.invoiceURI !== NO_ATTACHMENT_URI) ? escrow.invoiceURI : ''
   const trimmed = value.trim()
   const valid = trimmed !== '' && trimmed !== current && isValidUrl(trimmed)
 

@@ -19,7 +19,7 @@ import {
   addressToBytes32, daysToSeconds, usdcToBaseUnits
 } from '../utils/encode.js'
 import {
-  isValidAddress, formatUSDC, formatDeadline, formatWindow
+  isValidAddress, formatUSDC, formatDeadline, formatWindow, NO_ATTACHMENT_URI
 } from '../utils/format.js'
 
 const DRAFT_KEY = 'escrow-draft'
@@ -275,7 +275,7 @@ function Flow() {
       mintRecipient,
       reviewWindow,
       invoiceHash,
-      state.attachmentURI || '',
+      state.attachmentURI || NO_ATTACHMENT_URI,
       milestoneAmountsBigInt,
       deadline,
       [],

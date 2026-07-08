@@ -1,3 +1,8 @@
+// Contract reverts NoInvoiceURI() if the deposit call's invoiceURI is empty,
+// but the frontend treats attachment as optional — this sentinel fills that
+// gap without a contract redeploy. Every read site must treat it as "unset".
+export const NO_ATTACHMENT_URI = 'none'
+
 export const formatUSDC = (raw) => {
   if (raw === undefined || raw === null) return '0.00 USDC'
   const n = typeof raw === 'bigint' ? Number(raw) : Number(raw)

@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback, useRef } from 'react'
 import { keccak256, toHex } from 'viem'
 import { useReadContract } from 'wagmi'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
-import { formatTimestamp } from '../utils/format.js'
+import { formatTimestamp, NO_ATTACHMENT_URI } from '../utils/format.js'
 
 const ZERO_BYTES32 = '0x' + '0'.repeat(64)
 
@@ -173,7 +173,7 @@ export default function InvoiceCard({
       )}
 
       {/* Invoice URI disclosure */}
-      {invoiceURI && <URIRow uri={invoiceURI} />}
+      {invoiceURI && invoiceURI !== NO_ATTACHMENT_URI && <URIRow uri={invoiceURI} />}
     </div>
   )
 }
