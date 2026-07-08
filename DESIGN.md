@@ -283,7 +283,7 @@ The right-pane ledger on the Create Escrow flow is the system's signature surfac
 - **Do** use `<IconButton size="md">` (44px) for every icon-only trigger. The component enforces WCAG 2.5.5.
 - **Do** pair every state color with a text label. Color never carries meaning alone.
 - **Do** respect `prefers-reduced-motion` via `MotionConfig reducedMotion="user"` and `useReducedMotion()` on every infinite animation.
-- **Do** default the theme to dark per PRODUCT.md ("dark by default"); honor stored user preference when present.
+- **Do** default the theme to light per PRODUCT.md ("light by default"); honor stored user preference when present.
 
 ### Don't:
 - **Don't** use `#000` or `#fff`. Every neutral must carry chroma 0.008–0.018 in the 40-hue family.

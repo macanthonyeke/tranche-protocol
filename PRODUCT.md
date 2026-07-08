@@ -11,7 +11,7 @@ Two first-class audiences on a single shell:
 - **End users (depositors and recipients).** Crypto-comfortable freelancers, contractors, and clients moving USDC through milestone-based work. They arrive to lock funds, mark milestones fulfilled, signal delivery, raise or counter disputes, and withdraw refunds. Some are first-timers reading for safety before they connect a wallet; others are repeat operators managing several active escrows. They want certainty about *what is locked, when it releases, and what happens if something goes wrong*.
 - **Arbiters and protocol admins.** Trusted role-holders resolving disputes, managing supported CCTP domains, adjusting protocol fees, and pausing deposits. They land in `/arbiter` and `/protocol` workspaces and need fast, unambiguous controls over operations that move real money. Role-gating is mechanical, but the surfaces should not feel like afterthoughts.
 
-Context of use: desktop-first, wallet-connected, dark by default. Users often arrive mid-transaction (from a Telegram reminder, an explorer link, or a counterparty's URL) and need to act in a single session.
+Context of use: desktop-first, wallet-connected, light by default (dark available via toggle, honoring stored preference). Users often arrive mid-transaction (from a Telegram reminder, an explorer link, or a counterparty's URL) and need to act in a single session.
 
 ## Product Purpose
 
