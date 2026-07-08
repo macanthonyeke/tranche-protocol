@@ -6,6 +6,7 @@ import IconButton from './IconButton.jsx'
 import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
+import { useTheme } from '../hooks/useTheme.jsx'
 import { useActivityFeed } from '../hooks/useActivityFeed.js'
 import { Logo } from './Logo.jsx'
 import { arcTestnet } from '../config/wagmi'
@@ -171,50 +172,57 @@ function TopNav() {
         ))}
       </nav>
 
-      {/* Right — Utility & Wallet */}
-      <div className="flex items-center gap-1">
-        <IconButton
-          as="a"
-          href="https://x.com/trancheprotocol"
-          target="_blank"
-          rel="noreferrer"
-          label="X (Twitter)"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z" />
-          </svg>
-        </IconButton>
-        <IconButton
-          as="a"
-          href="https://github.com"
-          target="_blank"
-          rel="noreferrer"
-          label="GitHub"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.68 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56C20.21 21.38 23.5 17.08 23.5 12 23.5 5.73 18.27.5 12 .5Z" />
-          </svg>
-        </IconButton>
+      {/* Right — Utility & Wallet.
+          Below md, the social links + theme toggle move into MobileMoreMenu:
+          six full-width controls (X, GitHub, bell, theme, wallet, plus the
+          logo on the left) don't fit a ~360px header without clipping the
+          wallet pill — the one piece of chrome that actually matters
+          mid-task. Bell and wallet stay always-visible on every breakpoint. */}
+      <div className="flex items-center gap-1.5">
+        <div className="hidden md:flex items-center gap-1">
+          <IconButton
+            as="a"
+            href="https://x.com/trancheprotocol"
+            target="_blank"
+            rel="noreferrer"
+            label="X (Twitter)"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z" />
+            </svg>
+          </IconButton>
+          <IconButton
+            as="a"
+            href="https://github.com"
+            target="_blank"
+            rel="noreferrer"
+            label="GitHub"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.68 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56C20.21 21.38 23.5 17.08 23.5 12 23.5 5.73 18.27.5 12 .5Z" />
+            </svg>
+          </IconButton>
+        </div>
 
         {/* Activity bell — only when Goldsky is enabled and wallet is connected */}
         {GOLDSKY_ENABLED && isConnected && (
           <div className="relative" ref={feedRef}>
-            <button
-              type="button"
-              aria-label={`Activity feed${unreadCount > 0 ? ` — ${unreadCount} new` : ''}`}
+            <IconButton
               onClick={toggleFeed}
-              className="relative flex items-center justify-center w-8 h-8 rounded-md text-ink-2 hover:text-ink hover:bg-sunk transition-colors"
+              label={`Activity feed${unreadCount > 0 ? ` — ${unreadCount} new` : ''}`}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-              </svg>
-              {unreadCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-clay text-paper text-[9px] font-bold flex items-center justify-center tabular-nums leading-none">
-                  {unreadCount > 9 ? '9+' : unreadCount}
-                </span>
-              )}
-            </button>
+              <span className="relative inline-flex">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-clay text-paper text-[9px] font-bold flex items-center justify-center tabular-nums leading-none">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </span>
+            </IconButton>
 
             {feedOpen && (
               <ActivityFeedPanel items={items} onClose={() => setFeedOpen(false)} />
@@ -222,10 +230,94 @@ function TopNav() {
           </div>
         )}
 
-        <div className="ml-2"><ThemeToggle /></div>
-        <div className="ml-1"><WalletButton /></div>
+        <div className="hidden md:block"><ThemeToggle /></div>
+        <MobileMoreMenu />
+        <WalletButton />
       </div>
     </header>
+  )
+}
+
+/* Mobile-only (below md) overflow menu holding what the desktop header shows
+   inline: theme toggle, X, GitHub. These are preference/marketing links, not
+   task-relevant on a screen where BottomNav already owns primary navigation
+   — collapsing them here is what actually frees the room the wallet pill
+   needs on a ~360px viewport, rather than shrinking every control equally. */
+function MobileMoreMenu() {
+  const { theme, toggle } = useTheme()
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const isDark = theme === 'dark'
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  return (
+    <div className="relative md:hidden" ref={ref}>
+      <IconButton onClick={() => setOpen((v) => !v)} label="More" aria-expanded={open}>
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <circle cx="10" cy="4" r="1.6" />
+          <circle cx="10" cy="10" r="1.6" />
+          <circle cx="10" cy="16" r="1.6" />
+        </svg>
+      </IconButton>
+
+      {open && (
+        <motion.div
+          initial={{ opacity: 0, y: 6, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 4, scale: 0.97 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className="absolute right-0 top-[calc(100%+8px)] z-50 w-48 bg-paper border border-rule rounded-2xl shadow-lg overflow-hidden py-1.5"
+        >
+          <button
+            type="button"
+            onClick={() => { toggle(); setOpen(false) }}
+            className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-ink hover:bg-sunk transition-colors"
+          >
+            {isDark ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M12 9.5a4.5 4.5 0 0 1-5.5-5.5A5 5 0 1 0 12 9.5z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="3.2" stroke="currentColor" strokeWidth="1.4"/>
+                <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            )}
+            {isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          </button>
+          <a
+            href="https://x.com/trancheprotocol"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-ink hover:bg-sunk transition-colors"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z" />
+            </svg>
+            X (Twitter)
+          </a>
+          <a
+            href="https://github.com"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-ink hover:bg-sunk transition-colors"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.68 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.84 1.18 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.68.8.56C20.21 21.38 23.5 17.08 23.5 12 23.5 5.73 18.27.5 12 .5Z" />
+            </svg>
+            GitHub
+          </a>
+        </motion.div>
+      )}
+    </div>
   )
 }
 
