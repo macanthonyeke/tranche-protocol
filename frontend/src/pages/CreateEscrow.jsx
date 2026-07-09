@@ -986,7 +986,12 @@ function MobileLedgerBar({ state, address, totalBaseUnits, protocolFee, mileston
   const receives = totalBaseUnits > protocolFee + totalForwardFeeEst ? totalBaseUnits - protocolFee - totalForwardFeeEst : 0n
 
   return (
-    <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 px-3 pb-3">
+    // bottom offset = AppShell's BottomNav total height (min-h-16 = 4rem, plus
+    // its own safe-area gutter) + 0.5rem gap, so this card floats above the
+    // tab bar instead of colliding with it — both are position:fixed at the
+    // same viewport edge, so without this offset the tab bar (z-50, opaque)
+    // paints over this card's CTA button and makes it untappable.
+    <div className="lg:hidden fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom)+0.5rem)] z-40 px-3">
       <div className="bg-paper border border-rule-2 rounded-xl shadow-lg overflow-hidden max-w-[520px] mx-auto">
         <button
           type="button"

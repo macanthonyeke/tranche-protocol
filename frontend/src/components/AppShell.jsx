@@ -402,7 +402,11 @@ function BottomNav() {
   const mobileLinks = useMobileNavLinks()
   if (mobileLinks.length === 0) return null
   return (
-    <nav className="flex md:hidden fixed bottom-0 inset-x-0 z-50 h-16 w-full border-t border-rule bg-paper justify-around items-stretch">
+    // min-h-16 (not h-16): pb-[env(...)] needs room to grow the box past the
+    // 4rem content band on notched iOS devices; mainCls's calc mirrors this.
+    // md:hidden already means nothing paints at desktop, so position:fixed
+    // is inert there — no separate md:static needed.
+    <nav className="flex md:hidden fixed bottom-0 inset-x-0 z-50 min-h-16 w-full border-t border-rule bg-paper justify-around items-stretch pb-[env(safe-area-inset-bottom)]">
       {mobileLinks.map((item) => (
         <NavLink
           key={item.to}
@@ -448,10 +452,15 @@ function WrongNetworkBanner() {
 }
 
 export default function AppShell({ children, maxWidth = 'content' }) {
+  // Mobile bottom padding = BottomNav's own box (min-h-16 = 4rem, plus its
+  // safe-area gutter) plus 1rem breathing room — matching the gap-4 already
+  // used between the Dashboard stat cards (Dashboard.jsx:235), so the space
+  // below the nav reads as the same rhythm, not a new guessed number.
+  const mobilePb = 'pb-[calc(4rem+env(safe-area-inset-bottom)+1rem)]'
   const mainCls =
     maxWidth === 'full'
-      ? 'flex-1 w-full px-6 lg:px-10 pt-10 pb-28 md:pb-20 flex flex-col gap-8'
-      : 'w-full max-w-page mx-auto px-6 lg:px-10 pt-10 pb-28 md:pb-20 flex flex-col gap-8 flex-1'
+      ? `flex-1 w-full px-6 lg:px-10 pt-10 ${mobilePb} md:pb-20 flex flex-col gap-8`
+      : `w-full max-w-page mx-auto px-6 lg:px-10 pt-10 ${mobilePb} md:pb-20 flex flex-col gap-8 flex-1`
   return (
     <div className="min-h-screen flex flex-col text-ink">
       <TopNav />
