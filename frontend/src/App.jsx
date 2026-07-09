@@ -13,6 +13,7 @@ import BackgroundDrift from './components/BackgroundDrift.jsx'
 // authenticated/role-gated and can stream in on navigation.
 import Home from './pages/Home.jsx'
 
+const Docs             = lazy(() => import('./pages/Docs.jsx'))
 const CreateEscrow     = lazy(() => import('./pages/CreateEscrow.jsx'))
 const Dashboard        = lazy(() => import('./pages/Dashboard.jsx'))
 const EscrowDetail     = lazy(() => import('./pages/EscrowDetail.jsx'))
@@ -59,6 +60,16 @@ export default function App() {
                 PageTransition here would put a transform ancestor above the
                 header and silently break its position: sticky. */}
             <Route path="/" element={<Home />} />
+
+            {/* Docs: public, no-wallet-required — outside the app shell like Home */}
+            <Route
+              path="/docs"
+              element={
+                <Suspense fallback={<RouteFallback />}>
+                  <Docs />
+                </Suspense>
+              }
+            />
 
             {/* App routes: wrapped in shell */}
             <Route path="/dashboard" element={<Shelled><Dashboard /></Shelled>} />

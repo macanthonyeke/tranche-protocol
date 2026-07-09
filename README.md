@@ -282,6 +282,7 @@ Main screens:
   verification card
 - `/withdraw` refund balance withdrawal with cross-chain option
 - `/arbiter` arbiter workspace
+- `/docs` public protocol documentation, no wallet required
 
 ```sh
 cd frontend

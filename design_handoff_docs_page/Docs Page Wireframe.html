@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tranche Docs — Wireframe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#faf6ef;
+    --ink:#2a2521;
+    --ink-2:#6b6259;
+    --line:#2a2521;
+    --accent:#d9662f;
+    --box:#f1ebdc;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Kalam', cursive;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--ink);}
+
+  /* ---- layout shell ---- */
+  .shell{
+    display:grid;
+    grid-template-columns:260px 1fr;
+    min-height:100vh;
+  }
+
+  /* ---- sidebar ---- */
+  .sidebar{
+    position:sticky; top:0; height:100vh;
+    border-right:2.5px solid var(--line);
+    padding:28px 20px;
+    display:flex; flex-direction:column; gap:22px;
+    overflow-y:auto;
+  }
+  .logo-row{display:flex; align-items:center; gap:10px;}
+  .logo-scribble{
+    width:34px; height:34px; border:2.5px solid var(--line); border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--accent); color:var(--paper); font-weight:700; font-size:15px;
+  }
+  .wordmark{font-size:20px; font-weight:700;}
+
+  .search-box{
+    border:2px dashed var(--ink-2); border-radius:8px; padding:9px 12px;
+    color:var(--ink-2); font-size:14px;
+  }
+
+  .nav-list{display:flex; flex-direction:column; gap:2px; font-size:15px;}
+  .nav-list a{
+    text-decoration:none; padding:8px 10px; border-radius:6px; display:flex; gap:8px; align-items:baseline;
+  }
+  .nav-list a:hover{background:var(--box);}
+  .nav-list a.active{background:var(--accent); color:var(--paper); font-weight:700;}
+  .nav-num{color:var(--ink-2); font-size:12px; min-width:16px;}
+  .nav-list a.active .nav-num{color:var(--paper);}
+
+  .nav-group-label{
+    text-transform:uppercase; font-size:11px; letter-spacing:0.14em; color:var(--ink-2);
+    margin-top:10px; font-family:Arial, sans-serif;
+  }
+
+  .sidebar-note{
+    margin-top:auto; border:2px dashed var(--accent); border-radius:8px; padding:10px 12px;
+    font-size:13px; color:var(--accent); transform:rotate(-1deg);
+  }
+
+  /* ---- main ---- */
+  .main{padding:40px 64px 120px; max-width:920px;}
+  .page-title-block{margin-bottom:36px;}
+  .eyebrow-w{
+    font-family:Arial, sans-serif; text-transform:uppercase; letter-spacing:0.18em;
+    font-size:11px; color:var(--ink-2); margin-bottom:8px;
+  }
+  .page-title{font-size:38px; font-weight:700; margin:0 0 10px;}
+  .page-sub{font-size:16px; color:var(--ink-2); max-width:60ch;}
+
+  section{
+    margin-bottom:56px; scroll-margin-top:24px; position:relative;
+  }
+  .sec-tag{
+    display:inline-flex; align-items:center; gap:8px;
+    font-family:Arial, sans-serif; font-size:11px; letter-spacing:0.1em; text-transform:uppercase;
+    color:var(--paper); background:var(--ink); padding:4px 10px; border-radius:5px;
+    margin-bottom:14px;
+  }
+  .sec-title{font-size:24px; font-weight:700; margin:0 0 6px;}
+  .sec-desc{font-size:14px; color:var(--ink-2); margin:0 0 18px; max-width:65ch;}
+
+  .box{
+    border:2px solid var(--line); border-radius:10px; background:var(--box);
+    padding:18px 20px;
+  }
+  .box-dashed{border-style:dashed;}
+
+  .lines{display:flex; flex-direction:column; gap:8px; margin:10px 0;}
+  .lorem-line{height:11px; border-radius:5px; background:#d9d0bd;}
+  .lorem-line.w80{width:80%;} .lorem-line.w60{width:60%;} .lorem-line.w95{width:95%;}
+  .lorem-line.w40{width:40%;} .lorem-line.w70{width:70%;}
+
+  .label-chip{
+    display:inline-block; font-family:Arial, sans-serif; font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ink-2); background:var(--paper); border:1px solid var(--ink-2);
+    border-radius:4px; padding:2px 7px;
+  }
+
+  /* annotation sticky note */
+  .note{
+    position:relative; border:2px dashed var(--accent); border-radius:8px; padding:10px 14px;
+    color:var(--accent); font-size:13.5px; background:#fdf3ec; max-width:340px;
+  }
+  .note-inline{margin:14px 0;}
+  .note b{font-weight:700;}
+
+  /* hero */
+  .hero-headline-scribble{
+    font-size:30px; font-weight:700; line-height:1.15; margin:6px 0 14px;
+  }
+  .cta-row{display:flex; gap:12px; margin-top:16px;}
+  .btn-w{
+    border:2px solid var(--line); border-radius:8px; padding:10px 18px; font-weight:700; font-size:14px;
+    background:var(--accent); color:var(--paper);
+  }
+  .btn-w.ghost{background:transparent; color:var(--ink);}
+
+  /* stepper (how it works) */
+  .stepper{display:flex; gap:0; align-items:stretch; overflow-x:auto; padding-bottom:6px;}
+  .step{
+    border:2px solid var(--line); border-radius:10px; background:var(--paper); padding:14px 16px;
+    width:190px; flex:0 0 auto; display:flex; flex-direction:column; gap:8px;
+  }
+  .step-num{
+    width:28px; height:28px; border-radius:50%; border:2px solid var(--line);
+    display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px;
+  }
+  .step-arrow{
+    display:flex; align-items:center; justify-content:center; width:34px; flex:0 0 auto; font-size:20px; color:var(--ink-2);
+  }
+  .step-branch{
+    border:2px dashed var(--warn, #b5542a); border-radius:10px; background:#fdf3ec; padding:12px 14px;
+    width:190px; margin-top:14px; font-size:13px; color:var(--accent);
+  }
+
+  /* glossary */
+  .glossary{display:grid; grid-template-columns:1fr 1fr; gap:14px 24px;}
+  .gterm{border-left:3px solid var(--line); padding-left:12px;}
+  .gterm-name{font-weight:700; font-size:15.5px;}
+  .gterm-def{font-size:13.5px; color:var(--ink-2); margin-top:3px;}
+
+  /* two column payer/recipient */
+  .two-col{display:grid; grid-template-columns:1fr 1fr; gap:20px;}
+  .col-head{
+    font-weight:700; font-size:16px; display:flex; align-items:center; gap:8px; margin-bottom:10px;
+  }
+  .col-pill{
+    font-family:Arial, sans-serif; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+    background:var(--ink); color:var(--paper); border-radius:4px; padding:2px 7px;
+  }
+  .item-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border-top:1.5px solid var(--ink-2); padding:11px 2px; font-size:14px;
+  }
+  .item-row:first-of-type{border-top:none;}
+  .chevron{color:var(--ink-2); font-size:14px;}
+
+  /* callout / support tip */
+  .callout{
+    border:2px solid var(--accent); border-radius:10px; padding:16px 18px; background:#fdf3ec;
+    display:flex; gap:12px; align-items:flex-start;
+  }
+  .callout-icon{
+    width:26px; height:26px; border-radius:50%; border:2px solid var(--accent); flex:0 0 auto;
+    display:flex; align-items:center; justify-content:center; font-weight:700; color:var(--accent); font-size:14px;
+  }
+
+  /* fee ledger rows */
+  .ledger{border:2px solid var(--line); border-radius:10px; overflow:hidden;}
+  .ledger-row{
+    display:flex; justify-content:space-between; padding:12px 18px; font-size:14.5px;
+    border-bottom:1.5px solid var(--ink-2);
+  }
+  .ledger-row:last-child{border-bottom:none;}
+  .ledger-row .val{font-weight:700;}
+
+  /* faq accordion */
+  .faq-row{border:2px solid var(--line); border-radius:8px; margin-bottom:10px; padding:13px 16px;}
+  .faq-q{display:flex; justify-content:space-between; align-items:center; font-weight:700; font-size:15px;}
+  .faq-a{margin-top:8px;}
+
+  /* trust stats */
+  .stat-row{display:flex; gap:14px; flex-wrap:wrap;}
+  .stat-pill{
+    border:2px solid var(--line); border-radius:8px; padding:12px 18px; text-align:center; min-width:120px;
+  }
+  .stat-num{font-size:22px; font-weight:700;}
+  .stat-label{font-size:11px; color:var(--ink-2); font-family:Arial, sans-serif; text-transform:uppercase; letter-spacing:.08em; margin-top:3px;}
+
+  /* about / footer */
+  .about-line{display:flex; align-items:center; gap:10px; font-size:14.5px; color:var(--ink-2);}
+
+  /* ---- mobile topbar + drawer ---- */
+  .mobile-topbar{
+    display:none;
+    position:sticky; top:0; z-index:20;
+    align-items:center; justify-content:space-between;
+    background:var(--paper); border-bottom:2.5px solid var(--line);
+    padding:12px 16px;
+  }
+  .hamburger{
+    width:40px; height:40px; border:2px solid var(--line); border-radius:8px;
+    background:var(--box); display:flex; align-items:center; justify-content:center;
+    flex-direction:column; gap:4px; cursor:pointer;
+  }
+  .hamburger span{width:18px; height:2px; background:var(--line); display:block;}
+  .scrim{
+    display:none; position:fixed; inset:0; background:rgba(42,37,33,0.4); z-index:29;
+  }
+
+  @media (max-width: 860px){
+    .shell{grid-template-columns:1fr;}
+    .mobile-topbar{display:flex;}
+    .sidebar{
+      position:fixed; top:0; left:0; height:100vh; width:82%; max-width:320px;
+      background:var(--paper); z-index:30; transform:translateX(-100%);
+      transition:transform 220ms cubic-bezier(0.22,1,0.36,1);
+      box-shadow:6px 0 24px rgba(0,0,0,0.18);
+    }
+    .sidebar.open{transform:translateX(0);}
+    body.drawer-open .scrim{display:block;}
+    .sidebar-close{
+      display:flex; align-self:flex-end; width:32px; height:32px; border:2px solid var(--line);
+      border-radius:8px; align-items:center; justify-content:center; background:var(--box); cursor:pointer;
+    }
+    .two-col, .glossary{grid-template-columns:1fr;}
+    .main{padding:28px 20px 100px;}
+    .stepper{padding-bottom:10px;}
+  }
+  .sidebar-close{display:none;}
+</style>
+</head>
+<body>
+
+<div class="mobile-topbar">
+  <div class="logo-row">
+    <div class="logo-scribble">T</div>
+    <div class="wordmark">Tranche Docs</div>
+  </div>
+  <div class="hamburger" id="menuBtn" role="button" aria-label="Open section menu"><span></span><span></span><span></span></div>
+</div>
+<div class="scrim" id="scrim"></div>
+
+<div class="shell">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="logo-row" style="justify-content:space-between;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="logo-scribble">T</div>
+        <div class="wordmark">Tranche Docs</div>
+      </div>
+      <div class="sidebar-close" id="closeBtn">✕</div>
+    </div>
+
+    <div class="search-box">🔍 Search docs… <span style="font-size:11px;">(v2, not v1)</span></div>
+
+    <nav class="nav-list">
+      <a href="#s1" class="active"><span class="nav-num">01</span> What is Tranche</a>
+      <a href="#s2"><span class="nav-num">02</span> How it works</a>
+      <a href="#s3"><span class="nav-num">03</span> Key terms</a>
+
+      <div class="nav-group-label">Guides</div>
+      <a href="#s4"><span class="nav-num">04</span> For payers</a>
+      <a href="#s5"><span class="nav-num">05</span> For recipients</a>
+      <a href="#s6"><span class="nav-num">06</span> Cross-chain payouts</a>
+      <a href="#s7"><span class="nav-num">07</span> Disputes</a>
+
+      <div class="nav-group-label">Reference</div>
+      <a href="#s8"><span class="nav-num">08</span> Fees</a>
+      <a href="#s9"><span class="nav-num">09</span> FAQ</a>
+      <a href="#s10"><span class="nav-num">10</span> Trust &amp; security</a>
+      <a href="#s11"><span class="nav-num">11</span> About</a>
+    </nav>
+
+    <div class="sidebar-note">Desktop: sticky + scroll-spy, active link fills clay as its section enters view.<br><br>Mobile (&lt;860px): collapses behind the hamburger above as a slide-in drawer. Tapping a link or the scrim closes it.</div>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <main class="main">
+
+    <!-- 01 WHAT IS TRANCHE -->
+    <section id="s1" data-screen-label="01 What is Tranche">
+      <span class="sec-tag">01 — What is Tranche</span>
+      <div class="box">
+        <span class="label-chip">Eyebrow</span>
+        <div class="hero-headline-scribble">[ headline: one plain-language sentence on what Tranche does ]</div>
+        <div class="lines">
+          <div class="lorem-line w95"></div>
+          <div class="lorem-line w90"></div>
+          <div class="lorem-line w60"></div>
+        </div>
+        <div class="note note-inline">Simplified further than README's opening &mdash; assume zero crypto context. One paragraph, no jargon, no CTA needed here.</div>
+      </div>
+    </section>
+
+    <!-- 02 HOW IT WORKS -->
+    <section id="s2" data-screen-label="02 How it works">
+      <span class="sec-tag">02 — How it works</span>
+      <p class="sec-desc">The core loop, 5 steps, horizontal stepper with numeral badges.</p>
+      <div class="stepper">
+        <div class="step"><div class="step-num">1</div><b>Lock funds</b><div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w60"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">2</div><b>Define milestones</b><div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w70"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">3</div><b>Recipient delivers</b><div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w60"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">4</div><b>Review window</b><div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w70"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">5</div><b>Funds release</b><div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w60"></div></div></div>
+      </div>
+      <div class="step-branch">↳ branch from step 5: <b>or a dispute</b>, if either side objects inside the review window</div>
+      <div class="note note-inline" style="margin-top:16px;">Fraunces numerals for 1–5 in the real build (section-numeral use case). Arrows are hairline rules, not decorative icons.</div>
+    </section>
+
+    <!-- 03 KEY TERMS -->
+    <section id="s3" data-screen-label="03 Key terms">
+      <span class="sec-tag">03 — Key terms</span>
+      <p class="sec-desc">Short glossary, plain language, 2-column on desktop.</p>
+      <div class="glossary">
+        <div class="gterm"><div class="gterm-name">Escrow</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+        <div class="gterm"><div class="gterm-name">Milestone</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+        <div class="gterm"><div class="gterm-name">Review window</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+        <div class="gterm"><div class="gterm-name">Silent approval</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+        <div class="gterm"><div class="gterm-name">Split recipient</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+        <div class="gterm"><div class="gterm-name">Arbiter</div><div class="gterm-def">[ one-line plain definition ]</div></div>
+      </div>
+    </section>
+
+    <!-- 04 / 05 FOR PAYERS / FOR RECIPIENTS -->
+    <section id="s4" data-screen-label="04-05 For payers and recipients">
+      <span class="sec-tag">04–05 — For payers / For recipients</span>
+      <p class="sec-desc">Two audiences, side by side so either reader can skim past what doesn't apply to them.</p>
+      <div class="two-col">
+        <div class="box">
+          <div class="col-head"><span class="col-pill">Payer</span> For payers</div>
+          <div class="item-row">Creating an escrow <span class="chevron">⌄</span></div>
+          <div class="item-row">Acknowledgment step <span class="chevron">⌄</span></div>
+          <div class="item-row">Marking work fulfilled <span class="chevron">⌄</span></div>
+          <div class="item-row">Extending a deadline <span class="chevron">⌄</span></div>
+          <div class="item-row">If you go silent <span class="chevron">⌄</span></div>
+          <div class="item-row">Mutual settlement / cancel <span class="chevron">⌄</span></div>
+          <div class="item-row">Refunds <span class="chevron">⌄</span></div>
+        </div>
+        <div class="box" id="s5">
+          <div class="col-head"><span class="col-pill">Recipient</span> For recipients</div>
+          <div class="item-row">Acknowledging an invoice (declining) <span class="chevron">⌄</span></div>
+          <div class="item-row">Claiming delivery <span class="chevron">⌄</span></div>
+          <div class="item-row">What "silent approval" means for you <span class="chevron">⌄</span></div>
+          <div class="item-row">Disputing <span class="chevron">⌄</span></div>
+          <div class="item-row">Receiving cross-chain <span class="chevron">⌄</span></div>
+        </div>
+      </div>
+      <div class="note note-inline" style="margin-top:14px;">Each row is a collapsed accordion, first row per column open by default. Rows expand in place, not to a new page.</div>
+    </section>
+
+    <!-- 06 CROSS-CHAIN PAYOUTS -->
+    <section id="s6" data-screen-label="06 Cross-chain payouts">
+      <span class="sec-tag">06 — Cross-chain payouts</span>
+      <div class="box">
+        <div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w70"></div></div>
+        <span class="label-chip" style="margin-top:8px; display:inline-block;">small fee note, inline, not hidden in fine print</span>
+      </div>
+      <div class="callout" style="margin-top:16px;">
+        <div class="callout-icon">?</div>
+        <div>
+          <b>What to do if a payment seems stuck</b>
+          <div class="lines"><div class="lorem-line w90"></div><div class="lorem-line w60"></div></div>
+        </div>
+      </div>
+      <div class="note note-inline" style="margin-top:14px;">Worded as a support step ("try this"), not audit/relay jargon. Self-relay recovery explained as a fallback action, not a warning.</div>
+    </section>
+
+    <!-- 07 DISPUTES -->
+    <section id="s7" data-screen-label="07 Disputes">
+      <span class="sec-tag">07 — Disputes, plainly explained</span>
+      <div class="stepper">
+        <div class="step"><div class="step-num">1</div><b>Raise a dispute</b><div class="lines"><div class="lorem-line w90"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">2</div><b>Submit evidence</b><div class="lines"><div class="lorem-line w90"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">3</div><b>Arbiter reviews</b><div class="lines"><div class="lorem-line w90"></div></div></div>
+        <div class="step-arrow">→</div>
+        <div class="step"><div class="step-num">4</div><b>Ruling + release</b><div class="lines"><div class="lorem-line w90"></div></div></div>
+      </div>
+      <div class="note note-inline" style="margin-top:14px;"><b>Timeout protection:</b> if nobody acts, funds don't get stuck forever &mdash; explain the automatic fallback plainly, no countdown-timer anxiety styling.</div>
+    </section>
+
+    <!-- 08 FEES -->
+    <section id="s8" data-screen-label="08 Fees">
+      <span class="sec-tag">08 — Fees</span>
+      <div class="ledger">
+        <div class="ledger-row"><span>Protocol fee</span><span class="val">[ X.XX% ]</span></div>
+        <div class="ledger-row"><span>Taken when</span><span class="val">[ on release / on creation ]</span></div>
+        <div class="ledger-row"><span>Cross-chain fee</span><span class="val">[ small, flat ]</span></div>
+      </div>
+      <div class="note note-inline" style="margin-top:12px;">Ledger-row style (label : value, mono numerals), matches the app's Ledger component. Nothing hidden, no asterisks.</div>
+    </section>
+
+    <!-- 09 FAQ -->
+    <section id="s9" data-screen-label="09 FAQ">
+      <span class="sec-tag">09 — FAQ</span>
+      <div class="faq-row"><div class="faq-q">Is this audited? <span class="chevron">⌄</span></div></div>
+      <div class="faq-row"><div class="faq-q">Is my money safe if the other party disappears? <span class="chevron">⌄</span></div></div>
+      <div class="faq-row"><div class="faq-q">What if I send to the wrong chain? <span class="chevron">⌄</span></div></div>
+      <div class="faq-row"><div class="faq-q">Can I cancel? <span class="chevron">⌄</span></div></div>
+      <div class="note note-inline">Standard accordion, all collapsed by default.</div>
+    </section>
+
+    <!-- 10 TRUST & SECURITY -->
+    <section id="s10" data-screen-label="10 Trust and security">
+      <span class="sec-tag">10 — Trust &amp; security</span>
+      <div class="stat-row">
+        <div class="stat-pill"><div class="stat-num">6</div><div class="stat-label">Audit rounds</div></div>
+        <div class="stat-pill"><div class="stat-num">0</div><div class="stat-label">Critical</div></div>
+        <div class="stat-pill"><div class="stat-num">0</div><div class="stat-label">High severity</div></div>
+      </div>
+      <div class="lines" style="margin-top:14px;"><div class="lorem-line w60"></div></div>
+      <div class="note note-inline">One short paragraph + link to reports. No findings table, no CVE-style detail here &mdash; that lives elsewhere if it exists at all.</div>
+    </section>
+
+    <!-- 11 ABOUT -->
+    <section id="s11" data-screen-label="11 About">
+      <span class="sec-tag">11 — About</span>
+      <div class="about-line">Built by <b>MacAnthony Eke</b> · <a href="#">x.com/macanthonyeke</a></div>
+      <div class="note note-inline" style="margin-top:10px;">Minimal credit line only. No bio, no mission paragraph, no team photo.</div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  var sidebar = document.getElementById('sidebar');
+  var scrim = document.getElementById('scrim');
+  function openDrawer(){ sidebar.classList.add('open'); document.body.classList.add('drawer-open'); }
+  function closeDrawer(){ sidebar.classList.remove('open'); document.body.classList.remove('drawer-open'); }
+  document.getElementById('menuBtn').addEventListener('click', openDrawer);
+  document.getElementById('closeBtn').addEventListener('click', closeDrawer);
+  scrim.addEventListener('click', closeDrawer);
+  document.querySelectorAll('.nav-list a').forEach(function(a){ a.addEventListener('click', closeDrawer); });
+</script>
+
+</body>
+</html>

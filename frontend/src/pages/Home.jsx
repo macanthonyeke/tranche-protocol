@@ -597,6 +597,7 @@ export default function Home() {
           <div className="flex gap-6">
             <Link to="/dashboard" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Dashboard</Link>
             <Link to="/create" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Create</Link>
+            <Link to="/docs" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Docs</Link>
             <Link to="/settings" className="text-sm text-ink-2 font-medium hover:text-ink transition-colors">Settings</Link>
           </div>
           <div className="text-sm text-ink-3">© Tranche Protocol</div>
