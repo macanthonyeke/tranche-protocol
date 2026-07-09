@@ -5,6 +5,7 @@ import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
+import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useDashboard, useUsdcBalance, useDisputedEscrows } from '../hooks/useEscrows.js'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { formatUSDC, formatUSDCNumber, countdown } from '../utils/format.js'
@@ -45,15 +46,6 @@ function useLiveCountdown(deadlineUnix) {
     return () => clearInterval(id)
   }, [deadlineUnix])
   return text
-}
-
-const TILE_CONTAINER = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.16 } },
-}
-const TILE_ITEM = {
-  hidden: { opacity: 0, y: 20, scale: 0.95 },
-  show: { opacity: 1, y: 0, scale: 1, transition: { duration: 0.55, ease: [0.22, 1, 0.36, 1] } },
 }
 
 const isActionNeeded = (e) => {
@@ -158,7 +150,6 @@ function DashboardInner() {
 
   const refundBal = dashboard?.refundBalance ?? 0n
   const activeCount = dashboard?.activeEscrowCount ?? 0
-  const openDisputeCount = dashboard?.openDisputeCount ?? 0
 
   // Build a unified list of summaries with role attached, deduplicating in the
   // unlikely case the same wallet is both depositor and recipient.
@@ -187,6 +178,16 @@ function DashboardInner() {
   )
 
   const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
+
+  // Needs-Action queue: pulls dispute/release-due items out of the flat list.
+  const actionItems = useMemo(() => mySummaries.filter(isActionNeeded), [mySummaries])
+
+  // Position-band headline: total value locked across the caller's own active
+  // escrows (payer + freelancer, deduped) — the account's single financial figure.
+  const inEscrowTotal = useMemo(
+    () => mySummaries.reduce((sum, e) => (e.state === 0 ? sum + (e.totalAmount ?? 0n) : sum), 0n),
+    [mySummaries]
+  )
 
   const tabDef = LEDGER_TABS.find((t) => t.key === activeTab) ?? LEDGER_TABS[0]
   const filteredEscrows = useMemo(
@@ -225,46 +226,26 @@ function DashboardInner() {
 
       {isArbiter && <ArbiterDisputeBanner />}
 
-      {/* Stat tiles. Four real metrics, semantically distinct: two USDC values
-          (wallet balance, claimable) and two integer counts (active, disputes).
-          The Claimable tile is a Link to /settings when there's something to
-          withdraw — that interaction shift is what keeps the row from reading
-          as an identical card grid. */}
-      <motion.section
-        aria-label="Account summary"
-        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
-        variants={TILE_CONTAINER}
-        initial="hidden"
-        animate="show"
-      >
-        <motion.div variants={TILE_ITEM}>
-          <StatTile label="USDC Balance" sublabel="In wallet" loading={isLoading} flash={refreshFlash}>
-            <UsdcValue value={usdcBalance} />
-          </StatTile>
-        </motion.div>
+      {/* Financial Position band. Replaces the four equal-weight stat tiles
+          with a single financial headline (total value locked across the
+          caller's active escrows) plus three supporting mini-metrics. The
+          Claimable metric keeps the existing "link only when withdrawable"
+          behavior. */}
+      <PositionBand
+        total={inEscrowTotal}
+        activeCount={activeCount}
+        walletBalance={usdcBalance}
+        claimable={refundBal}
+        loading={isLoading}
+        flash={refreshFlash}
+      />
 
-        <motion.div variants={TILE_ITEM}>
-          <StatTile label="Active Escrows" sublabel="In progress" loading={isLoading} flash={refreshFlash}>
-            <CountValue value={activeCount} />
-          </StatTile>
-        </motion.div>
-
-        <motion.div variants={TILE_ITEM}>
-          <StatTile
-            label="Open Disputes"
-            sublabel={openDisputeCount > 0 ? 'Needs attention' : 'All clear'}
-            tone={openDisputeCount > 0 ? 'warning' : 'default'}
-            loading={isLoading}
-            flash={refreshFlash}
-          >
-            <CountValue value={openDisputeCount} tone={openDisputeCount > 0 ? 'warning' : 'default'} />
-          </StatTile>
-        </motion.div>
-
-        <motion.div variants={TILE_ITEM}>
-          <ClaimableTile loading={isLoading} balance={refundBal} flash={refreshFlash} />
-        </motion.div>
-      </motion.section>
+      {/* Needs-Action queue. Lifts dispute/release-due items out of the flat
+          list to the top of the page — the load-bearing change of this
+          redesign. Only renders when there's at least one actionable item. */}
+      {!isLoading && actionItems.length > 0 && (
+        <AttentionQueue items={actionItems} />
+      )}
 
       {incomingEscrows.length > 0 && (
         <section>
@@ -283,7 +264,7 @@ function DashboardInner() {
 
       <section>
         <div className="flex items-center justify-between gap-4">
-          <h2 className="text-2xl font-bold text-ink tracking-tight">Your Escrows</h2>
+          <h2 className="text-2xl font-bold text-ink tracking-tight">All escrows</h2>
           <div className="flex items-center gap-2 px-3 py-1 bg-sunk border border-rule rounded-md shrink-0">
             <span className="w-1.5 h-1.5 bg-ok rounded-full animate-pulse" />
             <span className="text-xs font-mono tabular-nums text-ink-2 tracking-widest uppercase whitespace-nowrap">
@@ -360,7 +341,11 @@ function DashboardInner() {
           </motion.div>
         ) : (
           <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-8">
+            {/* Desktop (>=900px): table. Mobile/tablet: PremiumEscrowCard grid. */}
+            <div className="hidden min-[900px]:block mt-8">
+              <EscrowTable escrows={visibleEscrows} />
+            </div>
+            <div className="min-[900px]:hidden grid grid-cols-1 sm:grid-cols-2 gap-6 mt-8">
               <AnimatePresence mode="popLayout">
                 {visibleEscrows.map((e, i) => (
                   <motion.div
@@ -542,6 +527,7 @@ function deriveStatus(summary) {
     return {
       label: 'Disputed',
       badgeCls: 'bg-warn/10 text-warn border border-warn/20',
+      pillCls: 'status-warn',
       dotCls: 'bg-warn',
       pulse: true
     }
@@ -550,6 +536,7 @@ function deriveStatus(summary) {
     return {
       label: 'Completed',
       badgeCls: 'bg-ok/10 text-ok border border-ok/20',
+      pillCls: 'status-ok',
       dotCls: 'bg-ok',
       pulse: false
     }
@@ -558,6 +545,7 @@ function deriveStatus(summary) {
     return {
       label: 'Cancelled',
       badgeCls: 'bg-sunk text-ink-3 border border-rule',
+      pillCls: 'status-muted',
       dotCls: 'bg-ink-3',
       pulse: false
     }
@@ -565,6 +553,7 @@ function deriveStatus(summary) {
   return {
     label: 'Active',
     badgeCls: 'bg-clay/10 text-clay border border-clay/20',
+    pillCls: 'status-active',
     dotCls: 'bg-clay',
     pulse: true
   }
@@ -598,6 +587,16 @@ function InboxIcon({ size = 24 }) {
   )
 }
 
+function WarningIcon({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  )
+}
+
 function RefreshCwIcon({ size = 14, spinning = false }) {
   return (
     <svg
@@ -620,151 +619,194 @@ function RefreshCwIcon({ size = 14, spinning = false }) {
   )
 }
 
-/* ---------- Stat tiles ----------
-   Compact stat cells. Label up top in mono-uppercase, value mid, sublabel below.
-   Tone shifts the value color when something needs attention. Loading uses a
-   width-pegged skeleton so the row doesn't reflow when data arrives. */
-function StatTile({ label, sublabel, children, tone = 'default', loading = false, flash = 0 }) {
-  const sublabelCls = tone === 'warning' ? 'text-warn' : 'text-ink-3'
+/* ---------- Financial Position band ----------
+   Single headline figure (total value locked across the caller's active
+   escrows) with three supporting mini-metrics inline. Replaces the four
+   equal-weight stat tiles — the in-escrow total is the account's one
+   financial headline; balance/claimable/active are secondary. */
+function PositionBand({ total, activeCount, walletBalance, claimable, loading, flash = 0 }) {
   const [scope, animate] = useAnimate()
   const prevFlashRef = useRef(0)
   const reduce = useReducedMotion()
   useEffect(() => {
     if (!reduce && flash > 0 && flash !== prevFlashRef.current) {
       prevFlashRef.current = flash
-      animate(scope.current, { scale: [1, 1.03, 1] }, { duration: 0.45, ease: [0.22, 1, 0.36, 1] })
+      animate(scope.current, { scale: [1, 1.01, 1] }, { duration: 0.45, ease: [0.22, 1, 0.36, 1] })
     }
   }, [flash, animate, scope, reduce])
+
+  const hasClaimable = claimable > 0n
+
   return (
-    <div ref={scope} className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2 shadow-lift-sm">
-      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
-        {label}
-      </span>
-      <div className="min-h-[2.25rem] flex items-baseline overflow-hidden">
-        <AnimatePresence mode="wait" initial={false}>
+    <section ref={scope} aria-label="Financial position" className="panel-sunk p-4 md:p-6">
+      <div className="flex flex-col gap-6 min-[900px]:flex-row min-[900px]:items-center min-[900px]:justify-between">
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <span className="eyebrow">In escrow — across {activeCount} {activeCount === 1 ? 'contract' : 'contracts'}</span>
           {loading ? (
-            <motion.div key="skel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-              <Skeleton className="h-7 w-24" />
-            </motion.div>
+            <Skeleton className="h-9 w-48" />
           ) : (
-            <motion.div key="val" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-              {children}
-            </motion.div>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="num text-[30px] md:text-[38px] font-semibold tracking-[-0.02em] text-ink leading-none">
+                {formatUSDCNumber(total)}
+              </span>
+              <span className="text-[13px] text-ink-2">USDC locked</span>
+            </div>
           )}
-        </AnimatePresence>
+        </div>
+
+        <div className="flex items-center gap-[22px] flex-wrap">
+          <MiniMetric label="Wallet balance" loading={loading}>
+            <span className="num text-[16px] font-semibold text-ink">{formatUSDCNumber(walletBalance)}</span>
+          </MiniMetric>
+          <MiniMetric label="Claimable" loading={loading}>
+            {hasClaimable ? (
+              <Link
+                to="/settings"
+                aria-label={`Withdraw ${formatUSDC(claimable)} USDC from your refund balance`}
+                className="group num text-[16px] font-semibold text-clay hover:underline underline-offset-2 inline-flex items-center gap-1"
+              >
+                {formatUSDCNumber(claimable)}
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </Link>
+            ) : (
+              <span className="num text-[16px] font-semibold text-ink">{formatUSDCNumber(claimable)}</span>
+            )}
+          </MiniMetric>
+          <MiniMetric label="Active" loading={loading}>
+            <span className="num text-[16px] font-semibold text-ink">{activeCount}</span>
+          </MiniMetric>
+        </div>
       </div>
-      {sublabel && (
-        <span className={`text-xs ${sublabelCls}`}>
-          {sublabel}
-        </span>
-      )}
+    </section>
+  )
+}
+
+function MiniMetric({ label, loading, children }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="eyebrow">{label}</span>
+      {loading ? <Skeleton className="h-4 w-14" /> : children}
     </div>
   )
 }
 
-function UsdcValue({ value }) {
-  const raw = (value !== undefined && value !== null) ? Number(value) / 1e6 : 0
-  const animated = useCountUp(raw)
-  const formatted = animated.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+/* ---------- Needs-Action queue ----------
+   Pinned panel of dispute/release-due items, pulled out of the flat escrow
+   list so the highest-priority decisions are the first thing the page shows. */
+function AttentionQueue({ items }) {
   return (
-    <span className="font-mono tabular-nums text-2xl font-semibold tracking-tight text-ink leading-none">
-      {formatted}
-      <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
-    </span>
-  )
-}
-
-function CountValue({ value, tone = 'default' }) {
-  const cls = tone === 'warning' ? 'text-warn' : 'text-ink'
-  return (
-    <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${cls}`}>
-      {value}
-    </span>
-  )
-}
-
-/* The Claimable tile is a Link when there's something to withdraw, a static
-   div when there isn't. The interaction shift is the load-bearing visual
-   distinction between this tile and the other three. */
-function ClaimableTileValue({ balance, hasFunds }) {
-  const raw = (balance !== undefined && balance !== null) ? Number(balance) / 1e6 : 0
-  const animated = useCountUp(raw)
-  const formatted = animated.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  return (
-    <span className={`font-mono tabular-nums text-2xl font-semibold tracking-tight leading-none ${hasFunds ? 'text-clay' : 'text-ink'}`}>
-      {formatted}
-      <span className="text-sm font-sans font-medium text-ink-2 ml-1.5">USDC</span>
-    </span>
-  )
-}
-
-function ClaimableTile({ balance, loading, flash = 0 }) {
-  const [scope, animate] = useAnimate()
-  const prevFlashRef = useRef(0)
-  const reduce = useReducedMotion()
-  useEffect(() => {
-    if (!reduce && flash > 0 && flash !== prevFlashRef.current) {
-      prevFlashRef.current = flash
-      animate(scope.current, { scale: [1, 1.03, 1] }, { duration: 0.45, ease: [0.22, 1, 0.36, 1] })
-    }
-  }, [flash, animate, scope, reduce])
-  const hasFunds = balance > 0n
-
-  const inner = (
-    <>
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-3">
-          Claimable Balance
+    <section aria-label="Needs your attention" className="rounded-md border border-warn overflow-hidden">
+      <div className="bg-warn/10 px-3.5 py-2.5 flex items-center justify-between gap-3">
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-warn">
+          <WarningIcon size={12} />
+          Needs your attention
         </span>
-        {hasFunds && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.18em] text-clay">
-            Withdraw
-            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-              <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
-        )}
+        <span className="text-[11px] font-mono tabular-nums text-warn">{items.length} {items.length === 1 ? 'item' : 'items'}</span>
       </div>
-      <div className="min-h-[2.25rem] flex items-baseline overflow-hidden">
-        <AnimatePresence mode="wait" initial={false}>
-          {loading ? (
-            <motion.div key="skel" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-              <Skeleton className="h-7 w-24" />
-            </motion.div>
-          ) : (
-            <motion.div key="val" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-              <ClaimableTileValue balance={balance} hasFunds={hasFunds} />
-            </motion.div>
-          )}
-        </AnimatePresence>
+      <div>
+        {items.map((e) => (
+          <AttentionRow key={e.id} summary={e} />
+        ))}
       </div>
-      <span className={`text-xs ${hasFunds ? 'text-clay' : 'text-ink-3'}`}>
-        {hasFunds ? 'Ready to withdraw' : 'Nothing to claim'}
-      </span>
-    </>
+    </section>
   )
+}
 
-  if (hasFunds && !loading) {
-    return (
-      <div ref={scope}>
-        <Link
-          to="/settings"
-          aria-label={`Withdraw ${formatUSDC(balance)} USDC from your refund balance`}
-          className="group bg-paper border border-clay/40 rounded-2xl p-5 flex flex-col gap-2
-                     transition-[border-color,box-shadow,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
-                     hover:-translate-y-0.5 hover:shadow-lift-md hover:border-clay
-                     focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-        >
-          {inner}
-        </Link>
-      </div>
-    )
-  }
+function AttentionRow({ summary }) {
+  const inv = summary.invoiceHash
+    ? `INV-${summary.invoiceHash.slice(2, 6).toUpperCase()}`
+    : `ESC-${summary.id}`
+  const isDispute = summary.disputedMilestoneCount > 0
+  const subline = isDispute
+    ? 'Dispute raised — awaiting resolution'
+    : 'No milestones released yet'
 
   return (
-    <div ref={scope} className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-2">
-      {inner}
+    <div className="grid grid-cols-[1fr_auto] min-[900px]:grid-cols-[120px_1fr_auto] items-center gap-3 border-t border-rule px-3.5 py-2.5">
+      <span className="hidden min-[900px]:block num text-[11px] text-ink-2">#{summary.id}</span>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isDispute ? 'bg-warn' : 'bg-clay'}`} aria-hidden="true" />
+          <span className="text-[12px] font-semibold text-ink truncate">{inv}</span>
+        </div>
+        <span className="block text-[11px] text-ink-3 truncate">{subline}</span>
+      </div>
+      <Link
+        to={`/escrow/${summary.id}`}
+        className={isDispute ? 'btn-secondary text-[12.5px] h-9 px-3 shrink-0' : 'btn-primary text-[12.5px] h-9 px-3 shrink-0'}
+      >
+        {isDispute ? 'Submit Evidence' : 'Review & Release'}
+      </Link>
     </div>
+  )
+}
+
+/* ---------- Escrow table (desktop, >=900px) ----------
+   Row = grid, whole row is a Link (same "clickable card" affordance as
+   PremiumEscrowCard, just laid out as a table for dense scanning). */
+const TABLE_COLUMNS = 'grid-cols-[90px_1fr_110px_130px_90px_40px]'
+
+function EscrowTable({ escrows }) {
+  return (
+    <div role="table" aria-label="All escrows" className="border border-rule rounded-md overflow-hidden">
+      <div role="row" className={`grid ${TABLE_COLUMNS} gap-3.5 bg-sunk px-4 py-2.5`}>
+        <span role="columnheader" className="eyebrow">Invoice</span>
+        <span role="columnheader" className="eyebrow">Counterparty</span>
+        <span role="columnheader" className="eyebrow">Amount</span>
+        <span role="columnheader" className="eyebrow">Progress</span>
+        <span role="columnheader" className="eyebrow">Status</span>
+        <span role="columnheader" aria-hidden="true" />
+      </div>
+      <div role="rowgroup">
+        {escrows.map((e) => (
+          <EscrowTableRow key={e.id} summary={e} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function EscrowTableRow({ summary }) {
+  const inv = summary.invoiceHash
+    ? `INV-${summary.invoiceHash.slice(2, 6).toUpperCase()}`
+    : `ESC-${summary.id}`
+  const counterparty = summary.isPayer ? summary.recipient : summary.depositor
+  const status = deriveStatus(summary)
+  const milestoneCount = Number(summary.milestoneCount) || 0
+  const releasedCount = Number(summary.releasedMilestoneCount) || 0
+  const progressPct = milestoneCount > 0
+    ? Math.min(100, Math.max(0, (releasedCount / milestoneCount) * 100))
+    : 0
+  const disputed = summary.disputedMilestoneCount > 0
+
+  return (
+    <Link
+      to={`/escrow/${summary.id}`}
+      role="row"
+      className={`grid ${TABLE_COLUMNS} gap-3.5 items-center px-4 py-2.5 border-t border-rule card-clickable`}
+    >
+      <span role="cell" className="num text-[11px] text-ink-2 truncate">{inv}</span>
+      <span role="cell" className="min-w-0">
+        <AddressDisplay address={counterparty} size="sm" />
+      </span>
+      <span role="cell" className="num text-[13px] font-semibold text-ink">{formatUSDCNumber(summary.totalAmount)}</span>
+      <span role="cell">
+        <div className="w-full h-[5px] bg-sunk rounded-full overflow-hidden">
+          <div
+            className={`h-full ${disputed ? 'bg-warn' : 'bg-clay'}`}
+            style={{ width: `${progressPct}%` }}
+          />
+        </div>
+      </span>
+      <span role="cell">
+        <span className={`status ${status.pillCls}`}>{status.label}</span>
+      </span>
+      <span role="cell" className="text-ink-3 justify-self-end">
+        <ChevronRightIcon size={14} />
+      </span>
+    </Link>
   )
 }
 

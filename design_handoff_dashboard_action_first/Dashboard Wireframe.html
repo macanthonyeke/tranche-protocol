@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="design_doc_mode" content="canvas">
+<title>Dashboard — Responsive Wireframe Exploration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#fafaf7;
+    --ink:#2b2a27;
+    --ink-2:#6f6d67;
+    --ink-3:#a3a099;
+    --line:#d8d5cc;
+    --line-2:#bdb9ae;
+    --sunk:#f0eee7;
+    --accent:#b5562f;
+    --accent-soft:#f5e2d6;
+    --warn:#a8791f;
+    --warn-soft:#f3e7cc;
+    --ok:#5e7d52;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    color:var(--ink);
+    background:transparent;
+  }
+
+  .canvas-root{ position:absolute; top:0; left:0; width:max-content; padding:64px; }
+
+  /* ---------- intro header ---------- */
+  .intro{ width:1080px; margin-bottom:56px; }
+  .intro .kicker{ font-family:'Kalam',cursive; color:var(--accent); font-size:15px; transform:rotate(-1deg); display:inline-block; margin-bottom:6px; }
+  .intro h1{ font-size:32px; margin:0 0 14px; letter-spacing:-0.01em; }
+  .intro p{ font-size:15px; line-height:1.6; color:var(--ink-2); margin:0 0 10px; max-width:940px; }
+  .diag{ margin:16px 0 0; padding:0; list-style:none; display:grid; grid-template-columns:1fr 1fr; gap:8px 28px; max-width:940px; }
+  .diag li{ font-size:13px; color:var(--ink-2); line-height:1.5; padding-left:18px; position:relative; }
+  .diag li::before{ content:'✕'; position:absolute; left:0; color:var(--accent); font-size:11px; top:2px; }
+  .legend{ display:flex; gap:22px; margin-top:20px; flex-wrap:wrap; }
+  .legend-item{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--ink-2); }
+  .legend-swatch{ width:22px; height:14px; border:1px solid var(--line-2); border-radius:2px; }
+  .legend-swatch.ph{ background:repeating-linear-gradient(45deg,#e6e4dd,#e6e4dd 5px,#f3f1ea 5px,#f3f1ea 10px); }
+  .legend-swatch.line{ background:#d8d5cc; height:8px; }
+  .legend-swatch.tag{ background:var(--accent-soft); border-color:var(--accent); }
+
+  /* ---------- direction row ---------- */
+  .dir-row{ margin-bottom:80px; }
+  .dir-head{ width:1080px; margin-bottom:24px; }
+  .dir-head h2{ font-size:22px; margin:0 0 8px; }
+  .dir-head .thesis{ font-size:14px; line-height:1.6; color:var(--ink-2); margin:0; max-width:1020px; }
+  .dir-head .fixes{ font-family:'Kalam',cursive; font-size:13px; color:var(--accent); margin-top:8px; }
+
+  .frames{ display:flex; align-items:flex-start; gap:40px; }
+  .frame-wrap{ display:flex; flex-direction:column; align-items:flex-start; }
+  .frame-label{ font-family:'Kalam',cursive; margin-bottom:10px; display:flex; align-items:baseline; gap:8px; }
+  .frame-label .bp-name{ font-size:16px; color:var(--ink); }
+  .frame-label .bp-px{ font-size:12px; color:var(--ink-3); }
+
+  .frame{
+    background:var(--paper);
+    border:1px solid var(--line-2);
+    box-shadow:0 1px 0 var(--line);
+    container-type:inline-size;
+    container-name:fr;
+    overflow:hidden;
+  }
+
+  /* ---------- shared placeholder primitives ---------- */
+  .ph-line{ height:9px; background:var(--line); border-radius:2px; }
+  .ph-line.dark{ background:var(--line-2); }
+  .ph-line.sm{ height:7px; }
+  .w100{width:100%}.w90{width:90%}.w80{width:80%}.w70{width:70%}.w60{width:60%}.w50{width:50%}.w40{width:40%}.w30{width:30%}.w25{width:25%}.w20{width:20%}
+  .ph-box{ background:repeating-linear-gradient(45deg,#e6e4dd,#e6e4dd 6px,#f3f1ea 6px,#f3f1ea 12px); border:1px solid var(--line-2); border-radius:4px; }
+  .tag{ font-family:'Kalam',cursive; font-size:11px; color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent); border-radius:3px; padding:1px 7px; display:inline-block; transform:rotate(-1.5deg); white-space:nowrap; }
+  .section-label{ font-size:10px; text-transform:uppercase; letter-spacing:0.12em; color:var(--ink-3); display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .stack{ display:flex; flex-direction:column; gap:8px; }
+  .row{ display:flex; gap:8px; }
+  .dot{ width:6px; height:6px; border-radius:50%; background:var(--ok); flex-shrink:0; }
+  .dot.warn{ background:var(--warn); }
+  .dot.clay{ background:var(--accent); }
+  .mono{ font-family:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .num{ font-variant-numeric:tabular-nums; }
+
+  /* ============================================================
+     NAV — shared across all directions
+     ============================================================ */
+  .navbar{ display:flex; align-items:center; justify-content:space-between; padding:12px 18px; border-bottom:1px solid var(--line); }
+  .brand{ display:flex; align-items:center; gap:8px; font-weight:600; font-size:14px; }
+  .brand .mark{ width:20px; height:20px; border-radius:5px; background:var(--accent); }
+  .net-badge{ font-size:9px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink-2); background:var(--sunk); border:1px solid var(--line); border-radius:20px; padding:3px 8px; display:inline-flex; align-items:center; gap:5px; }
+  .navlinks{ display:flex; gap:16px; font-size:12.5px; color:var(--ink-2); }
+  .navlinks .active{ color:var(--ink); font-weight:600; }
+  .nav-right{ display:flex; align-items:center; gap:8px; }
+  .wallet-chip{ font-size:11px; padding:5px 10px; border-radius:5px; background:var(--sunk); border:1px solid var(--line); color:var(--ink-2); }
+  .hamburger{ display:none; flex-direction:column; gap:3px; width:18px; }
+  .hamburger span{ height:2px; background:var(--ink); border-radius:1px; }
+
+  @container fr (max-width:640px){
+    .navbar .navlinks, .navbar .net-badge{ display:none; }
+    .navbar .hamburger{ display:flex; }
+    .navbar .wallet-chip{ display:none; }
+  }
+
+  /* mobile bottom tab bar (shows only on narrow) */
+  .tabbar-mobile{ display:none; align-items:stretch; justify-content:space-around; border-top:1px solid var(--line); background:var(--paper); padding:8px 0 10px; }
+  .tabbar-mobile .tb{ display:flex; flex-direction:column; align-items:center; gap:4px; font-size:9px; color:var(--ink-3); }
+  .tabbar-mobile .tb .ic{ width:18px; height:18px; border-radius:4px; border:1.5px solid var(--line-2); }
+  .tabbar-mobile .tb.active{ color:var(--ink); }
+  .tabbar-mobile .tb.active .ic{ border-color:var(--accent); background:var(--accent-soft); }
+  @container fr (max-width:640px){ .tabbar-mobile{ display:flex; } }
+
+  /* shared page shell */
+  .page{ padding:20px 18px 28px; }
+  .page-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:20px; }
+  .page-head h1{ font-size:20px; margin:0; letter-spacing:-0.01em; }
+  .page-head .sub{ font-size:11.5px; color:var(--ink-2); margin-top:4px; }
+  .btn-primary{ font-size:11px; padding:8px 13px; border-radius:6px; background:var(--accent); color:#fff; white-space:nowrap; }
+  .btn-ghost{ font-size:11px; padding:7px 12px; border-radius:6px; border:1px solid var(--line-2); color:var(--ink-2); white-space:nowrap; }
+  .status-pill{ font-size:9px; text-transform:uppercase; letter-spacing:0.08em; padding:3px 8px; border-radius:20px; display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+  .status-pill.active{ background:var(--accent-soft); color:var(--accent); }
+  .status-pill.disputed{ background:var(--warn-soft); color:var(--warn); }
+  .status-pill.done{ background:#e6ecdf; color:var(--ok); }
+  .status-pill.cancel{ background:var(--sunk); color:var(--ink-3); }
+  .card{ background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .progress{ height:5px; background:var(--sunk); border-radius:20px; overflow:hidden; }
+  .progress > span{ display:block; height:100%; background:var(--accent); border-radius:20px; }
+
+  @container fr (min-width:900px){
+    .page{ padding:32px 32px 44px; }
+    .page-head h1{ font-size:26px; }
+  }
+  @container fr (min-width:1400px){
+    .page{ padding:40px 56px 56px; max-width:1440px; margin:0 auto; }
+  }
+
+  /* ============================================================
+     DIRECTION A — Action-First Ledger
+       · Kills 4 identical stat tiles → one financial "position" line
+       · "Needs your attention" queue surfaces disputes / releases due
+       · Escrow list becomes a scannable TABLE on desktop, cards on mobile
+     ============================================================ */
+  /* position band */
+  [data-dir="a"] .position{ display:flex; flex-direction:column; gap:14px; padding:16px; border:1px solid var(--line); border-radius:10px; background:var(--sunk); margin-bottom:16px; }
+  [data-dir="a"] .pos-primary{ display:flex; flex-direction:column; gap:4px; }
+  [data-dir="a"] .pos-eyebrow{ font-size:9px; text-transform:uppercase; letter-spacing:0.14em; color:var(--ink-3); }
+  [data-dir="a"] .pos-figure{ font-size:30px; font-weight:600; letter-spacing:-0.02em; }
+  [data-dir="a"] .pos-figure small{ font-size:13px; font-weight:400; color:var(--ink-2); margin-left:4px; }
+  [data-dir="a"] .pos-secondary{ display:flex; gap:22px; flex-wrap:wrap; }
+  [data-dir="a"] .pos-item{ display:flex; flex-direction:column; gap:3px; }
+  [data-dir="a"] .pos-item .k{ font-size:9px; text-transform:uppercase; letter-spacing:0.12em; color:var(--ink-3); }
+  [data-dir="a"] .pos-item .v{ font-size:16px; font-weight:600; }
+  [data-dir="a"] .pos-item .v.clay{ color:var(--accent); }
+  @container fr (min-width:900px){
+    [data-dir="a"] .position{ flex-direction:row; align-items:center; justify-content:space-between; padding:20px 24px; }
+    [data-dir="a"] .pos-figure{ font-size:38px; }
+  }
+
+  /* attention queue */
+  [data-dir="a"] .attention{ border:1px solid var(--warn); border-radius:10px; overflow:hidden; margin-bottom:22px; }
+  [data-dir="a"] .attention-head{ display:flex; align-items:center; gap:8px; padding:10px 14px; background:var(--warn-soft); font-size:11px; font-weight:600; color:var(--warn); }
+  [data-dir="a"] .attention-head .count{ margin-left:auto; font-size:10px; }
+  [data-dir="a"] .attn-row{ display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; padding:11px 14px; border-top:1px solid var(--line); }
+  [data-dir="a"] .attn-what{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+  [data-dir="a"] .attn-title{ font-size:12px; font-weight:600; }
+  @container fr (min-width:900px){
+    [data-dir="a"] .attn-row{ grid-template-columns:120px 1fr auto; }
+    [data-dir="a"] .attn-id{ font-size:11px; color:var(--ink-2); }
+  }
+  [data-dir="a"] .attn-id{ font-size:11px; color:var(--ink-2); }
+  @container fr (max-width:899px){ [data-dir="a"] .attn-id-col{ display:none; } }
+
+  /* list section */
+  [data-dir="a"] .list-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+  [data-dir="a"] .list-head h2{ font-size:16px; margin:0; }
+  [data-dir="a"] .filter-tabs{ display:flex; gap:2px; padding:3px; background:var(--sunk); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  [data-dir="a"] .filter-tabs span{ font-size:10px; padding:5px 9px; border-radius:5px; color:var(--ink-2); white-space:nowrap; }
+  [data-dir="a"] .filter-tabs span.active{ background:var(--paper); color:var(--ink); border:1px solid var(--line); }
+
+  /* TABLE (desktop) */
+  [data-dir="a"] .esc-table{ display:none; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  [data-dir="a"] .esc-thead, [data-dir="a"] .esc-trow{ display:grid; grid-template-columns:90px 1fr 110px 130px 90px 40px; gap:14px; align-items:center; padding:11px 16px; }
+  [data-dir="a"] .esc-thead{ background:var(--sunk); font-size:9px; text-transform:uppercase; letter-spacing:0.1em; color:var(--ink-3); }
+  [data-dir="a"] .esc-trow{ border-top:1px solid var(--line); }
+  [data-dir="a"] .esc-trow .amt{ font-size:13px; font-weight:600; }
+  [data-dir="a"] .esc-trow .cty{ display:flex; align-items:center; gap:8px; }
+  [data-dir="a"] .esc-trow .chev{ color:var(--ink-3); font-size:13px; text-align:right; }
+  /* CARDS (mobile/tablet) */
+  [data-dir="a"] .esc-cards{ display:grid; grid-template-columns:1fr; gap:12px; }
+  [data-dir="a"] .esc-card .top{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; }
+  [data-dir="a"] .esc-card .amt{ font-size:22px; font-weight:600; letter-spacing:-0.01em; margin:6px 0 12px; }
+  [data-dir="a"] .esc-card .foot{ display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+  @container fr (min-width:640px){ [data-dir="a"] .esc-cards{ grid-template-columns:1fr 1fr; } }
+  @container fr (min-width:900px){
+    [data-dir="a"] .esc-cards{ display:none; }
+    [data-dir="a"] .esc-table{ display:block; }
+  }
+
+  /* ============================================================
+     DIRECTION B — Split Workspace + Activity Rail
+       · Compact one-line summary header (no tile grid)
+       · Main column = escrow cards; sticky right rail = live activity + quick actions
+       · Rail drops below the list on tablet, collapses to a strip on mobile
+     ============================================================ */
+  [data-dir="b"] .summary-bar{ display:flex; flex-wrap:wrap; gap:10px 26px; align-items:baseline; padding:14px 16px; border:1px solid var(--line); border-radius:10px; background:var(--sunk); margin-bottom:20px; }
+  [data-dir="b"] .sum-item{ display:flex; align-items:baseline; gap:7px; }
+  [data-dir="b"] .sum-item .k{ font-size:9px; text-transform:uppercase; letter-spacing:0.12em; color:var(--ink-3); }
+  [data-dir="b"] .sum-item .v{ font-size:15px; font-weight:600; }
+  [data-dir="b"] .sum-item .v.clay{ color:var(--accent); }
+  [data-dir="b"] .sum-sep{ width:1px; align-self:stretch; background:var(--line); }
+  @container fr (max-width:640px){ [data-dir="b"] .sum-sep{ display:none; } }
+
+  [data-dir="b"] .workspace{ display:grid; grid-template-columns:1fr; gap:20px; }
+  [data-dir="b"] .ws-main h2{ font-size:16px; margin:0 0 4px; }
+  [data-dir="b"] .ws-main .sub{ font-size:11px; color:var(--ink-2); margin:0 0 14px; }
+  [data-dir="b"] .filter-tabs{ display:flex; gap:2px; padding:3px; background:var(--sunk); border:1px solid var(--line); border-radius:8px; margin-bottom:14px; width:max-content; max-width:100%; overflow:hidden; }
+  [data-dir="b"] .filter-tabs span{ font-size:10px; padding:5px 9px; border-radius:5px; color:var(--ink-2); white-space:nowrap; }
+  [data-dir="b"] .filter-tabs span.active{ background:var(--paper); color:var(--ink); border:1px solid var(--line); }
+  [data-dir="b"] .ws-grid{ display:grid; grid-template-columns:1fr; gap:12px; }
+  [data-dir="b"] .esc-card .top{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; }
+  [data-dir="b"] .esc-card .amt{ font-size:20px; font-weight:600; margin:4px 0 12px; }
+  [data-dir="b"] .esc-card .foot{ display:flex; justify-content:space-between; align-items:center; margin-top:10px; }
+
+  /* right rail */
+  [data-dir="b"] .rail{ display:flex; flex-direction:column; gap:16px; }
+  [data-dir="b"] .rail-card{ border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  [data-dir="b"] .rail-card h3{ font-size:11px; margin:0; padding:11px 14px; border-bottom:1px solid var(--line); background:var(--sunk); display:flex; align-items:center; gap:7px; }
+  [data-dir="b"] .rail-body{ padding:12px 14px; }
+  [data-dir="b"] .feed-item{ display:grid; grid-template-columns:auto 1fr; gap:10px; padding:9px 0; border-top:1px solid var(--line); }
+  [data-dir="b"] .feed-item:first-child{ border-top:none; padding-top:0; }
+  [data-dir="b"] .feed-item .tl{ display:flex; flex-direction:column; align-items:center; gap:0; }
+  [data-dir="b"] .feed-item .tl .node{ width:8px; height:8px; border-radius:50%; background:var(--accent); }
+  [data-dir="b"] .feed-item .tl .stem{ width:1px; flex:1; background:var(--line); margin-top:2px; }
+  [data-dir="b"] .feed-item .txt{ display:flex; flex-direction:column; gap:5px; min-width:0; }
+  [data-dir="b"] .feed-item .when{ font-size:9px; color:var(--ink-3); text-transform:uppercase; letter-spacing:0.08em; }
+  [data-dir="b"] .quick{ display:flex; flex-direction:column; gap:8px; }
+  [data-dir="b"] .quick-btn{ display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
+  [data-dir="b"] .quick-btn .qic{ width:26px; height:26px; border-radius:6px; background:var(--accent-soft); border:1px solid var(--accent); flex-shrink:0; }
+
+  @container fr (min-width:640px){ [data-dir="b"] .ws-grid{ grid-template-columns:1fr 1fr; } }
+  @container fr (min-width:1000px){
+    [data-dir="b"] .workspace{ grid-template-columns:1fr 300px; align-items:start; }
+    [data-dir="b"] .rail{ position:sticky; top:20px; }
+    [data-dir="b"] .ws-grid{ grid-template-columns:1fr 1fr; }
+  }
+  @container fr (min-width:1400px){
+    [data-dir="b"] .workspace{ grid-template-columns:1fr 340px; }
+  }
+
+  /* ============================================================
+     DIRECTION C — Grouped by Priority (no filter tabs)
+       · Single position headline line
+       · Escrows grouped into collapsible sections: Needs Action → Active → Completed
+       · Needs-action pinned top & always open; scanning beats filtering
+     ============================================================ */
+  [data-dir="c"] .pos-line{ display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 6px; padding:6px 0 20px; border-bottom:1px solid var(--line); margin-bottom:22px; }
+  [data-dir="c"] .pos-line .big{ font-size:26px; font-weight:600; letter-spacing:-0.02em; }
+  [data-dir="c"] .pos-line .txt{ font-size:13px; color:var(--ink-2); }
+  [data-dir="c"] .pos-line .clay{ color:var(--accent); font-weight:600; }
+  @container fr (min-width:900px){ [data-dir="c"] .pos-line .big{ font-size:34px; } [data-dir="c"] .pos-line .txt{ font-size:15px; } }
+
+  [data-dir="c"] .grp{ margin-bottom:18px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  [data-dir="c"] .grp.priority{ border-color:var(--warn); }
+  [data-dir="c"] .grp-head{ display:flex; align-items:center; gap:9px; padding:12px 15px; background:var(--sunk); }
+  [data-dir="c"] .grp.priority .grp-head{ background:var(--warn-soft); }
+  [data-dir="c"] .grp-head .gtitle{ font-size:12.5px; font-weight:600; }
+  [data-dir="c"] .grp.priority .grp-head .gtitle{ color:var(--warn); }
+  [data-dir="c"] .grp-head .gcount{ font-size:10px; color:var(--ink-2); background:var(--paper); border:1px solid var(--line); border-radius:20px; padding:2px 8px; }
+  [data-dir="c"] .grp-head .chev{ margin-left:auto; color:var(--ink-3); font-size:12px; }
+  [data-dir="c"] .grp-body{ padding:6px 0; }
+  [data-dir="c"] .grp-body.collapsed{ display:none; }
+  [data-dir="c"] .g-row{ display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; padding:12px 15px; border-top:1px solid var(--line); }
+  [data-dir="c"] .g-row:first-child{ border-top:none; }
+  [data-dir="c"] .g-main{ display:flex; flex-direction:column; gap:6px; min-width:0; }
+  [data-dir="c"] .g-top{ display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  [data-dir="c"] .g-amt{ font-size:14px; font-weight:600; }
+  [data-dir="c"] .g-id{ font-size:10px; color:var(--ink-2); }
+  [data-dir="c"] .g-right{ display:flex; align-items:center; gap:12px; }
+  [data-dir="c"] .g-prog{ width:80px; display:none; }
+  [data-dir="c"] .g-cta{ font-size:10px; padding:6px 11px; border-radius:6px; border:1px solid var(--line-2); color:var(--ink-2); white-space:nowrap; }
+  [data-dir="c"] .grp.priority .g-cta{ background:var(--accent); color:#fff; border-color:var(--accent); }
+  @container fr (min-width:760px){
+    [data-dir="c"] .g-row{ grid-template-columns:180px 1fr auto; }
+    [data-dir="c"] .g-prog{ display:block; }
+  }
+  @container fr (min-width:900px){ [data-dir="c"] .g-row{ grid-template-columns:220px 1fr auto; } }
+</style>
+</head>
+<body>
+
+<div class="canvas-root">
+
+  <div class="intro">
+    <span class="kicker">✎ working notes</span>
+    <h1>Dashboard — responsive wireframe, 3 directions</h1>
+    <p>Same underlying data every time (wallet balance, in-escrow total, claimable, active count, disputes, the escrow list). Each frame is <strong>live CSS</strong> — container queries — so the reflow you see at each width is the actual proposed rule, not a mock of one. Both payer and freelancer roles are represented in the lists.</p>
+    <p>You said "decide for me," so I diagnosed the current page first. What's dragging it toward generic-SaaS territory:</p>
+    <ul class="diag">
+      <li>Four identical stat tiles read as a template card-grid; three of them are passive numbers you can't act on.</li>
+      <li>Nothing surfaces <em>what needs you</em> — a dispute or a release-due is buried in the same grid as everything else.</li>
+      <li>The 3-up card grid is pretty but low-density: scanning 20+ escrows means a lot of scrolling.</li>
+      <li>Filter tabs make you choose a view before you can see priority items.</li>
+    </ul>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-swatch ph"></span> visual placeholder</div>
+      <div class="legend-item"><span class="legend-swatch line"></span> text placeholder</div>
+      <div class="legend-item"><span class="legend-swatch tag"></span> <span class="tag" style="transform:none;">callout</span> — a specific decision</div>
+    </div>
+  </div>
+
+  <div class="dir-row" data-dir-row="a">
+    <div class="dir-head">
+      <h2>Direction A — Action-First Ledger</h2>
+      <p class="thesis">Replaces the four tiles with one <strong>financial position band</strong> (in-escrow figure large, balance + claimable as a supporting line) and adds a pinned <strong>"Needs your attention"</strong> queue for disputes and releases due — so the first thing you see is what wants a decision. The escrow list becomes a dense, sortable <strong>table</strong> at laptop/desktop for scanning many at once, and gracefully falls back to cards on phones.</p>
+      <div class="fixes">↳ drops: 4-tile grid · buried action items · low-density card wall on desktop</div>
+    </div>
+    <div class="frames" id="framesA"></div>
+  </div>
+
+  <div class="dir-row" data-dir-row="b">
+    <div class="dir-head">
+      <h2>Direction B — Split Workspace + Activity Rail</h2>
+      <p class="thesis">Metrics collapse to a single compact <strong>summary line</strong>. The page splits into a working area: escrow cards on the left, a sticky right rail carrying a <strong>live activity feed</strong> (the marketing ticker, but useful — your events) and <strong>quick actions</strong>. Feels like a workspace you return to, not a report. The rail reflows below the list on tablet and becomes a slim strip on mobile.</p>
+      <div class="fixes">↳ drops: static tiles · dead right-side whitespace · action-hunting</div>
+    </div>
+    <div class="frames" id="framesB"></div>
+  </div>
+
+  <div class="dir-row" data-dir-row="c">
+    <div class="dir-head">
+      <h2>Direction C — Grouped by Priority</h2>
+      <p class="thesis">No filter tabs at all. A single <strong>position headline</strong> up top, then escrows sorted into <strong>collapsible groups</strong> — <em>Needs Action</em> (pinned, always open, clay/amber), then <em>Active</em>, then <em>Completed</em> (collapsed by default). Priority is structural, so you never pick a filter to find the thing that matters. Rows stay compact and get a progress column as width allows.</p>
+      <div class="fixes">↳ drops: filter tabs · flat undifferentiated list · pagination-before-priority</div>
+    </div>
+    <div class="frames" id="framesC"></div>
+  </div>
+
+</div>
+
+<!-- ============================================================
+     TEMPLATE — DIRECTION A
+     ============================================================ -->
+<template id="tplA">
+  <nav class="navbar">
+    <div class="brand"><span class="mark"></span> Tranche
+      <span class="net-badge"><span class="dot"></span> Arc Testnet</span>
+    </div>
+    <div class="navlinks"><span class="active">Dashboard</span><span>Create</span><span>History</span><span>Settings</span></div>
+    <div class="nav-right"><span class="wallet-chip">0x4F…9a2</span></div>
+    <div class="hamburger"><span></span><span></span><span></span></div>
+  </nav>
+
+  <div class="page">
+    <div class="page-head">
+      <div><h1>Dashboard</h1><div class="sub">Your deposits, incoming payments, and refunds.</div></div>
+      <span class="btn-primary">+ New Escrow</span>
+    </div>
+
+    <div class="position">
+      <div class="pos-primary">
+        <span class="pos-eyebrow">In escrow — across 6 contracts</span>
+        <span class="pos-figure">42,500<small>USDC locked</small></span>
+        <span class="tag">one headline figure, not 4 equal tiles</span>
+      </div>
+      <div class="pos-secondary">
+        <div class="pos-item"><span class="k">Wallet balance</span><span class="v">12,340</span></div>
+        <div class="pos-item"><span class="k">Claimable</span><span class="v clay">1,200 →</span></div>
+        <div class="pos-item"><span class="k">Active</span><span class="v">6</span></div>
+      </div>
+    </div>
+
+    <div class="attention">
+      <div class="attention-head">⚠ Needs your attention <span class="count">2 items</span> <span class="tag" style="transform:none;background:transparent;border:none;color:var(--warn);">new</span></div>
+      <div class="attn-row">
+        <span class="attn-id attn-id-col">ESC-1042</span>
+        <div class="attn-what">
+          <span class="attn-title">Milestone delivered — release 3,000 USDC</span>
+          <div class="ph-line w70 sm"></div>
+        </div>
+        <span class="btn-primary">Review &amp; Release</span>
+      </div>
+      <div class="attn-row">
+        <span class="attn-id attn-id-col">ESC-0997</span>
+        <div class="attn-what">
+          <span class="attn-title">Dispute opened — evidence due in 18h</span>
+          <div class="ph-line w60 sm"></div>
+        </div>
+        <span class="btn-ghost">Open Dispute</span>
+      </div>
+    </div>
+
+    <div class="list-head">
+      <h2>All escrows</h2>
+      <div class="filter-tabs"><span class="active">All</span><span>Paying</span><span>Receiving</span><span>Completed</span></div>
+    </div>
+
+    <!-- TABLE (laptop+) -->
+    <div class="esc-table">
+      <div class="esc-thead"><span>Invoice</span><span>Counterparty</span><span>Amount</span><span>Progress</span><span>Status</span><span></span></div>
+      <div class="esc-trow"><span class="mono num">ESC-1042</span><span class="cty"><span class="ph-box" style="width:20px;height:20px;border-radius:50%;"></span><span class="ph-line w60"></span></span><span class="amt num">8,000</span><span><span class="progress"><span style="width:66%"></span></span></span><span><span class="status-pill active"><span class="dot clay"></span>Active</span></span><span class="chev">›</span></div>
+      <div class="esc-trow"><span class="mono num">ESC-0997</span><span class="cty"><span class="ph-box" style="width:20px;height:20px;border-radius:50%;"></span><span class="ph-line w50"></span></span><span class="amt num">5,000</span><span><span class="progress"><span style="width:33%;background:var(--warn)"></span></span></span><span><span class="status-pill disputed"><span class="dot warn"></span>Disputed</span></span><span class="chev">›</span></div>
+      <div class="esc-trow"><span class="mono num">ESC-0981</span><span class="cty"><span class="ph-box" style="width:20px;height:20px;border-radius:50%;"></span><span class="ph-line w70"></span></span><span class="amt num">12,500</span><span><span class="progress"><span style="width:100%"></span></span></span><span><span class="status-pill done">Completed</span></span><span class="chev">›</span></div>
+      <div class="esc-trow"><span class="mono num">ESC-0975</span><span class="cty"><span class="ph-box" style="width:20px;height:20px;border-radius:50%;"></span><span class="ph-line w55"></span></span><span class="amt num">3,200</span><span><span class="progress"><span style="width:20%"></span></span></span><span><span class="status-pill active"><span class="dot clay"></span>Active</span></span><span class="chev">›</span></div>
+    </div>
+
+    <!-- CARDS (mobile/tablet) -->
+    <div class="esc-cards">
+      <div class="card esc-card">
+        <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-1042</span><span class="status-pill active"><span class="dot clay"></span>Active</span></div>
+        <div class="amt num">8,000 <span style="font-size:11px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+        <div class="progress"><span style="width:66%"></span></div>
+        <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Receiving ›</span></div>
+      </div>
+      <div class="card esc-card">
+        <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-0997</span><span class="status-pill disputed"><span class="dot warn"></span>Disputed</span></div>
+        <div class="amt num">5,000 <span style="font-size:11px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+        <div class="progress"><span style="width:33%;background:var(--warn)"></span></div>
+        <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Paying ›</span></div>
+      </div>
+      <div class="card esc-card">
+        <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-0981</span><span class="status-pill done">Completed</span></div>
+        <div class="amt num">12,500 <span style="font-size:11px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+        <div class="progress"><span style="width:100%"></span></div>
+        <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Paying ›</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabbar-mobile">
+    <div class="tb active"><span class="ic"></span>Dashboard</div>
+    <div class="tb"><span class="ic"></span>Create</div>
+    <div class="tb"><span class="ic"></span>History</div>
+    <div class="tb"><span class="ic"></span>Settings</div>
+  </div>
+</template>
+
+<!-- ============================================================
+     TEMPLATE — DIRECTION B
+     ============================================================ -->
+<template id="tplB">
+  <nav class="navbar">
+    <div class="brand"><span class="mark"></span> Tranche
+      <span class="net-badge"><span class="dot"></span> Arc Testnet</span>
+    </div>
+    <div class="navlinks"><span class="active">Dashboard</span><span>Create</span><span>History</span><span>Settings</span></div>
+    <div class="nav-right"><span class="wallet-chip">0x4F…9a2</span></div>
+    <div class="hamburger"><span></span><span></span><span></span></div>
+  </nav>
+
+  <div class="page">
+    <div class="page-head">
+      <div><h1>Dashboard</h1></div>
+      <span class="btn-primary">+ New Escrow</span>
+    </div>
+
+    <div class="summary-bar">
+      <div class="sum-item"><span class="k">In escrow</span><span class="v num">42,500</span></div>
+      <div class="sum-sep"></div>
+      <div class="sum-item"><span class="k">Balance</span><span class="v num">12,340</span></div>
+      <div class="sum-sep"></div>
+      <div class="sum-item"><span class="k">Claimable</span><span class="v clay num">1,200 →</span></div>
+      <div class="sum-sep"></div>
+      <div class="sum-item"><span class="k">Active</span><span class="v num">6</span></div>
+      <span class="tag">metrics on one line, no tile grid</span>
+    </div>
+
+    <div class="workspace">
+      <div class="ws-main">
+        <h2>Your escrows</h2>
+        <p class="sub">12 total on-chain · 2 need action</p>
+        <div class="filter-tabs"><span class="active">All</span><span>Paying</span><span>Receiving</span><span>Disputed</span><span>Done</span></div>
+        <div class="ws-grid">
+          <div class="card esc-card">
+            <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-1042</span><span class="status-pill active"><span class="dot clay"></span>Active</span></div>
+            <div class="amt num">8,000 <span style="font-size:10px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+            <div class="progress"><span style="width:66%"></span></div>
+            <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Receiving ›</span></div>
+          </div>
+          <div class="card esc-card">
+            <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-0997</span><span class="status-pill disputed"><span class="dot warn"></span>Disputed</span></div>
+            <div class="amt num">5,000 <span style="font-size:10px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+            <div class="progress"><span style="width:33%;background:var(--warn)"></span></div>
+            <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Paying ›</span></div>
+          </div>
+          <div class="card esc-card">
+            <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-0981</span><span class="status-pill done">Completed</span></div>
+            <div class="amt num">12,500 <span style="font-size:10px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+            <div class="progress"><span style="width:100%"></span></div>
+            <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Paying ›</span></div>
+          </div>
+          <div class="card esc-card">
+            <div class="top"><span class="mono num" style="font-size:11px;color:var(--ink-2)">ESC-0975</span><span class="status-pill active"><span class="dot clay"></span>Active</span></div>
+            <div class="amt num">3,200 <span style="font-size:10px;font-weight:400;color:var(--ink-2)">USDC</span></div>
+            <div class="progress"><span style="width:20%"></span></div>
+            <div class="foot"><span class="ph-line w40 sm"></span><span style="font-size:10px;color:var(--ink-2)">Receiving ›</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rail">
+        <div class="rail-card">
+          <h3><span class="dot"></span> Live activity <span class="tag" style="transform:none;margin-left:auto;">the ticker, but yours</span></h3>
+          <div class="rail-body">
+            <div class="feed-item"><div class="tl"><span class="node"></span><span class="stem"></span></div><div class="txt"><span class="when">2 min ago</span><div class="ph-line w90 sm"></div><div class="ph-line w60 sm"></div></div></div>
+            <div class="feed-item"><div class="tl"><span class="node" style="background:var(--warn)"></span><span class="stem"></span></div><div class="txt"><span class="when">1 hr ago</span><div class="ph-line w80 sm"></div></div></div>
+            <div class="feed-item"><div class="tl"><span class="node" style="background:var(--ok)"></span><span class="stem"></span></div><div class="txt"><span class="when">Today</span><div class="ph-line w90 sm"></div><div class="ph-line w50 sm"></div></div></div>
+            <div class="feed-item"><div class="tl"><span class="node" style="background:var(--ink-3)"></span></div><div class="txt"><span class="when">Yesterday</span><div class="ph-line w70 sm"></div></div></div>
+          </div>
+        </div>
+        <div class="rail-card">
+          <h3>Quick actions</h3>
+          <div class="rail-body quick">
+            <div class="quick-btn"><span class="qic"></span> Create an escrow</div>
+            <div class="quick-btn"><span class="qic"></span> Withdraw 1,200 claimable</div>
+            <div class="quick-btn"><span class="qic"></span> View full history</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabbar-mobile">
+    <div class="tb active"><span class="ic"></span>Dashboard</div>
+    <div class="tb"><span class="ic"></span>Create</div>
+    <div class="tb"><span class="ic"></span>History</div>
+    <div class="tb"><span class="ic"></span>Settings</div>
+  </div>
+</template>
+
+<!-- ============================================================
+     TEMPLATE — DIRECTION C
+     ============================================================ -->
+<template id="tplC">
+  <nav class="navbar">
+    <div class="brand"><span class="mark"></span> Tranche
+      <span class="net-badge"><span class="dot"></span> Arc Testnet</span>
+    </div>
+    <div class="navlinks"><span class="active">Dashboard</span><span>Create</span><span>History</span><span>Settings</span></div>
+    <div class="nav-right"><span class="wallet-chip">0x4F…9a2</span></div>
+    <div class="hamburger"><span></span><span></span><span></span></div>
+  </nav>
+
+  <div class="page">
+    <div class="page-head">
+      <div><h1>Dashboard</h1></div>
+      <span class="btn-primary">+ New Escrow</span>
+    </div>
+
+    <div class="pos-line">
+      <span class="big num">42,500</span><span class="txt">USDC in escrow across 6 contracts ·</span>
+      <span class="txt"><span class="clay num">1,200</span> claimable ·</span>
+      <span class="txt"><span class="num">12,340</span> in wallet</span>
+      <span class="tag">one sentence, not a metric grid</span>
+    </div>
+
+    <!-- PRIORITY GROUP -->
+    <div class="grp priority">
+      <div class="grp-head"><span class="dot warn"></span><span class="gtitle">Needs action</span><span class="gcount">2</span><span class="chev">▾</span></div>
+      <div class="grp-body">
+        <div class="g-row">
+          <div class="g-top"><span class="g-amt num">3,000</span><span class="g-id mono">ESC-1042 · Receiving</span></div>
+          <div class="g-main" style="grid-column:1/-1;"><div class="ph-line w80 sm"></div></div>
+          <div class="g-right"><span class="g-cta">Release funds</span></div>
+        </div>
+        <div class="g-row">
+          <div class="g-top"><span class="g-amt num">5,000</span><span class="g-id mono">ESC-0997 · Paying</span><span class="status-pill disputed"><span class="dot warn"></span>Dispute</span></div>
+          <div class="g-main" style="grid-column:1/-1;"><div class="ph-line w70 sm"></div></div>
+          <div class="g-right"><span class="g-cta">Submit evidence</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ACTIVE GROUP -->
+    <div class="grp">
+      <div class="grp-head"><span class="dot clay"></span><span class="gtitle">Active</span><span class="gcount">4</span><span class="chev">▾</span></div>
+      <div class="grp-body">
+        <div class="g-row">
+          <div class="g-main"><div class="g-top"><span class="g-amt num">8,000</span><span class="g-id mono">ESC-1039 · Receiving</span></div></div>
+          <div class="g-prog"><div class="progress"><span style="width:66%"></span></div></div>
+          <div class="g-right"><span class="status-pill active"><span class="dot clay"></span>2/3</span><span class="g-cta">View ›</span></div>
+        </div>
+        <div class="g-row">
+          <div class="g-main"><div class="g-top"><span class="g-amt num">3,200</span><span class="g-id mono">ESC-0975 · Receiving</span></div></div>
+          <div class="g-prog"><div class="progress"><span style="width:20%"></span></div></div>
+          <div class="g-right"><span class="status-pill active"><span class="dot clay"></span>1/4</span><span class="g-cta">View ›</span></div>
+        </div>
+        <div class="g-row">
+          <div class="g-main"><div class="g-top"><span class="g-amt num">15,000</span><span class="g-id mono">ESC-0968 · Paying</span></div></div>
+          <div class="g-prog"><div class="progress"><span style="width:50%"></span></div></div>
+          <div class="g-right"><span class="status-pill active"><span class="dot clay"></span>1/2</span><span class="g-cta">View ›</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPLETED GROUP (collapsed) -->
+    <div class="grp">
+      <div class="grp-head"><span class="dot" style="background:var(--ok)"></span><span class="gtitle">Completed</span><span class="gcount">6</span><span class="chev" style="transform:rotate(-90deg)">▾</span><span class="tag" style="margin-left:8px;">collapsed by default</span></div>
+      <div class="grp-body collapsed"></div>
+    </div>
+  </div>
+
+  <div class="tabbar-mobile">
+    <div class="tb active"><span class="ic"></span>Dashboard</div>
+    <div class="tb"><span class="ic"></span>Create</div>
+    <div class="tb"><span class="ic"></span>History</div>
+    <div class="tb"><span class="ic"></span>Settings</div>
+  </div>
+</template>
+
+<script>
+  const BREAKPOINTS = [
+    { label: 'Mobile', w: 390 },
+    { label: 'Tablet', w: 768 },
+    { label: 'Laptop', w: 1280 },
+    { label: 'Desktop', w: 1600 },
+  ];
+
+  function build(tplId, containerId, dirLetter) {
+    const tpl = document.getElementById(tplId);
+    const container = document.getElementById(containerId);
+    BREAKPOINTS.forEach(bp => {
+      const wrap = document.createElement('div');
+      wrap.className = 'frame-wrap';
+
+      const label = document.createElement('div');
+      label.className = 'frame-label';
+      label.innerHTML = '<span class="bp-name">' + bp.label + '</span><span class="bp-px">' + bp.w + 'px</span>';
+
+      const frame = document.createElement('div');
+      frame.className = 'frame';
+      frame.setAttribute('data-dir', dirLetter);
+      frame.style.width = bp.w + 'px';
+      frame.appendChild(tpl.content.cloneNode(true));
+
+      wrap.appendChild(label);
+      wrap.appendChild(frame);
+      container.appendChild(wrap);
+    });
+  }
+
+  build('tplA', 'framesA', 'a');
+  build('tplB', 'framesB', 'b');
+  build('tplC', 'framesC', 'c');
+</script>
+
+</body>
+</html>
