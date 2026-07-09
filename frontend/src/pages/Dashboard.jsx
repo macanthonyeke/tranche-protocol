@@ -6,9 +6,9 @@ import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from
 import ConnectGate from '../components/ConnectGate.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
-import { useDashboard, useUsdcBalance, useDisputedEscrows } from '../hooks/useEscrows.js'
+import { useDashboard, useUsdcBalance, useDisputedEscrows, useAccountActivity } from '../hooks/useEscrows.js'
 import { useRoles } from '../hooks/useRoles.jsx'
-import { formatUSDC, formatUSDCNumber, countdown } from '../utils/format.js'
+import { formatUSDC, formatUSDCNumber, countdown, timeAgo } from '../utils/format.js'
 
 const PAGE_SIZE = 9
 
@@ -142,6 +142,7 @@ function DashboardInner() {
 
   const { dashboard, isLoading, error: dashboardError, refetch } = useDashboard(address)
   const { balance: usdcBalance } = useUsdcBalance(address)
+  const { items: activityItems, isLoading: activityLoading } = useAccountActivity(address)
 
   const [activeTab, setActiveTab] = useState('all')
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -226,12 +227,10 @@ function DashboardInner() {
 
       {isArbiter && <ArbiterDisputeBanner />}
 
-      {/* Financial Position band. Replaces the four equal-weight stat tiles
-          with a single financial headline (total value locked across the
-          caller's active escrows) plus three supporting mini-metrics. The
-          Claimable metric keeps the existing "link only when withdrawable"
-          behavior. */}
-      <PositionBand
+      {/* Summary bar (Direction A+). Replaces both the four-tile grid and
+          plain-A's PositionBand with a single-line metric strip — the
+          in-escrow figure leads by reading order, not by size. */}
+      <SummaryBar
         total={inEscrowTotal}
         activeCount={activeCount}
         walletBalance={usdcBalance}
@@ -239,13 +238,6 @@ function DashboardInner() {
         loading={isLoading}
         flash={refreshFlash}
       />
-
-      {/* Needs-Action queue. Lifts dispute/release-due items out of the flat
-          list to the top of the page — the load-bearing change of this
-          redesign. Only renders when there's at least one actionable item. */}
-      {!isLoading && actionItems.length > 0 && (
-        <AttentionQueue items={actionItems} />
-      )}
 
       {incomingEscrows.length > 0 && (
         <section>
@@ -262,151 +254,177 @@ function DashboardInner() {
         </section>
       )}
 
-      <section>
-        <div className="flex items-center justify-between gap-4">
-          <h2 className="text-2xl font-bold text-ink tracking-tight">All escrows</h2>
-          <div className="flex items-center gap-2 px-3 py-1 bg-sunk border border-rule rounded-md shrink-0">
-            <span className="w-1.5 h-1.5 bg-ok rounded-full animate-pulse" />
-            <span className="text-xs font-mono tabular-nums text-ink-2 tracking-widest uppercase whitespace-nowrap">
-              {totalOnChain} Total On-Chain
-            </span>
-          </div>
-        </div>
-        <p className="text-sm text-ink-2 mt-1">Manage your deposits, incoming payments, and refunds.</p>
+      {/* Workspace (Direction A+): main column keeps the AttentionQueue +
+          escrow list + pagination from plain A untouched; the sticky rail
+          on the right is the one net-new piece. */}
+      <Workspace
+        main={
+          <>
+            {!isLoading && actionItems.length > 0 && (
+              <AttentionQueue items={actionItems} />
+            )}
 
-        <div className="w-full mt-10 flex items-center justify-between gap-3 flex-wrap">
-          <div
-            role="tablist"
-            aria-label="Filter escrows"
-            className="inline-flex items-center gap-1 p-1 bg-sunk rounded-xl border border-rule overflow-x-auto scrollbar-hide max-w-full snap-x snap-mandatory"
-          >
-            {LEDGER_TABS.map((tab) => {
-              const isActive = tab.key === activeTab
-              return (
-                <button
-                  key={tab.key}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  onClick={() => setActiveTab(tab.key)}
-                  className={
-                    `relative inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
-                    `transition-colors duration-200 ` +
-                    `focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk ` +
-                    (isActive ? 'text-ink' : 'text-ink-2 hover:text-ink')
-                  }
-                >
-                  {isActive && (
-                    <motion.span
-                      layoutId="tab-pill"
-                      className="absolute inset-0 rounded-lg bg-paper shadow-sm"
-                      transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-                    />
-                  )}
-                  <span className="relative z-10">{tab.label}</span>
-                </button>
-              )
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            aria-label="Refresh escrow list"
-            className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink-2 hover:text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-          >
-            <RefreshCwIcon size={14} spinning={isRefreshing} />
-            <span className="hidden sm:inline">Refresh</span>
-            <span className="sm:hidden sr-only">Refresh</span>
-          </button>
-        </div>
-        <div className="w-full mt-3 border-b border-rule/50" aria-hidden="true" />
-
-        <AnimatePresence mode="wait" initial={false}>
-        {isLoading ? (
-          <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-            <DashboardSkeleton />
-          </motion.div>
-        ) : dashboardError ? (
-          <motion.div key="error" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-            <div className="flex flex-col items-start gap-3 py-12">
-              <p className="text-warn text-[14.5px]">Failed to load escrows — the indexer may be temporarily unavailable.</p>
-              <p className="text-ink-3 text-[13px]">{dashboardError.message || String(dashboardError)}</p>
-              <button className="btn-quiet text-[13px]" onClick={refetch}>Try again</button>
-            </div>
-          </motion.div>
-        ) : filteredEscrows.length === 0 ? (
-          <motion.div key="empty" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-            <LedgerEmptyState />
-          </motion.div>
-        ) : (
-          <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
-            {/* Desktop (>=900px): table. Mobile/tablet: PremiumEscrowCard grid. */}
-            <div className="hidden min-[900px]:block mt-8">
-              <EscrowTable escrows={visibleEscrows} />
-            </div>
-            <div className="min-[900px]:hidden grid grid-cols-1 sm:grid-cols-2 gap-6 mt-8">
-              <AnimatePresence mode="popLayout">
-                {visibleEscrows.map((e, i) => (
-                  <motion.div
-                    key={e.id}
-                    layout
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.97 }}
-                    transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: i * 0.11 }}
-                  >
-                    <PremiumEscrowCard summary={e} />
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-            </div>
-
-            <nav aria-label="Escrow list pagination" className="mt-10">
-              <div className="h-px w-full bg-rule/60" aria-hidden="true" />
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pt-6">
-                <span
-                  aria-live="polite"
-                  className="font-mono text-xs uppercase tracking-wider text-ink-3 tabular-nums"
-                >
-                  Showing{' '}
-                  <span className="text-ink tabular-nums">{pageStart + 1}–{pageEnd}</span>{' '}
-                  of <span className="text-ink tabular-nums">{filteredEscrows.length}</span> escrows
-                </span>
-                <div className="flex items-center gap-2 self-end sm:self-auto">
-                  <button
-                    type="button"
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
-                    disabled={safePage === 0}
-                    aria-label="Previous page"
-                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-                  >
-                    <ChevronLeftIcon size={14} />
-                    Prev
-                  </button>
-                  <span
-                    className="px-2 text-ink-2 tabular-nums font-mono text-xs uppercase tracking-wider"
-                    aria-current="page"
-                  >
-                    {safePage + 1} / {totalPages}
+            <section>
+              <div className="flex items-center justify-between gap-4">
+                <h2 className="text-2xl font-bold text-ink tracking-tight">All escrows</h2>
+                <div className="flex items-center gap-2 px-3 py-1 bg-sunk border border-rule rounded-md shrink-0">
+                  <span className="w-1.5 h-1.5 bg-ok rounded-full animate-pulse" />
+                  <span className="text-xs font-mono tabular-nums text-ink-2 tracking-widest uppercase whitespace-nowrap">
+                    {totalOnChain} Total On-Chain
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-                    disabled={safePage >= totalPages - 1}
-                    aria-label="Next page"
-                    className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
-                  >
-                    Next
-                    <ChevronRightIcon size={14} />
-                  </button>
                 </div>
               </div>
-            </nav>
-          </motion.div>
-        )}
-        </AnimatePresence>
-      </section>
+              <p className="text-sm text-ink-2 mt-1">Manage your deposits, incoming payments, and refunds.</p>
+
+              <div className="w-full mt-10 flex items-center justify-between gap-3 flex-wrap">
+                <div
+                  role="tablist"
+                  aria-label="Filter escrows"
+                  className="inline-flex items-center gap-1 p-1 bg-sunk rounded-xl border border-rule overflow-x-auto scrollbar-hide max-w-full snap-x snap-mandatory"
+                >
+                  {LEDGER_TABS.map((tab) => {
+                    const isActive = tab.key === activeTab
+                    return (
+                      <button
+                        key={tab.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={isActive}
+                        onClick={() => setActiveTab(tab.key)}
+                        className={
+                          `relative inline-flex items-center justify-center min-h-9 px-3.5 py-2 text-sm font-medium rounded-lg whitespace-nowrap snap-start ` +
+                          `transition-colors duration-200 ` +
+                          `focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-sunk ` +
+                          (isActive ? 'text-ink' : 'text-ink-2 hover:text-ink')
+                        }
+                      >
+                        {isActive && (
+                          <motion.span
+                            layoutId="tab-pill"
+                            className="absolute inset-0 rounded-lg bg-paper shadow-sm"
+                            transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                          />
+                        )}
+                        <span className="relative z-10">{tab.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  aria-label="Refresh escrow list"
+                  className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink-2 hover:text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100 whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+                >
+                  <RefreshCwIcon size={14} spinning={isRefreshing} />
+                  <span className="hidden sm:inline">Refresh</span>
+                  <span className="sm:hidden sr-only">Refresh</span>
+                </button>
+              </div>
+              <div className="w-full mt-3 border-b border-rule/50" aria-hidden="true" />
+
+              <AnimatePresence mode="wait" initial={false}>
+              {isLoading ? (
+                <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+                  <DashboardSkeleton />
+                </motion.div>
+              ) : dashboardError ? (
+                <motion.div key="error" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+                  <div className="flex flex-col items-start gap-3 py-12">
+                    <p className="text-warn text-[14.5px]">Failed to load escrows — the indexer may be temporarily unavailable.</p>
+                    <p className="text-ink-3 text-[13px]">{dashboardError.message || String(dashboardError)}</p>
+                    <button className="btn-quiet text-[13px]" onClick={refetch}>Try again</button>
+                  </div>
+                </motion.div>
+              ) : filteredEscrows.length === 0 ? (
+                <motion.div key="empty" className="mt-8" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+                  <LedgerEmptyState />
+                </motion.div>
+              ) : (
+                <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
+                  {/* Desktop (>=900px): table. Mobile/tablet: PremiumEscrowCard grid. */}
+                  <div className="hidden min-[900px]:block mt-8">
+                    <EscrowTable escrows={visibleEscrows} />
+                  </div>
+                  <div className="min-[900px]:hidden grid grid-cols-1 sm:grid-cols-2 gap-6 mt-8">
+                    <AnimatePresence mode="popLayout">
+                      {visibleEscrows.map((e, i) => (
+                        <motion.div
+                          key={e.id}
+                          layout
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.97 }}
+                          transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1], delay: i * 0.11 }}
+                        >
+                          <PremiumEscrowCard summary={e} />
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+
+                  <nav aria-label="Escrow list pagination" className="mt-10">
+                    <div className="h-px w-full bg-rule/60" aria-hidden="true" />
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pt-6">
+                      <span
+                        aria-live="polite"
+                        className="font-mono text-xs uppercase tracking-wider text-ink-3 tabular-nums"
+                      >
+                        Showing{' '}
+                        <span className="text-ink tabular-nums">{pageStart + 1}–{pageEnd}</span>{' '}
+                        of <span className="text-ink tabular-nums">{filteredEscrows.length}</span> escrows
+                      </span>
+                      <div className="flex items-center gap-2 self-end sm:self-auto">
+                        <button
+                          type="button"
+                          onClick={() => setPage((p) => Math.max(0, p - 1))}
+                          disabled={safePage === 0}
+                          aria-label="Previous page"
+                          className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+                        >
+                          <ChevronLeftIcon size={14} />
+                          Prev
+                        </button>
+                        <span
+                          className="px-2 text-ink-2 tabular-nums font-mono text-xs uppercase tracking-wider"
+                          aria-current="page"
+                        >
+                          {safePage + 1} / {totalPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                          disabled={safePage >= totalPages - 1}
+                          aria-label="Next page"
+                          className="inline-flex items-center justify-center gap-2 min-h-11 px-4 py-2.5 text-sm font-medium text-ink bg-paper border border-rule hover:bg-sunk rounded-xl transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-clay focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+                        >
+                          Next
+                          <ChevronRightIcon size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </nav>
+                </motion.div>
+              )}
+              </AnimatePresence>
+            </section>
+          </>
+        }
+        rail={<ActivityRail items={activityItems} loading={activityLoading} />}
+      />
+    </div>
+  )
+}
+
+/* ---------- Workspace (Direction A+) ----------
+   Two-column split: main content column + a sticky activity rail at
+   >=1000px. Single column, rail dropping below the list, on mobile/tablet. */
+function Workspace({ main, rail }) {
+  return (
+    <div className="grid grid-cols-1 min-[1000px]:grid-cols-[1fr_300px] min-[1400px]:grid-cols-[1fr_340px] gap-5 items-start">
+      <div className="min-w-0 flex flex-col gap-10">{main}</div>
+      <div className="min-[1000px]:sticky min-[1000px]:top-5">{rail}</div>
     </div>
   )
 }
@@ -619,12 +637,11 @@ function RefreshCwIcon({ size = 14, spinning = false }) {
   )
 }
 
-/* ---------- Financial Position band ----------
-   Single headline figure (total value locked across the caller's active
-   escrows) with three supporting mini-metrics inline. Replaces the four
-   equal-weight stat tiles — the in-escrow total is the account's one
-   financial headline; balance/claimable/active are secondary. */
-function PositionBand({ total, activeCount, walletBalance, claimable, loading, flash = 0 }) {
+/* ---------- Summary bar (Direction A+) ----------
+   Compact single-line metric strip — replaces both the four-tile grid and
+   plain-A's PositionBand. The in-escrow figure leads by reading order
+   (first item), not by size — everything renders at the same scale. */
+function SummaryBar({ total, activeCount, walletBalance, claimable, loading, flash = 0 }) {
   const [scope, animate] = useAnimate()
   const prevFlashRef = useRef(0)
   const reduce = useReducedMotion()
@@ -638,56 +655,52 @@ function PositionBand({ total, activeCount, walletBalance, claimable, loading, f
   const hasClaimable = claimable > 0n
 
   return (
-    <section ref={scope} aria-label="Financial position" className="panel-sunk p-4 md:p-6">
-      <div className="flex flex-col gap-6 min-[900px]:flex-row min-[900px]:items-center min-[900px]:justify-between">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="eyebrow">In escrow — across {activeCount} {activeCount === 1 ? 'contract' : 'contracts'}</span>
-          {loading ? (
-            <Skeleton className="h-9 w-48" />
-          ) : (
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="num text-[30px] md:text-[38px] font-semibold tracking-[-0.02em] text-ink leading-none">
-                {formatUSDCNumber(total)}
-              </span>
-              <span className="text-[13px] text-ink-2">USDC locked</span>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-[22px] flex-wrap">
-          <MiniMetric label="Wallet balance" loading={loading}>
-            <span className="num text-[16px] font-semibold text-ink">{formatUSDCNumber(walletBalance)}</span>
-          </MiniMetric>
-          <MiniMetric label="Claimable" loading={loading}>
-            {hasClaimable ? (
-              <Link
-                to="/settings"
-                aria-label={`Withdraw ${formatUSDC(claimable)} USDC from your refund balance`}
-                className="group num text-[16px] font-semibold text-clay hover:underline underline-offset-2 inline-flex items-center gap-1"
-              >
-                {formatUSDCNumber(claimable)}
-                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                  <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </Link>
-            ) : (
-              <span className="num text-[16px] font-semibold text-ink">{formatUSDCNumber(claimable)}</span>
-            )}
-          </MiniMetric>
-          <MiniMetric label="Active" loading={loading}>
-            <span className="num text-[16px] font-semibold text-ink">{activeCount}</span>
-          </MiniMetric>
-        </div>
-      </div>
+    <section
+      ref={scope}
+      aria-label="Account summary"
+      className="panel-sunk px-4 py-3 sm:px-5 sm:py-3.5 flex flex-wrap items-baseline gap-x-6 gap-y-2.5"
+    >
+      <SummaryItem label="In escrow" loading={loading}>
+        <span className="num text-[15px] font-semibold text-ink">{formatUSDCNumber(total)}</span>
+      </SummaryItem>
+      <SummarySep />
+      <SummaryItem label="Balance" loading={loading}>
+        <span className="num text-[15px] font-semibold text-ink">{formatUSDCNumber(walletBalance)}</span>
+      </SummaryItem>
+      <SummarySep />
+      <SummaryItem label="Claimable" loading={loading}>
+        {hasClaimable ? (
+          <Link
+            to="/settings"
+            aria-label={`Withdraw ${formatUSDC(claimable)} USDC from your refund balance`}
+            className="num text-[15px] font-semibold text-clay hover:underline underline-offset-2 inline-flex items-center gap-1"
+          >
+            {formatUSDCNumber(claimable)}
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M3 6h6M7 4l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </Link>
+        ) : (
+          <span className="num text-[15px] font-semibold text-ink">{formatUSDCNumber(claimable)}</span>
+        )}
+      </SummaryItem>
+      <SummarySep />
+      <SummaryItem label="Active" loading={loading}>
+        <span className="num text-[15px] font-semibold text-ink">{activeCount}</span>
+      </SummaryItem>
     </section>
   )
 }
 
-function MiniMetric({ label, loading, children }) {
+function SummarySep() {
+  return <span className="hidden sm:block w-px self-stretch bg-rule" aria-hidden="true" />
+}
+
+function SummaryItem({ label, loading, children }) {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="inline-flex items-baseline gap-1.5">
       <span className="eyebrow">{label}</span>
-      {loading ? <Skeleton className="h-4 w-14" /> : children}
+      {loading ? <Skeleton className="h-4 w-12" /> : children}
     </div>
   )
 }
@@ -806,6 +819,74 @@ function EscrowTableRow({ summary }) {
       <span role="cell" className="text-ink-3 justify-self-end">
         <ChevronRightIcon size={14} />
       </span>
+    </Link>
+  )
+}
+
+/* ---------- Activity rail (Direction A+, net-new) ----------
+   Sticky right rail with a live timeline of the account's on-chain events —
+   general lifecycle (created/released/disputed), distinct from the bell-icon
+   notification feed (useActivityFeed), which is scoped to action-required
+   items only. Capped server-side to ~6 newest overall. */
+const ACTIVITY_META = {
+  created:  { dotCls: 'bg-clay', text: (i) => `Escrow #${i.escrowId} created — ${formatUSDCNumber(i.amount)} USDC` },
+  released: { dotCls: 'bg-ok',   text: (i) => `Milestone ${i.milestoneIndex + 1} released on #${i.escrowId}` },
+  disputed: { dotCls: 'bg-warn', text: (i) => `Dispute raised on #${i.escrowId} — milestone ${i.milestoneIndex + 1}` }
+}
+
+function ActivityRail({ items, loading }) {
+  return (
+    <aside aria-label="Live activity" className="rounded-md border border-rule overflow-hidden">
+      <div className="bg-sunk border-b border-rule px-3.5 py-2.5 flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-ok animate-pulse" aria-hidden="true" />
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-2">Live activity</span>
+      </div>
+
+      {loading ? (
+        <div className="p-3.5 flex flex-col gap-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-9 w-full" />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <p className="px-3.5 py-8 text-[12px] text-ink-3 text-center">No recent activity</p>
+      ) : (
+        <div>
+          {items.map((item, i) => (
+            <ActivityFeedItem
+              key={`${item.type}-${item.escrowId}-${item.milestoneIndex ?? ''}-${item.timestamp}`}
+              item={item}
+              isLast={i === items.length - 1}
+            />
+          ))}
+        </div>
+      )}
+
+      <Link
+        to="/ledger"
+        className="block px-3.5 py-2.5 text-[12px] font-medium text-ink-2 hover:text-ink border-t border-rule transition-colors"
+      >
+        View all activity →
+      </Link>
+    </aside>
+  )
+}
+
+function ActivityFeedItem({ item, isLast }) {
+  const meta = ACTIVITY_META[item.type]
+  return (
+    <Link
+      to={`/escrow/${item.escrowId}`}
+      className="group flex gap-3 px-3.5 py-2.5 border-t border-rule first:border-t-0 hover:bg-sunk transition-colors"
+    >
+      <div className="flex flex-col items-center pt-1 shrink-0">
+        <span className={`w-2 h-2 rounded-full ${meta.dotCls}`} aria-hidden="true" />
+        {!isLast && <span className="w-px flex-1 bg-rule mt-1" aria-hidden="true" />}
+      </div>
+      <div className="min-w-0 pb-0.5">
+        <span className="block text-[10px] font-mono uppercase tracking-wide text-ink-3">{timeAgo(item.timestamp)}</span>
+        <span className="block text-[12px] text-ink leading-snug">{meta.text(item)}</span>
+      </div>
     </Link>
   )
 }

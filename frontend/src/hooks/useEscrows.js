@@ -7,7 +7,8 @@ import {
   fetchDashboard,
   fetchEscrowsByRole,
   fetchDisputedEscrows,
-  fetchEscrowInvoice
+  fetchEscrowInvoice,
+  fetchAccountActivity
 } from '../lib/goldsky'
 
 // Normalises one Escrow tuple/struct returned by the contract.
@@ -233,6 +234,22 @@ function useDisputedEscrowsGoldsky(active) {
 
 export function useDisputedEscrows() {
   return useDisputedEscrowsGoldsky(GOLDSKY_ENABLED)
+}
+
+// --- Account-wide activity timeline (Dashboard ActivityRail) ---
+function useAccountActivityGoldsky(address, active) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['gs-account-activity', address?.toLowerCase()],
+    queryFn: () => fetchAccountActivity(address),
+    enabled: active,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false
+  })
+  return { items: data ?? [], isLoading, error: error ?? null, refetch }
+}
+
+export function useAccountActivity(address) {
+  return useAccountActivityGoldsky(address, GOLDSKY_ENABLED && !!address)
 }
 
 export function useRefundBalance(address) {

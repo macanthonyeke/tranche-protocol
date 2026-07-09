@@ -317,3 +317,93 @@ export async function fetchActivityFeed(address, { since = 0, arbiterWindowSecs 
 
   return items
 }
+
+// Account-wide activity timeline for the Dashboard's ActivityRail — general
+// lifecycle events (created / released / disputed), not just action-required
+// items like fetchActivityFeed() above. Capped to `first` newest overall,
+// deduped across payer/freelancer roles.
+export async function fetchAccountActivity(address, { first = 6 } = {}) {
+  const addr = lc(address)
+  const data = await gql(
+    `query AccountActivity($addr: Bytes!, $first: Int!) {
+      createdAsPayer: escrows(
+        where: { depositor: $addr }
+        orderBy: createdAt, orderDirection: desc, first: $first
+      ) {
+        escrowId createdAt totalAmount
+      }
+      createdAsFreelancer: escrows(
+        where: { recipient: $addr }
+        orderBy: createdAt, orderDirection: desc, first: $first
+      ) {
+        escrowId createdAt totalAmount
+      }
+      releasedAsPayer: milestones(
+        where: { state: RELEASED, escrow_: { depositor: $addr } }
+        orderBy: updatedAt, orderDirection: desc, first: $first
+      ) {
+        id index updatedAt escrow { escrowId }
+      }
+      releasedAsFreelancer: milestones(
+        where: { state: RELEASED, escrow_: { recipient: $addr } }
+        orderBy: updatedAt, orderDirection: desc, first: $first
+      ) {
+        id index updatedAt escrow { escrowId }
+      }
+      disputedAsPayer: disputes(
+        where: { escrow_: { depositor: $addr } }
+        orderBy: raisedAt, orderDirection: desc, first: $first
+      ) {
+        id milestoneIndex raisedAt escrow { escrowId }
+      }
+      disputedAsFreelancer: disputes(
+        where: { escrow_: { recipient: $addr } }
+        orderBy: raisedAt, orderDirection: desc, first: $first
+      ) {
+        id milestoneIndex raisedAt escrow { escrowId }
+      }
+    }`,
+    { addr, first }
+  )
+
+  const items = []
+
+  const seenCreated = new Set()
+  for (const e of [...(data.createdAsPayer || []), ...(data.createdAsFreelancer || [])]) {
+    if (seenCreated.has(e.escrowId)) continue
+    seenCreated.add(e.escrowId)
+    items.push({
+      type: 'created',
+      escrowId: Number(e.escrowId),
+      timestamp: Number(e.createdAt),
+      amount: BigInt(e.totalAmount)
+    })
+  }
+
+  const seenReleased = new Set()
+  for (const m of [...(data.releasedAsPayer || []), ...(data.releasedAsFreelancer || [])]) {
+    if (seenReleased.has(m.id)) continue
+    seenReleased.add(m.id)
+    items.push({
+      type: 'released',
+      escrowId: Number(m.escrow.escrowId),
+      milestoneIndex: m.index,
+      timestamp: Number(m.updatedAt)
+    })
+  }
+
+  const seenDisputed = new Set()
+  for (const d of [...(data.disputedAsPayer || []), ...(data.disputedAsFreelancer || [])]) {
+    if (seenDisputed.has(d.id)) continue
+    seenDisputed.add(d.id)
+    items.push({
+      type: 'disputed',
+      escrowId: Number(d.escrow.escrowId),
+      milestoneIndex: d.milestoneIndex,
+      timestamp: Number(d.raisedAt)
+    })
+  }
+
+  items.sort((a, b) => b.timestamp - a.timestamp)
+  return items.slice(0, first)
+}
