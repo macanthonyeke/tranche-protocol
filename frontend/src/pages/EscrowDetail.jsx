@@ -453,10 +453,10 @@ function FocusBarShell({ tone, eyebrow, title, body, cta, onClick }) {
   const t = FOCUS_TONE[tone] ?? FOCUS_TONE.neutral
   return (
     <div
-      className="rounded-2xl border p-5 flex items-center justify-between gap-5 flex-wrap"
+      className="rounded-2xl border p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 sm:gap-5"
       style={{ background: t.bg, borderColor: t.bd }}
     >
-      <div className="flex items-start gap-3.5 min-w-0 flex-1">
+      <div className="flex items-start gap-3.5 min-w-0 sm:flex-1">
         <span
           className="rounded-md inline-flex items-center justify-center shrink-0 h-9 w-9 mt-0.5"
           style={{ background: 'color-mix(in oklch, var(--paper) 55%, transparent)', color: t.ac }}
@@ -475,7 +475,7 @@ function FocusBarShell({ tone, eyebrow, title, body, cta, onClick }) {
         <button
           type="button"
           onClick={onClick}
-          className="inline-flex items-center justify-center gap-2 rounded-md px-4 h-10 shrink-0 font-medium text-[13.5px] transition-all active:scale-[0.98]"
+          className="inline-flex items-center justify-center gap-2 rounded-md px-4 h-10 w-full sm:w-auto shrink-0 font-medium text-[13.5px] transition-all active:scale-[0.98]"
           style={tone === 'warn'
             ? { background: 'transparent', color: 'var(--warn)', border: '1px solid color-mix(in oklch, var(--warn) 45%, transparent)' }
             : { background: 'var(--clay)', color: 'var(--paper)' }}
