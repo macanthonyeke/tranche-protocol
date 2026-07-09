@@ -25,14 +25,6 @@ import {
 const DRAFT_KEY = 'escrow-draft'
 const MAX_DEADLINE_SECONDS = 5 * 365 * 86400
 
-const STEPS = [
-  { num: 1, label: 'Parties',    head: 'Who are you paying?', kicker: 'Approved milestones go directly to this address on the chain they choose.' },
-  { num: 2, label: 'Invoice',    head: 'What is this for?',   kicker: 'Invoice contents are published on-chain by default — or choose Private to store only the hash.' },
-  { num: 3, label: 'Timeline',   head: 'Set the timeline',    kicker: 'When work needs to be done, and how long each side has to respond at each step.' },
-  { num: 4, label: 'Milestones', head: 'Break the payment',   kicker: 'Each milestone releases independently. They must sum to the total.' },
-  { num: 5, label: 'Review',     head: 'Confirm and lock',    kicker: 'Two transactions: approve USDC, then create the escrow.' }
-]
-
 const TITLE_PRESETS = [
   'Upfront payment', 'Kickoff', 'First draft', 'Revision round 1',
   'Revision round 2', 'Final delivery', 'Post-launch support', 'QA', 'Documentation', 'Custom'
@@ -42,12 +34,20 @@ const TITLE_PRESETS = [
 // Bounded to MIN_REVIEW_WINDOW (1 day) .. MAX_REVIEW_WINDOW (7 days) on-chain.
 const REVIEW_OPTS = [1, 2, 3, 5, 7].map((v) => ({ value: v, label: `${v} day${v === 1 ? '' : 's'}` }))
 
+const ERROR_SECTION = {
+  freelancer: 'section-parties',
+  destinationDomain: 'section-parties',
+  invoiceNumber: 'section-documentation',
+  deadline: 'section-timeline',
+  milestones: 'section-milestones'
+}
+const sectionForErrorKey = (key) => (key.startsWith('m_') ? 'section-milestones' : ERROR_SECTION[key] || null)
+
 const emptyMilestone = () => ({ title: 'Upfront payment', customTitle: '', amount: '' })
 
 const emptyState = () => ({
   freelancer: '',
   destinationDomain: ARC_DOMAIN,
-  totalAmount: '',
   invoiceNumber: '',
   notes: '',
   attachmentURI: '',
@@ -81,7 +81,7 @@ export default function CreateEscrow() {
       <PageHeader
         eyebrow="Create a new escrow"
         title="Lock funds into milestones."
-        kicker="The ledger on the right is what the contract sees. Fill in the form on the left and watch it build."
+        kicker="The ledger tracks exactly what the contract will hold as you fill this in."
       />
       <div className="mb-6 rounded-xl bg-sunk border border-rule px-4 py-3 flex items-center gap-3 flex-wrap text-[12.5px] text-ink-2">
         <span>Gas on Arc is paid in USDC.</span>
@@ -109,7 +109,6 @@ function Flow() {
   const feeBps = config?.protocolFeeBps ?? 199n
   const cctpForwardFee = config?.cctpForwardFee ?? 0n
 
-  const [step, setStep] = useState(1)
   const [state, setState] = useState(() => {
     try {
       const raw = localStorage.getItem(DRAFT_KEY)
@@ -117,15 +116,22 @@ function Flow() {
     } catch {}
     return emptyState()
   })
-  const [errors, setErrors] = useState({})
+  const [touched, setTouched] = useState({})
+  const touch = (key) => setTouched((t) => (t[key] ? t : { ...t, [key]: true }))
 
   useEffect(() => {
-    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...state, step })) } catch {}
-  }, [state, step])
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state)) } catch {}
+  }, [state])
 
-  const totalBaseUnits = useMemo(() => {
-    try { return usdcToBaseUnits(state.totalAmount) } catch { return 0n }
-  }, [state.totalAmount])
+  const milestoneAmountsBigInt = useMemo(
+    () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
+    [state.milestones]
+  )
+  const totalBaseUnits = useMemo(
+    () => milestoneAmountsBigInt.reduce((a, b) => a + b, 0n),
+    [milestoneAmountsBigInt]
+  )
+  const totalAmountNum = Number(totalBaseUnits) / 1e6
 
   const {
     data: allowance,
@@ -145,54 +151,38 @@ function Flow() {
     query: { enabled: !!address }
   })
 
-  const milestoneAmountsBigInt = useMemo(
-    () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
-    [state.milestones]
-  )
-  const milestoneSumBaseUnits = useMemo(
-    () => milestoneAmountsBigInt.reduce((a, b) => a + b, 0n),
-    [milestoneAmountsBigInt]
-  )
-  const exactMatch = totalBaseUnits > 0n && milestoneSumBaseUnits === totalBaseUnits
-  const overBaseUnits = milestoneSumBaseUnits > totalBaseUnits
-  const remainingBaseUnits = totalBaseUnits - milestoneSumBaseUnits
-  const milestoneSum = Number(milestoneSumBaseUnits) / 1e6
-  const totalAmountNum = Number(totalBaseUnits) / 1e6
-
   const supportedSet = useMemo(() => new Set(supported), [supported])
   const domainsFailed = !loadingDomains && supported.length === 0
 
-  const validate = (s) => {
+  const validate = () => {
     const e = {}
-    if (s === 1) {
-      if (!isValidAddress(state.freelancer)) e.freelancer = "That doesn't look like a valid 0x address."
-      if (state.freelancer && address && state.freelancer.toLowerCase() === address.toLowerCase())
-        e.freelancer = "The freelancer and payer can't be the same wallet."
-      if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Pick a supported destination chain.'
-      else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Only EVM-compatible chains are supported right now.'
-      if (!totalAmountNum || totalAmountNum <= 0) e.totalAmount = 'Enter an amount greater than zero.'
+    if (!isValidAddress(state.freelancer)) e.freelancer = "That doesn't look like a valid 0x address."
+    if (state.freelancer && address && state.freelancer.toLowerCase() === address.toLowerCase())
+      e.freelancer = "The freelancer and payer can't be the same wallet."
+    if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Pick a supported destination chain.'
+    else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Only EVM-compatible chains are supported right now.'
+
+    if (!state.invoiceNumber.trim()) e.invoiceNumber = 'Invoice number is required.'
+
+    if (!state.deadline) e.deadline = 'Set a project deadline.'
+    else {
+      const ts = Math.floor(new Date(state.deadline).getTime() / 1000)
+      const now = Math.floor(Date.now() / 1000)
+      if (!ts || ts <= now + 3600) e.deadline = 'Deadline must be at least 1 hour from now.'
+      else if (ts - now > MAX_DEADLINE_SECONDS) e.deadline = 'Deadline can be at most 5 years from now.'
     }
-    if (s === 2) {
-      if (!state.invoiceNumber.trim()) e.invoiceNumber = 'Invoice number is required.'
-    }
-    if (s === 3) {
-      if (!state.deadline) e.deadline = 'Set a project deadline.'
-      else {
-        const ts = Math.floor(new Date(state.deadline).getTime() / 1000)
-        const now = Math.floor(Date.now() / 1000)
-        if (!ts || ts <= now + 3600) e.deadline = 'Deadline must be at least 1 hour from now.'
-        else if (ts - now > MAX_DEADLINE_SECONDS) e.deadline = 'Deadline can be at most 5 years from now.'
-      }
-    }
-    if (s === 4) {
-      if (state.milestones.length === 0) e.milestones = 'Add at least one milestone.'
-      state.milestones.forEach((m, i) => {
-        const eff = m.title === 'Custom' ? m.customTitle.trim() : m.title
-        if (!eff) e[`m_${i}_title`] = 'Give this milestone a title.'
-        const a = parseFloat(m.amount)
-        if (!a || a <= 0) {
-          e[`m_${i}_amount`] = 'Amount must be greater than zero.'
-        } else if (Number(state.destinationDomain) !== ARC_DOMAIN && cctpForwardFee > 0n) {
+
+    if (state.milestones.length === 0) e.milestones = 'Add at least one milestone.'
+    let anyPositive = false
+    state.milestones.forEach((m, i) => {
+      const eff = m.title === 'Custom' ? m.customTitle.trim() : m.title
+      if (!eff) e[`m_${i}_title`] = 'Give this milestone a title.'
+      const a = parseFloat(m.amount)
+      if (!a || a <= 0) {
+        e[`m_${i}_amount`] = 'Amount must be greater than zero.'
+      } else {
+        anyPositive = true
+        if (Number(state.destinationDomain) !== ARC_DOMAIN && cctpForwardFee > 0n) {
           // Cross-chain: verify each milestone's net burn amount exceeds the forwarding fee floor.
           const amtBigInt = milestoneAmountsBigInt[i]
           const milestoneProtocolFee = (amtBigInt * feeBps) / 10_000n
@@ -201,17 +191,19 @@ function Flow() {
             e[`m_${i}_amount`] = 'Too small to deliver to this chain — increase this milestone or switch to Arc.'
           }
         }
-      })
-      if (!exactMatch) e.milestonesTotal = 'Milestones must sum to the total.'
-    }
+      }
+    })
+    if (!anyPositive) e.milestones = e.milestones || 'Add at least one milestone amount greater than zero.'
+
     return e
   }
 
-  const next = () => {
-    const e = validate(step); setErrors(e)
-    if (Object.keys(e).length === 0) setStep((s) => Math.min(s + 1, STEPS.length))
+  const errors = validate()
+
+  const scrollToSection = (id) => {
+    if (!id) return
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
-  const back = () => setStep((s) => Math.max(s - 1, 1))
 
   const protocolFee = totalBaseUnits * feeBps / 10_000n
 
@@ -235,6 +227,12 @@ function Flow() {
 
   const onApprove = () => {
     if (!address) return
+    const e = validate()
+    if (Object.keys(e).length > 0) {
+      setTouched((t) => ({ ...t, ...Object.fromEntries(Object.keys(e).map((k) => [k, true])) }))
+      scrollToSection(sectionForErrorKey(Object.keys(e)[0]))
+      return
+    }
     approveTx.run({
       address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'approve',
       args: [CONTRACT_ADDRESS, totalBaseUnits]
@@ -250,7 +248,7 @@ function Flow() {
       payer: address,
       payee: state.freelancer,
       currency: 'USDC',
-      total: state.totalAmount,
+      total: totalAmountNum.toString(),
       lineItems: state.milestones.map((m, i) => ({
         milestone: i,
         title: m.title === 'Custom' ? m.customTitle.trim() : m.title,
@@ -283,43 +281,60 @@ function Flow() {
     ]), { loadingMessage: 'Sign to create the escrow.' }).catch(() => {})
   }
 
-  const reset = () => { setState(emptyState()); setStep(1); setErrors({}); try { localStorage.removeItem(DRAFT_KEY) } catch {} }
+  const reset = () => { setState(emptyState()); setTouched({}); try { localStorage.removeItem(DRAFT_KEY) } catch {} }
+
+  const busy = approveTx.isBusy || depositTx.isBusy
+  const canSubmit = Object.keys(errors).length === 0
 
   return (
-    <div className="grid grid-cols-12 lg:gap-x-10 gap-y-12 pb-20">
-      <div className="col-span-12 lg:col-span-7">
-        <Progress step={step} onJump={(i) => i < step && setStep(i)} />
-        <div className="rule mt-4 mb-10" />
+    <div className="grid grid-cols-12 lg:gap-x-10 gap-y-12 pb-36 lg:pb-20">
+      <div className="col-span-12 lg:col-span-7 flex flex-col">
+        <Section id="section-parties" n="01" title="Who are you paying?" sub="Parties" first>
+          <PartiesSection
+            state={state} setState={setState} errors={errors} touched={touched} touch={touch}
+            supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains}
+          />
+        </Section>
+        <div className="rule" />
 
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={step}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="flex flex-col gap-7 max-w-[640px]"
-          >
-            <StepHeading step={STEPS[step - 1]} />
-            {step === 1 && <Step1 state={state} setState={setState} errors={errors} supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains} />}
-            {step === 2 && <Step2 state={state} setState={setState} errors={errors} />}
-            {step === 3 && <Step3 state={state} setState={setState} errors={errors} />}
-            {step === 4 && <Step4 state={state} setState={setState} errors={errors} milestoneSum={milestoneSum} totalAmountNum={totalAmountNum} overBaseUnits={overBaseUnits} remainingBaseUnits={remainingBaseUnits} exactMatch={exactMatch} />}
-            {step === 5 && <Step5 approved={approved} approveTx={approveTx} depositTx={depositTx} onApprove={onApprove} onDeposit={onDeposit} totalBaseUnits={totalBaseUnits} address={address} allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance} usdcBalance={usdcBalance} balanceLoading={balanceLoading} />}
+        <Section id="section-milestones" n="02" title="Break the payment into milestones" sub="the total is their sum">
+          <MilestonesSection
+            state={state} setState={setState} errors={errors} touched={touched} touch={touch} totalAmountNum={totalAmountNum}
+          />
+        </Section>
+        <div className="rule" />
 
-            <div className="rule mt-2" />
-            <div className="flex items-center justify-between pt-1">
-              <button className="btn-quiet" onClick={back} disabled={step === 1 || approveTx.isBusy || depositTx.isBusy}>← Back</button>
-              <div className="flex items-center gap-2">
-                <button className="btn-quiet" onClick={reset} disabled={approveTx.isBusy || depositTx.isBusy}>Reset draft</button>
-                {step < STEPS.length && <button className="btn-primary" onClick={next}>Continue</button>}
-              </div>
-            </div>
-          </motion.div>
-        </AnimatePresence>
+        <Section id="section-timeline" n="03" title="Set the deadline" sub="Timeline">
+          <TimelineSection state={state} setState={setState} errors={errors} touched={touched} touch={touch} />
+        </Section>
+        <div className="rule" />
+
+        <Section id="section-documentation" n="04" title="Add documentation" sub="Invoice">
+          <DocumentationSection state={state} setState={setState} errors={errors} touched={touched} touch={touch} />
+        </Section>
+        <div className="rule" />
+
+        <div className="py-8">
+          <AdvancedSection state={state} setState={setState} />
+        </div>
+        <div className="rule" />
+
+        <Section id="section-review" n="05" title="Confirm and lock" sub="Review & Lock">
+          <ReviewSection
+            state={state} totalBaseUnits={totalBaseUnits} errors={errors}
+            approved={approved} approveTx={approveTx} depositTx={depositTx}
+            onApprove={onApprove} onDeposit={onDeposit} address={address}
+            allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance}
+            usdcBalance={usdcBalance} balanceLoading={balanceLoading}
+            onJump={scrollToSection}
+          />
+          <div className="flex items-center justify-between pt-8">
+            <button className="btn-quiet" onClick={reset} disabled={busy}>Reset draft</button>
+          </div>
+        </Section>
       </div>
 
-      <aside className="col-span-12 lg:col-span-5">
+      <aside className="hidden lg:block lg:col-span-5">
         <div className="lg:sticky lg:top-24">
           <Ledger
             state={state}
@@ -327,79 +342,55 @@ function Flow() {
             totalBaseUnits={totalBaseUnits}
             protocolFee={protocolFee}
             milestoneAmountsBigInt={milestoneAmountsBigInt}
-            step={step}
             feeBps={feeBps}
             cctpForwardFee={cctpForwardFee}
+            onJump={scrollToSection}
           />
         </div>
       </aside>
+
+      <MobileLedgerBar
+        state={state}
+        address={address}
+        totalBaseUnits={totalBaseUnits}
+        protocolFee={protocolFee}
+        milestoneAmountsBigInt={milestoneAmountsBigInt}
+        feeBps={feeBps}
+        cctpForwardFee={cctpForwardFee}
+        onJump={scrollToSection}
+        onReview={() => scrollToSection('section-review')}
+        canSubmit={canSubmit}
+      />
     </div>
   )
 }
 
-/* ------- Progress (segmented bar) ------- */
-function Progress({ step, onJump }) {
+/* ------- Section shell ------- */
+function Section({ id, n, title, sub, first = false, children }) {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-baseline justify-between">
-        <p className="eyebrow">Step {step} of {STEPS.length} · {STEPS[step - 1].label}</p>
-        <p className="seq text-[11px] text-ink-3">{Math.round((step / STEPS.length) * 100)}%</p>
+    <section id={id} className={`scroll-mt-24 ${first ? 'pt-0' : 'pt-8'} pb-8`}>
+      <div className="flex items-baseline gap-3 mb-6">
+        <span className="seq text-[12px] text-ink-3">{n}</span>
+        <h3 className="text-[15px] font-medium text-ink tracking-[-0.005em]">{title}</h3>
+        {sub && <span className="text-[12px] text-ink-3 ml-auto">{sub}</span>}
       </div>
-      <div className="flex items-center gap-1.5">
-        {STEPS.map((s) => {
-          const done = s.num < step, cur = s.num === step
-          return (
-            <button
-              key={s.num} type="button"
-              onClick={() => onJump(s.num)}
-              aria-label={`Step ${s.num}: ${s.label}`}
-              className={`relative flex-1 h-[3px] rounded-full transition-colors ${done ? 'bg-clay' : cur ? 'bg-clay-soft' : 'bg-rule'}`}
-            />
-          )
-        })}
-      </div>
-    </div>
+      {children}
+    </section>
   )
 }
 
-const HEADING_CONTAINER = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.07, delayChildren: 0.04 } }
-}
-const HEADING_ITEM = {
-  hidden: { opacity: 0, y: 14 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.38, ease: [0.22, 1, 0.36, 1] } }
-}
-
-function StepHeading({ step }) {
-  return (
-    <motion.div
-      className="flex flex-col gap-2"
-      variants={HEADING_CONTAINER}
-      initial="hidden"
-      animate="show"
-    >
-      <motion.div variants={HEADING_ITEM} className="flex items-baseline gap-3">
-        <span className="seq text-ink-3 text-[12px]">{String(step.num).padStart(2, '0')} / {String(STEPS.length).padStart(2, '0')}</span>
-      </motion.div>
-      <motion.h2 variants={HEADING_ITEM} className="display text-[36px] leading-tight text-ink">{step.head}</motion.h2>
-      <motion.p variants={HEADING_ITEM} className="text-ink-2 text-[14.5px] leading-relaxed">{step.kicker}</motion.p>
-    </motion.div>
-  )
-}
-
-/* ------- Step 1 ------- */
-function Step1({ state, setState, errors, supported, loadingDomains, domainsFailed, refetchDomains }) {
+/* ------- Parties ------- */
+function PartiesSection({ state, setState, errors, touched, touch, supported, loadingDomains, domainsFailed, refetchDomains }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
   const evmDomains = supported.filter(isEvmDomain)
   const domainHelper = loadingDomains
     ? 'Loading supported chains.'
     : domainsFailed
       ? "Couldn't reach the contract. Check your RPC and retry."
-      : 'Same-chain Arc has no forwarding fee.'
+      : 'Where your freelancer gets paid. Arc has no forwarding fee; other chains do.'
   return (
     <div className="flex flex-col gap-6">
-      <Field label="Freelancer address" error={errors.freelancer}
+      <Field label="Freelancer address" error={touched.freelancer ? errors.freelancer : undefined}
         hint={<Tooltip content="This wallet receives released milestones. Same address on the chain you choose below." />}
         helper="The wallet that will receive USDC when milestones release.">
         {(p) => (
@@ -407,6 +398,7 @@ function Step1({ state, setState, errors, supported, loadingDomains, domainsFail
             autoComplete="off" spellCheck={false}
             value={state.freelancer}
             onChange={(e) => set('freelancer')(e.target.value.trim())}
+            onBlur={() => touch('freelancer')}
           />
         )}
       </Field>
@@ -417,51 +409,167 @@ function Step1({ state, setState, errors, supported, loadingDomains, domainsFail
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <Field label="Destination chain" error={errors.destinationDomain} helper={domainHelper}>
-          {(p) => (
-            <div className="flex flex-col gap-2">
-              <select {...p} className="input"
-                disabled={domainsFailed}
-                value={Number(state.destinationDomain)}
-                onChange={(e) => set('destinationDomain')(Number(e.target.value))}
-              >
-                {evmDomains.length === 0 && (
-                  <option>{loadingDomains ? 'Loading…' : 'No chains available'}</option>
-                )}
-                {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
-                  <option key={d} value={d}>{getDomainName(d)}</option>
-                ))}
-              </select>
-              {domainsFailed && (
-                <button type="button" className="btn-quiet self-start px-0 text-[12.5px]" onClick={() => refetchDomains?.()}>
-                  Retry
-                </button>
+      <Field label="Destination chain" error={touched.destinationDomain ? errors.destinationDomain : undefined} helper={domainHelper}>
+        {(p) => (
+          <div className="flex flex-col gap-2">
+            <select {...p} className="input"
+              disabled={domainsFailed}
+              value={Number(state.destinationDomain)}
+              onChange={(e) => { set('destinationDomain')(Number(e.target.value)); touch('destinationDomain') }}
+            >
+              {evmDomains.length === 0 && (
+                <option>{loadingDomains ? 'Loading…' : 'No chains available'}</option>
               )}
-            </div>
-          )}
-        </Field>
-
-        <Field label="Total amount" error={errors.totalAmount}
-          helper="Total locked from your wallet.">
-          {(p) => (
-            <div className="relative">
-              <input {...p} type="number" step="0.01" min="0" inputMode="decimal"
-                className="input num pr-16 text-right" placeholder="0.00"
-                value={state.totalAmount}
-                onChange={(e) => set('totalAmount')(e.target.value)}
-              />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-ink-3 uppercase tracking-wider">USDC</span>
-            </div>
-          )}
-        </Field>
-      </div>
+              {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
+                <option key={d} value={d}>{getDomainName(d)}</option>
+              ))}
+            </select>
+            {domainsFailed && (
+              <button type="button" className="btn-quiet self-start px-0 text-[12.5px]" onClick={() => refetchDomains?.()}>
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+      </Field>
     </div>
   )
 }
 
-/* ------- Step 2 ------- */
-function Step2({ state, setState, errors }) {
+/* ------- Milestones ------- */
+function MilestonesSection({ state, setState, errors, touched, touch, totalAmountNum }) {
+  const update = (i, field, val) => setState((s) => {
+    const next = [...s.milestones]
+    next[i] = { ...next[i], [field]: val }
+    return { ...s, milestones: next }
+  })
+  const add = () => state.milestones.length < 10 && setState((s) => ({
+    ...s, milestones: [...s.milestones, { title: TITLE_PRESETS[0], customTitle: '', amount: '' }]
+  }))
+  const remove = (i) => state.milestones.length > 1 && setState((s) => ({
+    ...s, milestones: s.milestones.filter((_, idx) => idx !== i)
+  }))
+
+  return (
+    <div className="flex flex-col gap-7">
+      <p className="text-[12.5px] text-ink-3 leading-relaxed -mt-2">
+        Each milestone is delivered, reviewed, and paid out on its own, not all at once at the end.
+      </p>
+      <ol className="flex flex-col">
+        <div className="rule" />
+        {state.milestones.map((m, i) => (
+          <li key={i} className="flex flex-col gap-3 sm:grid sm:grid-cols-12 sm:gap-3 sm:items-start py-4 border-b border-rule">
+            <div className="sm:col-span-7 sm:order-2 flex flex-col gap-2">
+              <select className="input"
+                value={m.title}
+                onChange={(e) => update(i, 'title', e.target.value)}
+                aria-label={`Milestone ${i + 1} title`}
+              >
+                {TITLE_PRESETS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              {m.title === 'Custom' && (
+                <input className="input"
+                  placeholder="Custom title" maxLength={80}
+                  value={m.customTitle}
+                  onChange={(e) => update(i, 'customTitle', e.target.value)}
+                />
+              )}
+              <FieldError text={touched[`m_${i}_title`] ? errors[`m_${i}_title`] : undefined} />
+            </div>
+            <div className="flex items-center gap-3 sm:contents">
+              <span className="seq text-[12px] text-ink-3 sm:col-span-1 sm:order-1 sm:pt-3">M{i + 1}</span>
+              <div className="flex-1 sm:col-span-3 sm:order-3">
+                <div className="relative">
+                  <input type="number" step="0.01" min="0" inputMode="decimal"
+                    className="input num text-right pr-14" placeholder="0.00"
+                    value={m.amount}
+                    onChange={(e) => update(i, 'amount', e.target.value)}
+                    onBlur={() => touch(`m_${i}_amount`)}
+                    aria-label={`Milestone ${i + 1} amount`}
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10.5px] text-ink-3 uppercase tracking-wider">USDC</span>
+                </div>
+                <FieldError text={touched[`m_${i}_amount`] ? errors[`m_${i}_amount`] : undefined} />
+              </div>
+              <div className="sm:col-span-1 sm:order-4 sm:flex sm:justify-end">
+                <IconButton
+                  size="md"
+                  tone="ghost-danger"
+                  label={`Remove milestone ${i + 1}`}
+                  disabled={state.milestones.length <= 1}
+                  onClick={() => remove(i)}
+                >
+                  <TrashIcon />
+                </IconButton>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      <div className="flex items-center justify-between">
+        <button type="button" className="btn-secondary" onClick={add} disabled={state.milestones.length >= 10}>
+          + Add milestone
+        </button>
+        <p className="seq text-[11px] text-ink-3">{state.milestones.length} / 10</p>
+      </div>
+
+      <div className="flex items-baseline justify-between pt-1">
+        <span className="eyebrow">Total locked</span>
+        <span className="num text-[15px] text-ink">
+          {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          <span className="text-ink-3"> USDC</span>
+        </span>
+      </div>
+      {touched.milestones && <FieldError text={errors.milestones} />}
+    </div>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M3 5h10M6 5V3.5A1 1 0 0 1 7 2.5h2a1 1 0 0 1 1 1V5M5 5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9L11 5"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/* ------- Timeline ------- */
+function TimelineSection({ state, setState, errors, touched, touch }) {
+  const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
+  const dlBounds = useMemo(() => {
+    const fmt = (d) => {
+      const pad = (n) => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+    const now = new Date()
+    const min = new Date(now.getTime() + 3600 * 1000)
+    const max = new Date(now.getTime() + MAX_DEADLINE_SECONDS * 1000)
+    return { min: fmt(min), max: fmt(max) }
+  }, [])
+  return (
+    <div className="flex flex-col gap-6">
+      <Field label="Project deadline" error={touched.deadline ? errors.deadline : undefined}
+        helper="If the freelancer hasn't delivered a milestone within 72 hours after this date, you can refund it.">
+        {(p) => (
+          <input {...p} type="datetime-local" className="input"
+            min={dlBounds.min} max={dlBounds.max}
+            value={state.deadline}
+            onChange={(e) => set('deadline')(e.target.value)}
+            onBlur={() => touch('deadline')}
+          />
+        )}
+      </Field>
+      <p className="text-[12px] text-ink-3 leading-relaxed -mt-3">
+        The review window, how long you get to approve or dispute after delivery, is set in Advanced settings below.
+      </p>
+    </div>
+  )
+}
+
+/* ------- Documentation ------- */
+function DocumentationSection({ state, setState, errors, touched, touch }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
   const [dragging, setDragging] = useState(false)
 
@@ -491,27 +599,17 @@ function Step2({ state, setState, errors }) {
     <div className="flex flex-col gap-6">
       {!state.privateMode && (
         <div className="rounded-xl bg-sunk border border-rule px-4 py-3 text-[12.5px] text-ink-2 leading-relaxed">
-          Everything in this invoice will be publicly readable on-chain forever and cannot be deleted. Do not include personal information.
+          Everything here will be publicly readable on-chain forever and cannot be deleted. Switch to private in Advanced settings to store only a hash.
         </div>
       )}
 
-      <Field label="Invoice number" error={errors.invoiceNumber}>
+      <Field label="Invoice number" error={touched.invoiceNumber ? errors.invoiceNumber : undefined}>
         {(p) => (
           <input {...p} className="input num" placeholder="INV-2025-0001"
             autoComplete="off" spellCheck={false}
             value={state.invoiceNumber}
             onChange={(e) => set('invoiceNumber')(e.target.value.trim())}
-          />
-        )}
-      </Field>
-
-      <Field label="Notes">
-        {(p) => (
-          <textarea {...p} rows={3} className="input-multiline"
-            placeholder="Any additional context for this escrow (optional)"
-            maxLength={500}
-            value={state.notes}
-            onChange={(e) => set('notes')(e.target.value)}
+            onBlur={() => touch('invoiceNumber')}
           />
         )}
       </Field>
@@ -545,208 +643,163 @@ function Step2({ state, setState, errors }) {
             </p>
           ) : (
             <p className="text-[12.5px] text-ink-3 leading-relaxed">
-              Drop file here to verify its contents are fingerprinted on-chain. The file never leaves your browser.
+              Drop a file here to fingerprint its contents on-chain. It never leaves your browser.
             </p>
           )}
         </div>
       </div>
-
-      <div className="flex flex-col gap-3">
-        <p className="eyebrow">Visibility</p>
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => set('privateMode')(false)}
-            className={`rounded-xl border px-4 py-3 text-left transition-colors ${!state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
-          >
-            <p className="text-[13.5px] font-medium">Public (recommended)</p>
-            <p className="text-[11.5px] mt-0.5 opacity-60">Invoice published on-chain</p>
-          </button>
-          <button
-            type="button"
-            onClick={() => set('privateMode')(true)}
-            className={`rounded-xl border px-4 py-3 text-left transition-colors ${state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
-          >
-            <p className="text-[13.5px] font-medium">Private — hash only</p>
-            <p className="text-[11.5px] mt-0.5 opacity-60">Contents kept off-chain</p>
-          </button>
-        </div>
-        {state.privateMode && (
-          <p className="text-[12.5px] text-ink-2 leading-relaxed">
-            Download and keep your invoice file. Anyone verifying will need a copy of it.
-          </p>
-        )}
-      </div>
     </div>
   )
 }
 
-/* ------- Step 3 ------- */
-function Step3({ state, setState, errors }) {
+/* ------- Advanced settings (review window + visibility + notes) ------- */
+function AdvancedSection({ state, setState }) {
+  const [open, setOpen] = useState(false)
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
-  const dlBounds = useMemo(() => {
-    const fmt = (d) => {
-      const pad = (n) => String(n).padStart(2, '0')
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-    }
-    const now = new Date()
-    const min = new Date(now.getTime() + 3600 * 1000)
-    const max = new Date(now.getTime() + MAX_DEADLINE_SECONDS * 1000)
-    return { min: fmt(min), max: fmt(max) }
-  }, [])
-  return (
-    <div className="flex flex-col gap-6">
-      <Field label="Project deadline" error={errors.deadline}
-        helper="Past this date, any milestone the freelancer never delivered can be refunded to the payer.">
-        {(p) => (
-          <input {...p} type="datetime-local" className="input"
-            min={dlBounds.min} max={dlBounds.max}
-            value={state.deadline}
-            onChange={(e) => set('deadline')(e.target.value)}
-          />
-        )}
-      </Field>
-
-      <Field label="Review window"
-        helper="After the freelancer marks a milestone delivered, how long the payer has to approve or dispute before it can auto-release.">
-        {(p) => (
-          <select {...p} className="input"
-            value={state.reviewWindowDays}
-            onChange={(e) => set('reviewWindowDays')(Number(e.target.value))}
-          >
-            {REVIEW_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        )}
-      </Field>
-    </div>
-  )
-}
-
-/* ------- Step 4 ------- */
-function Step4({ state, setState, errors, milestoneSum, totalAmountNum, overBaseUnits, remainingBaseUnits, exactMatch }) {
-  const update = (i, field, val) => setState((s) => {
-    const next = [...s.milestones]
-    next[i] = { ...next[i], [field]: val }
-    return { ...s, milestones: next }
-  })
-  const add = () => state.milestones.length < 10 && setState((s) => ({
-    ...s, milestones: [...s.milestones, { title: TITLE_PRESETS[0], customTitle: '', amount: '' }]
-  }))
-  const remove = (i) => state.milestones.length > 1 && setState((s) => ({
-    ...s, milestones: s.milestones.filter((_, idx) => idx !== i)
-  }))
-
-  const over = overBaseUnits
-  const pct = totalAmountNum > 0 ? Math.min(100, (milestoneSum / totalAmountNum) * 100) : 0
-  const absRemaining = Math.abs(Number(remainingBaseUnits)) / 1e6
-  const remainingText = absRemaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
   return (
-    <div className="flex flex-col gap-7">
-      <ol className="flex flex-col">
-        <div className="rule" />
-        {state.milestones.map((m, i) => (
-          <li key={i} className="grid grid-cols-12 gap-3 items-start py-4 border-b border-rule">
-            <span className="col-span-1 seq text-[12px] text-ink-3 pt-3">M{i + 1}</span>
-            <div className="col-span-7 flex flex-col gap-2">
-              <select className="input"
-                value={m.title}
-                onChange={(e) => update(i, 'title', e.target.value)}
-                aria-label={`Milestone ${i + 1} title`}
-              >
-                {TITLE_PRESETS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-              {m.title === 'Custom' && (
-                <input className="input"
-                  placeholder="Custom title" maxLength={80}
-                  value={m.customTitle}
-                  onChange={(e) => update(i, 'customTitle', e.target.value)}
-                />
-              )}
-              <FieldError text={errors[`m_${i}_title`]} />
-            </div>
-            <div className="col-span-3">
-              <div className="relative">
-                <input type="number" step="0.01" min="0" inputMode="decimal"
-                  className="input num text-right pr-14" placeholder="0.00"
-                  value={m.amount}
-                  onChange={(e) => update(i, 'amount', e.target.value)}
-                  aria-label={`Milestone ${i + 1} amount`}
-                />
-                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10.5px] text-ink-3 uppercase tracking-wider">USDC</span>
-              </div>
-              <FieldError text={errors[`m_${i}_amount`]} />
-            </div>
-            <div className="col-span-1 flex justify-end">
-              <IconButton
-                size="md"
-                tone="ghost-danger"
-                label={`Remove milestone ${i + 1}`}
-                disabled={state.milestones.length <= 1}
-                onClick={() => remove(i)}
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-                  <path d="M3 5h10M6 5V3.5A1 1 0 0 1 7 2.5h2a1 1 0 0 1 1 1V5M5 5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9L11 5"
-                    stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </IconButton>
-            </div>
-          </li>
-        ))}
-      </ol>
-
-      <div className="flex items-center justify-between">
-        <button type="button" className="btn-secondary" onClick={add} disabled={state.milestones.length >= 10}>
-          + Add milestone
-        </button>
-        <p className="seq text-[11px] text-ink-3">{state.milestones.length} / 10</p>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-baseline justify-between">
-          <span className="eyebrow">Allocated</span>
-          <span className={`num text-[14px] ${over ? 'text-bad' : exactMatch ? 'text-ok' : 'text-ink-2'}`}>
-            {milestoneSum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            <span className="text-ink-3"> / </span>
-            {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            <span className="text-ink-3"> USDC</span>
-          </span>
-        </div>
-        <div className="h-1.5 bg-sunk rounded-full overflow-hidden">
+    <div className="rounded-xl border border-rule overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-sunk transition-colors"
+        aria-expanded={open}
+      >
+        <span className="text-[14px] font-medium text-ink">Advanced settings</span>
+        <span className="text-[12px] text-ink-3 ml-auto mr-1">
+          Review {state.reviewWindowDays}d · {state.privateMode ? 'Private' : 'Public'}
+        </span>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
+          className={`text-ink-3 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
+          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
           <motion.div
-            className={`h-full ${exactMatch ? 'bg-ok' : over ? 'bg-bad' : 'bg-clay'}`}
-            initial={false}
-            animate={{ width: `${pct}%` }}
-            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          />
-        </div>
-        <p className={`text-[12.5px] ${exactMatch ? 'text-ok' : over ? 'text-bad' : 'text-ink-3'}`}>
-          {totalAmountNum === 0
-            ? 'Set a total in step 1 before allocating milestones.'
-            : over ? `Over by ${remainingText} USDC.`
-              : exactMatch ? 'All funds allocated.'
-                : `${remainingText} USDC left to allocate.`}
-        </p>
-        {errors.milestonesTotal && <FieldError text={errors.milestonesTotal} />}
-      </div>
+            key="body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden border-t border-rule"
+          >
+            <div className="px-4 py-5 flex flex-col gap-6">
+              <div className="flex flex-col gap-2">
+                <label className="field-label">Review window</label>
+                <div className="inline-flex bg-sunk border border-rule rounded-lg p-1 gap-1 flex-wrap w-fit">
+                  {REVIEW_OPTS.map((o) => (
+                    <button key={o.value} type="button"
+                      onClick={() => set('reviewWindowDays')(o.value)}
+                      className={`h-8 px-3.5 rounded-md text-[13px] transition-colors ${state.reviewWindowDays === o.value ? 'bg-clay text-paper font-medium' : 'text-ink-2 hover:bg-paper'}`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[12px] text-ink-3 leading-relaxed">
+                  After the freelancer marks a milestone delivered, how long you have to approve or dispute before it can auto-release. Most escrows leave this at 3 days.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="field-label">Invoice visibility</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => set('privateMode')(false)}
+                    className={`rounded-xl border px-4 py-3 text-left transition-colors ${!state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
+                  >
+                    <p className="text-[13.5px] font-medium">Public (recommended)</p>
+                    <p className="text-[11.5px] mt-0.5 opacity-60">Invoice published on-chain</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => set('privateMode')(true)}
+                    className={`rounded-xl border px-4 py-3 text-left transition-colors ${state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
+                  >
+                    <p className="text-[13.5px] font-medium">Private — hash only</p>
+                    <p className="text-[11.5px] mt-0.5 opacity-60">Contents kept off-chain</p>
+                  </button>
+                </div>
+                {state.privateMode && (
+                  <p className="text-[12.5px] text-ink-2 leading-relaxed">
+                    Download and keep your invoice file. Anyone verifying will need a copy of it.
+                  </p>
+                )}
+              </div>
+
+              <Field label="Notes">
+                {(p) => (
+                  <textarea {...p} rows={3} className="input-multiline"
+                    placeholder="Any additional context for this escrow (optional)"
+                    maxLength={500}
+                    value={state.notes}
+                    onChange={(e) => set('notes')(e.target.value)}
+                  />
+                )}
+              </Field>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }
 
-/* ------- Step 5 ------- */
-function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBaseUnits, address, allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading }) {
+/* ------- Review & Lock ------- */
+function summarizeMissing(errors) {
+  const out = []
+  if (errors.freelancer) out.push({ text: 'a valid freelancer address', id: 'section-parties' })
+  if (errors.destinationDomain) out.push({ text: 'a supported destination chain', id: 'section-parties' })
+  if (errors.milestones) out.push({ text: 'at least one milestone amount', id: 'section-milestones' })
+  else if (Object.keys(errors).some((k) => k.startsWith('m_'))) out.push({ text: 'valid milestone details', id: 'section-milestones' })
+  if (errors.deadline) out.push({ text: 'a deadline', id: 'section-timeline' })
+  if (errors.invoiceNumber) out.push({ text: 'an invoice number', id: 'section-documentation' })
+  return out
+}
+
+function ReviewSection({
+  state, totalBaseUnits, errors, approved, approveTx, depositTx, onApprove, onDeposit, address,
+  allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading, onJump
+}) {
   const disconnected = !address
   const busy = approveTx.isBusy || depositTx.isBusy
   const hasInsufficientBalance = !balanceLoading && usdcBalance !== undefined
     && totalBaseUnits > 0n && BigInt(usdcBalance) < totalBaseUnits
+  const chainName = getDomainName(state.destinationDomain)
+  const missing = summarizeMissing(errors)
+  const isComplete = missing.length === 0
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-3">
-        <p className="eyebrow">Two-step submission</p>
-        <p className="text-[14.5px] text-ink-2 leading-relaxed max-w-prose">
-          First you authorise the contract to move USDC from your wallet, then you create the escrow. The lock isn't complete until both succeed.
-        </p>
+      <div className={`rounded-xl border px-5 py-4 text-[14px] leading-relaxed ${isComplete ? 'border-rule-2 bg-paper text-ink-2' : 'border-rule bg-sunk text-ink-3'}`}>
+        {isComplete ? (
+          <>
+            You lock <b className="num text-ink">{formatUSDC(totalBaseUnits)}</b>.{' '}
+            <AddressDisplay address={state.freelancer} size="sm" /> is paid as each of your{' '}
+            <b className="text-ink">{state.milestones.length}</b> milestone{state.milestones.length === 1 ? '' : 's'} is approved, delivered on{' '}
+            <b className="text-ink">{chainName}</b>. If a milestone isn't delivered by{' '}
+            <b className="text-ink">{formatDeadline(Math.floor(new Date(state.deadline).getTime() / 1000))}</b>, that portion is refundable to you.
+            If you don't respond within <b className="text-ink">{state.reviewWindowDays} day{state.reviewWindowDays === 1 ? '' : 's'}</b> of a delivery, that milestone releases automatically.
+          </>
+        ) : (
+          <>Fill in the sections above to see the full terms before you lock funds.</>
+        )}
       </div>
+
+      {!isComplete && (
+        <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 text-[12.5px] text-ink-2 leading-relaxed" role="status">
+          Add{' '}
+          {missing.map((m, i) => (
+            <span key={m.text}>
+              <button type="button" className="text-clay hover:underline underline-offset-2" onClick={() => onJump?.(m.id)}>{m.text}</button>
+              {i < missing.length - 1 ? ', ' : ''}
+            </span>
+          ))}
+          {' '}to continue.
+        </div>
+      )}
 
       {disconnected && (
         <div className="panel-sunk p-4 text-[13px] text-ink-2" role="status">
@@ -768,6 +821,13 @@ function Step5({ approved, approveTx, depositTx, onApprove, onDeposit, totalBase
           Insufficient USDC — you have {formatUSDC(BigInt(usdcBalance))}, need {formatUSDC(totalBaseUnits)}
         </div>
       )}
+
+      <div className="flex flex-col gap-1">
+        <span className="eyebrow">Two transactions</span>
+        <p className="text-[13px] text-ink-2 leading-relaxed">
+          First you allow the contract to move your USDC, then you create the escrow. Nothing is locked until both are confirmed in your wallet.
+        </p>
+      </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <FlowStep
@@ -819,8 +879,8 @@ function FlowStep({ letter, label, description, done, loading, actionLabel, onAc
   )
 }
 
-/* ------- Live ledger (right pane) ------- */
-function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsBigInt, step, feeBps, cctpForwardFee }) {
+/* ------- Live ledger ------- */
+function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsBigInt, feeBps, cctpForwardFee, onJump, bare = false }) {
   const dl = state.deadline ? Math.floor(new Date(state.deadline).getTime() / 1000) : 0
   const effectiveFeeBps = feeBps ?? 199n
   const effectiveCctpFee = cctpForwardFee ?? 0n
@@ -834,7 +894,7 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
     : 0n
 
   return (
-    <div className="panel p-6 flex flex-col gap-5">
+    <div className={bare ? 'flex flex-col gap-5' : 'panel p-6 flex flex-col gap-5'}>
       <div className="flex items-baseline justify-between">
         <p className="eyebrow">Escrow ledger</p>
         <p className="seq text-[11px] text-ink-3">Draft</p>
@@ -843,19 +903,16 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
       <Row label="Payer" complete={!!address} placeholder="connect wallet">
         {address && <AddressDisplay address={address} />}
       </Row>
-      <Row label="Freelancer" complete={isValidAddress(state.freelancer)} placeholder="step 01 / Parties">
+      <Row label="Freelancer" complete={isValidAddress(state.freelancer)} placeholder="add address" onClick={() => onJump?.('section-parties')}>
         {isValidAddress(state.freelancer) && <AddressDisplay address={state.freelancer} />}
       </Row>
-      <Row label="Destination" complete={!!state.destinationDomain} placeholder="any chain">
+      <Row label="Destination" complete>
         <span className="text-[13px] text-ink">{getDomainName(state.destinationDomain)}</span>
       </Row>
-      <Row label="Amount" complete={totalBaseUnits > 0n} placeholder="step 01 / Parties">
-        {totalBaseUnits > 0n && <span className="num text-[14px] text-ink">{formatUSDC(totalBaseUnits)}</span>}
-      </Row>
-      <Row label="Deadline" complete={!!dl} placeholder="step 03 / Timeline">
+      <Row label="Deadline" complete={!!dl} placeholder="set a date" onClick={() => onJump?.('section-timeline')}>
         {dl > 0 && <span className="num text-[13px] text-ink">{formatDeadline(dl)}</span>}
       </Row>
-      <Row label="Review window" complete={!!state.reviewWindowDays}>
+      <Row label="Review window" complete>
         <span className="text-[13px] text-ink">{formatWindow(daysToSeconds(state.reviewWindowDays))}</span>
       </Row>
 
@@ -881,11 +938,11 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
 
       <div className="rule" />
 
-      <Row label={`Protocol fee (${feePct}%)`} muted>
+      <Row label={`Protocol fee (${feePct}%)`} muted complete>
         <span className="num text-[13px] text-ink-2">−{formatUSDC(protocolFee).replace(' USDC', '')}</span>
       </Row>
       {isCrossChain && effectiveCctpFee > 0n && (
-        <Row label="Est. forwarding fee (varies)" muted>
+        <Row label="Est. forwarding fee (varies)" muted complete>
           <span className="num text-[13px] text-ink-2">≈ {formatUSDC(effectiveCctpFee).replace(' USDC', '')} / payout</span>
         </Row>
       )}
@@ -902,22 +959,81 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
           Freelancer receives ≈ {formatUSDC(freelancerReceivesEst).replace(' USDC', '')} USDC after {feePct}% protocol fee{isCrossChain ? ' and transfer fees' : ''}.
         </p>
       )}
-
-      {step === 5 && (
-        <p className="text-[12px] text-ink-3 leading-relaxed pt-1">
-          You'll sign twice: USDC approval, then escrow creation. Both happen on Arc Testnet.
-        </p>
-      )}
     </div>
   )
 }
 
-function Row({ label, children, placeholder, complete = false, muted = false }) {
+function Row({ label, children, placeholder, complete = false, muted = false, onClick }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <span className={`text-[12px] shrink-0 ${muted ? 'text-ink-3' : 'text-ink-2'}`}>{label}</span>
       <div className="text-right min-w-0 max-w-full">
-        {complete || children ? children : <span className="text-[12px] text-ink-3 italic">{placeholder ? `· ${placeholder}` : '·'}</span>}
+        {complete || children ? children : (
+          <button type="button" onClick={onClick} className="text-[12px] text-ink-3 italic hover:text-clay transition-colors">
+            {placeholder ? `· ${placeholder}` : '·'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ------- Mobile sticky ledger bar ------- */
+function MobileLedgerBar({ state, address, totalBaseUnits, protocolFee, milestoneAmountsBigInt, feeBps, cctpForwardFee, onJump, onReview, canSubmit }) {
+  const [open, setOpen] = useState(false)
+  const isCrossChain = Number(state.destinationDomain) !== ARC_DOMAIN
+  const totalForwardFeeEst = isCrossChain ? (cctpForwardFee ?? 0n) * BigInt(state.milestones.length) : 0n
+  const receives = totalBaseUnits > protocolFee + totalForwardFeeEst ? totalBaseUnits - protocolFee - totalForwardFeeEst : 0n
+
+  return (
+    <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 px-3 pb-3">
+      <div className="bg-paper border border-rule-2 rounded-xl shadow-lg overflow-hidden max-w-[520px] mx-auto">
+        <button
+          type="button"
+          className="w-full flex items-center gap-3 px-4 py-3 text-left"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+        >
+          <div className="flex flex-col">
+            <span className="text-[10px] uppercase tracking-wider text-ink-3">Total to lock</span>
+            <span className="num text-[17px] text-clay font-medium">{formatUSDC(totalBaseUnits).replace(' USDC', '')}</span>
+          </div>
+          <div className="ml-auto text-right">
+            <span className="text-[10.5px] text-ink-3 block">Freelancer nets</span>
+            <span className="num text-[12.5px] text-ink-2">{formatUSDC(receives).replace(' USDC', '')}</span>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
+            className={`text-ink-3 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
+            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <AnimatePresence initial={false}>
+          {open && (
+            <motion.div
+              key="sheet"
+              initial={{ height: 0 }}
+              animate={{ height: 'auto' }}
+              exit={{ height: 0 }}
+              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden border-t border-rule"
+            >
+              <div className="max-h-[46vh] overflow-y-auto px-4 pt-4">
+                <Ledger
+                  state={state} address={address} totalBaseUnits={totalBaseUnits}
+                  protocolFee={protocolFee} milestoneAmountsBigInt={milestoneAmountsBigInt}
+                  feeBps={feeBps} cctpForwardFee={cctpForwardFee}
+                  onJump={(id) => { setOpen(false); onJump(id) }}
+                  bare
+                />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <div className="px-4 pb-4 pt-3">
+          <button type="button" className="btn-primary w-full" onClick={onReview}>
+            {canSubmit ? 'Review & lock funds' : 'Add details to continue'}
+          </button>
+        </div>
       </div>
     </div>
   )

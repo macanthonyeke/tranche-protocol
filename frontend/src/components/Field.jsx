@@ -60,6 +60,7 @@ export default function Field({ label, hint, children, error, helper }) {
 }
 
 export function FieldError({ text, id }) {
+  if (!text) return null
   return (
     <div id={id} role="alert" className="flex items-center gap-1.5 text-[12.5px] text-bad">
       <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden className="shrink-0">
