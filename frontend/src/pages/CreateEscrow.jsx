@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useReadContract } from 'wagmi'
 import { decodeEventLog, keccak256, toHex } from 'viem'
@@ -8,8 +8,12 @@ import PageHeader from '../components/PageHeader.jsx'
 import ConnectGate from '../components/ConnectGate.jsx'
 import Field, { FieldError } from '../components/Field.jsx'
 import IconButton from '../components/IconButton.jsx'
+import Modal from '../components/Modal.jsx'
+import TxModal from '../components/TxModal.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
+import ClayBar, { parseAmt, round2, ordinal } from '../components/ClayBar.jsx'
+import { pinFile, pinUrl } from '../utils/invoicePin.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
@@ -36,34 +40,63 @@ const REVIEW_OPTS = [1, 2, 3, 5, 7].map((v) => ({ value: v, label: `${v} day${v 
 
 const ERROR_SECTION = {
   freelancer: 'section-parties',
-  destinationDomain: 'section-parties',
-  invoiceNumber: 'section-documentation',
+  destinationDomain: 'section-advanced',
+  total: 'section-work',
+  description: 'section-work',
   deadline: 'section-timeline',
-  milestones: 'section-milestones'
+  milestones: 'section-milestones',
+  invoicePinning: 'section-advanced'
 }
 const sectionForErrorKey = (key) => (key.startsWith('m_') ? 'section-milestones' : ERROR_SECTION[key] || null)
 
-const emptyMilestone = () => ({ title: 'Upfront payment', customTitle: '', amount: '' })
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `m${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+
+const emptyMilestone = () => ({ id: uid(), title: 'Upfront payment', customTitle: '', amount: '' })
+
+const emptyInvoice = () => ({ mode: 'file', status: 'idle', name: '', size: 0, error: '' })
 
 const emptyState = () => ({
   freelancer: '',
   destinationDomain: ARC_DOMAIN,
+  total: '',
+  description: '',
   invoiceNumber: '',
-  notes: '',
+  // attachmentURI/attachmentHash are the canonical resolved values — the only
+  // fields onDeposit() reads when it builds invoiceObject.attachments (and
+  // pre-date this redesign; onDeposit() is untouched). `invoice` below is NOT
+  // a second copy of the same data — it holds only transient uploader UI
+  // state (mode/status/name/size/error) for driving the idle/pinning/pinned/
+  // error views. A resolved pin writes attachmentURI/attachmentHash directly;
+  // `invoice` only ever gets `status: 'pinned'`, never its own ipfsUri/sha256.
+  // Both are always reset together in the same setState call (see
+  // onRemoveInvoice) so they can't drift out of sync.
   attachmentURI: '',
   attachmentHash: '',
+  invoice: emptyInvoice(),
   privateMode: false,
   deadline: '',
   reviewWindowDays: 3,
   milestones: [emptyMilestone()]
 })
 
+const sanitizeInvoice = (inv) => {
+  if (!inv || typeof inv !== 'object') return emptyInvoice()
+  const mode = inv.mode === 'url' ? 'url' : 'file'
+  // 'pinning' can never survive a reload — the in-flight request is gone with the tab.
+  const status = inv.status === 'pinned' || inv.status === 'error' ? inv.status : 'idle'
+  const name = typeof inv.name === 'string' ? inv.name : ''
+  const size = typeof inv.size === 'number' ? inv.size : 0
+  const error = typeof inv.error === 'string' ? inv.error : ''
+  return { mode, status, name, size, error }
+}
+
 const sanitizeMilestone = (m) => {
   if (!m || typeof m !== 'object') return emptyMilestone()
   const title = typeof m.title === 'string' && TITLE_PRESETS.includes(m.title) ? m.title : TITLE_PRESETS[0]
   const customTitle = typeof m.customTitle === 'string' ? m.customTitle.slice(0, 80) : ''
   const amount = typeof m.amount === 'string' ? m.amount : ''
-  return { title, customTitle, amount }
+  const id = typeof m.id === 'string' && m.id ? m.id : uid()
+  return { id, title, customTitle, amount }
 }
 
 const sanitizeDraft = (raw) => {
@@ -72,7 +105,8 @@ const sanitizeDraft = (raw) => {
   const merged = { ...base, ...raw }
   const arr = Array.isArray(raw.milestones) ? raw.milestones : []
   const milestones = arr.length === 0 ? [emptyMilestone()] : arr.slice(0, 10).map(sanitizeMilestone)
-  return { ...merged, milestones }
+  const invoice = sanitizeInvoice(raw.invoice)
+  return { ...merged, milestones, invoice }
 }
 
 export default function CreateEscrow() {
@@ -118,10 +152,72 @@ function Flow() {
   })
   const [touched, setTouched] = useState({})
   const touch = (key) => setTouched((t) => (t[key] ? t : { ...t, [key]: true }))
+  // Lifted out of AdvancedSection so jumping to a blocker inside it (chain,
+  // invoice-pinning) can also expand the disclosure, not just scroll to it.
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   useEffect(() => {
     try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state)) } catch {}
   }, [state])
+
+  // Invoice number is no longer a user-visible field — silently backfilled once,
+  // same value shape as before (INV-YYYY-NNNN), still required by validate().
+  useEffect(() => {
+    if (state.invoiceNumber) return
+    const year = new Date().getFullYear()
+    const rand = String(Math.floor(Math.random() * 9000) + 1000)
+    setState((s) => (s.invoiceNumber ? s : { ...s, invoiceNumber: `INV-${year}-${rand}` }))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pin a file/URL to permanent storage via the real invoicePin.js helpers.
+  // Resolved results mirror into attachmentURI/attachmentHash — the exact
+  // fields onDeposit() already folds into invoiceObject before it's hashed —
+  // so the hash-ordering guarantee (sha256 in the envelope before keccak256)
+  // holds without onDeposit() needing to know anything changed here.
+  const onPinFile = async (file) => {
+    setState((s) => ({
+      ...s,
+      invoice: { mode: 'file', status: 'pinning', name: file.name, size: file.size, error: '' }
+    }))
+    try {
+      const { ipfsUri, sha256 } = await pinFile(file)
+      setState((s) => ({
+        ...s,
+        attachmentURI: ipfsUri,
+        attachmentHash: sha256,
+        invoice: { mode: 'file', status: 'pinned', name: file.name, size: file.size, error: '' }
+      }))
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        attachmentURI: '',
+        attachmentHash: '',
+        invoice: { mode: 'file', status: 'error', name: file.name, size: file.size, error: err.message }
+      }))
+    }
+  }
+  const onPinUrl = async (url) => {
+    setState((s) => ({ ...s, invoice: { mode: 'url', status: 'pinning', name: '', size: 0, error: '' } }))
+    try {
+      const { ipfsUri, sha256 } = await pinUrl(url)
+      setState((s) => ({
+        ...s,
+        attachmentURI: ipfsUri,
+        attachmentHash: sha256,
+        invoice: { mode: 'url', status: 'pinned', name: '', size: 0, error: '' }
+      }))
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        attachmentURI: '',
+        attachmentHash: '',
+        invoice: { mode: 'url', status: 'error', name: '', size: 0, error: err.message }
+      }))
+    }
+  }
+  // Remove clears the stale hash/URI too — never leave a dangling commitment
+  // to a file that's no longer actually attached.
+  const onRemoveInvoice = () => setState((s) => ({ ...s, attachmentURI: '', attachmentHash: '', invoice: emptyInvoice() }))
 
   const milestoneAmountsBigInt = useMemo(
     () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
@@ -132,6 +228,14 @@ function Flow() {
     [milestoneAmountsBigInt]
   )
   const totalAmountNum = Number(totalBaseUnits) / 1e6
+  // The user's authoritative target (Section 02) vs. the actual sum of milestone
+  // amounts (Section 03) — bigint-exact so "balanced" here can never disagree
+  // with what ClayBar's float-based readout shows for realistic 2-decimal inputs.
+  const targetTotalBaseUnits = useMemo(() => {
+    try { return usdcToBaseUnits(state.total) } catch { return 0n }
+  }, [state.total])
+  const milestonesBalanced = targetTotalBaseUnits === 0n || targetTotalBaseUnits === totalBaseUnits
+  const milestonesOver = targetTotalBaseUnits > 0n && totalBaseUnits > targetTotalBaseUnits
 
   const {
     data: allowance,
@@ -154,23 +258,22 @@ function Flow() {
   const supportedSet = useMemo(() => new Set(supported), [supported])
   const domainsFailed = !loadingDomains && supported.length === 0
 
+  // Property insertion order below IS the single-blocker priority order
+  // (Object.keys(e)[0] in onApprove picks the first-inserted key) — matches
+  // the design spec exactly: recipient -> total -> description -> milestone
+  // titles/amounts -> balanced -> deadline -> invoice-still-saving. destinationDomain
+  // and invoiceNumber are real validations but not part of that spec'd chain
+  // (destinationDomain defaults valid to Arc; invoiceNumber is auto-generated
+  // and practically never empty) — kept last as low-priority safety nets.
   const validate = () => {
     const e = {}
     if (!isValidAddress(state.freelancer)) e.freelancer = "That doesn't look like a valid 0x address."
     if (state.freelancer && address && state.freelancer.toLowerCase() === address.toLowerCase())
       e.freelancer = "The freelancer and payer can't be the same wallet."
-    if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Pick a supported destination chain.'
-    else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Only EVM-compatible chains are supported right now.'
 
-    if (!state.invoiceNumber.trim()) e.invoiceNumber = 'Invoice number is required.'
-
-    if (!state.deadline) e.deadline = 'Set a project deadline.'
-    else {
-      const ts = Math.floor(new Date(state.deadline).getTime() / 1000)
-      const now = Math.floor(Date.now() / 1000)
-      if (!ts || ts <= now + 3600) e.deadline = 'Deadline must be at least 1 hour from now.'
-      else if (ts - now > MAX_DEADLINE_SECONDS) e.deadline = 'Deadline can be at most 5 years from now.'
-    }
+    const totalNum = parseFloat(state.total)
+    if (!totalNum || totalNum <= 0) e.total = 'Enter the total amount you want to lock.'
+    if (!state.description.trim()) e.description = 'Describe the work in a sentence or two.'
 
     if (state.milestones.length === 0) e.milestones = 'Add at least one milestone.'
     let anyPositive = false
@@ -194,6 +297,25 @@ function Flow() {
       }
     })
     if (!anyPositive) e.milestones = e.milestones || 'Add at least one milestone amount greater than zero.'
+    if (!milestonesBalanced) {
+      e.milestones = e.milestones || (milestonesOver
+        ? `Your milestones are ${formatUSDC(totalBaseUnits - targetTotalBaseUnits)} over the total. Trim them to match.`
+        : `${formatUSDC(targetTotalBaseUnits - totalBaseUnits)} is still unallocated. Assign it across your milestones.`)
+    }
+
+    if (!state.deadline) e.deadline = 'Set a project deadline.'
+    else {
+      const ts = Math.floor(new Date(state.deadline).getTime() / 1000)
+      const now = Math.floor(Date.now() / 1000)
+      if (!ts || ts <= now + 3600) e.deadline = 'Deadline must be at least 1 hour from now.'
+      else if (ts - now > MAX_DEADLINE_SECONDS) e.deadline = 'Deadline can be at most 5 years from now.'
+    }
+
+    if (state.invoice.status === 'pinning') e.invoicePinning = 'Your document is still saving.'
+
+    if (!supportedSet.has(Number(state.destinationDomain))) e.destinationDomain = 'Pick a supported destination chain.'
+    else if (!isEvmDomain(state.destinationDomain)) e.destinationDomain = 'Only EVM-compatible chains are supported right now.'
+    if (!state.invoiceNumber.trim()) e.invoiceNumber = 'Invoice number is required.'
 
     return e
   }
@@ -202,10 +324,20 @@ function Flow() {
 
   const scrollToSection = (id) => {
     if (!id) return
+    if (id === 'section-advanced') setAdvancedOpen(true)
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   const protocolFee = totalBaseUnits * feeBps / 10_000n
+  // The aside Ledger + mobile bar are a "draft, here's where you're headed"
+  // view driven by the user's target (state.total / Section 02), so its
+  // headline stays stable while milestones are mid-edit — unlike totalBaseUnits
+  // above, which is the real milestone sum and stays authoritative for every
+  // actual on-chain amount (approve/deposit args, allowance/balance checks,
+  // ReviewSection's "You lock X" and the confirm modal). The two only ever
+  // differ while unbalanced, which already blocks submission.
+  const ledgerTotalBaseUnits = targetTotalBaseUnits
+  const ledgerProtocolFee = targetTotalBaseUnits * feeBps / 10_000n
 
   const approveTx = useTx({ onConfirmed: () => refetchAllowance() })
   const depositTx = useTx({
@@ -254,7 +386,7 @@ function Flow() {
         title: m.title === 'Custom' ? m.customTitle.trim() : m.title,
         amount: m.amount
       })),
-      notes: state.notes || undefined,
+      notes: state.description || undefined,
       attachments: state.attachmentURI ? [{
         uri: state.attachmentURI,
         sha256: state.attachmentHash || undefined
@@ -292,30 +424,35 @@ function Flow() {
         <Section id="section-parties" n="01" title="Who are you paying?" sub="Parties" first>
           <PartiesSection
             state={state} setState={setState} errors={errors} touched={touched} touch={touch}
-            supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains}
           />
         </Section>
         <div className="rule" />
 
-        <Section id="section-milestones" n="02" title="Break the payment into milestones" sub="the total is their sum">
+        <Section id="section-work" n="02" title="What are you paying for?" sub="The work">
+          <WorkSection state={state} setState={setState} errors={errors} touched={touched} touch={touch} />
+        </Section>
+        <div className="rule" />
+
+        <Section id="section-milestones" n="03" title="Break the payment into milestones" sub="the total is their sum">
           <MilestonesSection
-            state={state} setState={setState} errors={errors} touched={touched} touch={touch} totalAmountNum={totalAmountNum}
+            state={state} setState={setState} errors={errors} touched={touched} touch={touch}
+            total={Number(targetTotalBaseUnits) / 1e6}
           />
         </Section>
         <div className="rule" />
 
-        <Section id="section-timeline" n="03" title="Set the deadline" sub="Timeline">
+        <Section id="section-timeline" n="04" title="Set the deadline" sub="Timeline">
           <TimelineSection state={state} setState={setState} errors={errors} touched={touched} touch={touch} />
         </Section>
         <div className="rule" />
 
-        <Section id="section-documentation" n="04" title="Add documentation" sub="Invoice">
-          <DocumentationSection state={state} setState={setState} errors={errors} touched={touched} touch={touch} />
-        </Section>
-        <div className="rule" />
-
-        <div className="py-8">
-          <AdvancedSection state={state} setState={setState} />
+        <div id="section-advanced" className="py-8">
+          <AdvancedSection
+            state={state} setState={setState}
+            supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains}
+            onPinFile={onPinFile} onPinUrl={onPinUrl} onRemoveInvoice={onRemoveInvoice}
+            open={advancedOpen} setOpen={setAdvancedOpen}
+          />
         </div>
         <div className="rule" />
 
@@ -339,8 +476,8 @@ function Flow() {
           <Ledger
             state={state}
             address={address}
-            totalBaseUnits={totalBaseUnits}
-            protocolFee={protocolFee}
+            totalBaseUnits={ledgerTotalBaseUnits}
+            protocolFee={ledgerProtocolFee}
             milestoneAmountsBigInt={milestoneAmountsBigInt}
             feeBps={feeBps}
             cctpForwardFee={cctpForwardFee}
@@ -352,8 +489,8 @@ function Flow() {
       <MobileLedgerBar
         state={state}
         address={address}
-        totalBaseUnits={totalBaseUnits}
-        protocolFee={protocolFee}
+        totalBaseUnits={ledgerTotalBaseUnits}
+        protocolFee={ledgerProtocolFee}
         milestoneAmountsBigInt={milestoneAmountsBigInt}
         feeBps={feeBps}
         cctpForwardFee={cctpForwardFee}
@@ -380,18 +517,12 @@ function Section({ id, n, title, sub, first = false, children }) {
 }
 
 /* ------- Parties ------- */
-function PartiesSection({ state, setState, errors, touched, touch, supported, loadingDomains, domainsFailed, refetchDomains }) {
+function PartiesSection({ state, setState, errors, touched, touch }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
-  const evmDomains = supported.filter(isEvmDomain)
-  const domainHelper = loadingDomains
-    ? 'Loading supported chains.'
-    : domainsFailed
-      ? "Couldn't reach the contract. Check your RPC and retry."
-      : 'Where your freelancer gets paid. Arc has no forwarding fee; other chains do.'
   return (
     <div className="flex flex-col gap-6">
       <Field label="Freelancer address" error={touched.freelancer ? errors.freelancer : undefined}
-        hint={<Tooltip content="This wallet receives released milestones. Same address on the chain you choose below." />}
+        hint={<Tooltip content="This wallet receives released milestones. Same address on the chain set in Advanced settings." />}
         helper="The wallet that will receive USDC when milestones release.">
         {(p) => (
           <input {...p} className="input num" placeholder="0x…"
@@ -405,31 +536,43 @@ function PartiesSection({ state, setState, errors, touched, touch, supported, lo
 
       {Number(state.destinationDomain) !== ARC_DOMAIN && (
         <div className="rounded-xl bg-sunk border border-rule px-3 py-2.5 text-[12.5px] text-ink-2 leading-relaxed">
-          Safe and smart contract wallets have different addresses on each chain. Make sure this is the right address for the selected destination chain.
+          You're paying out on a different chain (set in Advanced settings). Safe and smart contract wallets have different addresses per chain — make sure this address is correct there.
         </div>
       )}
+    </div>
+  )
+}
 
-      <Field label="Destination chain" error={touched.destinationDomain ? errors.destinationDomain : undefined} helper={domainHelper}>
+/* ------- Work (total + scope) ------- */
+function WorkSection({ state, setState, errors, touched, touch }) {
+  const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
+  return (
+    <div className="flex flex-col gap-6">
+      <Field label="Total amount" error={touched.total ? errors.total : undefined}
+        helper="The full amount you will lock. You'll divide it into milestones next.">
         {(p) => (
-          <div className="flex flex-col gap-2">
-            <select {...p} className="input"
-              disabled={domainsFailed}
-              value={Number(state.destinationDomain)}
-              onChange={(e) => { set('destinationDomain')(Number(e.target.value)); touch('destinationDomain') }}
-            >
-              {evmDomains.length === 0 && (
-                <option>{loadingDomains ? 'Loading…' : 'No chains available'}</option>
-              )}
-              {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
-                <option key={d} value={d}>{getDomainName(d)}</option>
-              ))}
-            </select>
-            {domainsFailed && (
-              <button type="button" className="btn-quiet self-start px-0 text-[12.5px]" onClick={() => refetchDomains?.()}>
-                Retry
-              </button>
-            )}
+          <div className="relative" style={{ maxWidth: 280 }}>
+            <input {...p} type="number" step="0.01" min="0" inputMode="decimal"
+              className="input num h-[52px] text-[20px] font-medium pr-14"
+              placeholder="0.00"
+              value={state.total}
+              onChange={(e) => set('total')(e.target.value)}
+              onBlur={() => touch('total')}
+            />
+            <span className="absolute right-3.5 top-1/2 -translate-y-1/2 num text-[12px] text-ink-3 uppercase tracking-wider pointer-events-none">USDC</span>
           </div>
+        )}
+      </Field>
+
+      <Field label="Scope of work" error={touched.description ? errors.description : undefined}
+        hint={<span className="text-[11.5px] text-ink-3">{state.description.length}/500</span>}>
+        {(p) => (
+          <textarea {...p} rows={3} className="input-multiline" maxLength={500}
+            placeholder="Describe the work in plain language. What is being delivered?"
+            value={state.description}
+            onChange={(e) => set('description')(e.target.value)}
+            onBlur={() => touch('description')}
+          />
         )}
       </Field>
     </div>
@@ -437,74 +580,196 @@ function PartiesSection({ state, setState, errors, touched, touch, supported, lo
 }
 
 /* ------- Milestones ------- */
-function MilestonesSection({ state, setState, errors, touched, touch, totalAmountNum }) {
+function MilestonesSection({ state, setState, errors, touched, touch, total }) {
+  const [hoverIdx, setHoverIdx] = useState(null)
+  const [flashIds, setFlashIds] = useState(() => new Set())
+  const [removingIds, setRemovingIds] = useState([])
+  const flashTimer = useRef(null)
+  useEffect(() => () => clearTimeout(flashTimer.current), [])
+
+  const amounts = state.milestones.map((m) => parseAmt(m.amount))
+  const allocated = amounts.reduce((a, b) => a + b, 0)
+  const remaining = round2(total - allocated)
+
+  const flash = (ids) => {
+    setFlashIds(new Set(ids))
+    clearTimeout(flashTimer.current)
+    flashTimer.current = setTimeout(() => setFlashIds(new Set()), 650)
+  }
+
+  const setAmount = (i, v) => setState((s) => {
+    const next = [...s.milestones]
+    next[i] = { ...next[i], amount: v }
+    return { ...s, milestones: next }
+  })
   const update = (i, field, val) => setState((s) => {
     const next = [...s.milestones]
     next[i] = { ...next[i], [field]: val }
     return { ...s, milestones: next }
   })
-  const add = () => state.milestones.length < 10 && setState((s) => ({
-    ...s, milestones: [...s.milestones, { title: TITLE_PRESETS[0], customTitle: '', amount: '' }]
-  }))
-  const remove = (i) => state.milestones.length > 1 && setState((s) => ({
-    ...s, milestones: s.milestones.filter((_, idx) => idx !== i)
-  }))
+
+  // Add = split the largest slice in two, inserted immediately after its
+  // source (not appended) — everything else keeps its relative order.
+  // Falls back to a plain append only when nothing is allocated yet.
+  const add = () => {
+    if (state.milestones.length >= 10) return
+    const maxV = Math.max(0, ...amounts)
+    if (total > 0 && maxV > 0) {
+      const idx = amounts.indexOf(maxV)
+      const half = round2(maxV / 2)
+      const other = round2(maxV - half)
+      const splitId = state.milestones[idx].id
+      const newM = { id: uid(), title: TITLE_PRESETS[0], customTitle: '', amount: String(other) }
+      setState((s) => {
+        const copy = s.milestones.map((m, i) => (i === idx ? { ...m, amount: String(half) } : m))
+        copy.splice(idx + 1, 0, newM)
+        return { ...s, milestones: copy }
+      })
+      flash([splitId, newM.id])
+    } else {
+      const newM = { id: uid(), title: TITLE_PRESETS[0], customTitle: '', amount: '' }
+      setState((s) => ({ ...s, milestones: [...s.milestones, newM] }))
+      flash([newM.id])
+    }
+  }
+
+  // Remove = zero the amount first (money visibly flows back into the
+  // unallocated remainder as the bar reflows), then collapse the row and
+  // splice it out by id — never by index, since indices can shift if the
+  // user triggers another add/remove during the 340ms collapse animation.
+  const remove = (i) => {
+    if (state.milestones.length <= 1) return
+    const id = state.milestones[i].id
+    setState((s) => {
+      const next = [...s.milestones]
+      next[i] = { ...next[i], amount: '' }
+      return { ...s, milestones: next }
+    })
+    setRemovingIds((r) => [...r, id])
+    setTimeout(() => {
+      setState((s) => ({ ...s, milestones: s.milestones.filter((m) => m.id !== id) }))
+      setRemovingIds((r) => r.filter((x) => x !== id))
+    }, 340)
+  }
+
+  const distributeEvenly = () => {
+    if (total <= 0) return
+    const n = state.milestones.length
+    const base = Math.floor((total / n) * 100) / 100
+    setState((s) => ({
+      ...s,
+      milestones: s.milestones.map((m, i) => ({
+        ...m, amount: String(i === n - 1 ? round2(total - base * (n - 1)) : base)
+      }))
+    }))
+  }
+  const fillRemaining = () => {
+    if (remaining <= 0.005) return
+    const last = state.milestones.length - 1
+    setState((s) => ({
+      ...s,
+      milestones: s.milestones.map((m, i) =>
+        i === last ? { ...m, amount: String(round2(parseAmt(m.amount) + remaining)) } : m)
+    }))
+  }
 
   return (
-    <div className="flex flex-col gap-7">
-      <p className="text-[12.5px] text-ink-3 leading-relaxed -mt-2">
-        Each milestone is delivered, reviewed, and paid out on its own, not all at once at the end.
+    <div className="flex flex-col gap-6">
+      <p className="text-[12.5px] text-ink-3 leading-relaxed -mt-2" style={{ maxWidth: '54ch' }}>
+        Enter an amount for each milestone and the bar above shows how the total is divided. Milestones are paid out in order, left to right.
       </p>
-      <ol className="flex flex-col">
-        <div className="rule" />
-        {state.milestones.map((m, i) => (
-          <li key={i} className="flex flex-col gap-3 sm:grid sm:grid-cols-12 sm:gap-3 sm:items-start py-4 border-b border-rule">
-            <div className="sm:col-span-7 sm:order-2 flex flex-col gap-2">
-              <select className="input"
-                value={m.title}
-                onChange={(e) => update(i, 'title', e.target.value)}
-                aria-label={`Milestone ${i + 1} title`}
-              >
-                {TITLE_PRESETS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-              {m.title === 'Custom' && (
-                <input className="input"
-                  placeholder="Custom title" maxLength={80}
-                  value={m.customTitle}
-                  onChange={(e) => update(i, 'customTitle', e.target.value)}
-                />
-              )}
-              <FieldError text={touched[`m_${i}_title`] ? errors[`m_${i}_title`] : undefined} />
-            </div>
-            <div className="flex items-center gap-3 sm:contents">
-              <span className="seq text-[12px] text-ink-3 sm:col-span-1 sm:order-1 sm:pt-3">M{i + 1}</span>
-              <div className="flex-1 sm:col-span-3 sm:order-3">
-                <div className="relative">
-                  <input type="number" step="0.01" min="0" inputMode="decimal"
-                    className="input num text-right pr-14" placeholder="0.00"
-                    value={m.amount}
-                    onChange={(e) => update(i, 'amount', e.target.value)}
-                    onBlur={() => touch(`m_${i}_amount`)}
-                    aria-label={`Milestone ${i + 1} amount`}
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10.5px] text-ink-3 uppercase tracking-wider">USDC</span>
-                </div>
-                <FieldError text={touched[`m_${i}_amount`] ? errors[`m_${i}_amount`] : undefined} />
-              </div>
-              <div className="sm:col-span-1 sm:order-4 sm:flex sm:justify-end">
-                <IconButton
-                  size="md"
-                  tone="ghost-danger"
-                  label={`Remove milestone ${i + 1}`}
-                  disabled={state.milestones.length <= 1}
-                  onClick={() => remove(i)}
+
+      <ClayBar milestones={state.milestones} total={total} hoverIdx={hoverIdx} setHoverIdx={setHoverIdx} flashIds={flashIds} />
+
+      <div className="flex items-center flex-wrap gap-2">
+        <button type="button" className="btn-secondary h-[34px] text-[13px]" onClick={distributeEvenly} disabled={total <= 0}>
+          Split evenly
+        </button>
+        {remaining > 0.005 && (
+          <button type="button" className="btn-quiet h-[34px] text-[13px]" onClick={fillRemaining}>
+            Assign remaining {remaining.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} to last
+          </button>
+        )}
+      </div>
+
+      <ol className="flex flex-col gap-2">
+        {state.milestones.map((m, i) => {
+          const amtErr = touched[`m_${i}_amount`] ? errors[`m_${i}_amount`] : undefined
+          const titleErr = touched[`m_${i}_title`] ? errors[`m_${i}_title`] : undefined
+          const active = hoverIdx === i
+          const flashing = flashIds.has(m.id)
+          const removing = removingIds.includes(m.id)
+          const pctRaw = total > 0 ? Math.round((parseAmt(m.amount) / total) * 1000) / 10 : 0
+
+          return (
+            <li key={m.id}
+              onMouseEnter={() => setHoverIdx(i)}
+              onMouseLeave={() => setHoverIdx(null)}
+              className={`rounded-md overflow-hidden transition-[max-height,opacity,padding,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${active || flashing ? 'bg-sunk' : 'bg-transparent'}`}
+              style={{
+                boxShadow: flashing ? 'inset 0 0 0 1.5px var(--clay)' : 'none',
+                padding: removing ? '0 8px' : '8px',
+                maxHeight: removing ? 0 : 220,
+                opacity: removing ? 0 : 1
+              }}
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className="shrink-0 inline-flex items-center justify-center num rounded-full mt-2.5 h-6 w-6 text-[11.5px] font-medium bg-clay-soft text-clay"
+                  title={`Paid ${ordinal(i + 1)}`}
                 >
-                  <TrashIcon />
-                </IconButton>
+                  {i + 1}
+                </span>
+                <div className="flex-1 min-w-0 flex flex-col gap-2">
+                  <div className="flex flex-wrap items-start gap-2">
+                    <div className="flex-1 min-w-[150px]">
+                      <select className="input"
+                        value={m.title}
+                        onChange={(e) => update(i, 'title', e.target.value)}
+                        aria-label={`Milestone ${i + 1} title`}
+                      >
+                        {TITLE_PRESETS.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1 w-[168px]">
+                      <div className="relative">
+                        <input type="number" step="0.01" min="0" inputMode="decimal"
+                          className="input num text-right pr-12" placeholder="0.00"
+                          value={m.amount}
+                          onChange={(e) => setAmount(i, e.target.value)}
+                          onBlur={() => touch(`m_${i}_amount`)}
+                          aria-label={`Milestone ${i + 1} amount`}
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-ink-3 uppercase tracking-wider pointer-events-none">USDC</span>
+                      </div>
+                      <span className="num text-[10.5px] text-ink-3 text-right">
+                        {total > 0
+                          ? <>{Number.isInteger(pctRaw) ? pctRaw : pctRaw.toFixed(1)}% of total · Paid {ordinal(i + 1)}</>
+                          : `Paid ${ordinal(i + 1)}`}
+                      </span>
+                    </div>
+                    <IconButton
+                      size="md"
+                      tone="ghost-danger"
+                      label={`Remove milestone ${i + 1}`}
+                      disabled={state.milestones.length <= 1}
+                      onClick={() => remove(i)}
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </div>
+                  {m.title === 'Custom' && (
+                    <input className="input" placeholder="Name this milestone" maxLength={60}
+                      value={m.customTitle}
+                      onChange={(e) => update(i, 'customTitle', e.target.value)}
+                    />
+                  )}
+                  {(amtErr || titleErr) && <FieldError text={amtErr || titleErr} />}
+                </div>
               </div>
-            </div>
-          </li>
-        ))}
+            </li>
+          )
+        })}
       </ol>
 
       <div className="flex items-center justify-between">
@@ -514,13 +779,6 @@ function MilestonesSection({ state, setState, errors, touched, touch, totalAmoun
         <p className="seq text-[11px] text-ink-3">{state.milestones.length} / 10</p>
       </div>
 
-      <div className="flex items-baseline justify-between pt-1">
-        <span className="eyebrow">Total locked</span>
-        <span className="num text-[15px] text-ink">
-          {totalAmountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          <span className="text-ink-3"> USDC</span>
-        </span>
-      </div>
       {touched.milestones && <FieldError text={errors.milestones} />}
     </div>
   )
@@ -531,6 +789,59 @@ function TrashIcon() {
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path d="M3 5h10M6 5V3.5A1 1 0 0 1 7 2.5h2a1 1 0 0 1 1 1V5M5 5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9L11 5"
         stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function SpinnerIcon({ size = 15 }) {
+  return <span className="inline-block rounded-full border-2 border-clay/25 border-t-clay animate-spin" style={{ width: size, height: size }} aria-hidden />
+}
+function UploadIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden>
+      <path d="M11 14V4M7 8l4-4 4 4M4 15v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+function DocIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      <path d="M5 2h5l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+function LinkIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
+      <path d="M7 10l3-3M6.5 11.5l-1 1a2.1 2.1 0 0 1-3-3l2-2a2.1 2.1 0 0 1 3-.1M10.5 5.5l1-1a2.1 2.1 0 0 1 3 3l-2 2a2.1 2.1 0 0 1-3 .1"
+        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+function LockIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <rect x="3" y="6.5" width="8" height="6" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M4.5 6.5V4.5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  )
+}
+function ExternalIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  )
+}
+function WarnIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path d="M7 1.5l6 10.5H1L7 1.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M7 5.5v3M7 10.5v0.05" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   )
 }
@@ -569,93 +880,127 @@ function TimelineSection({ state, setState, errors, touched, touch }) {
 }
 
 /* ------- Documentation ------- */
-function DocumentationSection({ state, setState, errors, touched, touch }) {
-  const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
+/* ------- Invoice uploader (idle / pinning / pinned-file / pinned-url / error) ------- */
+function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, onPinUrl, onRemove }) {
   const [dragging, setDragging] = useState(false)
+  const [showUrlInput, setShowUrlInput] = useState(false)
+  const [urlDraft, setUrlDraft] = useState('')
+  const fileInputRef = useRef(null)
 
-  useEffect(() => {
-    if (!state.invoiceNumber) {
-      const year = new Date().getFullYear()
-      const rand = String(Math.floor(Math.random() * 9000) + 1000)
-      set('invoiceNumber')(`INV-${year}-${rand}`)
-    }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleDrop = async (e) => {
-    e.preventDefault()
-    setDragging(false)
-    const file = e.dataTransfer.files[0]
-    if (!file) return
-    try {
-      const buffer = await file.arrayBuffer()
-      const hashBuffer = await crypto.subtle.digest('SHA-256', buffer)
-      const hashArray = Array.from(new Uint8Array(hashBuffer))
-      const hex = '0x' + hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
-      set('attachmentHash')(hex)
-    } catch {}
+  const handleFiles = (files) => {
+    const file = files && files[0]
+    if (file) onPinFile(file)
   }
 
+  if (invoice.status === 'pinning') {
+    return (
+      <div className="rounded-xl border border-rule bg-sunk px-4 py-3.5 flex items-center gap-3">
+        <SpinnerIcon size={18} />
+        <div className="flex-1 min-w-0">
+          <p className="text-[13.5px] font-medium text-ink">Saving to permanent storage</p>
+          <p className="text-[12px] text-ink-3 truncate">
+            {invoice.mode === 'url' ? 'Fetching link…' : invoice.name} · this takes a few seconds
+          </p>
+          <div className="mt-2 h-[3px] rounded-full bg-rule overflow-hidden">
+            <div className="skeleton-shimmer h-full w-full rounded-full" />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (invoice.status === 'pinned') {
+    const isUrl = invoice.mode === 'url'
+    return (
+      <div className="rounded-xl border border-ok/30 bg-ok/[0.07] px-4 py-3.5">
+        <div className="flex items-start gap-3">
+          <span className="shrink-0 inline-flex items-center justify-center h-9 w-9 rounded-md border border-rule bg-paper text-ink-2">
+            {isUrl ? <LinkIcon /> : <DocIcon />}
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13.5px] font-medium text-ink truncate">{isUrl ? attachmentURI : invoice.name}</p>
+            <div className="flex items-center gap-2 flex-wrap mt-1.5">
+              <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ok">
+                <LockIcon /> {isUrl ? 'Linked' : 'Locked, cannot be changed later'}
+              </span>
+              {attachmentHash && (
+                <span className="hash text-[11px]" title="Content fingerprint">{attachmentHash.slice(0, 14)}…</span>
+              )}
+              <a href={attachmentURI} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80">
+                View <ExternalIcon />
+              </a>
+            </div>
+            {!isUrl && (
+              <p className="text-[11.5px] text-ink-3 mt-1.5 leading-relaxed">
+                A fingerprint of this document is stored with the escrow, so it can never be swapped for a different file later.
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mt-3">
+          <button type="button" className="btn-secondary h-[34px] text-[13px]" onClick={() => fileInputRef.current?.click()}>Replace</button>
+          <button type="button" className="btn-quiet h-[34px] text-[13px]" onClick={onRemove}>Remove</button>
+          <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+        </div>
+      </div>
+    )
+  }
+
+  // idle / error
   return (
-    <div className="flex flex-col gap-6">
-      {!state.privateMode && (
-        <div className="rounded-xl bg-sunk border border-rule px-4 py-3 text-[12.5px] text-ink-2 leading-relaxed">
-          Everything here will be publicly readable on-chain forever and cannot be deleted. Switch to private in Advanced settings to store only a hash.
+    <div className="flex flex-col gap-2">
+      <div
+        onDrop={(e) => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files) }}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={() => setDragging(false)}
+        onClick={() => fileInputRef.current?.click()}
+        className={`rounded-xl border-[1.5px] border-dashed px-5 py-6 flex flex-col items-center text-center cursor-pointer transition-colors ${dragging ? 'border-clay bg-clay/5' : 'border-rule-2'}`}
+      >
+        <span className={dragging ? 'text-clay' : 'text-ink-3'}><UploadIcon /></span>
+        <p className="text-[13.5px] text-ink mt-2"><span className="text-clay font-medium">Browse</span> or drag a document here</p>
+        <p className="text-[11.5px] text-ink-3 mt-1">PDF, image, or doc up to 4 MB</p>
+        <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+      </div>
+
+      {invoice.status === 'error' && (
+        <div className="rounded-xl bg-bad/8 border border-bad/20 px-3 py-2.5 flex items-start gap-2 text-[12.5px] leading-relaxed text-bad">
+          <span className="mt-[1px]"><WarnIcon /></span>
+          <span>{invoice.error}</span>
         </div>
       )}
 
-      <Field label="Invoice number" error={touched.invoiceNumber ? errors.invoiceNumber : undefined}>
-        {(p) => (
-          <input {...p} className="input num" placeholder="INV-2025-0001"
-            autoComplete="off" spellCheck={false}
-            value={state.invoiceNumber}
-            onChange={(e) => set('invoiceNumber')(e.target.value.trim())}
-            onBlur={() => touch('invoiceNumber')}
+      {!showUrlInput ? (
+        <button type="button" className="btn-quiet self-start h-8 px-1 text-[12.5px]" onClick={() => setShowUrlInput(true)}>
+          Paste a link instead
+        </button>
+      ) : (
+        <div className="flex items-center gap-2">
+          <input type="url" className="input" placeholder="https://… link to an invoice"
+            value={urlDraft} onChange={(e) => setUrlDraft(e.target.value)}
           />
-        )}
-      </Field>
-
-      <div className="flex flex-col gap-2">
-        <Field label="Attachment">
-          {(p) => (
-            <input {...p} type="url" className="input"
-              placeholder="Link to supporting document (optional)"
-              autoComplete="url"
-              value={state.attachmentURI}
-              onChange={(e) => { set('attachmentURI')(e.target.value.trim()); set('attachmentHash')('') }}
-            />
-          )}
-        </Field>
-
-        {state.attachmentURI && !state.attachmentHash && (
-          <p className="text-[12px] text-ink-3">Link only (contents not verified)</p>
-        )}
-
-        <div
-          onDrop={handleDrop}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-          onDragLeave={() => setDragging(false)}
-          className={`rounded-xl border-2 border-dashed px-4 py-5 text-center transition-colors ${dragging ? 'border-clay bg-clay/5' : 'border-rule'}`}
-        >
-          {state.attachmentHash ? (
-            <p className="text-[12.5px] text-ok">
-              File fingerprinted ✓{' '}
-              <span className="num text-[11px] opacity-70">{state.attachmentHash.slice(0, 10)}</span>
-            </p>
-          ) : (
-            <p className="text-[12.5px] text-ink-3 leading-relaxed">
-              Drop a file here to fingerprint its contents on-chain. It never leaves your browser.
-            </p>
-          )}
+          <button type="button" className="btn-secondary shrink-0"
+            onClick={() => { if (urlDraft.trim()) { onPinUrl(urlDraft.trim()); setUrlDraft(''); setShowUrlInput(false) } }}
+          >
+            Attach
+          </button>
         </div>
-      </div>
+      )}
     </div>
   )
 }
 
-/* ------- Advanced settings (review window + visibility + notes) ------- */
-function AdvancedSection({ state, setState }) {
-  const [open, setOpen] = useState(false)
+/* ------- Advanced settings (invoice + visibility + destination chain + review window) ------- */
+function AdvancedSection({
+  state, setState, supported, loadingDomains, domainsFailed, refetchDomains, onPinFile, onPinUrl, onRemoveInvoice,
+  open, setOpen
+}) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
+  const evmDomains = supported.filter(isEvmDomain)
+  const domainHelper = loadingDomains
+    ? 'Loading supported chains.'
+    : domainsFailed
+      ? "Couldn't reach the contract. Check your RPC and retry."
+      : 'Where your freelancer gets paid. Arc has no forwarding fee; other chains do.'
 
   return (
     <div className="rounded-xl border border-rule overflow-hidden">
@@ -667,7 +1012,7 @@ function AdvancedSection({ state, setState }) {
       >
         <span className="text-[14px] font-medium text-ink">Advanced settings</span>
         <span className="text-[12px] text-ink-3 ml-auto mr-1">
-          Review {state.reviewWindowDays}d · {state.privateMode ? 'Private' : 'Public'}
+          {state.invoice.status === 'pinned' ? 'Document attached' : 'No document'} · Review {state.reviewWindowDays}d · {state.privateMode ? 'Private' : 'Public'}
         </span>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
           className={`text-ink-3 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
@@ -685,6 +1030,46 @@ function AdvancedSection({ state, setState }) {
             className="overflow-hidden border-t border-rule"
           >
             <div className="px-4 py-5 flex flex-col gap-6">
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-baseline justify-between">
+                  <label className="field-label">Invoice or contract</label>
+                  <span className="text-[11.5px] text-ink-3">Optional</span>
+                </div>
+                <p className="text-[12px] text-ink-3 leading-relaxed -mt-1">
+                  Attach the document this payment is for. It's saved so neither side can quietly change it later.
+                </p>
+                <InvoiceUploader
+                  invoice={state.invoice}
+                  attachmentURI={state.attachmentURI}
+                  attachmentHash={state.attachmentHash}
+                  onPinFile={onPinFile}
+                  onPinUrl={onPinUrl}
+                  onRemove={onRemoveInvoice}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="field-label">Where the freelancer gets paid</label>
+                <select className="input"
+                  disabled={domainsFailed}
+                  value={Number(state.destinationDomain)}
+                  onChange={(e) => set('destinationDomain')(Number(e.target.value))}
+                >
+                  {evmDomains.length === 0 && (
+                    <option>{loadingDomains ? 'Loading…' : 'No chains available'}</option>
+                  )}
+                  {evmDomains.sort((a, b) => getDomainName(a).localeCompare(getDomainName(b))).map((d) => (
+                    <option key={d} value={d}>{getDomainName(d)}</option>
+                  ))}
+                </select>
+                {domainsFailed && (
+                  <button type="button" className="btn-quiet self-start px-0 text-[12.5px]" onClick={() => refetchDomains?.()}>
+                    Retry
+                  </button>
+                )}
+                <p className="text-[12px] text-ink-3 leading-relaxed">{domainHelper}</p>
+              </div>
+
               <div className="flex flex-col gap-2">
                 <label className="field-label">Review window</label>
                 <div className="inline-flex bg-sunk border border-rule rounded-lg p-1 gap-1 flex-wrap w-fit">
@@ -725,20 +1110,10 @@ function AdvancedSection({ state, setState }) {
                 {state.privateMode && (
                   <p className="text-[12.5px] text-ink-2 leading-relaxed">
                     Download and keep your invoice file. Anyone verifying will need a copy of it.
+                    {state.attachmentURI && ' The attached document itself still sits at a public storage link — this only keeps the invoice details off-chain.'}
                   </p>
                 )}
               </div>
-
-              <Field label="Notes">
-                {(p) => (
-                  <textarea {...p} rows={3} className="input-multiline"
-                    placeholder="Any additional context for this escrow (optional)"
-                    maxLength={500}
-                    value={state.notes}
-                    onChange={(e) => set('notes')(e.target.value)}
-                  />
-                )}
-              </Field>
             </div>
           </motion.div>
         )}
@@ -751,11 +1126,13 @@ function AdvancedSection({ state, setState }) {
 function summarizeMissing(errors) {
   const out = []
   if (errors.freelancer) out.push({ text: 'a valid freelancer address', id: 'section-parties' })
-  if (errors.destinationDomain) out.push({ text: 'a supported destination chain', id: 'section-parties' })
+  if (errors.total) out.push({ text: 'the total amount', id: 'section-work' })
+  if (errors.description) out.push({ text: 'a short description of the work', id: 'section-work' })
   if (errors.milestones) out.push({ text: 'at least one milestone amount', id: 'section-milestones' })
   else if (Object.keys(errors).some((k) => k.startsWith('m_'))) out.push({ text: 'valid milestone details', id: 'section-milestones' })
   if (errors.deadline) out.push({ text: 'a deadline', id: 'section-timeline' })
-  if (errors.invoiceNumber) out.push({ text: 'an invoice number', id: 'section-documentation' })
+  if (errors.destinationDomain) out.push({ text: 'a supported destination chain', id: 'section-advanced' })
+  // invoicePinning gets its own spinner banner in ReviewSection, not a jump link here.
   return out
 }
 
@@ -768,8 +1145,14 @@ function ReviewSection({
   const hasInsufficientBalance = !balanceLoading && usdcBalance !== undefined
     && totalBaseUnits > 0n && BigInt(usdcBalance) < totalBaseUnits
   const chainName = getDomainName(state.destinationDomain)
+  const pinning = state.invoice.status === 'pinning'
   const missing = summarizeMissing(errors)
-  const isComplete = missing.length === 0
+  const isComplete = Object.keys(errors).length === 0
+  // Idle-summary confirm step lives in this Modal; once "Sign and lock" calls
+  // onDeposit(), depositTx.status flips off 'idle' so this Modal's own open
+  // condition goes false right as TxModal's (driven by that same status)
+  // goes true — a clean handoff between the two, no double-modal overlap.
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   return (
     <div className="flex flex-col gap-6">
@@ -788,7 +1171,14 @@ function ReviewSection({
         )}
       </div>
 
-      {!isComplete && (
+      {pinning && (
+        <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 flex items-center gap-2.5 text-[13px] text-ink-2 leading-relaxed" role="status">
+          <span className="text-clay"><SpinnerIcon /></span>
+          Your document is still saving. This takes a few seconds, then you can continue.
+        </div>
+      )}
+
+      {!isComplete && !pinning && missing.length > 0 && (
         <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 text-[12.5px] text-ink-2 leading-relaxed" role="status">
           Add{' '}
           {missing.map((m, i) => (
@@ -847,11 +1237,55 @@ function ReviewSection({
           done={false}
           loading={depositTx.isBusy}
           actionLabel="Lock funds"
-          onAction={onDeposit}
+          onAction={() => setConfirmOpen(true)}
           disabled={!approved || busy || disconnected}
           primary
         />
       </div>
+
+      <Modal
+        open={confirmOpen && depositTx.status === 'idle'}
+        onClose={() => setConfirmOpen(false)}
+        title="Lock funds into escrow"
+        footer={
+          <>
+            <button className="btn-quiet" onClick={() => setConfirmOpen(false)}>Cancel</button>
+            <button className="btn-primary" onClick={onDeposit}>Sign and lock</button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2.5">
+          <p className="text-[13.5px] text-ink-2 leading-relaxed">
+            This is the second and final signature. Your USDC moves into the contract and is held until milestones are approved.
+          </p>
+          <div className="rule" />
+          <div className="flex items-baseline justify-between pt-1">
+            <span className="text-[13px] text-ink-2">Locking</span>
+            <span className="num text-[15px] text-ink font-medium">{formatUSDC(totalBaseUnits)}</span>
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-[13px] text-ink-2">Freelancer</span>
+            <AddressDisplay address={state.freelancer} size="sm" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-[13px] text-ink-2">Paid on</span>
+            <span className="text-[13px] text-ink">{chainName}</span>
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-[13px] text-ink-2">Milestones</span>
+            <span className="num text-[13px] text-ink">{state.milestones.length}</span>
+          </div>
+        </div>
+      </Modal>
+
+      <TxModal
+        status={depositTx.status}
+        txHash={depositTx.hash}
+        error={depositTx.error}
+        title="Creating your escrow"
+        onClose={() => { setConfirmOpen(false); depositTx.reset() }}
+        onRetry={onDeposit}
+      />
     </div>
   )
 }
@@ -946,6 +1380,13 @@ function Ledger({ state, address, totalBaseUnits, protocolFee, milestoneAmountsB
           <span className="num text-[13px] text-ink-2">≈ {formatUSDC(effectiveCctpFee).replace(' USDC', '')} / payout</span>
         </Row>
       )}
+      <Row label="Invoice" muted complete>
+        {state.invoice.status === 'pinned' ? (
+          <span className="text-[13px] text-ok">{state.invoice.mode === 'url' ? 'Linked' : 'Attached'}</span>
+        ) : (
+          <span className="num text-[13px] text-ink-3">—</span>
+        )}
+      </Row>
 
       <div className="rule-2" />
 
