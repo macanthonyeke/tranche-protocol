@@ -48,3 +48,7 @@ frontend/.vite/
 
 # Local Slither analysis venv
 .slither-venv/
+
+# Windows/WSL download-marker files (recur whenever assets are pulled
+# from a browser download into the repo on WSL; never real content)
+**/*Zone.Identifier*
