@@ -150,7 +150,7 @@ function CheckIcon({ size = 12 }) {
 }
 function DocIcon() {
   return (
-    <svg width="22" height="22" viewBox="0 0 18 18" fill="none" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
       <path d="M5 2h5l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
       <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
     </svg>

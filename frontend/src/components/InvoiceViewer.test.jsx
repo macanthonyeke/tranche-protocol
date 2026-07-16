@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup } from '@testing-library/react'
 import InvoiceViewer from './InvoiceViewer.jsx'
+import { toGatewayUrl } from '../utils/ipfsGateway.js'
 
 const CID = 'bafyMOCKCID123'
-const GATEWAY_URL = `https://moccasin-impressed-gibbon-651.mypinata.cloud/ipfs/${CID}`
+// Derived from the real toGatewayUrl rather than a hardcoded literal, so this
+// suite doesn't silently drift/fail if VITE_PINATA_GATEWAY is ever set.
+const GATEWAY_URL = toGatewayUrl(`ipfs://${CID}`)
 const FILE_BYTES = new TextEncoder().encode('hello invoice world').buffer
 
 async function sha256Hex(buf) {

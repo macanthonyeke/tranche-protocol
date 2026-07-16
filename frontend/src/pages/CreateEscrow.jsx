@@ -198,21 +198,24 @@ function Flow() {
     }
   }
   const onPinUrl = async (url) => {
-    setState((s) => ({ ...s, invoice: { mode: 'url', status: 'pinning', name: '', size: 0, error: '' } }))
+    // invoice.name carries the display label — the pasted URL here, the
+    // filename in file mode — since attachmentURI gets overwritten with the
+    // pinned ipfs:// CID and the original URL isn't stored anywhere else.
+    setState((s) => ({ ...s, invoice: { mode: 'url', status: 'pinning', name: url, size: 0, error: '' } }))
     try {
       const { ipfsUri, sha256 } = await pinUrl(url)
       setState((s) => ({
         ...s,
         attachmentURI: ipfsUri,
         attachmentHash: sha256,
-        invoice: { mode: 'url', status: 'pinned', name: '', size: 0, error: '' }
+        invoice: { mode: 'url', status: 'pinned', name: url, size: 0, error: '' }
       }))
     } catch (err) {
       setState((s) => ({
         ...s,
         attachmentURI: '',
         attachmentHash: '',
-        invoice: { mode: 'url', status: 'error', name: '', size: 0, error: err.message }
+        invoice: { mode: 'url', status: 'error', name: url, size: 0, error: err.message }
       }))
     }
   }
@@ -919,7 +922,7 @@ function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, on
             {isUrl ? <LinkIcon /> : <DocIcon />}
           </span>
           <div className="flex-1 min-w-0">
-            <p className="text-[13.5px] font-medium text-ink truncate">{isUrl ? attachmentURI : invoice.name}</p>
+            <p className="text-[13.5px] font-medium text-ink truncate">{invoice.name}</p>
             <div className="flex items-center gap-2 flex-wrap mt-1.5">
               <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ok">
                 <LockIcon /> {isUrl ? 'Linked' : 'Locked, cannot be changed later'}

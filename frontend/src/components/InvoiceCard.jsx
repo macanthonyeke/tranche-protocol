@@ -126,7 +126,14 @@ export default function InvoiceCard({
     )
   }
 
-  const attachment = parsed.attachments?.[0]
+  // parsed comes from user/depositor-controlled JSON (the invoice envelope) —
+  // don't trust attachments[0]'s field types. uri feeds toGatewayUrl()
+  // (calls .startsWith) and sha256 feeds .slice()/.toLowerCase() downstream;
+  // a crafted non-string value there would throw and crash this render.
+  const rawAttachment = parsed.attachments?.[0]
+  const attachment = typeof rawAttachment?.uri === 'string'
+    ? { uri: rawAttachment.uri, sha256: typeof rawAttachment.sha256 === 'string' ? rawAttachment.sha256 : null }
+    : null
 
   return (
     <div className="flex flex-col gap-4">
@@ -223,13 +230,19 @@ function AttachmentRow({ attachment, status, onFile }) {
           </span>
           <div className="flex-1 min-w-0 flex flex-col gap-1">
             {/* href is the gateway URL as a right-click/middle-click fallback
-                (never the raw ipfs:// form, which no browser can open) —
-                the normal left-click path opens the in-app viewer instead. */}
+                (never the raw ipfs:// form, which no browser can open) — a
+                plain left-click opens the in-app viewer instead, but a
+                modifier click (Cmd/Ctrl/Shift, or a non-primary button) is
+                left alone so "open in new tab" keeps working natively. */}
             <a
               href={toGatewayUrl(attachment.uri)}
               target="_blank"
               rel="noreferrer"
-              onClick={(e) => { e.preventDefault(); setViewerOpen(true) }}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+                e.preventDefault()
+                setViewerOpen(true)
+              }}
               className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all inline-flex items-center gap-1"
             >
               {attachment.uri}
