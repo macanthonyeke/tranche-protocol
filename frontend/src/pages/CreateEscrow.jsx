@@ -14,6 +14,7 @@ import Tooltip from '../components/Tooltip.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import ClayBar, { parseAmt, round2, ordinal } from '../components/ClayBar.jsx'
 import { pinFile, pinUrl } from '../utils/invoicePin.js'
+import { toGatewayUrl } from '../utils/ipfsGateway.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
@@ -926,7 +927,7 @@ function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, on
               {attachmentHash && (
                 <span className="hash text-[11px]" title="Content fingerprint">{attachmentHash.slice(0, 14)}…</span>
               )}
-              <a href={attachmentURI} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80">
+              <a href={toGatewayUrl(attachmentURI)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80">
                 View <ExternalIcon />
               </a>
             </div>
