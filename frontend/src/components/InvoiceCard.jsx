@@ -3,6 +3,8 @@ import { keccak256, toHex } from 'viem'
 import { useReadContract } from 'wagmi'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { formatTimestamp, NO_ATTACHMENT_URI } from '../utils/format.js'
+import { toGatewayUrl } from '../utils/ipfsGateway.js'
+import InvoiceViewer from './InvoiceViewer.jsx'
 
 const ZERO_BYTES32 = '0x' + '0'.repeat(64)
 
@@ -210,6 +212,7 @@ function LineItemsTable({ items }) {
 
 /* ---------- Attachment row ---------- */
 function AttachmentRow({ attachment, status, onFile }) {
+  const [viewerOpen, setViewerOpen] = useState(false)
   return (
     <div className="flex flex-col gap-2">
       <p className="text-[10px] uppercase tracking-[0.18em] text-ink-3 font-medium">Attachment</p>
@@ -219,10 +222,14 @@ function AttachmentRow({ attachment, status, onFile }) {
             <DocIcon />
           </span>
           <div className="flex-1 min-w-0 flex flex-col gap-1">
+            {/* href is the gateway URL as a right-click/middle-click fallback
+                (never the raw ipfs:// form, which no browser can open) —
+                the normal left-click path opens the in-app viewer instead. */}
             <a
-              href={attachment.uri}
+              href={toGatewayUrl(attachment.uri)}
               target="_blank"
               rel="noreferrer"
+              onClick={(e) => { e.preventDefault(); setViewerOpen(true) }}
               className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all inline-flex items-center gap-1"
             >
               {attachment.uri}
@@ -256,6 +263,8 @@ function AttachmentRow({ attachment, status, onFile }) {
           )
         )}
       </div>
+
+      <InvoiceViewer open={viewerOpen} onClose={() => setViewerOpen(false)} attachment={attachment} />
     </div>
   )
 }
