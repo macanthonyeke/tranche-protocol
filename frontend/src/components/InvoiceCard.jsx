@@ -213,33 +213,47 @@ function AttachmentRow({ attachment, status, onFile }) {
   return (
     <div className="flex flex-col gap-2">
       <p className="text-[10px] uppercase tracking-[0.18em] text-ink-3 font-medium">Attachment</p>
-      <div className="flex flex-col gap-2">
-        <a
-          href={attachment.uri}
-          target="_blank"
-          rel="noreferrer"
-          className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all inline-flex items-center gap-1"
-        >
-          {attachment.uri}
-          <ExternalLinkIcon size={11} />
-        </a>
-        {attachment.sha256 && onFile && (
-          <>
-            {status === 'verified' ? (
-              <div className="flex items-center gap-1.5 text-[12px] text-ok">
-                <CheckIcon size={11} />
-                <span>File verified — SHA-256 matches</span>
-              </div>
-            ) : status ? (
-              <p className="text-[12px] text-bad">{status}</p>
-            ) : (
-              <FileDrop
-                label="Drop original file to verify"
-                onFile={onFile}
-                compact
-              />
+      <div className="rounded-xl border border-rule bg-paper px-4 py-3.5 flex flex-col gap-2.5">
+        <div className="flex items-start gap-3">
+          <span className="shrink-0 inline-flex items-center justify-center h-9 w-9 rounded-md border border-rule bg-sunk text-ink-2">
+            <DocIcon />
+          </span>
+          <div className="flex-1 min-w-0 flex flex-col gap-1">
+            <a
+              href={attachment.uri}
+              target="_blank"
+              rel="noreferrer"
+              className="text-clay hover:opacity-80 underline-offset-2 hover:underline text-[12.5px] break-all inline-flex items-center gap-1"
+            >
+              {attachment.uri}
+              <ExternalLinkIcon size={11} />
+            </a>
+            {attachment.sha256 && (
+              <span className="hash text-[11px] self-start" title="Content fingerprint">
+                {attachment.sha256.slice(0, 14)}…
+              </span>
             )}
-          </>
+          </div>
+        </div>
+
+        {attachment.sha256 && onFile && (
+          status === 'verified' ? (
+            <div className="rounded-lg border border-ok/30 bg-ok/10 px-3 py-2 flex items-center gap-1.5 text-[12px] text-ok">
+              <CheckIcon size={11} />
+              File verified — SHA-256 matches
+            </div>
+          ) : status ? (
+            <div className="rounded-lg border border-bad/30 bg-bad/10 px-3 py-2 flex items-start gap-1.5 text-[12px] text-bad">
+              <WarnIcon size={12} />
+              <span>{status}</span>
+            </div>
+          ) : (
+            <FileDrop
+              label="Drop original file to verify"
+              onFile={onFile}
+              compact
+            />
+          )
         )}
       </div>
     </div>
@@ -302,15 +316,15 @@ function AckChip({ acknowledgedAt }) {
 function VerifyBadge({ status }) {
   if (status === 'loading' || status === 'pending') {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-ink-3">
-        <span className="inline-block h-2.5 w-2.5 rounded-full border border-ink-3/40 border-t-ink-2 animate-spin" aria-hidden />
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-rule bg-sunk px-2 py-0.5 text-[11px] text-ink-3">
+        <SpinnerIcon size={10} />
         Verifying…
       </span>
     )
   }
   if (status === 'verified') {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-ok font-medium">
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-ok/30 bg-ok/10 px-2 py-0.5 text-[11px] text-ok font-medium">
         <CheckIcon size={10} />
         Verified against chain
       </span>
@@ -318,8 +332,8 @@ function VerifyBadge({ status }) {
   }
   if (status === 'failed') {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] text-bad font-medium">
-        <span aria-hidden>⚠</span>
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-bad/30 bg-bad/10 px-2 py-0.5 text-[11px] text-bad font-medium">
+        <WarnIcon size={11} />
         Verification failed — subgraph data does not match on-chain commitment
       </span>
     )
@@ -348,14 +362,14 @@ function FileDrop({ label, onFile, error, fullCard = false, compact = false }) {
   }
 
   const baseCls = compact
-    ? 'rounded-lg border border-dashed px-3 py-2 text-[11.5px] text-center cursor-pointer transition-colors'
+    ? 'rounded-lg border-[1.5px] border-dashed px-3 py-2 text-[11.5px] text-center cursor-pointer transition-colors flex items-center justify-center gap-1.5'
     : fullCard
-    ? 'rounded-xl border border-dashed px-4 py-8 text-sm text-center cursor-pointer transition-colors'
-    : 'rounded-xl border border-dashed px-3 py-3 text-[11.5px] text-center cursor-pointer transition-colors'
+    ? 'rounded-xl border-[1.5px] border-dashed px-5 py-6 text-sm text-center cursor-pointer transition-colors flex flex-col items-center'
+    : 'rounded-xl border-[1.5px] border-dashed px-3 py-3 text-[11.5px] text-center cursor-pointer transition-colors flex flex-col items-center gap-1'
 
   const colorCls = dragging
     ? 'border-clay bg-clay/5 text-clay'
-    : 'border-rule/60 text-ink-3 hover:border-clay/50 hover:text-ink-2'
+    : 'border-rule-2 text-ink-3 hover:border-clay/50 hover:text-ink-2'
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -369,7 +383,8 @@ function FileDrop({ label, onFile, error, fullCard = false, compact = false }) {
         tabIndex={0}
         onKeyDown={(e) => e.key === 'Enter' && inputRef.current?.click()}
       >
-        <span>{label}</span>
+        {!compact && <UploadIcon size={fullCard ? 20 : 16} />}
+        <span className={!compact ? 'mt-1.5' : ''}>{label}</span>
         <input
           ref={inputRef}
           type="file"
@@ -398,6 +413,37 @@ function ExternalLinkIcon({ size = 11 }) {
       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
       <polyline points="15 3 21 3 21 9" />
       <line x1="10" y1="14" x2="21" y2="3" />
+    </svg>
+  )
+}
+
+function SpinnerIcon({ size = 12 }) {
+  return <span className="inline-block rounded-full border-2 border-ink-3/30 border-t-ink-2 animate-spin" style={{ width: size, height: size }} aria-hidden />
+}
+
+function WarnIcon({ size = 13 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path d="M7 1.5l6 10.5H1L7 1.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M7 5.5v3M7 10.5v0.05" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function DocIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      <path d="M5 2h5l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function UploadIcon({ size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 22 22" fill="none" aria-hidden>
+      <path d="M11 14V4M7 8l4-4 4 4M4 15v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"
+        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 }
