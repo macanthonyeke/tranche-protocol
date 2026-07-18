@@ -15,6 +15,7 @@ import AddressDisplay from '../components/AddressDisplay.jsx'
 import ClayBar, { parseAmt, round2, ordinal } from '../components/ClayBar.jsx'
 import { pinFile, pinUrl } from '../utils/invoicePin.js'
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
+import InvoiceViewer from '../components/InvoiceViewer.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
@@ -885,10 +886,15 @@ function TimelineSection({ state, setState, errors, touched, touch }) {
 
 /* ------- Documentation ------- */
 /* ------- Invoice uploader (idle / pinning / pinned-file / pinned-url / error) ------- */
-function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, onPinUrl, onRemove }) {
+// Exported (only) so it's directly testable without mounting the whole page
+// and its router/wagmi dependency graph — same reasoning as testing
+// InvoiceCard's default export directly rather than duplicating its JSX
+// into a test harness.
+export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, onPinUrl, onRemove }) {
   const [dragging, setDragging] = useState(false)
   const [showUrlInput, setShowUrlInput] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
+  const [viewerOpen, setViewerOpen] = useState(false)
   const fileInputRef = useRef(null)
 
   const handleFiles = (files) => {
@@ -916,6 +922,7 @@ function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, on
   if (invoice.status === 'pinned') {
     const isUrl = invoice.mode === 'url'
     return (
+      <>
       <div className="rounded-xl border border-ok/30 bg-ok/[0.07] px-4 py-3.5">
         <div className="flex items-start gap-3">
           <span className="shrink-0 inline-flex items-center justify-center h-9 w-9 rounded-md border border-rule bg-paper text-ink-2">
@@ -930,7 +937,21 @@ function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, on
               {attachmentHash && (
                 <span className="hash text-[11px]" title="Content fingerprint">{attachmentHash.slice(0, 14)}…</span>
               )}
-              <a href={toGatewayUrl(attachmentURI)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80">
+              {/* href stays the gateway URL as a right-click/middle-click/
+                  modifier-click fallback — a plain left-click opens the
+                  in-app viewer instead. Same pattern as AttachmentRow in
+                  InvoiceCard.jsx. */}
+              <a
+                href={toGatewayUrl(attachmentURI)}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+                  e.preventDefault()
+                  setViewerOpen(true)
+                }}
+                className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80"
+              >
                 View <ExternalIcon />
               </a>
             </div>
@@ -947,6 +968,12 @@ function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, on
           <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
         </div>
       </div>
+      <InvoiceViewer
+        open={viewerOpen}
+        onClose={() => setViewerOpen(false)}
+        attachment={{ uri: attachmentURI, sha256: attachmentHash }}
+      />
+      </>
     )
   }
 

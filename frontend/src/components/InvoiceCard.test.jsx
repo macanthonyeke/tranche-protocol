@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { useReadContract } from 'wagmi'
 import InvoiceCard from './InvoiceCard.jsx'
 
@@ -76,5 +76,48 @@ describe('InvoiceCard — malformed attachment resilience', () => {
     // of which are gated on attachment.sha256 being present.
     expect(screen.queryByTitle('Content fingerprint')).not.toBeInTheDocument()
     expect(screen.queryByText(/drop original file to verify/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('AttachmentRow — link opens InvoiceViewer', () => {
+  const VALID_URI = 'ipfs://bafyREALCID'
+
+  function renderWithAttachment() {
+    useReadContract.mockReturnValue({ data: undefined })
+    const invoiceData = JSON.stringify({
+      version: 1,
+      invoiceNumber: 'INV-0003',
+      attachments: [{ uri: VALID_URI, sha256: '0x' + 'ab'.repeat(32) }]
+    })
+    return render(
+      <InvoiceCard
+        escrowId={3}
+        invoiceData={invoiceData}
+        invoiceURI="ipfs://bafyMOCK"
+        invoiceAcknowledgedAt={null}
+        role="payer"
+      />
+    )
+  }
+
+  it('opens InvoiceViewer on a plain left-click', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    renderWithAttachment()
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: new RegExp(VALID_URI) }))
+    expect(screen.getByRole('dialog', { name: /invoice attachment/i })).toBeInTheDocument()
+
+    vi.unstubAllGlobals()
+  })
+
+  it('does not open InvoiceViewer on a modifier click, leaving native "open in new tab" alone', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    renderWithAttachment()
+
+    fireEvent.click(screen.getByRole('link', { name: new RegExp(VALID_URI) }), { metaKey: true })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    vi.unstubAllGlobals()
   })
 })
