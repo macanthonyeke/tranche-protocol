@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
-import { useAccount, useConnect, useDisconnect, useChainId } from 'wagmi'
+import { useAccount, useConnect, useDisconnect } from 'wagmi'
 import { motion, AnimatePresence } from 'framer-motion'
 import { arcTestnet } from '../config/wagmi'
 import { truncateAddr } from '../utils/format'
 
 export default function WalletButton() {
-  const { address, isConnected } = useAccount()
+  // useAccount().chainId, NOT wagmi's useChainId(): useChainId() only syncs
+  // when the wallet's real chain is registered in config.chains (wagmi.js
+  // registers only arcTestnet), so a wallet on any other chain never syncs
+  // and useChainId() keeps reporting the arcTestnet default forever — this
+  // would show "Arc Testnet" here even on a mainnet wallet. Same fix as
+  // useTx.js's run() and AppShell.jsx's WrongNetworkBanner.
+  const { address, isConnected, chainId } = useAccount()
   const { connect, connectors, isPending } = useConnect()
   const { disconnect } = useDisconnect()
-  const chainId = useChainId()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const ref = useRef(null)

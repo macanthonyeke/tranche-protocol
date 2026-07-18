@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useAccount, useWaitForTransactionReceipt, useWriteContract } from 'wagmi'
+import { useAccount } from 'wagmi'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Field from '../components/Field.jsx'
@@ -8,10 +8,8 @@ import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTheme } from '../hooks/useTheme.jsx'
-import { txToast } from '../hooks/useToast.jsx'
-import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
+import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { formatUSDC, isValidAddress } from '../utils/format.js'
-import { parseRevertReason } from '../utils/errors.js'
 
 export default function Settings() {
   return (
@@ -42,36 +40,16 @@ function RefundSection() {
   const { address } = useAccount()
   const { balance, refetch } = useRefundBalance(address)
   const [recipient, setRecipient] = useState(address || '')
-  const { writeContractAsync } = useWriteContract()
-  const [txStatus, setTxStatus] = useState('idle')
-  const [txHash, setTxHash] = useState(null)
-  const [txError, setTxError] = useState(null)
-  const [txToastApi, setTxToastApi] = useState(null)
-  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+  const tx = useTx({ onConfirmed: () => refetch() })
 
   useEffect(() => { if (address) setRecipient(address) }, [address])
-  useEffect(() => {
-    if (!receipt) return
-    setTxStatus('success'); refetch()
-    txToastApi?.success('Withdrawn successfully.', { hash: txHash })
-  }, [receipt]) // eslint-disable-line
 
-  const submit = async () => {
-    const t = txToast({ loading: 'Submitting. Check your wallet.' })
-    setTxToastApi(t)
-    try {
-      if (!isValidAddress(recipient)) throw new Error('Invalid recipient address')
-      setTxError(null); setTxStatus('confirming')
-      const hash = await writeContractAsync({
-        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
-        functionName: 'withdrawRefund', args: [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]
-      })
-      setTxHash(hash); setTxStatus('pending')
-      t.update('Transaction sent. Waiting for confirmation.')
-    } catch (err) {
-      setTxError(err); setTxStatus('error')
-      t.error(parseRevertReason(err))
-    }
+  const submit = () => {
+    if (!isValidAddress(recipient)) return
+    tx.run(
+      escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
+      { loadingMessage: 'Submitting. Check your wallet.' }
+    )
   }
 
   return (
@@ -105,13 +83,13 @@ function RefundSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}
+        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
       >
-        {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Withdraw funds'}
+        {tx.isBusy ? 'Submitting…' : 'Withdraw funds'}
       </button>
 
-      <TxModal status={txStatus} txHash={txHash} error={txError}
-        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+      <TxModal status={tx.status} txHash={tx.hash} error={tx.error}
+        onClose={tx.reset}
         onRetry={submit} title="Processing withdrawal" />
     </Section>
   )
@@ -122,35 +100,14 @@ function TransferRefundCreditSection() {
   const { address } = useAccount()
   const { balance, refetch } = useRefundBalance(address)
   const [recipient, setRecipient] = useState('')
-  const { writeContractAsync } = useWriteContract()
-  const [txStatus, setTxStatus] = useState('idle')
-  const [txHash, setTxHash] = useState(null)
-  const [txError, setTxError] = useState(null)
-  const [txToastApi, setTxToastApi] = useState(null)
-  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, query: { enabled: !!txHash } })
+  const tx = useTx({ onConfirmed: () => refetch() })
 
-  useEffect(() => {
-    if (!receipt) return
-    setTxStatus('success'); refetch()
-    txToastApi?.success('Credit transferred.', { hash: txHash })
-  }, [receipt]) // eslint-disable-line
-
-  const submit = async () => {
-    const t = txToast({ loading: 'Submitting. Check your wallet.' })
-    setTxToastApi(t)
-    try {
-      if (!isValidAddress(recipient)) throw new Error('Invalid recipient address')
-      setTxError(null); setTxStatus('confirming')
-      const hash = await writeContractAsync({
-        address: CONTRACT_ADDRESS, abi: ESCROW_ABI,
-        functionName: 'transferRefundCredit', args: [recipient]
-      })
-      setTxHash(hash); setTxStatus('pending')
-      t.update('Transaction sent. Waiting for confirmation.')
-    } catch (err) {
-      setTxError(err); setTxStatus('error')
-      t.error(parseRevertReason(err))
-    }
+  const submit = () => {
+    if (!isValidAddress(recipient)) return
+    tx.run(
+      escrowWrite('transferRefundCredit', [recipient]),
+      { loadingMessage: 'Submitting. Check your wallet.' }
+    )
   }
 
   return (
@@ -182,12 +139,12 @@ function TransferRefundCreditSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || txStatus === 'confirming' || txStatus === 'pending'}
+        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
       >
-        {txStatus === 'confirming' || txStatus === 'pending' ? 'Submitting…' : 'Transfer credit'}
+        {tx.isBusy ? 'Submitting…' : 'Transfer credit'}
       </button>
-      <TxModal status={txStatus} txHash={txHash} error={txError}
-        onClose={() => { setTxStatus('idle'); setTxHash(null); setTxError(null) }}
+      <TxModal status={tx.status} txHash={tx.hash} error={tx.error}
+        onClose={tx.reset}
         onRetry={submit} title="Transferring refund credit" />
     </Section>
   )

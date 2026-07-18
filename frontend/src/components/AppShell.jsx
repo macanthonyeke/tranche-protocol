@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { useAccount, useChainId, useSwitchChain } from 'wagmi'
+import { useAccount, useSwitchChain } from 'wagmi'
 import IconButton from './IconButton.jsx'
 import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
@@ -428,8 +428,21 @@ function BottomNav() {
 }
 
 function WrongNetworkBanner() {
-  const { isConnected } = useAccount()
-  const chainId = useChainId()
+  // useAccount().chainId, NOT wagmi's useChainId(): useChainId() only syncs
+  // when the wallet's real chain is registered in config.chains (wagmi.js
+  // registers only arcTestnet), so a wallet on any other chain never syncs
+  // and useChainId() keeps reporting the arcTestnet default forever — this
+  // banner would never show. useAccount().chainId is the connector's real,
+  // unfiltered per-connection value. Same fix as useTx.js's run(), verified
+  // there against an isolated @wagmi/core harness.
+  //
+  // This banner is intentionally non-blocking: it doesn't gate or disable
+  // any action below it. Enforcement happens at the write layer (useTx.js's
+  // run(), which auto-prompts a switch via switchChainAsync before every
+  // signature) — this is just an ambient status indicator. Do not "fix" this
+  // into a hard gate; that would fight the auto-switch UX rather than
+  // complement it.
+  const { isConnected, chainId } = useAccount()
   const { switchChain, isPending } = useSwitchChain()
 
   if (!isConnected || chainId === arcTestnet.id) return null
