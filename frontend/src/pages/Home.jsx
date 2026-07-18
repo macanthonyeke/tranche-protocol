@@ -442,8 +442,8 @@ export default function Home() {
               Lock funds into milestones. The contract holds them until work is approved, a dispute is resolved, or both sides agree to cancel. No trust required on either side.
             </p>
             <div className="mt-10 flex flex-col sm:flex-row gap-3">
-              <Link to="/create" className="btn-primary btn-lg">Create an Escrow</Link>
-              <Link to="/dashboard" className="btn-secondary btn-lg">View Dashboard</Link>
+              <Link to="/dashboard" className="btn-primary btn-lg">Launch App</Link>
+              <Link to="/docs" className="btn-secondary btn-lg">Read the Docs</Link>
             </div>
             <p className="mt-8 num text-xs text-ink-3">
               Live on Arc Testnet · Powered by Circle CCTP V2
