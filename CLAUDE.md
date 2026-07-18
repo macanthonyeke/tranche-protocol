@@ -228,6 +228,25 @@ Note: `EscrowReleased` and `EscrowRefunded` are in the ABI but never emitted by 
 
 ---
 
+## Frontend: invoice attachment pinning (IPFS)
+
+Create Escrow's invoice uploader pins attachments (uploaded file or pasted URL) to IPFS server-side, hashes the exact pinned bytes, and stores the resulting `ipfs://` URI and SHA-256 as sub-fields (`attachments[0].uri` / `.sha256`) inside the `invoiceData` JSON envelope. This is separate from and does **not** change `invoiceHash`, which still commits to the whole envelope — see the SE-6 note below; this distinction matters.
+
+- `frontend/api/pin-invoice.js` — Vercel serverless route. Accepts a raw file upload OR `{ url }` JSON, fetches/reads the bytes, pins to Pinata, hashes with SHA-256, returns `{ ipfsUri, sha256, size }`. 4MB cap (kept under Vercel's fixed 4.5MB request-body limit), 10s SSRF-guarded fetch timeout, `maxDuration: 30` in `frontend/vercel.json`.
+- `frontend/api/_lib/ssrf.js` — SSRF guard for the URL-fetch path: http/https only, no embedded credentials, every DNS-resolved address validated (rejects if *any* resolved address is private/reserved, not just the first), connection pinned to the validated address via a custom `lookup` (closes the DNS-rebinding check-then-fetch gap), no redirects followed, byte cap enforced while streaming. Do not add `::ffff:0:0/96` directly to the `net.BlockList` if touching this — it collides with the plain IPv4 subnets and silently blocks every IPv4 address; mapped addresses are unwrapped and re-checked instead.
+- `frontend/api/_lib/pinata.js` — thin wrapper around Pinata's pinning REST API.
+- `frontend/src/utils/invoicePin.js` — frontend helper calling the route above (`pinFile`/`pinUrl`).
+- `frontend/src/utils/ipfsGateway.js` — converts the canonical `ipfs://` URI into an `https://` gateway link (browsers can't resolve `ipfs://` directly, for either navigation or `fetch()`). Passes any non-`ipfs://` value through unchanged, so escrows created before this feature (plain pasted links) keep working.
+- `frontend/src/components/InvoiceViewer.jsx` — in-app modal (built on `Modal.jsx`), opened from both `InvoiceCard.jsx`'s `AttachmentRow` and `CreateEscrow.jsx`'s `InvoiceUploader` (same component, not duplicated). One fetch serves both the SHA-256 verify check and the inline preview (image/PDF; other types fall back to "open in a new tab") — never two independent fetches, so what's displayed is provably the same bytes that were hash-checked. The trigger link's `onClick` only intercepts a plain left-click; Cmd/Ctrl/Shift-click and non-primary buttons fall through to the gateway `href` natively.
+
+**Env vars**: `PINATA_JWT` (server-side only, Vercel — never `VITE_`-prefixed), `VITE_PINATA_GATEWAY` (optional client override of the default gateway subdomain hardcoded in `ipfsGateway.js`).
+
+**SE-6 status — partially addressed, not fully closed**: `InvoiceViewer` and `AttachmentRow`'s pre-existing manual "drop file to verify" fallback (kept for when the automatic fetch fails — rotted legacy link, CORS-blocked third-party host) now both compare the pinned attachment's SHA-256 against `attachments[0].sha256` and surface a clear verified/mismatch badge. **What's still open**: `EscrowDetail.jsx`'s `AckBanner` does not check verification status at all — the recipient can still click "Accept terms" even when the fingerprint fails to match. Also worth recording: SE-6's original wording ("hash the doc at invoiceURI and verify it equals invoiceHash") doesn't match the actual data model and shouldn't be read literally — `invoiceHash` commits to the whole JSON envelope, not to the attachment file's bytes; the attachment's own hash is one sub-field (`attachments[0].sha256`) inside that envelope, verified independently.
+
+**Test coverage**: `frontend/vitest.config.js` — the first test framework in this package (none existed before this work). Run via `npm test` from `frontend/`. Covers the pinning backend (`ssrf.js`, `pinata.js`, `pin-invoice.js`) and `InvoiceCard`/`InvoiceViewer`/`CreateEscrow`'s `InvoiceUploader`, including several safety-critical properties — multi-address DNS validation, byte-exact Pinata payload, single-fetch-serves-both-hash-and-preview, modifier-click still opens a new tab — each verified by temporarily reintroducing the bug it guards against, confirming the test fails, then reverting.
+
+---
+
 ## Key design notes
 
 - **Optimistic release**: recipient calls `claimDelivery`, depositor has a review window to dispute; after the window anyone can permissionlessly `release`.
@@ -272,4 +291,4 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
 ## Open FRONTEND follow-ups (not contract, not blocking)
 
 - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."
-- SE-6: frontend should hash the doc at invoiceURI and verify it equals invoiceHash before letting the recipient acknowledge.
+- SE-6 (remaining piece): `EscrowDetail.jsx`'s `AckBanner` should block "Accept terms" when `InvoiceViewer`'s SHA-256 check fails. Verification itself now exists (see "Frontend: invoice attachment pinning (IPFS)" above) — this is only the missing gate on acknowledgement.
