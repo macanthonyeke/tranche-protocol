@@ -679,17 +679,7 @@ contract TrancheProtocolInvariantTest is StdInvariant, Test, ITrancheProtocol {
     function invariant_BurnFloorAndH04() public view {
         uint256 n = tokenMessenger.callsLength();
         for (uint256 i = 0; i < n; i++) {
-            (
-                ,
-                uint256 amount,
-                uint32 destinationDomain,
-                ,
-                ,
-                ,
-                uint256 maxFee,
-                ,
-                ,
-            ) = tokenMessenger.calls(i);
+            (, uint256 amount, uint32 destinationDomain,,,, uint256 maxFee,,,) = tokenMessenger.calls(i);
             assertTrue(destinationDomain != ARC_DOMAIN, "arc leg should never burn through CCTP");
             assertGt(amount, CCTP_FORWARD_FEE, "cross-chain burn at/below forwarding-fee floor");
             assertLt(maxFee, amount, "maxFee >= burn amount (H-04 bypassed)");

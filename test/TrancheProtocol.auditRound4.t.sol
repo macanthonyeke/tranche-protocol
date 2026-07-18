@@ -550,11 +550,7 @@ contract TrancheProtocolAuditRound4Test is Base {
         assertEq(_maxFeeAt(before), CCTP_FORWARD_FEE, "burn carried the snapshot floor as maxFee");
         assertEq(escrow.refundBalances(recipient), 0, "recipient NOT credited; it was mailed");
         assertEq(escrow.refundBalances(refundTo), 899_900, "depositor refund leg");
-        assertEq(
-            uint256(_getMilestoneState(id, 0)),
-            uint256(MilestoneState.RELEASED),
-            "normal release, burned"
-        );
+        assertEq(uint256(_getMilestoneState(id, 0)), uint256(MilestoneState.RELEASED), "normal release, burned");
     }
 
     function test_Finding3_Split_MixedBurnAndDivert() public {
