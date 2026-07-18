@@ -288,6 +288,7 @@ Main screens:
 cd frontend
 npm install
 npm run dev
+npm test        # vitest — invoice-pinning backend + component suites
 ```
 
 ## Subgraph
@@ -480,6 +481,7 @@ Frontend responsive e2e tests run in the same workflow.
 |---|---|
 | `VITE_CONTRACT_ADDRESS` | Deployed contract address |
 | `VITE_GOLDSKY_ENDPOINT` | Goldsky subgraph query URL |
+| `VITE_PINATA_GATEWAY` | IPFS gateway subdomain for pinned invoice attachments (optional — defaults to the team's dedicated gateway) |
 
 `VITE_GOLDSKY_ENDPOINT` is required. The frontend has no 
 on-chain fallback for bulk reads — if this is unset, 
