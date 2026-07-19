@@ -1167,7 +1167,7 @@ function AdvancedSection({
                 </div>
                 {state.privateMode && (
                   <p className="text-[12.5px] text-ink-2 leading-relaxed">
-                    Download and keep your invoice file. Anyone verifying will need a copy of it.
+                    The invoice details are encrypted before they're stored off-chain. You and the freelancer can always decrypt it; the arbiter can too, but only while a dispute is open.
                     {state.attachmentURI && ' The attached document itself still sits at a public storage link — this only keeps the invoice details off-chain.'}
                   </p>
                 )}
