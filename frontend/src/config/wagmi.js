@@ -9,6 +9,22 @@ export const arcTestnet = defineChain({
   rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
   blockExplorers: {
     default: { name: 'Arc Explorer', url: 'https://testnet.arcscan.app' }
+  },
+  // Without this, wagmi's useReadContracts (useSupportedDomains,
+  // useEscrows, useArbiter) can't batch reads via multicall and instead
+  // fires one eth_call per read — e.g. ~25 individual requests just to
+  // check supportedDomains for every CCTP domain on /create. That flood
+  // trips the public RPC's rate limit (verified: 37/41 requests came back
+  // 429 on a single /create load), which is what actually produces "No
+  // chains available" / "Couldn't reach the contract." The canonical
+  // Multicall3 deployment is present on Arc Testnet (verified via
+  // eth_getCode, live since at least block 1) — declaring it here lets
+  // wagmi collapse all of those into one multicall.
+  contracts: {
+    multicall3: {
+      address: '0xcA11bde05977b3631167028862bE2a173976CA11',
+      blockCreated: 1
+    }
   }
 })
 
