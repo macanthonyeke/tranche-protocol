@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Readable } from 'node:stream'
 import { createHash } from 'node:crypto'
 import http from 'node:http'
+import { keccak256, toHex } from 'viem'
 import handler from './pin-invoice.js'
+import { deriveInvoiceKey, decryptInvoiceEnvelope } from './_lib/invoiceCrypto.js'
 
 function fakeReq(bodyBytes, headers) {
   const req = Readable.from([bodyBytes])
@@ -49,6 +51,7 @@ let server, port, receivedByMockPinata
 
 beforeEach(async () => {
   process.env.PINATA_JWT = 'test-jwt'
+  process.env.INVOICE_KEY_SECRET = 'test-secret'
   receivedByMockPinata = null
   server = http.createServer((req, res) => {
     const chunks = []
@@ -74,6 +77,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.PINATA_JWT
+  delete process.env.INVOICE_KEY_SECRET
   vi.unstubAllGlobals()
   await new Promise((resolve) => server.close(resolve))
 })
@@ -170,5 +174,62 @@ describe('POST /api/pin-invoice', () => {
 
     expect(res.statusCode).toBe(400)
     expect(res.body.error).toMatch(/no file was provided/i)
+  })
+})
+
+describe('POST /api/pin-invoice — private mode (encrypted envelope)', () => {
+  it('encrypts the invoice JSON, pins ciphertext (not plaintext), and the pinned blob decrypts back to the exact original bytes', async () => {
+    const invoiceJson = JSON.stringify({ version: 1, invoiceNumber: 'INV-PRIVATE-1', notes: 'sensitive terms' })
+    const invoiceHash = keccak256(toHex(invoiceJson))
+    const req = fakeReq(Buffer.from(JSON.stringify({ invoiceJson, invoiceHash })), { 'content-type': 'application/json' })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.ipfsUri).toBe('ipfs://bafyMOCKED')
+
+    const pinnedBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    // What Pinata received is ciphertext, not the plaintext invoice.
+    expect(pinnedBlob.includes(Buffer.from('INV-PRIVATE-1'))).toBe(false)
+
+    const key = deriveInvoiceKey(invoiceHash)
+    const decrypted = decryptInvoiceEnvelope(pinnedBlob, key)
+    expect(decrypted.toString('utf8')).toBe(invoiceJson)
+  })
+
+  it('rejects an invoiceHash that does not match the provided invoiceJson, instead of silently pinning an unrecoverable envelope', async () => {
+    const invoiceJson = JSON.stringify({ version: 1, invoiceNumber: 'INV-PRIVATE-2' })
+    const wrongHash = keccak256(toHex('something else entirely'))
+    const req = fakeReq(Buffer.from(JSON.stringify({ invoiceJson, invoiceHash: wrongHash })), { 'content-type': 'application/json' })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/invoiceHash does not match/i)
+    expect(receivedByMockPinata).toBeNull() // never reached Pinata
+  })
+
+  it('rejects invoiceJson with no invoiceHash', async () => {
+    const req = fakeReq(Buffer.from(JSON.stringify({ invoiceJson: '{}' })), { 'content-type': 'application/json' })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/invoiceHash is required/i)
+  })
+
+  it('fails clearly when INVOICE_KEY_SECRET is not configured', async () => {
+    delete process.env.INVOICE_KEY_SECRET
+    const invoiceJson = JSON.stringify({ version: 1 })
+    const invoiceHash = keccak256(toHex(invoiceJson))
+    const req = fakeReq(Buffer.from(JSON.stringify({ invoiceJson, invoiceHash })), { 'content-type': 'application/json' })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(500)
   })
 })

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAccount, useReadContract } from 'wagmi'
-import { decodeEventLog, keccak256, toHex } from 'viem'
+import { decodeEventLog } from 'viem'
 import { motion, AnimatePresence } from 'framer-motion'
 
 import PageHeader from '../components/PageHeader.jsx'
@@ -13,7 +13,8 @@ import TxModal from '../components/TxModal.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import ClayBar, { parseAmt, round2, ordinal } from '../components/ClayBar.jsx'
-import { pinFile, pinUrl } from '../utils/invoicePin.js'
+import { pinFile, pinUrl, pinPrivateInvoice } from '../utils/invoicePin.js'
+import { computeInvoiceHash } from '../utils/invoiceHash.js'
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
 import InvoiceViewer from '../components/InvoiceViewer.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
@@ -157,6 +158,11 @@ function Flow() {
   // Lifted out of AdvancedSection so jumping to a blocker inside it (chain,
   // invoice-pinning) can also expand the disclosure, not just scroll to it.
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  // Transient: only used during onDeposit()'s private-mode pin-and-encrypt
+  // step, which runs before depositTx.run() so depositTx.isBusy can't cover
+  // it on its own.
+  const [envelopePinning, setEnvelopePinning] = useState(false)
+  const [envelopeError, setEnvelopeError] = useState('')
 
   useEffect(() => {
     try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state)) } catch {}
@@ -376,7 +382,7 @@ function Flow() {
     }, { loadingMessage: 'Approve USDC in your wallet.' }).catch(() => {})
   }
 
-  const onDeposit = () => {
+  const onDeposit = async () => {
     if (!address) return
     const invoiceObject = {
       version: 1,
@@ -398,7 +404,27 @@ function Flow() {
       }] : []
     }
     const invoiceJson = JSON.stringify(invoiceObject)
-    const invoiceHash = keccak256(toHex(invoiceJson))
+    // Computed exactly once and reused below for both the on-chain deposit()
+    // argument and (private mode only) the pin-invoice request that derives
+    // the encryption key — see invoiceHash.js's file header for why this
+    // must never be recomputed independently.
+    const invoiceHash = computeInvoiceHash(invoiceJson)
+
+    let invoiceDataArg = invoiceJson
+    if (state.privateMode) {
+      setEnvelopeError('')
+      setEnvelopePinning(true)
+      try {
+        const { ipfsUri } = await pinPrivateInvoice(invoiceJson, invoiceHash)
+        invoiceDataArg = ipfsUri
+      } catch (err) {
+        setEnvelopeError(err.message || 'Could not encrypt and pin the invoice. Please try again.')
+        setEnvelopePinning(false)
+        return
+      }
+      setEnvelopePinning(false)
+    }
+
     const mintRecipient = addressToBytes32(state.freelancer)
     const deadline = BigInt(Math.floor(new Date(state.deadline).getTime() / 1000))
     const reviewWindow = BigInt(daysToSeconds(state.reviewWindowDays))
@@ -414,13 +440,13 @@ function Flow() {
       milestoneAmountsBigInt,
       deadline,
       [],
-      state.privateMode ? '' : invoiceJson
+      invoiceDataArg
     ]), { loadingMessage: 'Sign to create the escrow.' }).catch(() => {})
   }
 
   const reset = () => { setState(emptyState()); setTouched({}); try { localStorage.removeItem(DRAFT_KEY) } catch {} }
 
-  const busy = approveTx.isBusy || depositTx.isBusy
+  const busy = approveTx.isBusy || depositTx.isBusy || envelopePinning
   const canSubmit = Object.keys(errors).length === 0
 
   return (
@@ -468,6 +494,7 @@ function Flow() {
             onApprove={onApprove} onDeposit={onDeposit} address={address}
             allowanceLoading={allowanceLoading} allowanceIsError={allowanceIsError} refetchAllowance={refetchAllowance}
             usdcBalance={usdcBalance} balanceLoading={balanceLoading}
+            envelopePinning={envelopePinning} envelopeError={envelopeError}
             onJump={scrollToSection}
           />
           <div className="flex items-center justify-between pt-8">
@@ -1169,10 +1196,11 @@ function summarizeMissing(errors) {
 
 function ReviewSection({
   state, totalBaseUnits, errors, approved, approveTx, depositTx, onApprove, onDeposit, address,
-  allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading, onJump
+  allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading,
+  envelopePinning, envelopeError, onJump
 }) {
   const disconnected = !address
-  const busy = approveTx.isBusy || depositTx.isBusy
+  const busy = approveTx.isBusy || depositTx.isBusy || envelopePinning
   const hasInsufficientBalance = !balanceLoading && usdcBalance !== undefined
     && totalBaseUnits > 0n && BigInt(usdcBalance) < totalBaseUnits
   const chainName = getDomainName(state.destinationDomain)
@@ -1206,6 +1234,19 @@ function ReviewSection({
         <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 flex items-center gap-2.5 text-[13px] text-ink-2 leading-relaxed" role="status">
           <span className="text-clay"><SpinnerIcon /></span>
           Your document is still saving. This takes a few seconds, then you can continue.
+        </div>
+      )}
+
+      {envelopePinning && (
+        <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 flex items-center gap-2.5 text-[13px] text-ink-2 leading-relaxed" role="status">
+          <span className="text-clay"><SpinnerIcon /></span>
+          Encrypting your private invoice. This takes a few seconds, then your wallet will prompt you to sign.
+        </div>
+      )}
+
+      {envelopeError && !envelopePinning && (
+        <div className="rounded-xl border border-bad/30 bg-bad/10 px-4 py-3 text-[12.5px] text-bad leading-relaxed" role="alert">
+          {envelopeError}
         </div>
       )}
 

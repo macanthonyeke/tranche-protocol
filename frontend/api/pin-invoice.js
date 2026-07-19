@@ -12,8 +12,10 @@
 // reading it instead of buffering an arbitrary amount up front.
 
 import { createHash } from 'node:crypto'
+import { keccak256, toHex } from 'viem'
 import { fetchUrlSafely, SsrfError } from './_lib/ssrf.js'
 import { pinBytesToIPFS, PinataError } from './_lib/pinata.js'
+import { deriveInvoiceKey, encryptInvoiceEnvelope, InvoiceCryptoError } from './_lib/invoiceCrypto.js'
 
 // Kept under Vercel's fixed 4.5MB serverless function request-body limit, so
 // our own clear error fires first instead of the platform's generic 413.
@@ -65,6 +67,25 @@ function safeDecode(value, fallback) {
   }
 }
 
+// Private-mode invoice envelope: encrypt the exact invoiceJson the client
+// computed invoiceHash from (see frontend/src/utils/invoiceHash.js), then pin
+// the ciphertext instead of plaintext. invoiceHash is recomputed here from
+// the received invoiceJson and checked against the client-supplied value —
+// not to pick one over the other, but to fail loudly at pin time if the two
+// ever diverge. A mismatch here means the escrow this pin is for would carry
+// an on-chain invoiceHash that request-invoice-key.js can never reproduce a
+// matching key from, permanently stranding the ciphertext.
+async function pinPrivateInvoiceEnvelope({ invoiceJson, invoiceHash }) {
+  const recomputed = keccak256(toHex(invoiceJson))
+  if (recomputed.toLowerCase() !== String(invoiceHash).toLowerCase()) {
+    throw new RequestError('invoiceHash does not match the provided invoice JSON.')
+  }
+  const key = deriveInvoiceKey(invoiceHash)
+  const blob = encryptInvoiceEnvelope(invoiceJson, key)
+  const { ipfsUri } = await pinBytesToIPFS(blob, { filename: 'invoice.enc', contentType: 'application/octet-stream' })
+  return { ipfsUri }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
@@ -78,6 +99,16 @@ export default async function handler(req, res) {
 
     if (contentType.startsWith('application/json')) {
       const body = await readJsonBody(req)
+
+      if (typeof body?.invoiceJson === 'string') {
+        if (typeof body?.invoiceHash !== 'string' || !body.invoiceHash) {
+          throw new RequestError('invoiceHash is required alongside invoiceJson.')
+        }
+        const result = await pinPrivateInvoiceEnvelope({ invoiceJson: body.invoiceJson, invoiceHash: body.invoiceHash })
+        res.status(200).json(result)
+        return
+      }
+
       const url = typeof body?.url === 'string' ? body.url.trim() : ''
       if (!url) throw new RequestError('Provide a "url" to fetch, or upload a file directly.')
 
@@ -114,6 +145,10 @@ export default async function handler(req, res) {
     }
     if (err instanceof PinataError) {
       res.status(502).json({ error: err.message })
+      return
+    }
+    if (err instanceof InvoiceCryptoError) {
+      res.status(500).json({ error: err.message })
       return
     }
     console.error('pin-invoice failed:', err)

@@ -1,16 +1,22 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
-import { useReadContract } from 'wagmi'
+import { useAccount, useReadContract, useSignMessage } from 'wagmi'
 import InvoiceCard from './InvoiceCard.jsx'
 
-// InvoiceCard's only external dependency is wagmi's useReadContract (via its
-// internal useOnChainHash) — mocked so this can render without a live
+// InvoiceCard's external wagmi dependencies — useReadContract (via its
+// internal useOnChainHash) and useAccount/useSignMessage (via the private-
+// invoice unlock flow) — are mocked so this can render without a live
 // WagmiProvider/RPC connection. Everything else from wagmi is passed through
 // unchanged: config/wagmi.js (imported transitively via config/contract.js)
 // calls the real createConfig() at module load time.
 vi.mock('wagmi', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, useReadContract: vi.fn() }
+  return {
+    ...actual,
+    useReadContract: vi.fn(),
+    useAccount: vi.fn(() => ({ address: undefined })),
+    useSignMessage: vi.fn(() => ({ signMessageAsync: vi.fn() }))
+  }
 })
 
 afterEach(() => {

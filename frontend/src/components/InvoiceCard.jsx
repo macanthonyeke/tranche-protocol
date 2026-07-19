@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef } from 'react'
 import { keccak256, toHex } from 'viem'
-import { useReadContract } from 'wagmi'
+import { useAccount, useReadContract, useSignMessage } from 'wagmi'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { formatTimestamp, NO_ATTACHMENT_URI } from '../utils/format.js'
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
@@ -27,6 +27,64 @@ function useOnChainHash(escrowId) {
   return data?.invoiceHash ?? null
 }
 
+function hexToBytes(hex) {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
+  const bytes = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.substr(i * 2, 2), 16)
+  return bytes
+}
+
+// Drives the signature -> request-invoice-key -> fetch -> decrypt flow for a
+// private-mode invoice. The pinned blob is iv (12 bytes) || ciphertext ||
+// authTag — self-contained, so the only thing the server needs to return is
+// the raw AES key (see api/_lib/invoiceCrypto.js). Never auto-fires: signing
+// is only ever triggered by an explicit click, since prompting a wallet
+// signature with no user action is both bad UX and blocked by some wallets.
+function usePrivateInvoiceUnlock(escrowId, ipfsUri) {
+  const { address } = useAccount()
+  const { signMessageAsync } = useSignMessage()
+  const [state, setState] = useState({ status: 'idle', data: null, error: null })
+
+  const unlock = useCallback(async () => {
+    if (!address || !ipfsUri) return
+    setState({ status: 'unlocking', data: null, error: null })
+    try {
+      const message = `Access invoice for escrow ${escrowId} at ${Date.now()}`
+      const signature = await signMessageAsync({ message })
+
+      const [keyRes, blobRes] = await Promise.all([
+        fetch('/api/request-invoice-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ escrowId: String(escrowId), walletAddress: address, signature, message })
+        }),
+        fetch(toGatewayUrl(ipfsUri))
+      ])
+
+      if (!keyRes.ok) {
+        const body = await keyRes.json().catch(() => ({}))
+        throw new Error(body.error || 'Not authorized to unlock this invoice.')
+      }
+      if (!blobRes.ok) throw new Error('Could not fetch the encrypted invoice.')
+
+      const { key } = await keyRes.json()
+      const blobBytes = new Uint8Array(await blobRes.arrayBuffer())
+      if (blobBytes.length < 13) throw new Error('Encrypted invoice is corrupt.')
+
+      const iv = blobBytes.slice(0, 12)
+      const ciphertext = blobBytes.slice(12)
+      const cryptoKey = await crypto.subtle.importKey('raw', hexToBytes(key), 'AES-GCM', false, ['decrypt'])
+      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertext)
+
+      setState({ status: 'unlocked', data: new TextDecoder().decode(plainBuf), error: null })
+    } catch (err) {
+      setState({ status: 'error', data: null, error: err.message || 'Could not unlock this invoice.' })
+    }
+  }, [address, escrowId, ipfsUri, signMessageAsync])
+
+  return { ...state, unlock }
+}
+
 /* ---------- Main component ---------- */
 export default function InvoiceCard({
   escrowId,
@@ -36,16 +94,25 @@ export default function InvoiceCard({
   invoiceAcknowledgedAt,
   role
 }) {
-  // Private mode: invoiceData === '' means the depositor passed no data (private).
-  // Drop a file to reveal contents by comparing against the on-chain hash.
-  const isPrivate = invoiceData === '' || invoiceData == null
+  // Private mode: invoiceData === '' (legacy escrows, predating encrypted
+  // storage) means the depositor passed no data at all. An ipfs:// value is
+  // the newer case — an encrypted envelope, unlockable via signature by the
+  // recipient (always) or the arbiter (only during an open dispute). Either
+  // way, a manual "drop file to verify" is also always available below.
+  const isEncryptedPointer = typeof invoiceData === 'string' && invoiceData.startsWith('ipfs://')
+  const isPrivate = invoiceData === '' || invoiceData == null || isEncryptedPointer
   const showAckChip = invoiceAcknowledgedAt !== undefined
 
   const [revealedData, setRevealedData] = useState(null)
   const [invoiceDropError, setInvoiceDropError] = useState(null)
   const [attachStatus, setAttachStatus] = useState(null) // null | 'verified' | error-string
+  const unlock = usePrivateInvoiceUnlock(escrowId, isEncryptedPointer ? invoiceData : null)
 
-  const effectiveData = revealedData ?? (!isPrivate ? invoiceData : null)
+  // Hash verification below (verifyStatus) runs against effectiveData
+  // unconditionally, so an unlocked private invoice is checked exactly the
+  // same way a public one is — against the DECRYPTED bytes, since
+  // invoiceHash was always computed over the plaintext envelope.
+  const effectiveData = revealedData ?? unlock.data ?? (!isPrivate ? invoiceData : null)
   const onChainHash = useOnChainHash(escrowId)
 
   // Verification: compare keccak256(effectiveData) to on-chain hash.
@@ -98,16 +165,21 @@ export default function InvoiceCard({
     }
   }, [])
 
-  /* --- Private mode (no data, drop to verify) --- */
-  if (isPrivate && !revealedData) {
+  /* --- Private mode (no data, or an encrypted pointer not yet unlocked) --- */
+  if (isPrivate && !revealedData && !unlock.data) {
     return (
       <div className="flex flex-col gap-2">
         <p className="text-[10px] uppercase tracking-[0.18em] text-ink-3 font-medium">Invoice</p>
+        {isEncryptedPointer && (
+          <PrivateUnlock status={unlock.status} error={unlock.error} onUnlock={unlock.unlock} />
+        )}
         <FileDrop
-          label="This invoice is private. Drop the invoice file to verify it."
+          label={isEncryptedPointer
+            ? 'Or drop the original invoice file to verify it manually.'
+            : 'This invoice is private. Drop the invoice file to verify it.'}
           onFile={handleInvoiceFile}
           error={invoiceDropError}
-          fullCard
+          fullCard={!isEncryptedPointer}
         />
       </div>
     )
@@ -330,6 +402,35 @@ function AckChip({ acknowledgedAt }) {
     <div className="inline-flex items-center gap-1.5 text-[11px] text-ink-3">
       <span className="inline-block h-1.5 w-1.5 rounded-full bg-ink-3/50" aria-hidden />
       Awaiting recipient acknowledgment
+    </div>
+  )
+}
+
+/* ---------- Private invoice unlock ---------- */
+function PrivateUnlock({ status, error, onUnlock }) {
+  if (status === 'unlocking') {
+    return (
+      <div className="rounded-xl bg-sunk border border-rule-2 px-4 py-3 flex items-center gap-2.5 text-[13px] text-ink-2 leading-relaxed" role="status">
+        <SpinnerIcon size={13} />
+        Check your wallet to unlock this invoice…
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-xl border border-rule bg-paper px-4 py-3.5 flex flex-col gap-2.5">
+      <p className="text-[12.5px] text-ink-2 leading-relaxed">
+        This invoice is private. Sign a message with your wallet to decrypt it.
+      </p>
+      {error && (
+        <div className="rounded-lg border border-bad/30 bg-bad/10 px-3 py-2 flex items-start gap-1.5 text-[12px] text-bad">
+          <WarnIcon size={12} />
+          <span>{error}</span>
+        </div>
+      )}
+      <button type="button" className="btn-secondary text-[12.5px] py-1.5 self-start" onClick={onUnlock}>
+        Unlock private invoice
+      </button>
     </div>
   )
 }

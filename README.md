@@ -99,9 +99,16 @@ This means:
   JSON and comparing it to the on-chain `invoiceHash`
 - File attachments include client-side content hashes, so the 
   actual file is verifiable even if the link dies
-- Private mode: the frontend hashes the JSON but emits an empty 
-  string in the event. Both parties keep a local copy. Verification 
-  works by dragging the file into the verify UI.
+- Private mode: the frontend encrypts the JSON (AES-256-GCM) and 
+  pins the ciphertext to IPFS, emitting the ciphertext's `ipfs://` 
+  URI in the event instead of the plaintext. The escrow's payer 
+  and recipient can always decrypt it; the arbiter can decrypt 
+  it only while a milestone is under dispute — all by signing a 
+  short-lived challenge message that `api/request-invoice-key.js` 
+  verifies before releasing the key. No key is ever stored: it's derived 
+  deterministically server-side from a secret and the invoice's 
+  own hash. A manual "drag the file to verify" fallback still 
+  exists for when the automatic fetch/decrypt fails.
 
 Recipients can call `acknowledgeInvoice` to create an on-chain 
 record of acceptance. This is never required to claim payment, 
@@ -482,6 +489,8 @@ Frontend responsive e2e tests run in the same workflow.
 | `VITE_CONTRACT_ADDRESS` | Deployed contract address |
 | `VITE_GOLDSKY_ENDPOINT` | Goldsky subgraph query URL |
 | `VITE_PINATA_GATEWAY` | IPFS gateway subdomain for pinned invoice attachments (optional — defaults to the team's dedicated gateway) |
+| `PINATA_JWT` | Server-side only (`api/pin-invoice.js`). Pinata JWT for pinning invoice attachments and encrypted private-invoice envelopes to IPFS. |
+| `INVOICE_KEY_SECRET` | Server-side only (`api/pin-invoice.js`, `api/request-invoice-key.js`). Secret used to deterministically derive each private-mode invoice's AES-256 decryption key — no key is ever stored. Rotating it permanently strands every previously pinned private invoice. |
 
 `VITE_GOLDSKY_ENDPOINT` is required. The frontend has no 
 on-chain fallback for bulk reads — if this is unset, 

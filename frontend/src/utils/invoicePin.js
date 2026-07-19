@@ -68,3 +68,28 @@ export async function pinUrl(url) {
   if (!res.ok) throw await parseError(res, 'Could not pin that URL. Please try again.')
   return res.json()
 }
+
+/**
+ * Encrypt and pin a private-mode invoice envelope. `invoiceHash` must be the
+ * exact value computeInvoiceHash(invoiceJson) already produced for this
+ * submission — see frontend/src/utils/invoiceHash.js's file header for why
+ * this can never be recomputed independently.
+ * @param {string} invoiceJson
+ * @param {`0x${string}`} invoiceHash
+ * @returns {Promise<{ ipfsUri: string }>}
+ */
+export async function pinPrivateInvoice(invoiceJson, invoiceHash) {
+  let res
+  try {
+    res = await fetch('/api/pin-invoice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invoiceJson, invoiceHash })
+    })
+  } catch {
+    throw new Error('Could not reach the pinning service. Check your connection and try again.')
+  }
+
+  if (!res.ok) throw await parseError(res, 'Could not encrypt and pin the invoice. Please try again.')
+  return res.json()
+}
