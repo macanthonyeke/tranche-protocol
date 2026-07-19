@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto'
 import http from 'node:http'
 import { keccak256, toHex } from 'viem'
 import handler from './pin-invoice.js'
-import { deriveInvoiceKey, decryptInvoiceEnvelope } from './_lib/invoiceCrypto.js'
+import { deriveInvoiceKey, deriveAttachmentKey, decryptEnvelope, decryptBytes } from './_lib/invoiceCrypto.js'
+import { verifyUnpinToken } from './_lib/unpinToken.js'
 
 function fakeReq(bodyBytes, headers) {
   const req = Readable.from([bodyBytes])
@@ -52,6 +53,7 @@ let server, port, receivedByMockPinata
 beforeEach(async () => {
   process.env.PINATA_JWT = 'test-jwt'
   process.env.INVOICE_KEY_SECRET = 'test-secret'
+  process.env.UNPIN_TOKEN_SECRET = 'test-unpin-secret'
   receivedByMockPinata = null
   server = http.createServer((req, res) => {
     const chunks = []
@@ -78,6 +80,7 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.PINATA_JWT
   delete process.env.INVOICE_KEY_SECRET
+  delete process.env.UNPIN_TOKEN_SECRET
   vi.unstubAllGlobals()
   await new Promise((resolve) => server.close(resolve))
 })
@@ -107,6 +110,12 @@ describe('POST /api/pin-invoice', () => {
 
     const pinnedFilePart = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
     expect(pinnedFilePart.equals(fileBytes)).toBe(true) // what got pinned is byte-identical to what was uploaded
+
+    // A public pin also gets an unpin capability, scoped to exactly this CID
+    // (bafyMOCKED — see unpin-invoice.js / setPrivateMode's cleanup path).
+    expect(typeof res.body.unpinToken).toBe('string')
+    expect(verifyUnpinToken('bafyMOCKED', res.body.unpinToken)).toBe(true)
+    expect(verifyUnpinToken('bafySOMEOTHERCID', res.body.unpinToken)).toBe(false)
   })
 
   it('fetches a URL server-side, pins the exact fetched bytes, and returns a matching hash', { timeout: 10_000, retry: 2 }, async () => {
@@ -194,8 +203,9 @@ describe('POST /api/pin-invoice — private mode (encrypted envelope)', () => {
     expect(pinnedBlob.includes(Buffer.from('INV-PRIVATE-1'))).toBe(false)
 
     const key = deriveInvoiceKey(invoiceHash)
-    const decrypted = decryptInvoiceEnvelope(pinnedBlob, key)
+    const { plaintext: decrypted, attachmentSalt } = decryptEnvelope(pinnedBlob, key)
     expect(decrypted.toString('utf8')).toBe(invoiceJson)
+    expect(attachmentSalt).toBeNull() // no attachmentSalt was sent
   })
 
   it('rejects an invoiceHash that does not match the provided invoiceJson, instead of silently pinning an unrecoverable envelope', async () => {
@@ -231,5 +241,181 @@ describe('POST /api/pin-invoice — private mode (encrypted envelope)', () => {
     await handler(req, res)
 
     expect(res.statusCode).toBe(500)
+  })
+
+  it('embeds a client-supplied attachmentSalt in the envelope header, extractable and usable to derive the attachment key', async () => {
+    const invoiceJson = JSON.stringify({ version: 1, invoiceNumber: 'INV-PRIVATE-3', attachments: [{ uri: 'ipfs://bafyATTACHMENT' }] })
+    const invoiceHash = keccak256(toHex(invoiceJson))
+    const attachmentSalt = '0x' + 'ab'.repeat(16)
+    const req = fakeReq(
+      Buffer.from(JSON.stringify({ invoiceJson, invoiceHash, attachmentSalt })),
+      { 'content-type': 'application/json' }
+    )
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    const pinnedBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    const key = deriveInvoiceKey(invoiceHash)
+    const { plaintext: decrypted, attachmentSalt: extractedSalt } = decryptEnvelope(pinnedBlob, key)
+
+    expect(decrypted.toString('utf8')).toBe(invoiceJson)
+    expect(`0x${extractedSalt.toString('hex')}`).toBe(attachmentSalt)
+    // The exact key request-invoice-key.js would derive from this salt.
+    expect(deriveAttachmentKey(extractedSalt).equals(deriveAttachmentKey(attachmentSalt))).toBe(true)
+  })
+
+  it('rejects a malformed attachmentSalt', async () => {
+    const invoiceJson = JSON.stringify({ version: 1 })
+    const invoiceHash = keccak256(toHex(invoiceJson))
+    const req = fakeReq(
+      Buffer.from(JSON.stringify({ invoiceJson, invoiceHash, attachmentSalt: 'not-hex' })),
+      { 'content-type': 'application/json' }
+    )
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/16-byte hex/i)
+  })
+})
+
+describe('POST /api/pin-invoice — private mode (encrypted attachment)', () => {
+  it('encrypts an uploaded file (X-Private header), pins ciphertext, and returns a plaintext sha256 + usable salt', async () => {
+    const fileBytes = Buffer.from('%PDF-1.4 fake private attachment bytes')
+    const req = fakeReq(fileBytes, {
+      'content-type': 'application/pdf',
+      'x-filename': encodeURIComponent('secret.pdf'),
+      'x-private': 'true'
+    })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.sha256).toBe(sha256Hex(fileBytes)) // hash of PLAINTEXT, unchanged contract
+    expect(res.body.mime).toBe('application/pdf')
+    expect(typeof res.body.salt).toBe('string')
+
+    const pinnedBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    expect(pinnedBlob.includes(fileBytes)).toBe(false) // ciphertext, not plaintext, reached Pinata
+
+    const key = deriveAttachmentKey(res.body.salt)
+    const decrypted = decryptBytes(pinnedBlob, key)
+    expect(decrypted.equals(fileBytes)).toBe(true)
+  })
+
+  it('sha256 is computed on the plaintext BEFORE encryption, not on the ciphertext that actually gets pinned', async () => {
+    // Dedicated, narrow proof of the invariant — would fail immediately if
+    // the implementation were ever reordered to hash after encrypting.
+    const fileBytes = Buffer.from('the exact bytes attachments[0].sha256 must commit to')
+    const req = fakeReq(fileBytes, {
+      'content-type': 'application/octet-stream',
+      'x-filename': encodeURIComponent('doc'),
+      'x-private': 'true'
+    })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.sha256).toBe(sha256Hex(fileBytes))
+
+    const pinnedCiphertext = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    // The returned hash must NOT match what was actually pinned — proof
+    // it's the plaintext's hash, not the ciphertext's.
+    expect(res.body.sha256).not.toBe(sha256Hex(pinnedCiphertext))
+  })
+
+  it('encrypts a fetched URL (private:true), pins ciphertext, and returns a plaintext sha256', { timeout: 10_000, retry: 2 }, async () => {
+    const req = fakeReq(
+      Buffer.from(JSON.stringify({ url: 'http://example.com/', private: true })),
+      { 'content-type': 'application/json' }
+    )
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(typeof res.body.salt).toBe('string')
+
+    const pinnedBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    const key = deriveAttachmentKey(res.body.salt)
+    const decrypted = decryptBytes(pinnedBlob, key)
+    expect(res.body.sha256).toBe(sha256Hex(decrypted)) // sha256 matches the DECRYPTED (plaintext) bytes
+  })
+
+  it('a public (non-private) upload is unaffected — still pins plaintext, exact pre-existing behavior', async () => {
+    const fileBytes = Buffer.from('%PDF-1.4 public attachment')
+    const req = fakeReq(fileBytes, { 'content-type': 'application/pdf', 'x-filename': encodeURIComponent('public.pdf') })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.salt).toBeUndefined()
+    const pinnedFilePart = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    expect(pinnedFilePart.equals(fileBytes)).toBe(true) // still plaintext
+  })
+})
+
+describe('POST /api/pin-invoice — full private-mode round trip (attachment + envelope)', () => {
+  it('attachment pin -> invoiceHash over the final envelope -> envelope pin (embedding the salt) -> viewing-side decrypt of both', async () => {
+    // 1. Attachment first — its ciphertext URI has to exist before the
+    // envelope that references it can be hashed.
+    const attachmentBytes = Buffer.from('%PDF-1.4 the real contract')
+    const attachmentReq = fakeReq(attachmentBytes, {
+      'content-type': 'application/pdf',
+      'x-filename': encodeURIComponent('contract.pdf'),
+      'x-private': 'true'
+    })
+    const attachmentRes = fakeRes()
+    await handler(attachmentReq, attachmentRes)
+    expect(attachmentRes.statusCode).toBe(200)
+    const { ipfsUri: attachmentUri, sha256: attachmentSha256, salt: attachmentSalt, mime } = attachmentRes.body
+    // receivedByMockPinata gets overwritten by the next handler() call
+    // below, so snapshot the attachment's ciphertext blob now.
+    const attachmentCiphertext = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+
+    // 2. Fold the attachment's ciphertext URI into the envelope, hash the
+    // now-final envelope.
+    const invoiceObject = {
+      version: 1,
+      invoiceNumber: 'INV-FULL-ROUNDTRIP',
+      attachments: [{ uri: attachmentUri, sha256: attachmentSha256, mime }]
+    }
+    const invoiceJson = JSON.stringify(invoiceObject)
+    const invoiceHash = keccak256(toHex(invoiceJson))
+
+    // 3. Pin the envelope, embedding the attachment's salt in its header.
+    const envelopeReq = fakeReq(
+      Buffer.from(JSON.stringify({ invoiceJson, invoiceHash, attachmentSalt })),
+      { 'content-type': 'application/json' }
+    )
+    const envelopeRes = fakeRes()
+    await handler(envelopeReq, envelopeRes)
+    expect(envelopeRes.statusCode).toBe(200)
+
+    // 4. Viewing side: fetch (here, read directly from the mock Pinata
+    // capture) the envelope blob, decrypt it with the invoiceHash-derived
+    // key, extract the attachment salt from its header, derive the
+    // attachment key, decrypt the attachment, and confirm everything
+    // matches what was pinned.
+    const envelopeBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
+    const envelopeKey = deriveInvoiceKey(invoiceHash)
+    const { plaintext: decryptedEnvelope, attachmentSalt: saltFromEnvelope } = decryptEnvelope(envelopeBlob, envelopeKey)
+    expect(decryptedEnvelope.toString('utf8')).toBe(invoiceJson)
+    expect(`0x${saltFromEnvelope.toString('hex')}`).toBe(attachmentSalt)
+
+    // 5. Decrypt the attachment itself using ONLY what a viewer would have:
+    // the salt read out of the (now-decrypted) envelope — never the
+    // original attachmentSalt variable directly — proving the salt really
+    // did survive the envelope round trip intact.
+    const attachmentKey = deriveAttachmentKey(saltFromEnvelope)
+    const decryptedAttachment = decryptBytes(attachmentCiphertext, attachmentKey)
+    expect(decryptedAttachment.equals(attachmentBytes)).toBe(true)
+    expect(attachmentSha256).toBe(sha256Hex(attachmentBytes))
   })
 })

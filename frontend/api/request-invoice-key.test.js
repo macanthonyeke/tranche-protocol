@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { privateKeyToAccount } from 'viem/accounts'
 import handler from './request-invoice-key.js'
 import { getEscrowDetailFor } from './_lib/chain.js'
-import { deriveInvoiceKey } from './_lib/invoiceCrypto.js'
+import { deriveInvoiceKey, deriveAttachmentKey } from './_lib/invoiceCrypto.js'
 
 vi.mock('./_lib/chain.js', () => ({ getEscrowDetailFor: vi.fn() }))
 
@@ -193,5 +193,51 @@ describe('POST /api/request-invoice-key', () => {
     }), res)
 
     expect(res.statusCode).toBe(400)
+  })
+
+  it('returns an attachmentKey alongside key when attachmentSalt is supplied — same one authorization check covers both', async () => {
+    mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    const { message, signature } = await signChallenge(RECIPIENT, 5)
+    const attachmentSalt = `0x${'cd'.repeat(16)}`
+    const res = fakeRes()
+
+    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message, attachmentSalt }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.key).toBe(`0x${deriveInvoiceKey(INVOICE_HASH).toString('hex')}`)
+    expect(res.body.attachmentKey).toBe(`0x${deriveAttachmentKey(attachmentSalt).toString('hex')}`)
+  })
+
+  it('omits attachmentKey when no attachmentSalt is supplied (escrow has no attachment)', async () => {
+    mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    const { message, signature } = await signChallenge(RECIPIENT, 5)
+    const res = fakeRes()
+
+    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message }), res)
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body.attachmentKey).toBeUndefined()
+  })
+
+  it('rejects a malformed attachmentSalt', async () => {
+    mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    const { message, signature } = await signChallenge(RECIPIENT, 5)
+    const res = fakeRes()
+
+    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message, attachmentSalt: 'not-hex' }), res)
+
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('still rejects an unauthorized wallet even when attachmentSalt is supplied — no partial authorization', async () => {
+    mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    const { message, signature } = await signChallenge(STRANGER, 5)
+    const attachmentSalt = `0x${'cd'.repeat(16)}`
+    const res = fakeRes()
+
+    await handler(fakeReq({ escrowId: '5', walletAddress: STRANGER.address, signature, message, attachmentSalt }), res)
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.attachmentKey).toBeUndefined()
   })
 })

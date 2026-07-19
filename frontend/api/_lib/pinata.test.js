@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import http from 'node:http'
-import { pinBytesToIPFS, PinataError } from './pinata.js'
+import { pinBytesToIPFS, unpinFromIPFS, PinataError } from './pinata.js'
 
 let server
 let port
@@ -13,7 +13,7 @@ beforeEach(async () => {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
-      received = { headers: req.headers, body: Buffer.concat(chunks) }
+      received = { method: req.method, headers: req.headers, body: Buffer.concat(chunks) }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ IpfsHash: 'bafyMOCKCID', PinSize: received.body.length }))
     })
@@ -31,6 +31,19 @@ afterEach(async () => {
 function pointFetchAtMockServer() {
   const realFetch = globalThis.fetch
   vi.stubGlobal('fetch', (url, opts) => realFetch(`http://127.0.0.1:${port}/`, opts))
+}
+
+// Same redirect as pointFetchAtMockServer, but also records the ORIGINAL
+// requested URL (pointFetchAtMockServer discards it) so tests can assert
+// which Pinata endpoint/path was actually hit.
+function pointFetchAtMockServerCapturingUrl() {
+  const realFetch = globalThis.fetch
+  const calls = []
+  vi.stubGlobal('fetch', (url, opts) => {
+    calls.push(String(url))
+    return realFetch(`http://127.0.0.1:${port}/`, opts)
+  })
+  return calls
 }
 
 // Extracts exactly the "file" field's payload bytes from a multipart body,
@@ -106,5 +119,43 @@ describe('pinBytesToIPFS', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
 
     await expect(pinBytesToIPFS(Buffer.from('x'))).rejects.toThrow(PinataError)
+  })
+})
+
+describe('unpinFromIPFS', () => {
+  it('refuses to unpin without PINATA_JWT configured, without making a network call', async () => {
+    delete process.env.PINATA_JWT
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    await expect(unpinFromIPFS('bafySOMECID')).rejects.toThrow(PinataError)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('sends a DELETE to the unpin endpoint for the given CID, with auth', async () => {
+    process.env.PINATA_JWT = 'test-jwt'
+    const calls = pointFetchAtMockServerCapturingUrl()
+
+    await unpinFromIPFS('bafySOMECID')
+
+    expect(calls).toEqual(['https://api.pinata.cloud/pinning/unpin/bafySOMECID'])
+    expect(received.method).toBe('DELETE')
+    expect(received.headers['authorization']).toBe('Bearer test-jwt')
+  })
+
+  it('surfaces a non-OK Pinata response as a PinataError with the response detail', async () => {
+    process.env.PINATA_JWT = 'test-jwt'
+    server.removeAllListeners('request')
+    server.on('request', (req, res) => { req.resume(); res.writeHead(404); res.end('not found') })
+    pointFetchAtMockServer()
+
+    await expect(unpinFromIPFS('bafySOMECID')).rejects.toThrow(/404.*not found/is)
+  })
+
+  it('wraps a network-level failure (fetch rejects) as a clean PinataError', async () => {
+    process.env.PINATA_JWT = 'test-jwt'
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
+
+    await expect(unpinFromIPFS('bafySOMECID')).rejects.toThrow(PinataError)
   })
 })

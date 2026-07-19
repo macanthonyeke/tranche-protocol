@@ -4,6 +4,7 @@ import { useAccount, useReadContract, useSignMessage } from 'wagmi'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 import { formatTimestamp, NO_ATTACHMENT_URI } from '../utils/format.js'
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
+import { unpackEnvelopeBlob } from '../utils/envelopeBlob.js'
 import InvoiceViewer from './InvoiceViewer.jsx'
 
 const ZERO_BYTES32 = '0x' + '0'.repeat(64)
@@ -34,51 +35,61 @@ function hexToBytes(hex) {
   return bytes
 }
 
-// Drives the signature -> request-invoice-key -> fetch -> decrypt flow for a
-// private-mode invoice. The pinned blob is iv (12 bytes) || ciphertext ||
-// authTag — self-contained, so the only thing the server needs to return is
-// the raw AES key (see api/_lib/invoiceCrypto.js). Never auto-fires: signing
-// is only ever triggered by an explicit click, since prompting a wallet
-// signature with no user action is both bad UX and blocked by some wallets.
+function bytesToHex(bytes) {
+  return '0x' + Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Drives the fetch -> signature -> request-invoice-key -> decrypt flow for a
+// private-mode invoice (and, if one exists, its attachment). The envelope
+// blob is fetched FIRST — before signing anything — because its own public
+// header may carry the attachment's derivation salt (see envelopeBlob.js);
+// reading that up front lets a single signed request return both the
+// envelope key and the attachment key, instead of needing a second
+// signature once the attachment's existence is discovered by decrypting the
+// envelope. Never auto-fires: signing is only ever triggered by an explicit
+// click, since prompting a wallet signature with no user action is both bad
+// UX and blocked by some wallets.
 function usePrivateInvoiceUnlock(escrowId, ipfsUri) {
   const { address } = useAccount()
   const { signMessageAsync } = useSignMessage()
-  const [state, setState] = useState({ status: 'idle', data: null, error: null })
+  const [state, setState] = useState({ status: 'idle', data: null, attachmentKey: null, error: null })
 
   const unlock = useCallback(async () => {
     if (!address || !ipfsUri) return
-    setState({ status: 'unlocking', data: null, error: null })
+    setState({ status: 'unlocking', data: null, attachmentKey: null, error: null })
     try {
+      const blobRes = await fetch(toGatewayUrl(ipfsUri))
+      if (!blobRes.ok) throw new Error('Could not fetch the encrypted invoice.')
+      const { iv, ciphertextAndTag, attachmentSalt } = unpackEnvelopeBlob(new Uint8Array(await blobRes.arrayBuffer()))
+
       const message = `Access invoice for escrow ${escrowId} at ${Date.now()}`
       const signature = await signMessageAsync({ message })
 
-      const [keyRes, blobRes] = await Promise.all([
-        fetch('/api/request-invoice-key', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ escrowId: String(escrowId), walletAddress: address, signature, message })
-        }),
-        fetch(toGatewayUrl(ipfsUri))
-      ])
-
+      const keyRes = await fetch('/api/request-invoice-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          escrowId: String(escrowId), walletAddress: address, signature, message,
+          ...(attachmentSalt ? { attachmentSalt: bytesToHex(attachmentSalt) } : {})
+        })
+      })
       if (!keyRes.ok) {
         const body = await keyRes.json().catch(() => ({}))
         throw new Error(body.error || 'Not authorized to unlock this invoice.')
       }
-      if (!blobRes.ok) throw new Error('Could not fetch the encrypted invoice.')
+      const { key, attachmentKey } = await keyRes.json()
 
-      const { key } = await keyRes.json()
-      const blobBytes = new Uint8Array(await blobRes.arrayBuffer())
-      if (blobBytes.length < 13) throw new Error('Encrypted invoice is corrupt.')
-
-      const iv = blobBytes.slice(0, 12)
-      const ciphertext = blobBytes.slice(12)
       const cryptoKey = await crypto.subtle.importKey('raw', hexToBytes(key), 'AES-GCM', false, ['decrypt'])
-      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertext)
+      const plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertextAndTag)
 
-      setState({ status: 'unlocked', data: new TextDecoder().decode(plainBuf), error: null })
+      setState({
+        status: 'unlocked',
+        data: new TextDecoder().decode(plainBuf),
+        attachmentKey: attachmentKey ?? null,
+        error: null
+      })
     } catch (err) {
-      setState({ status: 'error', data: null, error: err.message || 'Could not unlock this invoice.' })
+      setState({ status: 'error', data: null, attachmentKey: null, error: err.message || 'Could not unlock this invoice.' })
     }
   }, [address, escrowId, ipfsUri, signMessageAsync])
 
@@ -202,9 +213,16 @@ export default function InvoiceCard({
   // don't trust attachments[0]'s field types. uri feeds toGatewayUrl()
   // (calls .startsWith) and sha256 feeds .slice()/.toLowerCase() downstream;
   // a crafted non-string value there would throw and crash this render.
+  // mime is only ever set for private-mode attachments (see
+  // attachmentFlow.js) — InvoiceViewer needs it post-decrypt, since the
+  // gateway only ever reports "application/octet-stream" for ciphertext.
   const rawAttachment = parsed.attachments?.[0]
   const attachment = typeof rawAttachment?.uri === 'string'
-    ? { uri: rawAttachment.uri, sha256: typeof rawAttachment.sha256 === 'string' ? rawAttachment.sha256 : null }
+    ? {
+        uri: rawAttachment.uri,
+        sha256: typeof rawAttachment.sha256 === 'string' ? rawAttachment.sha256 : null,
+        mime: typeof rawAttachment.mime === 'string' ? rawAttachment.mime : null
+      }
     : null
 
   return (
@@ -246,6 +264,7 @@ export default function InvoiceCard({
         <AttachmentRow
           attachment={attachment}
           status={attachStatus}
+          decryptKey={isEncryptedPointer ? unlock.attachmentKey : null}
           onFile={attachment.sha256
             ? (f) => handleAttachFile(f, attachment.sha256)
             : null
@@ -290,7 +309,7 @@ function LineItemsTable({ items }) {
 }
 
 /* ---------- Attachment row ---------- */
-function AttachmentRow({ attachment, status, onFile }) {
+function AttachmentRow({ attachment, status, decryptKey, onFile }) {
   const [viewerOpen, setViewerOpen] = useState(false)
   return (
     <div className="flex flex-col gap-2">
@@ -349,7 +368,7 @@ function AttachmentRow({ attachment, status, onFile }) {
         )}
       </div>
 
-      <InvoiceViewer open={viewerOpen} onClose={() => setViewerOpen(false)} attachment={attachment} />
+      <InvoiceViewer open={viewerOpen} onClose={() => setViewerOpen(false)} attachment={attachment} decryptKey={decryptKey} />
     </div>
   )
 }

@@ -7,6 +7,13 @@ async function sha256Hex(buf) {
   return '0x' + Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+function hexToBytes(hex) {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
+  const bytes = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.substr(i * 2, 2), 16)
+  return bytes
+}
+
 const PDF_TYPE = 'application/pdf'
 const isImageType = (type) => typeof type === 'string' && type.startsWith('image/')
 
@@ -16,25 +23,57 @@ const isImageType = (type) => typeof type === 'string' && type.startsWith('image
 // (an object URL built from the same ArrayBuffer) — never a second,
 // independent fetch, so what's displayed is guaranteed to be what got
 // hash-checked.
-export default function InvoiceViewer({ open, onClose, attachment }) {
+//
+// Two alternate byte sources, mutually exclusive with the gateway fetch and
+// with each other:
+//   - `localFile`: a File/Blob not yet pinned anywhere (private-mode
+//     attachment during Create Escrow, before onDeposit() has run). No
+//     network fetch, no sha256 to verify against yet (nothing's been
+//     committed to), just an immediate local preview.
+//   - `decryptKey`: attachment.uri points at ciphertext (private-mode,
+//     already pinned). Fetched bytes are iv(12)||ciphertext+tag — decrypted
+//     via Web Crypto before the hash-verify/preview steps below run, so
+//     verification is always against the plaintext, matching invoiceHash
+//     verification's own decrypted-bytes-only rule. attachment.mime carries
+//     the original content-type, since the gateway only ever reports
+//     "application/octet-stream" for the ciphertext itself.
+export default function InvoiceViewer({ open, onClose, attachment, localFile, decryptKey }) {
   const [state, setState] = useState({ status: 'idle' })
   const [objectUrl, setObjectUrl] = useState(null)
 
   useEffect(() => {
-    if (!open || !attachment?.uri) return
+    if (!open || (!attachment?.uri && !localFile)) return
     let cancelled = false
     setState({ status: 'loading' })
 
     ;(async () => {
       try {
-        const res = await fetch(toGatewayUrl(attachment.uri))
-        if (!res.ok) throw new Error(`fetch failed with status ${res.status}`)
-        const contentType = (res.headers.get('content-type') || '').split(';')[0].trim()
-        const buf = await res.arrayBuffer()
+        let buf, contentType
+
+        if (localFile) {
+          buf = await localFile.arrayBuffer()
+          contentType = localFile.type
+        } else {
+          const res = await fetch(toGatewayUrl(attachment.uri))
+          if (!res.ok) throw new Error(`fetch failed with status ${res.status}`)
+          const fetched = await res.arrayBuffer()
+
+          if (decryptKey) {
+            const bytes = new Uint8Array(fetched)
+            const iv = bytes.slice(0, 12)
+            const ciphertext = bytes.slice(12)
+            const cryptoKey = await crypto.subtle.importKey('raw', hexToBytes(decryptKey), 'AES-GCM', false, ['decrypt'])
+            buf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, ciphertext)
+            contentType = attachment.mime || ''
+          } else {
+            buf = fetched
+            contentType = (res.headers.get('content-type') || '').split(';')[0].trim()
+          }
+        }
         if (cancelled) return
 
         let verify = 'unavailable'
-        if (attachment.sha256) {
+        if (attachment?.sha256) {
           const computed = await sha256Hex(buf)
           verify = computed.toLowerCase() === attachment.sha256.toLowerCase() ? 'verified' : 'failed'
         }
@@ -49,7 +88,7 @@ export default function InvoiceViewer({ open, onClose, attachment }) {
     })()
 
     return () => { cancelled = true }
-  }, [open, attachment?.uri, attachment?.sha256])
+  }, [open, attachment?.uri, attachment?.sha256, attachment?.mime, decryptKey, localFile])
 
   // Revoke whichever object URL is current whenever it's replaced or the
   // modal unmounts, so repeated opens don't leak blob: URLs.
@@ -57,7 +96,11 @@ export default function InvoiceViewer({ open, onClose, attachment }) {
 
   if (!open) return null
 
-  const gatewayUrl = toGatewayUrl(attachment?.uri)
+  // A raw "open in a new tab" link only makes sense against plaintext the
+  // browser can fetch on its own — not a not-yet-pinned local file, and not
+  // ciphertext the browser has no way to decrypt outside this component.
+  const canOfferGatewayLink = !localFile && !decryptKey && !!attachment?.uri
+  const gatewayUrl = canOfferGatewayLink ? toGatewayUrl(attachment.uri) : null
   const canPreviewImage = state.status === 'ready' && isImageType(state.contentType)
   const canPreviewPdf = state.status === 'ready' && state.contentType === PDF_TYPE
 
@@ -67,7 +110,7 @@ export default function InvoiceViewer({ open, onClose, attachment }) {
         {state.status === 'loading' && (
           <div className="flex items-center justify-center gap-2 text-[13px] text-ink-3 py-16">
             <SpinnerIcon size={14} />
-            Loading and verifying…
+            {decryptKey ? 'Loading and decrypting…' : 'Loading and verifying…'}
           </div>
         )}
 
@@ -75,7 +118,10 @@ export default function InvoiceViewer({ open, onClose, attachment }) {
           <div className="rounded-lg border border-bad/30 bg-bad/10 px-3 py-2.5 flex items-start gap-1.5 text-[12.5px] text-bad">
             <WarnIcon size={12} />
             <span>
-              Could not load this file. <a href={gatewayUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">Open in a new tab</a> instead.
+              Could not load this file.
+              {canOfferGatewayLink && (
+                <> <a href={gatewayUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">Open in a new tab</a> instead.</>
+              )}
             </span>
           </div>
         )}
@@ -113,14 +159,16 @@ export default function InvoiceViewer({ open, onClose, attachment }) {
               <div className="rounded-xl border border-rule bg-sunk px-4 py-10 flex flex-col items-center gap-2 text-center">
                 <DocIcon />
                 <p className="text-[13px] text-ink-2">Preview not available for this file type.</p>
-                <a
-                  href={gatewayUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[12.5px] text-clay hover:opacity-80 underline-offset-2 hover:underline"
-                >
-                  Open in a new tab
-                </a>
+                {canOfferGatewayLink && (
+                  <a
+                    href={gatewayUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[12.5px] text-clay hover:opacity-80 underline-offset-2 hover:underline"
+                  >
+                    Open in a new tab
+                  </a>
+                )}
               </div>
             )}
           </>

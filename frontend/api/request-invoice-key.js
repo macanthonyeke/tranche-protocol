@@ -1,9 +1,18 @@
 // POST /api/request-invoice-key — signature-gated access to a private
-// escrow's invoice decryption key. Caller proves control of a wallet by
-// signing a short-lived challenge message; if that wallet is the escrow's
-// recipient or depositor (always), or the arbiter while the escrow has an
-// open dispute, the deterministically-derived key (see _lib/invoiceCrypto.js)
-// is returned.
+// escrow's invoice decryption key (and, optionally, its attachment key).
+// Caller proves control of a wallet by signing a short-lived challenge
+// message; if that wallet is the escrow's recipient or depositor (always),
+// or the arbiter while the escrow has an open dispute, the
+// deterministically-derived envelope key (see _lib/invoiceCrypto.js) is
+// returned.
+//
+// If the request also includes attachmentSalt — the client reads this out
+// of the envelope's own ciphertext header (envelopeBlob.js) once it's
+// fetched the envelope blob, before requesting any key — the attachment key
+// is derived and returned in the same response. Same authorization check,
+// no extra chain read: this is what lets one signature unlock both the
+// envelope and its attachment instead of requiring a second signed request
+// once the attachment's existence is discovered.
 //
 // No key is ever generated here and nothing is ever stored — see
 // _lib/invoiceCrypto.js's file header for the derivation design and its
@@ -11,7 +20,7 @@
 
 import { isAddress, recoverMessageAddress } from 'viem'
 import { getEscrowDetailFor } from './_lib/chain.js'
-import { deriveInvoiceKey, InvoiceCryptoError } from './_lib/invoiceCrypto.js'
+import { deriveInvoiceKey, deriveAttachmentKey, InvoiceCryptoError } from './_lib/invoiceCrypto.js'
 import { authorizeInvoiceKeyAccess } from './_lib/invoiceKeyAuth.js'
 
 // Both directions bounded: a message timestamped in the future would
@@ -38,7 +47,7 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body && typeof req.body === 'object' ? req.body : {}
-    const { escrowId, walletAddress, signature, message } = body
+    const { escrowId, walletAddress, signature, message, attachmentSalt } = body
 
     if (escrowId === undefined || escrowId === null || !/^\d+$/.test(String(escrowId))) {
       throw new RequestError('A valid escrowId is required.')
@@ -51,6 +60,9 @@ export default async function handler(req, res) {
     }
     if (typeof message !== 'string') {
       throw new RequestError('A message is required.')
+    }
+    if (attachmentSalt !== undefined && (typeof attachmentSalt !== 'string' || !/^(0x)?[0-9a-fA-F]{32}$/.test(attachmentSalt))) {
+      throw new RequestError('attachmentSalt must be a 16-byte hex string.')
     }
 
     const match = message.match(MESSAGE_RE)
@@ -99,7 +111,12 @@ export default async function handler(req, res) {
     }
 
     const key = deriveInvoiceKey(detail.escrow.invoiceHash)
-    res.status(200).json({ key: `0x${key.toString('hex')}` })
+    const responseBody = { key: `0x${key.toString('hex')}` }
+    if (attachmentSalt) {
+      const attachmentKey = deriveAttachmentKey(attachmentSalt)
+      responseBody.attachmentKey = `0x${attachmentKey.toString('hex')}`
+    }
+    res.status(200).json(responseBody)
   } catch (err) {
     if (err instanceof RequestError) {
       res.status(err.status).json({ error: err.message })
