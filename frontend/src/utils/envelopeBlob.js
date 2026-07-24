@@ -15,6 +15,27 @@
 // envelope. That's what lets one wallet signature authorize both the
 // envelope key and the attachment key, instead of requiring a second
 // signature once the attachment's location is discovered.
+//
+// No legacy-format fallback, deliberately: an earlier version of the
+// private-invoice feature (commit e39be6b, already on main at the time this
+// header format was introduced) pinned envelopes as plain iv(12) ||
+// ciphertext+authTag — no flag byte, no header at all. unpackEnvelopeBlob
+// below would misparse any blob in that old shape (it has no way to tell
+// "no header" from "flags byte happens to be 0x00/0x01", so a real IV's
+// first byte gets consumed as a fake flags byte, corrupting every offset
+// after it — AES-GCM auth then fails, permanently, since IPFS content can't
+// be edited after pinning). Before shipping this header format, the live
+// Goldsky subgraph was queried for any escrow with invoiceData starting
+// with "ipfs://" (the only way an old-format envelope could exist, since
+// that's what marks a private escrow that actually went through the
+// encryption path) — zero existed, out of 4 escrows total on the entire
+// deployment, all plaintext/public mode. The feature had never actually
+// been exercised through a real deposit() before this format shipped, so
+// there was nothing to migrate. If that's ever not true by the time this
+// merges (i.e. someone deposits a private escrow via the still-live old
+// code between this check and deploy), decryption for that one escrow will
+// fail with an opaque auth-tag mismatch, not a clear error — re-verify
+// before merging if this branch sits for a while.
 export const SALT_LEN = 16
 export const IV_LEN = 12
 export const FLAG_HAS_ATTACHMENT_SALT = 0b1
