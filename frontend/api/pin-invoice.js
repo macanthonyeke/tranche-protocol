@@ -25,6 +25,7 @@ import {
   deriveInvoiceKey, encryptEnvelope, deriveAttachmentKey, generateAttachmentSalt, encryptBytes, InvoiceCryptoError
 } from './_lib/invoiceCrypto.js'
 import { issueUnpinToken } from './_lib/unpinToken.js'
+import { detectFileType } from './_lib/fileType.js'
 
 // Kept under Vercel's fixed 4.5MB serverless function request-body limit, so
 // our own clear error fires first instead of the platform's generic 413.
@@ -32,6 +33,11 @@ const MAX_BYTES = 4 * 1024 * 1024
 const TIMEOUT_MS = 10_000
 const FILE_TOO_LARGE_MESSAGE =
   `File is too large. Please compress or split it and try again (limit ${MAX_BYTES / 1024 / 1024}MB).`
+
+// The only mime values that ever reach the Pinata pin's Content-Type or (in
+// private mode) attachments[0].mime, once a file passes detectFileType —
+// keyed by that verified type, never by the client-declared header.
+const MIME_BY_TYPE = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg' }
 
 class RequestError extends Error {
   constructor(message, status = 400) {
@@ -177,6 +183,25 @@ export default async function handler(req, res) {
     if (!bytes || bytes.length === 0) {
       throw new RequestError('No file was provided.')
     }
+
+    // Runs on these exact bytes — the original plaintext for both the
+    // raw-upload and URL-fetch paths, and (critically for private mode)
+    // BEFORE encryptBytes() ever runs below, since ciphertext has no valid
+    // file signature by definition and checking it would reject everything.
+    // Filename/Content-Type are attacker-controlled and deliberately not
+    // consulted — see fileType.js for why only the real leading bytes count.
+    const fileType = detectFileType(bytes)
+    if (!fileType) {
+      throw new RequestError('Unsupported file type. Please upload a PDF, PNG, or JPG.')
+    }
+    // From here on, mime is fully replaced by the byte-verified canonical
+    // value — the client-declared Content-Type header (from either the
+    // upload header or the fetched URL's response) must never reach the
+    // Pinata pin's Content-Type or attachments[0].mime, since a mismatched
+    // declaration there would misdirect InvoiceViewer's rendering (public
+    // mode, via the gateway's echoed Content-Type) or get permanently
+    // embedded in the invoiceHash-committed envelope (private mode).
+    mime = MIME_BY_TYPE[fileType]
 
     if (isPrivate) {
       const result = await pinPrivateAttachment(bytes, { filename, mime })
