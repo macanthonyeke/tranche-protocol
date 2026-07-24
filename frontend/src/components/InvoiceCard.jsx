@@ -35,20 +35,16 @@ function hexToBytes(hex) {
   return bytes
 }
 
-function bytesToHex(bytes) {
-  return '0x' + Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 // Drives the fetch -> signature -> request-invoice-key -> decrypt flow for a
-// private-mode invoice (and, if one exists, its attachment). The envelope
-// blob is fetched FIRST — before signing anything — because its own public
-// header may carry the attachment's derivation salt (see envelopeBlob.js);
-// reading that up front lets a single signed request return both the
-// envelope key and the attachment key, instead of needing a second
-// signature once the attachment's existence is discovered by decrypting the
-// envelope. Never auto-fires: signing is only ever triggered by an explicit
-// click, since prompting a wallet signature with no user action is both bad
-// UX and blocked by some wallets.
+// private-mode invoice (and, if one exists, its attachment). request-invoice
+// -key.js sources the attachment's derivation salt itself, server-side —
+// this hook never reads or sends it (see that endpoint's file header for
+// why: a client-supplied salt can't be trusted to belong to this escrow).
+// One signed request still returns both the envelope key and the
+// attachment key, whenever one exists, entirely as a server-side decision.
+// Never auto-fires: signing is only ever triggered by an explicit click,
+// since prompting a wallet signature with no user action is both bad UX and
+// blocked by some wallets.
 function usePrivateInvoiceUnlock(escrowId, ipfsUri) {
   const { address } = useAccount()
   const { signMessageAsync } = useSignMessage()
@@ -60,7 +56,7 @@ function usePrivateInvoiceUnlock(escrowId, ipfsUri) {
     try {
       const blobRes = await fetch(toGatewayUrl(ipfsUri))
       if (!blobRes.ok) throw new Error('Could not fetch the encrypted invoice.')
-      const { iv, ciphertextAndTag, attachmentSalt } = unpackEnvelopeBlob(new Uint8Array(await blobRes.arrayBuffer()))
+      const { iv, ciphertextAndTag } = unpackEnvelopeBlob(new Uint8Array(await blobRes.arrayBuffer()))
 
       const message = `Access invoice for escrow ${escrowId} at ${Date.now()}`
       const signature = await signMessageAsync({ message })
@@ -68,10 +64,7 @@ function usePrivateInvoiceUnlock(escrowId, ipfsUri) {
       const keyRes = await fetch('/api/request-invoice-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          escrowId: String(escrowId), walletAddress: address, signature, message,
-          ...(attachmentSalt ? { attachmentSalt: bytesToHex(attachmentSalt) } : {})
-        })
+        body: JSON.stringify({ escrowId: String(escrowId), walletAddress: address, signature, message })
       })
       if (!keyRes.ok) {
         const body = await keyRes.json().catch(() => ({}))

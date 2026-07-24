@@ -4,8 +4,15 @@ import { privateKeyToAccount } from 'viem/accounts'
 import handler from './request-invoice-key.js'
 import { getEscrowDetailFor } from './_lib/chain.js'
 import { deriveInvoiceKey, deriveAttachmentKey } from './_lib/invoiceCrypto.js'
+import { resolveAttachmentSalt } from './_lib/resolveAttachmentSalt.js'
 
 vi.mock('./_lib/chain.js', () => ({ getEscrowDetailFor: vi.fn() }))
+// The endpoint now ALWAYS attempts to independently source the attachment
+// salt (see request-invoice-key.js's file header) — mocked here so tests
+// stay hermetic instead of hitting the real subgraph/IPFS on every request.
+// Defaults to "no attachment"; individual tests override with
+// mockResolvedValueOnce / mockRejectedValueOnce as needed.
+vi.mock('./_lib/resolveAttachmentSalt.js', () => ({ resolveAttachmentSalt: vi.fn() }))
 
 const RECIPIENT = privateKeyToAccount(`0x${'11'.repeat(32)}`)
 const ARBITER = privateKeyToAccount(`0x${'22'.repeat(32)}`)
@@ -46,6 +53,7 @@ async function signChallenge(account, escrowId, timestamp = Date.now()) {
 beforeEach(() => {
   process.env.INVOICE_KEY_SECRET = 'test-secret'
   vi.clearAllMocks()
+  resolveAttachmentSalt.mockResolvedValue(null) // default: this escrow has no attachment
 })
 
 afterEach(() => {
@@ -195,21 +203,24 @@ describe('POST /api/request-invoice-key', () => {
     expect(res.statusCode).toBe(400)
   })
 
-  it('returns an attachmentKey alongside key when attachmentSalt is supplied — same one authorization check covers both', async () => {
+  it('returns an attachmentKey alongside key when this escrow has an attachment, derived from the SERVER-sourced salt', async () => {
     mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    const realSaltForThisEscrow = `0x${'ef'.repeat(16)}`
+    resolveAttachmentSalt.mockResolvedValue(Buffer.from('ef'.repeat(16), 'hex'))
     const { message, signature } = await signChallenge(RECIPIENT, 5)
-    const attachmentSalt = `0x${'cd'.repeat(16)}`
     const res = fakeRes()
 
-    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message, attachmentSalt }), res)
+    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message }), res)
 
+    expect(resolveAttachmentSalt).toHaveBeenCalledWith('5')
     expect(res.statusCode).toBe(200)
     expect(res.body.key).toBe(`0x${deriveInvoiceKey(INVOICE_HASH).toString('hex')}`)
-    expect(res.body.attachmentKey).toBe(`0x${deriveAttachmentKey(attachmentSalt).toString('hex')}`)
+    expect(res.body.attachmentKey).toBe(`0x${deriveAttachmentKey(realSaltForThisEscrow).toString('hex')}`)
   })
 
-  it('omits attachmentKey when no attachmentSalt is supplied (escrow has no attachment)', async () => {
+  it('omits attachmentKey when this escrow has no attachment (resolveAttachmentSalt resolves null)', async () => {
     mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    resolveAttachmentSalt.mockResolvedValue(null)
     const { message, signature } = await signChallenge(RECIPIENT, 5)
     const res = fakeRes()
 
@@ -219,25 +230,63 @@ describe('POST /api/request-invoice-key', () => {
     expect(res.body.attachmentKey).toBeUndefined()
   })
 
-  it('rejects a malformed attachmentSalt', async () => {
+  // The vulnerability this replaces: an earlier version accepted a
+  // client-supplied attachmentSalt and derived+returned whatever key that
+  // salt produced, with no check that the salt actually belonged to the
+  // authorized escrow. A caller legitimately authorized for their OWN
+  // escrow could submit a salt copied from a DIFFERENT escrow's public
+  // envelope (salts aren't secret) and receive that other escrow's real
+  // attachment key. Fixed by never reading attachmentSalt from the request
+  // at all — the salt always comes from resolveAttachmentSalt(escrowId),
+  // which independently looks up THIS escrow's own envelope.
+  it('a client-submitted attachmentSalt (e.g. copied from a different escrow) is completely ignored', async () => {
     mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    // What the server independently finds for escrow 5 — NOT what's sent below.
+    const realSaltForEscrow5 = Buffer.from('11'.repeat(16), 'hex')
+    resolveAttachmentSalt.mockResolvedValue(realSaltForEscrow5)
+    const { message, signature } = await signChallenge(RECIPIENT, 5)
+    // A real salt, but scavenged from escrow 999's public envelope — an
+    // attacker's best-case attempt to redirect the derivation.
+    const saltFromAnotherEscrow = `0x${'99'.repeat(16)}`
+    const res = fakeRes()
+
+    await handler(fakeReq({
+      escrowId: '5', walletAddress: RECIPIENT.address, signature, message,
+      attachmentSalt: saltFromAnotherEscrow
+    }), res)
+
+    expect(res.statusCode).toBe(200)
+    // The response must derive from escrow 5's REAL salt, never the
+    // attacker-supplied one.
+    expect(res.body.attachmentKey).toBe(`0x${deriveAttachmentKey(realSaltForEscrow5).toString('hex')}`)
+    expect(res.body.attachmentKey).not.toBe(`0x${deriveAttachmentKey(saltFromAnotherEscrow).toString('hex')}`)
+  })
+
+  it('fails closed — no attachmentKey, not a hard error — when resolveAttachmentSalt itself fails (subgraph/IPFS unreachable)', async () => {
+    mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    resolveAttachmentSalt.mockRejectedValue(new Error('Could not reach the subgraph: fetch failed'))
     const { message, signature } = await signChallenge(RECIPIENT, 5)
     const res = fakeRes()
 
-    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message, attachmentSalt: 'not-hex' }), res)
+    await handler(fakeReq({ escrowId: '5', walletAddress: RECIPIENT.address, signature, message }), res)
 
-    expect(res.statusCode).toBe(400)
+    // The envelope key request itself still succeeds...
+    expect(res.statusCode).toBe(200)
+    expect(res.body.key).toBe(`0x${deriveInvoiceKey(INVOICE_HASH).toString('hex')}`)
+    // ...but no attachmentKey is ever fabricated from a failed lookup.
+    expect(res.body.attachmentKey).toBeUndefined()
   })
 
-  it('still rejects an unauthorized wallet even when attachmentSalt is supplied — no partial authorization', async () => {
+  it('still rejects an unauthorized wallet regardless of what resolveAttachmentSalt would have returned', async () => {
     mockDetail({ recipient: RECIPIENT.address, isArbiter: false, milestoneStates: [] })
+    resolveAttachmentSalt.mockResolvedValue(Buffer.from('cd'.repeat(16), 'hex'))
     const { message, signature } = await signChallenge(STRANGER, 5)
-    const attachmentSalt = `0x${'cd'.repeat(16)}`
     const res = fakeRes()
 
-    await handler(fakeReq({ escrowId: '5', walletAddress: STRANGER.address, signature, message, attachmentSalt }), res)
+    await handler(fakeReq({ escrowId: '5', walletAddress: STRANGER.address, signature, message }), res)
 
     expect(res.statusCode).toBe(403)
     expect(res.body.attachmentKey).toBeUndefined()
+    expect(resolveAttachmentSalt).not.toHaveBeenCalled() // never reached — authorization fails first
   })
 })

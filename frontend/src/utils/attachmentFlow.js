@@ -28,7 +28,7 @@
  *   file: File, privateMode: boolean,
  *   pinFile: (file: File) => Promise<{ipfsUri: string, sha256: string, unpinToken?: string}>,
  *   previousAttachmentURI?: string, previousAttachmentUnpinToken?: string,
- *   unpinAttachment?: (ipfsUri: string, token: string) => void
+ *   unpinAttachment: (ipfsUri: string, token: string) => void
  * }} params
  */
 export async function resolveFileAttachment({
@@ -37,7 +37,7 @@ export async function resolveFileAttachment({
   if (!privateMode) {
     const { ipfsUri, sha256, unpinToken } = await pinFile(file)
     if (previousAttachmentURI && previousAttachmentUnpinToken) {
-      unpinAttachment?.(previousAttachmentURI, previousAttachmentUnpinToken)
+      unpinAttachment(previousAttachmentURI, previousAttachmentUnpinToken)
     }
     return { deferred: false, attachmentURI: ipfsUri, attachmentHash: sha256, unpinToken }
   }
@@ -51,7 +51,7 @@ export async function resolveFileAttachment({
  *   url: string, privateMode: boolean,
  *   pinUrl: (url: string) => Promise<{ipfsUri: string, sha256: string, unpinToken?: string}>,
  *   previousAttachmentURI?: string, previousAttachmentUnpinToken?: string,
- *   unpinAttachment?: (ipfsUri: string, token: string) => void
+ *   unpinAttachment: (ipfsUri: string, token: string) => void
  * }} params
  */
 export async function resolveUrlAttachment({
@@ -60,7 +60,7 @@ export async function resolveUrlAttachment({
   if (!privateMode) {
     const { ipfsUri, sha256, unpinToken } = await pinUrl(url)
     if (previousAttachmentURI && previousAttachmentUnpinToken) {
-      unpinAttachment?.(previousAttachmentURI, previousAttachmentUnpinToken)
+      unpinAttachment(previousAttachmentURI, previousAttachmentUnpinToken)
     }
     return { deferred: false, attachmentURI: ipfsUri, attachmentHash: sha256, unpinToken }
   }

@@ -1,18 +1,27 @@
 // POST /api/request-invoice-key — signature-gated access to a private
-// escrow's invoice decryption key (and, optionally, its attachment key).
-// Caller proves control of a wallet by signing a short-lived challenge
-// message; if that wallet is the escrow's recipient or depositor (always),
-// or the arbiter while the escrow has an open dispute, the
-// deterministically-derived envelope key (see _lib/invoiceCrypto.js) is
-// returned.
+// escrow's invoice decryption key (and, if the escrow has one, its
+// attachment key). Caller proves control of a wallet by signing a
+// short-lived challenge message; if that wallet is the escrow's recipient
+// or depositor (always), or the arbiter while the escrow has an open
+// dispute, the deterministically-derived envelope key (see
+// _lib/invoiceCrypto.js) is returned.
 //
-// If the request also includes attachmentSalt — the client reads this out
-// of the envelope's own ciphertext header (envelopeBlob.js) once it's
-// fetched the envelope blob, before requesting any key — the attachment key
-// is derived and returned in the same response. Same authorization check,
-// no extra chain read: this is what lets one signature unlock both the
-// envelope and its attachment instead of requiring a second signed request
-// once the attachment's existence is discovered.
+// The attachment key, when present, is ALWAYS derived from a salt this
+// endpoint sources itself (see _lib/resolveAttachmentSalt.js) — never from
+// anything the client sends. An earlier version of this endpoint accepted
+// a client-supplied attachmentSalt, gated behind the exact same
+// authorization check as the envelope key. That was a real vulnerability:
+// attachmentSalt isn't secret (it's in the public header of every private
+// escrow's envelope — see envelopeBlob.js) and every escrow's envelope URI
+// is public too (invoiceData is emitted unconditionally via
+// InvoiceSnapshotted). So a caller legitimately authorized for their OWN
+// unrelated escrow could submit a salt copied from a DIFFERENT escrow's
+// public envelope and receive that escrow's real attachment key — the
+// authorization check verified the caller against escrowId, but the
+// attachment key it handed back was never actually bound to that escrow.
+// There is no fast path, no fallback to client input, and no "trust but
+// verify": the salt used is always the one this endpoint independently
+// found for the escrow it already verified the caller is authorized for.
 //
 // No key is ever generated here and nothing is ever stored — see
 // _lib/invoiceCrypto.js's file header for the derivation design and its
@@ -22,6 +31,7 @@ import { isAddress, recoverMessageAddress } from 'viem'
 import { getEscrowDetailFor } from './_lib/chain.js'
 import { deriveInvoiceKey, deriveAttachmentKey, InvoiceCryptoError } from './_lib/invoiceCrypto.js'
 import { authorizeInvoiceKeyAccess } from './_lib/invoiceKeyAuth.js'
+import { resolveAttachmentSalt } from './_lib/resolveAttachmentSalt.js'
 
 // Both directions bounded: a message timestamped in the future would
 // otherwise let someone "bank" a valid signature for a chosen later window.
@@ -46,8 +56,10 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Note: intentionally NOT destructuring an attachmentSalt field here —
+    // if a caller sends one, it's simply never read. See file header.
     const body = req.body && typeof req.body === 'object' ? req.body : {}
-    const { escrowId, walletAddress, signature, message, attachmentSalt } = body
+    const { escrowId, walletAddress, signature, message } = body
 
     if (escrowId === undefined || escrowId === null || !/^\d+$/.test(String(escrowId))) {
       throw new RequestError('A valid escrowId is required.')
@@ -60,9 +72,6 @@ export default async function handler(req, res) {
     }
     if (typeof message !== 'string') {
       throw new RequestError('A message is required.')
-    }
-    if (attachmentSalt !== undefined && (typeof attachmentSalt !== 'string' || !/^(0x)?[0-9a-fA-F]{32}$/.test(attachmentSalt))) {
-      throw new RequestError('attachmentSalt must be a 16-byte hex string.')
     }
 
     const match = message.match(MESSAGE_RE)
@@ -112,10 +121,22 @@ export default async function handler(req, res) {
 
     const key = deriveInvoiceKey(detail.escrow.invoiceHash)
     const responseBody = { key: `0x${key.toString('hex')}` }
-    if (attachmentSalt) {
-      const attachmentKey = deriveAttachmentKey(attachmentSalt)
-      responseBody.attachmentKey = `0x${attachmentKey.toString('hex')}`
+
+    // Always attempt to independently source this escrow's own attachment
+    // salt — never from client input (see file header). Fails closed: any
+    // error here (subgraph unreachable, envelope not fetchable, escrow has
+    // no attachment) just omits attachmentKey from an otherwise-successful
+    // response. It must never fall back to trusting anything the caller
+    // sent, and a failure to resolve must never produce a wrong key.
+    try {
+      const salt = await resolveAttachmentSalt(escrowId)
+      if (salt) {
+        responseBody.attachmentKey = `0x${deriveAttachmentKey(salt).toString('hex')}`
+      }
+    } catch (err) {
+      console.error(`resolveAttachmentSalt failed for escrow ${escrowId} (attachmentKey omitted):`, err)
     }
+
     res.status(200).json(responseBody)
   } catch (err) {
     if (err instanceof RequestError) {
