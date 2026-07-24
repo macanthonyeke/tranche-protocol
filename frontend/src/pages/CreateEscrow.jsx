@@ -1107,7 +1107,7 @@ export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, pendin
         <div className="flex items-center gap-2 mt-3">
           <button type="button" className="btn-secondary h-[34px] text-[13px]" onClick={() => fileInputRef.current?.click()}>Replace</button>
           <button type="button" className="btn-quiet h-[34px] text-[13px]" onClick={onRemove}>Remove</button>
-          <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/png,image/jpeg" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
         </div>
       </div>
       {!isUrl && (
@@ -1167,7 +1167,7 @@ export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, pendin
         <div className="flex items-center gap-2 mt-3">
           <button type="button" className="btn-secondary h-[34px] text-[13px]" onClick={() => fileInputRef.current?.click()}>Replace</button>
           <button type="button" className="btn-quiet h-[34px] text-[13px]" onClick={onRemove}>Remove</button>
-          <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/png,image/jpeg" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
         </div>
       </div>
       <InvoiceViewer
@@ -1191,8 +1191,8 @@ export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, pendin
       >
         <span className={dragging ? 'text-clay' : 'text-ink-3'}><UploadIcon /></span>
         <p className="text-[13.5px] text-ink mt-2"><span className="text-clay font-medium">Browse</span> or drag a document here</p>
-        <p className="text-[11.5px] text-ink-3 mt-1">PDF, image, or doc up to 4 MB</p>
-        <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+        <p className="text-[11.5px] text-ink-3 mt-1">PDF, PNG, or JPG up to 4 MB</p>
+        <input ref={fileInputRef} type="file" accept="application/pdf,image/png,image/jpeg" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
       </div>
 
       {invoice.status === 'error' && (

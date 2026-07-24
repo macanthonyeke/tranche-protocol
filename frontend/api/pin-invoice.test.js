@@ -5,8 +5,23 @@ import { createHash } from 'node:crypto'
 import http from 'node:http'
 import { keccak256, toHex } from 'viem'
 import handler from './pin-invoice.js'
-import { deriveInvoiceKey, deriveAttachmentKey, decryptEnvelope, decryptBytes } from './_lib/invoiceCrypto.js'
+import { deriveInvoiceKey, deriveAttachmentKey, decryptEnvelope, decryptBytes, encryptBytes } from './_lib/invoiceCrypto.js'
 import { verifyUnpinToken } from './_lib/unpinToken.js'
+import { fetchUrlSafely } from './_lib/ssrf.js'
+
+// Both mocks below wrap the real implementation by default (vi.fn(actual.fn)
+// delegates to it) so every pre-existing test keeps hitting real ssrf.js /
+// invoiceCrypto.js logic unchanged. Individual tests below override one call
+// at a time with mockResolvedValueOnce, or assert on call counts, without
+// affecting any other test in this file.
+vi.mock('./_lib/ssrf.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, fetchUrlSafely: vi.fn(actual.fetchUrlSafely) }
+})
+vi.mock('./_lib/invoiceCrypto.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, encryptBytes: vi.fn(actual.encryptBytes) }
+})
 
 function fakeReq(bodyBytes, headers) {
   const req = Readable.from([bodyBytes])
@@ -42,6 +57,29 @@ function extractMultipartFilePart(body, contentTypeHeader) {
       let content = part.subarray(headerEnd + 4)
       if (content.subarray(-2).toString() === '\r\n') content = content.subarray(0, -2)
       return content
+    }
+    start = next
+  }
+  return null
+}
+
+// Same traversal as extractMultipartFilePart, but reads the "file" part's
+// own declared Content-Type header instead of its body bytes.
+function extractMultipartFileContentType(body, contentTypeHeader) {
+  const boundary = contentTypeHeader.match(/boundary=(.+)$/)[1]
+  const marker = Buffer.from(`--${boundary}`)
+  let start = body.indexOf(marker)
+  while (start !== -1) {
+    const next = body.indexOf(marker, start + marker.length)
+    if (next === -1) break
+    const part = body.subarray(start + marker.length, next)
+    const headerEnd = part.indexOf('\r\n\r\n')
+    if (headerEnd !== -1) {
+      const headers = part.subarray(0, headerEnd).toString('utf8')
+      if (headers.includes('name="file"')) {
+        const match = headers.match(/Content-Type:\s*(.+)/i)
+        return match ? match[1].trim() : null
+      }
     }
     start = next
   }
@@ -118,8 +156,10 @@ describe('POST /api/pin-invoice', () => {
     expect(verifyUnpinToken('bafySOMEOTHERCID', res.body.unpinToken)).toBe(false)
   })
 
-  it('fetches a URL server-side, pins the exact fetched bytes, and returns a matching hash', { timeout: 10_000, retry: 2 }, async () => {
-    const req = fakeReq(Buffer.from(JSON.stringify({ url: 'http://example.com/' })), { 'content-type': 'application/json' })
+  it('fetches a URL server-side, pins the exact fetched bytes, and returns a matching hash', async () => {
+    const fetchedBytes = Buffer.from('%PDF-1.4 url-fetched invoice bytes')
+    fetchUrlSafely.mockResolvedValueOnce({ bytes: fetchedBytes, contentType: 'application/pdf' })
+    const req = fakeReq(Buffer.from(JSON.stringify({ url: 'http://example.com/invoice.pdf' })), { 'content-type': 'application/json' })
     const res = fakeRes()
 
     await handler(req, res)
@@ -128,10 +168,21 @@ describe('POST /api/pin-invoice', () => {
     expect(res.body.ipfsUri).toBe('ipfs://bafyMOCKED')
 
     const pinnedFilePart = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
-    // Self-consistent regardless of example.com's actual current content:
-    // the hash returned to the caller must match the bytes that were
-    // actually pinned, not some other fetch of the same URL.
-    expect(res.body.sha256).toBe(sha256Hex(pinnedFilePart))
+    expect(pinnedFilePart.equals(fetchedBytes)).toBe(true)
+    expect(res.body.sha256).toBe(sha256Hex(fetchedBytes))
+  })
+
+  it('rejects a URL-fetched file whose real bytes are not an allowed type, before ever pinning it', async () => {
+    const htmlBytes = Buffer.from('<!DOCTYPE html><html><body>not an invoice</body></html>')
+    fetchUrlSafely.mockResolvedValueOnce({ bytes: htmlBytes, contentType: 'text/html' })
+    const req = fakeReq(Buffer.from(JSON.stringify({ url: 'http://example.com/' })), { 'content-type': 'application/json' })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/unsupported file type/i)
+    expect(receivedByMockPinata).toBeNull() // never reached Pinata
   })
 
   it('rejects an oversized upload with a clear, specific message instead of a generic platform error', async () => {
@@ -146,13 +197,77 @@ describe('POST /api/pin-invoice', () => {
   })
 
   it('accepts an upload just under the size cap', async () => {
-    const underCap = Buffer.alloc(4 * 1024 * 1024 - 1000, 1)
-    const req = fakeReq(underCap, { 'content-type': 'application/octet-stream' })
+    const underCap = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(4 * 1024 * 1024 - 1000 - 9, 1)])
+    const req = fakeReq(underCap, { 'content-type': 'application/pdf' })
     const res = fakeRes()
 
     await handler(req, res)
 
     expect(res.statusCode).toBe(200)
+  })
+
+  it('rejects a text file even when it is uploaded with a .pdf filename and a PDF Content-Type', async () => {
+    const textBytes = Buffer.from('just a plain text file, not a real pdf')
+    const req = fakeReq(textBytes, { 'content-type': 'application/pdf', 'x-filename': encodeURIComponent('invoice.pdf') })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/unsupported file type/i)
+    expect(receivedByMockPinata).toBeNull()
+  })
+
+  it('rejects an HTML file disguised as a .png upload', async () => {
+    const htmlBytes = Buffer.from('<!DOCTYPE html><html><body><script>alert(1)</script></body></html>')
+    const req = fakeReq(htmlBytes, { 'content-type': 'image/png', 'x-filename': encodeURIComponent('invoice.png') })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/unsupported file type/i)
+    expect(receivedByMockPinata).toBeNull()
+  })
+
+  it('rejects a renamed executable disguised as a .jpg upload', async () => {
+    const exeBytes = Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00]) // MZ header
+    const req = fakeReq(exeBytes, { 'content-type': 'image/jpeg', 'x-filename': encodeURIComponent('invoice.jpg') })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/unsupported file type/i)
+    expect(receivedByMockPinata).toBeNull()
+  })
+
+  it('regression: a lying-but-well-formed Content-Type never reaches the pinned Content-Type or attachments[0].mime — only the byte-verified type does', async () => {
+    // Real PDF bytes (passes detectFileType cleanly, no length/format issue
+    // — the header itself is just wrong), declared as image/png throughout.
+    const realPdfBytes = Buffer.from('%PDF-1.4 real pdf bytes, mislabeled on purpose')
+
+    // Public mode: what actually gets pinned to Pinata must carry the
+    // verified Content-Type, not the declared one.
+    const publicReq = fakeReq(realPdfBytes, { 'content-type': 'image/png', 'x-filename': encodeURIComponent('invoice.png') })
+    const publicRes = fakeRes()
+    await handler(publicReq, publicRes)
+    expect(publicRes.statusCode).toBe(200)
+    expect(extractMultipartFileContentType(receivedByMockPinata.body, receivedByMockPinata.headers['content-type']))
+      .toBe('application/pdf')
+
+    // Private mode: the mime returned here is exactly what CreateEscrow.jsx
+    // embeds as attachments[0].mime inside the invoiceHash-committed
+    // envelope — it must be the verified type too, never the declared lie.
+    const privateReq = fakeReq(realPdfBytes, {
+      'content-type': 'image/png',
+      'x-filename': encodeURIComponent('invoice.png'),
+      'x-private': 'true'
+    })
+    const privateRes = fakeRes()
+    await handler(privateReq, privateRes)
+    expect(privateRes.statusCode).toBe(200)
+    expect(privateRes.body.mime).toBe('application/pdf')
   })
 
   it('surfaces an SSRF-blocked URL as a 400 with the guard message, not a 500', async () => {
@@ -310,9 +425,9 @@ describe('POST /api/pin-invoice — private mode (encrypted attachment)', () => 
   it('sha256 is computed on the plaintext BEFORE encryption, not on the ciphertext that actually gets pinned', async () => {
     // Dedicated, narrow proof of the invariant — would fail immediately if
     // the implementation were ever reordered to hash after encrypting.
-    const fileBytes = Buffer.from('the exact bytes attachments[0].sha256 must commit to')
+    const fileBytes = Buffer.from('%PDF-1.4 the exact bytes attachments[0].sha256 must commit to')
     const req = fakeReq(fileBytes, {
-      'content-type': 'application/octet-stream',
+      'content-type': 'application/pdf',
       'x-filename': encodeURIComponent('doc'),
       'x-private': 'true'
     })
@@ -329,9 +444,35 @@ describe('POST /api/pin-invoice — private mode (encrypted attachment)', () => 
     expect(res.body.sha256).not.toBe(sha256Hex(pinnedCiphertext))
   })
 
-  it('encrypts a fetched URL (private:true), pins ciphertext, and returns a plaintext sha256', { timeout: 10_000, retry: 2 }, async () => {
+  it('the file-type check runs on the plaintext BEFORE encryptBytes is ever called — an invalid type never reaches encryption', async () => {
+    // If this were ever reordered to encrypt first and check second, this
+    // assertion on encryptBytes' own call count would catch it immediately —
+    // unlike a status-code-only check, which can't distinguish "rejected by
+    // the type gate" from "rejected because encrypted bytes never look like
+    // a valid signature either" (see fileType.js's header comment: checking
+    // ciphertext would silently reject everything, valid uploads included).
+    encryptBytes.mockClear()
+    const notARealFile = Buffer.from('plain text, not a real pdf/png/jpg')
+    const req = fakeReq(notARealFile, {
+      'content-type': 'application/pdf', // a lying Content-Type header — must not be trusted either
+      'x-filename': encodeURIComponent('invoice.pdf'),
+      'x-private': 'true'
+    })
+    const res = fakeRes()
+
+    await handler(req, res)
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body.error).toMatch(/unsupported file type/i)
+    expect(encryptBytes).not.toHaveBeenCalled()
+    expect(receivedByMockPinata).toBeNull()
+  })
+
+  it('encrypts a fetched URL (private:true), pins ciphertext, and returns a plaintext sha256', async () => {
+    const fetchedBytes = Buffer.from('%PDF-1.4 private url-fetched bytes')
+    fetchUrlSafely.mockResolvedValueOnce({ bytes: fetchedBytes, contentType: 'application/pdf' })
     const req = fakeReq(
-      Buffer.from(JSON.stringify({ url: 'http://example.com/', private: true })),
+      Buffer.from(JSON.stringify({ url: 'http://example.com/invoice.pdf', private: true })),
       { 'content-type': 'application/json' }
     )
     const res = fakeRes()
@@ -344,6 +485,7 @@ describe('POST /api/pin-invoice — private mode (encrypted attachment)', () => 
     const pinnedBlob = extractMultipartFilePart(receivedByMockPinata.body, receivedByMockPinata.headers['content-type'])
     const key = deriveAttachmentKey(res.body.salt)
     const decrypted = decryptBytes(pinnedBlob, key)
+    expect(decrypted.equals(fetchedBytes)).toBe(true)
     expect(res.body.sha256).toBe(sha256Hex(decrypted)) // sha256 matches the DECRYPTED (plaintext) bytes
   })
 
