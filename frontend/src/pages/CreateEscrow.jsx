@@ -13,8 +13,9 @@ import TxModal from '../components/TxModal.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
 import ClayBar, { parseAmt, round2, ordinal } from '../components/ClayBar.jsx'
-import { pinFile, pinUrl, pinPrivateInvoice } from '../utils/invoicePin.js'
+import { pinFile, pinUrl, pinPrivateInvoice, pinPrivateAttachmentFile, pinPrivateAttachmentUrl, unpinAttachment } from '../utils/invoicePin.js'
 import { computeInvoiceHash } from '../utils/invoiceHash.js'
+import { resolveFileAttachment, resolveUrlAttachment, resolveRemoveAttachment, preparePrivateInvoiceData } from '../utils/attachmentFlow.js'
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
 import InvoiceViewer from '../components/InvoiceViewer.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
@@ -75,6 +76,12 @@ const emptyState = () => ({
   // onRemoveInvoice) so they can't drift out of sync.
   attachmentURI: '',
   attachmentHash: '',
+  // Capability token authorizing /api/unpin-invoice to clean up
+  // attachmentURI specifically — only ever set alongside a public-mode
+  // pin, always cleared in lockstep with attachmentURI/attachmentHash.
+  // Harmless if it outlives its (short) server-side TTL: unpinAttachment
+  // is best-effort and a stale token just fails verification.
+  attachmentUnpinToken: '',
   invoice: emptyInvoice(),
   privateMode: false,
   deadline: '',
@@ -163,6 +170,38 @@ function Flow() {
   // it on its own.
   const [envelopePinning, setEnvelopePinning] = useState(false)
   const [envelopeError, setEnvelopeError] = useState('')
+  // Private-mode attachments are NOT pinned on select — they're held here
+  // (deliberately outside `state`, so a page reload can't try to resurrect
+  // a File object from localStorage/JSON) until onDeposit() encrypts and
+  // pins them alongside the envelope. See attachmentFlow.js's file header.
+  const [pendingAttachmentFile, setPendingAttachmentFile] = useState(null)
+  const [pendingAttachmentUrl, setPendingAttachmentUrl] = useState(null)
+
+  // A plaintext attachment pinned while public must never carry over once
+  // the user switches to private (or vice versa, to keep the two states
+  // simple to reason about) — clearing forces a clean re-attach under
+  // whichever mode is now active.
+  const setPrivateMode = (value) => {
+    if (value === state.privateMode) return
+    // A plaintext attachment can only exist here if it was pinned during
+    // public mode (private mode never pins on select — see onPinFile).
+    // Best-effort unpin so Tranche stops hosting it now that it's being
+    // abandoned; this can't guarantee the content is gone everywhere (see
+    // unpinAttachment / api/unpin-invoice.js) — accepted, not mitigated
+    // further. Fire-and-forget: never block the mode switch on it. Requires
+    // attachmentUnpinToken — the capability issued for this exact CID at
+    // pin time; unpin-invoice.js rejects anything else, so an unauthorized
+    // third party can't use this same call shape to unpin someone else's
+    // escrow attachment (see api/_lib/unpinToken.js).
+    resolveRemoveAttachment({
+      attachmentURI: state.attachmentURI, attachmentUnpinToken: state.attachmentUnpinToken, unpinAttachment
+    })
+    setPendingAttachmentFile(null)
+    setPendingAttachmentUrl(null)
+    setState((s) => ({
+      ...s, privateMode: value, attachmentURI: '', attachmentHash: '', attachmentUnpinToken: '', invoice: emptyInvoice()
+    }))
+  }
 
   useEffect(() => {
     try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state)) } catch {}
@@ -188,18 +227,40 @@ function Flow() {
       invoice: { mode: 'file', status: 'pinning', name: file.name, size: file.size, error: '' }
     }))
     try {
-      const { ipfsUri, sha256 } = await pinFile(file)
-      setState((s) => ({
-        ...s,
-        attachmentURI: ipfsUri,
-        attachmentHash: sha256,
-        invoice: { mode: 'file', status: 'pinned', name: file.name, size: file.size, error: '' }
-      }))
+      const result = await resolveFileAttachment({
+        file, privateMode: state.privateMode, pinFile,
+        previousAttachmentURI: state.attachmentURI,
+        previousAttachmentUnpinToken: state.attachmentUnpinToken,
+        unpinAttachment
+      })
+      if (result.deferred) {
+        // Private mode: nothing pinned yet — held until onDeposit(). 'ready'
+        // (not 'pinned') signals that, and drives InvoiceUploader to preview
+        // from the local File object instead of a remote IPFS fetch.
+        setPendingAttachmentFile(file)
+        setPendingAttachmentUrl(null)
+        setState((s) => ({
+          ...s,
+          attachmentURI: '',
+          attachmentHash: '',
+          attachmentUnpinToken: '',
+          invoice: { mode: 'file', status: 'ready', name: file.name, size: file.size, error: '' }
+        }))
+      } else {
+        setState((s) => ({
+          ...s,
+          attachmentURI: result.attachmentURI,
+          attachmentHash: result.attachmentHash,
+          attachmentUnpinToken: result.unpinToken || '',
+          invoice: { mode: 'file', status: 'pinned', name: file.name, size: file.size, error: '' }
+        }))
+      }
     } catch (err) {
       setState((s) => ({
         ...s,
         attachmentURI: '',
         attachmentHash: '',
+        attachmentUnpinToken: '',
         invoice: { mode: 'file', status: 'error', name: file.name, size: file.size, error: err.message }
       }))
     }
@@ -210,25 +271,58 @@ function Flow() {
     // pinned ipfs:// CID and the original URL isn't stored anywhere else.
     setState((s) => ({ ...s, invoice: { mode: 'url', status: 'pinning', name: url, size: 0, error: '' } }))
     try {
-      const { ipfsUri, sha256 } = await pinUrl(url)
-      setState((s) => ({
-        ...s,
-        attachmentURI: ipfsUri,
-        attachmentHash: sha256,
-        invoice: { mode: 'url', status: 'pinned', name: url, size: 0, error: '' }
-      }))
+      const result = await resolveUrlAttachment({
+        url, privateMode: state.privateMode, pinUrl,
+        previousAttachmentURI: state.attachmentURI,
+        previousAttachmentUnpinToken: state.attachmentUnpinToken,
+        unpinAttachment
+      })
+      if (result.deferred) {
+        // Private mode: the server fetches+encrypts this URL at onDeposit()
+        // time, not now — see attachmentFlow.js. There's no local blob to
+        // preview from a not-yet-fetched external URL, so this stays a
+        // text-only "ready" state (see InvoiceUploader).
+        setPendingAttachmentUrl(url)
+        setPendingAttachmentFile(null)
+        setState((s) => ({
+          ...s,
+          attachmentURI: '',
+          attachmentHash: '',
+          attachmentUnpinToken: '',
+          invoice: { mode: 'url', status: 'ready', name: url, size: 0, error: '' }
+        }))
+      } else {
+        setState((s) => ({
+          ...s,
+          attachmentURI: result.attachmentURI,
+          attachmentHash: result.attachmentHash,
+          attachmentUnpinToken: result.unpinToken || '',
+          invoice: { mode: 'url', status: 'pinned', name: url, size: 0, error: '' }
+        }))
+      }
     } catch (err) {
       setState((s) => ({
         ...s,
         attachmentURI: '',
         attachmentHash: '',
+        attachmentUnpinToken: '',
         invoice: { mode: 'url', status: 'error', name: url, size: 0, error: err.message }
       }))
     }
   }
   // Remove clears the stale hash/URI too — never leave a dangling commitment
-  // to a file that's no longer actually attached.
-  const onRemoveInvoice = () => setState((s) => ({ ...s, attachmentURI: '', attachmentHash: '', invoice: emptyInvoice() }))
+  // to a file that's no longer actually attached. Same best-effort cleanup
+  // as setPrivateMode — see resolveRemoveAttachment for the no-op case
+  // (nothing pinned yet, e.g. a private-mode attachment still only
+  // pending).
+  const onRemoveInvoice = () => {
+    resolveRemoveAttachment({
+      attachmentURI: state.attachmentURI, attachmentUnpinToken: state.attachmentUnpinToken, unpinAttachment
+    })
+    setPendingAttachmentFile(null)
+    setPendingAttachmentUrl(null)
+    setState((s) => ({ ...s, attachmentURI: '', attachmentHash: '', attachmentUnpinToken: '', invoice: emptyInvoice() }))
+  }
 
   const milestoneAmountsBigInt = useMemo(
     () => state.milestones.map((m) => { try { return usdcToBaseUnits(m.amount) } catch { return 0n } }),
@@ -384,7 +478,11 @@ function Flow() {
 
   const onDeposit = async () => {
     if (!address) return
-    const invoiceObject = {
+    // Fields common to both modes — attachments get folded in differently
+    // below, since private mode's attachment must be encrypted+pinned
+    // before invoiceHash can be computed over the envelope that references
+    // it (see attachmentFlow.js / invoiceCrypto.js file headers).
+    const invoiceObjectBase = {
       version: 1,
       invoiceNumber: state.invoiceNumber,
       issuedAt: new Date().toISOString(),
@@ -397,32 +495,54 @@ function Flow() {
         title: m.title === 'Custom' ? m.customTitle.trim() : m.title,
         amount: m.amount
       })),
-      notes: state.description || undefined,
-      attachments: state.attachmentURI ? [{
-        uri: state.attachmentURI,
-        sha256: state.attachmentHash || undefined
-      }] : []
+      notes: state.description || undefined
     }
-    const invoiceJson = JSON.stringify(invoiceObject)
-    // Computed exactly once and reused below for both the on-chain deposit()
-    // argument and (private mode only) the pin-invoice request that derives
-    // the encryption key — see invoiceHash.js's file header for why this
-    // must never be recomputed independently.
-    const invoiceHash = computeInvoiceHash(invoiceJson)
 
-    let invoiceDataArg = invoiceJson
+    let invoiceHash, invoiceDataArg, invoiceURIArg
+
     if (state.privateMode) {
       setEnvelopeError('')
       setEnvelopePinning(true)
       try {
-        const { ipfsUri } = await pinPrivateInvoice(invoiceJson, invoiceHash)
-        invoiceDataArg = ipfsUri
+        const result = await preparePrivateInvoiceData({
+          invoiceObjectBase,
+          pendingAttachmentFile,
+          pendingAttachmentUrl,
+          pinPrivateAttachmentFile,
+          pinPrivateAttachmentUrl,
+          pinPrivateInvoice,
+          computeInvoiceHash
+        })
+        invoiceHash = result.invoiceHash
+        invoiceDataArg = result.invoiceDataArg
       } catch (err) {
+        // Halt here, before depositTx.run() — never sign/submit a
+        // transaction whose invoiceData or attachment reference is partial
+        // or missing because a pin step failed midway.
         setEnvelopeError(err.message || 'Could not encrypt and pin the invoice. Please try again.')
         setEnvelopePinning(false)
         return
       }
       setEnvelopePinning(false)
+      // The attachment's reference lives only inside the encrypted
+      // envelope above — never on-chain, or its mere existence would leak
+      // regardless of what's inside it.
+      invoiceURIArg = NO_ATTACHMENT_URI
+    } else {
+      const invoiceObject = {
+        ...invoiceObjectBase,
+        attachments: state.attachmentURI ? [{
+          uri: state.attachmentURI,
+          sha256: state.attachmentHash || undefined
+        }] : []
+      }
+      const invoiceJson = JSON.stringify(invoiceObject)
+      // Computed exactly once and reused below for the on-chain deposit()
+      // argument — see invoiceHash.js's file header for why this must never
+      // be recomputed independently.
+      invoiceHash = computeInvoiceHash(invoiceJson)
+      invoiceDataArg = invoiceJson
+      invoiceURIArg = state.attachmentURI || NO_ATTACHMENT_URI
     }
 
     const mintRecipient = addressToBytes32(state.freelancer)
@@ -436,7 +556,7 @@ function Flow() {
       mintRecipient,
       reviewWindow,
       invoiceHash,
-      state.attachmentURI || NO_ATTACHMENT_URI,
+      invoiceURIArg,
       milestoneAmountsBigInt,
       deadline,
       [],
@@ -479,9 +599,10 @@ function Flow() {
 
         <div id="section-advanced" className="py-8">
           <AdvancedSection
-            state={state} setState={setState}
+            state={state} setState={setState} onSetPrivateMode={setPrivateMode}
             supported={supported} loadingDomains={loadingDomains} domainsFailed={domainsFailed} refetchDomains={refetchDomains}
             onPinFile={onPinFile} onPinUrl={onPinUrl} onRemoveInvoice={onRemoveInvoice}
+            pendingAttachmentFile={pendingAttachmentFile}
             open={advancedOpen} setOpen={setAdvancedOpen}
           />
         </div>
@@ -917,7 +1038,7 @@ function TimelineSection({ state, setState, errors, touched, touch }) {
 // and its router/wagmi dependency graph — same reasoning as testing
 // InvoiceCard's default export directly rather than duplicating its JSX
 // into a test harness.
-export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinFile, onPinUrl, onRemove }) {
+export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, pendingAttachmentFile, onPinFile, onPinUrl, onRemove }) {
   const [dragging, setDragging] = useState(false)
   const [showUrlInput, setShowUrlInput] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
@@ -943,6 +1064,60 @@ export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinF
           </div>
         </div>
       </div>
+    )
+  }
+
+  if (invoice.status === 'ready') {
+    // Private mode: nothing has been pinned anywhere yet — the actual
+    // encrypt+pin happens at onDeposit() time (see attachmentFlow.js). File
+    // mode previews from the local File object itself (no network fetch,
+    // since there's nothing to fetch yet); URL mode has no local blob to
+    // preview from, so it's text-only until submit.
+    const isUrl = invoice.mode === 'url'
+    return (
+      <>
+      <div className="rounded-xl border border-clay/30 bg-clay/[0.05] px-4 py-3.5">
+        <div className="flex items-start gap-3">
+          <span className="shrink-0 inline-flex items-center justify-center h-9 w-9 rounded-md border border-rule bg-paper text-ink-2">
+            {isUrl ? <LinkIcon /> : <DocIcon />}
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13.5px] font-medium text-ink truncate">{invoice.name}</p>
+            <div className="flex items-center gap-2 flex-wrap mt-1.5">
+              <span className="inline-flex items-center gap-1.5 text-[11.5px] text-clay">
+                <LockIcon /> Will be encrypted when you sign
+              </span>
+              {!isUrl && (
+                <button
+                  type="button"
+                  onClick={() => setViewerOpen(true)}
+                  className="inline-flex items-center gap-1 text-[11.5px] text-clay hover:opacity-80"
+                >
+                  Preview <ExternalIcon />
+                </button>
+              )}
+            </div>
+            <p className="text-[11.5px] text-ink-3 mt-1.5 leading-relaxed">
+              {isUrl
+                ? 'This link is fetched and encrypted only when you sign to create the escrow — nothing is pinned yet.'
+                : 'This file is encrypted and pinned only when you sign to create the escrow — nothing is uploaded yet.'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mt-3">
+          <button type="button" className="btn-secondary h-[34px] text-[13px]" onClick={() => fileInputRef.current?.click()}>Replace</button>
+          <button type="button" className="btn-quiet h-[34px] text-[13px]" onClick={onRemove}>Remove</button>
+          <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
+        </div>
+      </div>
+      {!isUrl && (
+        <InvoiceViewer
+          open={viewerOpen}
+          onClose={() => setViewerOpen(false)}
+          localFile={pendingAttachmentFile}
+        />
+      )}
+      </>
     )
   }
 
@@ -1049,7 +1224,8 @@ export function InvoiceUploader({ invoice, attachmentURI, attachmentHash, onPinF
 
 /* ------- Advanced settings (invoice + visibility + destination chain + review window) ------- */
 function AdvancedSection({
-  state, setState, supported, loadingDomains, domainsFailed, refetchDomains, onPinFile, onPinUrl, onRemoveInvoice,
+  state, setState, onSetPrivateMode, supported, loadingDomains, domainsFailed, refetchDomains,
+  onPinFile, onPinUrl, onRemoveInvoice, pendingAttachmentFile,
   open, setOpen
 }) {
   const set = (k) => (v) => setState((s) => ({ ...s, [k]: v }))
@@ -1059,6 +1235,7 @@ function AdvancedSection({
     : domainsFailed
       ? "Couldn't reach the contract. Check your RPC and retry."
       : 'Where your freelancer gets paid. Arc has no forwarding fee; other chains do.'
+  const hasAttachment = state.invoice.status === 'pinned' || state.invoice.status === 'ready'
 
   return (
     <div className="rounded-xl border border-rule overflow-hidden">
@@ -1070,7 +1247,7 @@ function AdvancedSection({
       >
         <span className="text-[14px] font-medium text-ink">Advanced settings</span>
         <span className="text-[12px] text-ink-3 ml-auto mr-1">
-          {state.invoice.status === 'pinned' ? 'Document attached' : 'No document'} · Review {state.reviewWindowDays}d · {state.privateMode ? 'Private' : 'Public'}
+          {hasAttachment ? 'Document attached' : 'No document'} · Review {state.reviewWindowDays}d · {state.privateMode ? 'Private' : 'Public'}
         </span>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden
           className={`text-ink-3 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
@@ -1100,6 +1277,7 @@ function AdvancedSection({
                   invoice={state.invoice}
                   attachmentURI={state.attachmentURI}
                   attachmentHash={state.attachmentHash}
+                  pendingAttachmentFile={pendingAttachmentFile}
                   onPinFile={onPinFile}
                   onPinUrl={onPinUrl}
                   onRemove={onRemoveInvoice}
@@ -1150,7 +1328,7 @@ function AdvancedSection({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => set('privateMode')(false)}
+                    onClick={() => onSetPrivateMode(false)}
                     className={`rounded-xl border px-4 py-3 text-left transition-colors ${!state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
                   >
                     <p className="text-[13.5px] font-medium">Public (recommended)</p>
@@ -1158,7 +1336,7 @@ function AdvancedSection({
                   </button>
                   <button
                     type="button"
-                    onClick={() => set('privateMode')(true)}
+                    onClick={() => onSetPrivateMode(true)}
                     className={`rounded-xl border px-4 py-3 text-left transition-colors ${state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
                   >
                     <p className="text-[13.5px] font-medium">Private — hash only</p>
@@ -1167,8 +1345,7 @@ function AdvancedSection({
                 </div>
                 {state.privateMode && (
                   <p className="text-[12.5px] text-ink-2 leading-relaxed">
-                    The invoice details are encrypted before they're stored off-chain. You and the freelancer can always decrypt it; the arbiter can too, but only while a dispute is open.
-                    {state.attachmentURI && ' The attached document itself still sits at a public storage link — this only keeps the invoice details off-chain.'}
+                    The invoice details — and any attached document — are encrypted before they're stored off-chain. You and the freelancer can always decrypt it; the arbiter can too, but only while a dispute is open.
                   </p>
                 )}
               </div>
