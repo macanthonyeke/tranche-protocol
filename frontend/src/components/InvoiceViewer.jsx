@@ -37,12 +37,23 @@ const isImageType = (type) => typeof type === 'string' && type.startsWith('image
 //     verification's own decrypted-bytes-only rule. attachment.mime carries
 //     the original content-type, since the gateway only ever reports
 //     "application/octet-stream" for the ciphertext itself.
-export default function InvoiceViewer({ open, onClose, attachment, localFile, decryptKey }) {
+export default function InvoiceViewer({ open, onClose, attachment, localFile, decryptKey, attachmentKeyStatus = 'none' }) {
   const [state, setState] = useState({ status: 'idle' })
   const [objectUrl, setObjectUrl] = useState(null)
 
   useEffect(() => {
     if (!open || (!attachment?.uri && !localFile)) return
+
+    // The attachment is encrypted and the key fetch specifically failed
+    // (distinct from "nothing to decrypt") — bail out before any fetch, so
+    // ciphertext never gets hashed against attachment.sha256 (a guaranteed
+    // mismatch that would read as tampering, not a key-retrieval hiccup)
+    // and never gets offered as a raw "open in a new tab" link.
+    if (attachmentKeyStatus === 'failed') {
+      setState({ status: 'key-failed' })
+      return
+    }
+
     let cancelled = false
     setState({ status: 'loading' })
 
@@ -88,7 +99,7 @@ export default function InvoiceViewer({ open, onClose, attachment, localFile, de
     })()
 
     return () => { cancelled = true }
-  }, [open, attachment?.uri, attachment?.sha256, attachment?.mime, decryptKey, localFile])
+  }, [open, attachment?.uri, attachment?.sha256, attachment?.mime, decryptKey, localFile, attachmentKeyStatus])
 
   // Revoke whichever object URL is current whenever it's replaced or the
   // modal unmounts, so repeated opens don't leak blob: URLs.
@@ -98,8 +109,13 @@ export default function InvoiceViewer({ open, onClose, attachment, localFile, de
 
   // A raw "open in a new tab" link only makes sense against plaintext the
   // browser can fetch on its own — not a not-yet-pinned local file, and not
-  // ciphertext the browser has no way to decrypt outside this component.
-  const canOfferGatewayLink = !localFile && !decryptKey && !!attachment?.uri
+  // ciphertext (whether or not the key ended up available — a link to the
+  // encrypted blob is never useful, and offering one in the key-failed case
+  // specifically would hand the user a dead end that looks like a preview).
+  // Driven by attachmentKeyStatus explicitly rather than decryptKey alone,
+  // so "key fetch failed" can't be silently mistaken for "no decryption
+  // needed."
+  const canOfferGatewayLink = !localFile && attachmentKeyStatus === 'none' && !!attachment?.uri
   const gatewayUrl = canOfferGatewayLink ? toGatewayUrl(attachment.uri) : null
   const canPreviewImage = state.status === 'ready' && isImageType(state.contentType)
   const canPreviewPdf = state.status === 'ready' && state.contentType === PDF_TYPE
@@ -111,6 +127,13 @@ export default function InvoiceViewer({ open, onClose, attachment, localFile, de
           <div className="flex items-center justify-center gap-2 text-[13px] text-ink-3 py-16">
             <SpinnerIcon size={14} />
             {decryptKey ? 'Loading and decrypting…' : 'Loading and verifying…'}
+          </div>
+        )}
+
+        {state.status === 'key-failed' && (
+          <div className="rounded-lg border border-rule bg-sunk px-3 py-2.5 flex items-start gap-1.5 text-[12.5px] text-ink-2">
+            <WarnIcon size={12} />
+            <span>Could not retrieve the decryption key for this attachment right now. Try again in a moment.</span>
           </div>
         )}
 

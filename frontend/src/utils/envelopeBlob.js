@@ -60,6 +60,15 @@ function concatBytes(arrays) {
  * @returns {Uint8Array}
  */
 export function packEnvelopeBlob({ iv, ciphertextAndTag, attachmentSalt }) {
+  // Mirrors the length check deriveAttachmentKey (invoiceCrypto.js) already
+  // does on the read side — catch a malformed salt here, at pin time,
+  // instead of silently packing a blob whose header lies about its own
+  // length (unpackEnvelopeBlob trusts SALT_LEN unconditionally once the
+  // flag bit is set, so a short/long salt here would misalign every offset
+  // after it for every future reader).
+  if (attachmentSalt && toUint8(attachmentSalt).length !== SALT_LEN) {
+    throw new Error(`attachmentSalt must be ${SALT_LEN} bytes.`)
+  }
   const flags = new Uint8Array([attachmentSalt ? FLAG_HAS_ATTACHMENT_SALT : 0])
   const parts = [flags]
   if (attachmentSalt) parts.push(toUint8(attachmentSalt))

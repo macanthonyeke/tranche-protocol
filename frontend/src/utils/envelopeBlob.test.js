@@ -68,4 +68,16 @@ describe('envelopeBlob pack/unpack', () => {
       .slice(0, 5) // flag byte says "salt present" but the bytes aren't there
     expect(() => unpackEnvelopeBlob(truncated)).toThrow(/too short/i)
   })
+
+  it('packEnvelopeBlob rejects a malformed-length attachmentSalt — too short', () => {
+    expect(() => packEnvelopeBlob({
+      iv: randomBytes(IV_LEN), ciphertextAndTag: randomBytes(20), attachmentSalt: randomBytes(SALT_LEN - 1)
+    })).toThrow(new RegExp(`${SALT_LEN} bytes`))
+  })
+
+  it('packEnvelopeBlob rejects a malformed-length attachmentSalt — too long', () => {
+    expect(() => packEnvelopeBlob({
+      iv: randomBytes(IV_LEN), ciphertextAndTag: randomBytes(20), attachmentSalt: randomBytes(SALT_LEN + 1)
+    })).toThrow(new RegExp(`${SALT_LEN} bytes`))
+  })
 })

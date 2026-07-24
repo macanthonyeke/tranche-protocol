@@ -127,4 +127,105 @@ describe('InvoiceViewer', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  // Three attachmentKeyStatus states a private-mode caller can be in, plus a
+  // regression test locking in the specific failure the 'failed' state must
+  // never reproduce (a false hash-mismatch reading, or a dead gateway link
+  // pointing at ciphertext).
+  describe('attachmentKeyStatus', () => {
+    it('idle (attachmentKeyStatus "none", no decryptKey): unchanged from the pre-encryption behavior', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(makeResponse({ contentType: 'image/png' })))
+
+      render(
+        <InvoiceViewer
+          open
+          onClose={() => {}}
+          attachment={{ uri: `ipfs://${CID}`, sha256: realHash }}
+          attachmentKeyStatus="none"
+        />
+      )
+
+      await waitFor(() => expect(screen.getByText(/file verified — sha-256 matches/i)).toBeInTheDocument())
+      expect(screen.getByAltText(/invoice attachment preview/i)).toBeInTheDocument()
+    })
+
+    it('key-fetch-failed: shows an honest retry message, never fetches, and offers no gateway link', async () => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(
+        <InvoiceViewer
+          open
+          onClose={() => {}}
+          attachment={{ uri: `ipfs://${CID}`, sha256: realHash }}
+          decryptKey={null}
+          attachmentKeyStatus="failed"
+        />
+      )
+
+      await waitFor(() =>
+        expect(screen.getByText(/could not retrieve the decryption key for this attachment/i)).toBeInTheDocument()
+      )
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(screen.queryByRole('link', { name: /open in a new tab/i })).not.toBeInTheDocument()
+    })
+
+    it('regression: key-fetch-failed never renders the hash-mismatch UI or a gateway link', async () => {
+      // Same wrong-length/wrong-hash setup as the mismatch test above — if the
+      // 'failed' short-circuit in InvoiceViewer's effect ever regresses back
+      // to falling through to the normal fetch path, this attachment's sha256
+      // deliberately does not match FILE_BYTES, so a regression would surface
+      // as the "does not match the commitment" text this test forbids.
+      const fetchMock = vi.fn().mockResolvedValue(makeResponse({ contentType: 'image/png' }))
+      vi.stubGlobal('fetch', fetchMock)
+      const wrongHash = '0x' + 'ab'.repeat(32)
+
+      render(
+        <InvoiceViewer
+          open
+          onClose={() => {}}
+          attachment={{ uri: `ipfs://${CID}`, sha256: wrongHash }}
+          decryptKey={null}
+          attachmentKeyStatus="failed"
+        />
+      )
+
+      await waitFor(() =>
+        expect(screen.getByText(/could not retrieve the decryption key for this attachment/i)).toBeInTheDocument()
+      )
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(screen.queryByText(/does not match the commitment/i)).not.toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: /open in a new tab/i })).not.toBeInTheDocument()
+    })
+
+    it('decrypted-success: decrypts real ciphertext, verifies against the plaintext hash, and renders the preview', async () => {
+      const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+      const rawKey = new Uint8Array(await crypto.subtle.exportKey('raw', cryptoKey))
+      const keyHex = '0x' + Array.from(rawKey).map((b) => b.toString(16).padStart(2, '0')).join('')
+
+      const plaintext = new TextEncoder().encode('a real invoice attachment')
+      const plaintextHash = await sha256Hex(plaintext.buffer)
+      const iv = crypto.getRandomValues(new Uint8Array(12))
+      const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, plaintext))
+      const envelope = new Uint8Array(iv.length + ciphertext.length)
+      envelope.set(iv, 0)
+      envelope.set(ciphertext, iv.length)
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(makeResponse({ bytes: envelope.buffer })))
+
+      render(
+        <InvoiceViewer
+          open
+          onClose={() => {}}
+          attachment={{ uri: `ipfs://${CID}`, sha256: plaintextHash, mime: 'image/png' }}
+          decryptKey={keyHex}
+          attachmentKeyStatus="available"
+        />
+      )
+
+      await waitFor(() => expect(screen.getByText(/file verified — sha-256 matches/i)).toBeInTheDocument())
+      expect(screen.getByAltText(/invoice attachment preview/i)).toBeInTheDocument()
+      expect(screen.queryByText(/could not retrieve the decryption key/i)).not.toBeInTheDocument()
+    })
+  })
 })
