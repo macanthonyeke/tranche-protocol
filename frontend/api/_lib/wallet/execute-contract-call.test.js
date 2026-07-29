@@ -5,7 +5,7 @@ const circleMock = vi.hoisted(() => ({
   createUserTransactionContractExecutionChallenge: vi.fn()
 }))
 
-vi.mock('../_lib/circle.js', async (importOriginal) => ({
+vi.mock('../circle.js', async (importOriginal) => ({
   ...(await importOriginal()),
   getCircleClient: () => circleMock
 }))

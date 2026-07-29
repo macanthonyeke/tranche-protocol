@@ -5,8 +5,8 @@
 // the original email-token call, and resending must not be a way to re-point
 // a live session at a different address.
 
-import { getCircleClient } from '../_lib/circle.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { getCircleClient } from '../circle.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const deviceId = requireString(body, 'deviceId', { max: 256 })

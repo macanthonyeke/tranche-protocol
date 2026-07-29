@@ -204,7 +204,9 @@ production-ready.
 ├── frontend/
 │   ├── api/
 │   │   ├── _lib/
+│   │   │   └── wallet/            # wallet route handlers (not functions)
 │   │   ├── wallet/
+│   │   │   └── [...route].js      # single function fronting /api/wallet/*
 │   │   ├── pin-invoice.js
 │   │   ├── request-invoice-key.js
 │   │   └── unpin-invoice.js
@@ -498,7 +500,7 @@ Frontend responsive e2e tests run in the same workflow.
 | `PINATA_JWT` | Server-side only (`api/pin-invoice.js`). Pinata JWT for pinning invoice attachments and encrypted private-invoice envelopes to IPFS. |
 | `INVOICE_KEY_SECRET` | Server-side only (`api/pin-invoice.js`, `api/request-invoice-key.js`). Secret used to deterministically derive each private-mode invoice's AES-256 decryption key — no key is ever stored. Rotating it permanently strands every previously pinned private invoice. |
 | `VITE_CIRCLE_APP_ID` | Circle User-Controlled Wallets App ID. Public by design — identifies the app to Circle's browser SDK. Without it, email sign-in is unavailable; connecting an existing wallet still works. |
-| `CIRCLE_API_KEY` | Server-side only (`api/wallet/*`). Circle UCW API key. Can mint a session token for any user in the app, so a leak compromises every email-onboarded wallet. |
+| `CIRCLE_API_KEY` | Server-side only (`api/_lib/wallet/*`). Circle UCW API key. Can mint a session token for any user in the app, so a leak compromises every email-onboarded wallet. |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Upstash Redis credentials backing the email → Arc address directory and pending email verifications (`api/_lib/redis.js`). Injected automatically when the Upstash integration is added to the Vercel project — the `KV_` prefix is inherited from the deprecated `@vercel/kv` and does not imply that package. Without them, email sign-in and the Create Escrow email lookup both fail; wallet-connect escrows are unaffected. |
 | `RESEND_API_KEY` / `RESEND_FROM` | Server-side only (`api/_lib/resend.js`). Sends Tranche's own email-verification code, required before a freelancer's email is first bound to a payout address — an independent proof of inbox control that Circle's API cannot provide. `RESEND_FROM` must be a verified sender, e.g. `Tranche <noreply@yourdomain.com>`. |
 

@@ -11,9 +11,9 @@
 // in _lib/emailWallets.js.
 
 import { randomUUID } from 'node:crypto'
-import { getCircleClient } from '../_lib/circle.js'
-import { normalizeEmail, putOtpSession } from '../_lib/emailWallets.js'
-import { postRoute, requireString, RequestError } from '../_lib/walletRoute.js'
+import { getCircleClient } from '../circle.js'
+import { normalizeEmail, putOtpSession } from '../emailWallets.js'
+import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const deviceId = requireString(body, 'deviceId', { max: 256 })

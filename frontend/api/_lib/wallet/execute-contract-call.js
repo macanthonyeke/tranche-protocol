@@ -22,8 +22,8 @@
 // abiFunctionSignature is still accepted for callers that genuinely have no
 // ABI to hand, but callData wins whenever both are present.
 
-import { getCircleClient } from '../_lib/circle.js'
-import { postRoute, requireString, RequestError } from '../_lib/walletRoute.js'
+import { getCircleClient } from '../circle.js'
+import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 // Gas Station sponsors the transaction, but Circle's API still requires a fee
 // configuration to size the gas limit. MEDIUM is the level Circle's own

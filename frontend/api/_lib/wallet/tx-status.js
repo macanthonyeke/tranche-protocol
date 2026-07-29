@@ -10,8 +10,8 @@
 //
 // challengeId -> transaction id comes from the challenge's correlationIds.
 
-import { getCircleClient } from '../_lib/circle.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { getCircleClient } from '../circle.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 // Circle transaction states that mean "stop polling".
 const TERMINAL = new Set(['COMPLETE', 'CONFIRMED', 'FAILED', 'CANCELLED', 'DENIED'])

@@ -11,8 +11,8 @@
 // Circle silently defaults to EOA if it's omitted, which would strand
 // email users with an unfundable wallet, so it is passed explicitly.
 
-import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../_lib/circle.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../circle.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 // Circle's "user already initialized" code. Not an error for us: it means the
 // user is returning on a new device, so we skip the challenge and hand back

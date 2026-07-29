@@ -10,8 +10,8 @@
 // wallet/register.js. A miss is reported as not-onboarded so CreateEscrow can
 // say "ask them to sign up first" instead of failing opaquely.
 
-import { normalizeEmail, readBinding } from '../_lib/emailWallets.js'
-import { postRoute, RequestError } from '../_lib/walletRoute.js'
+import { normalizeEmail, readBinding } from '../emailWallets.js'
+import { postRoute, RequestError } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const email = normalizeEmail(body.email)

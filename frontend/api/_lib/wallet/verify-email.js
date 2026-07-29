@@ -8,9 +8,9 @@
 // code is the single thing they contribute, and it is exactly the thing only
 // the real owner of the inbox can have.
 
-import { confirmVerification } from '../_lib/emailVerification.js'
-import { writeBinding } from '../_lib/emailWallets.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { confirmVerification } from '../emailVerification.js'
+import { writeBinding } from '../emailWallets.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const verificationId = requireString(body, 'verificationId', { max: 128 })

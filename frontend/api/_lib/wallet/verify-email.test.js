@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const store = vi.hoisted(() => new Map())
 
-vi.mock('../_lib/redis.js', () => ({
+vi.mock('../redis.js', () => ({
   kv: {
     get: async (k) => (store.has(k) ? structuredClone(store.get(k)) : null),
     set: async (k, v) => { store.set(k, structuredClone(v)) },
@@ -16,8 +16,8 @@ vi.mock('../_lib/redis.js', () => ({
 }))
 
 const handler = (await import('./verify-email.js')).default
-const { createVerification } = await import('../_lib/emailVerification.js')
-const { readBinding, writeBinding } = await import('../_lib/emailWallets.js')
+const { createVerification } = await import('../emailVerification.js')
+const { readBinding, writeBinding } = await import('../emailWallets.js')
 
 function invoke(body, method = 'POST') {
   const res = {

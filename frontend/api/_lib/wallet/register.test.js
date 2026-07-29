@@ -11,12 +11,12 @@ const circleMock = vi.hoisted(() => ({
 }))
 const sentMail = vi.hoisted(() => [])
 
-vi.mock('../_lib/resend.js', async (importOriginal) => ({
+vi.mock('../resend.js', async (importOriginal) => ({
   ...(await importOriginal()),
   sendEmail: async (msg) => { sentMail.push(msg) }
 }))
 
-vi.mock('../_lib/redis.js', () => ({
+vi.mock('../redis.js', () => ({
   kv: {
     get: async (k) => (store.has(k) ? structuredClone(store.get(k)) : null),
     set: async (k, v) => { store.set(k, structuredClone(v)) },
@@ -24,7 +24,7 @@ vi.mock('../_lib/redis.js', () => ({
   }
 }))
 
-vi.mock('../_lib/circle.js', async (importOriginal) => {
+vi.mock('../circle.js', async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
@@ -38,7 +38,7 @@ vi.mock('../_lib/circle.js', async (importOriginal) => {
 })
 
 const handler = (await import('./register.js')).default
-const { putOtpSession, readBinding, writeBinding } = await import('../_lib/emailWallets.js')
+const { putOtpSession, readBinding, writeBinding } = await import('../emailWallets.js')
 
 function invoke(body) {
   const res = {
@@ -113,7 +113,7 @@ describe('POST /api/wallet/register — first time on an email', () => {
 
     const res = await invoke({ sessionId: 'sess-1', userToken: 'tok-a', address: '0xATTACKER' })
 
-    const { peekVerification } = await import('../_lib/emailVerification.js')
+    const { peekVerification } = await import('../emailVerification.js')
     expect((await peekVerification(res.payload.verificationId)).address).toBe('0xALICE')
   })
 })

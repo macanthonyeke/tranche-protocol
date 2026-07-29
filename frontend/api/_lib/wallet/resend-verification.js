@@ -5,9 +5,9 @@
 // record, never from the request. That matters — accepting a `to` here would
 // hand back exactly the redirect this whole mechanism exists to prevent.
 
-import { rotateVerificationCode, CODE_TTL_MINUTES } from '../_lib/emailVerification.js'
-import { sendEmail, verificationMessage } from '../_lib/resend.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { rotateVerificationCode, CODE_TTL_MINUTES } from '../emailVerification.js'
+import { sendEmail, verificationMessage } from '../resend.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const verificationId = requireString(body, 'verificationId', { max: 128 })

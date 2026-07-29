@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const store = vi.hoisted(() => new Map())
 const writes = vi.hoisted(() => [])
 
-vi.mock('../_lib/redis.js', () => ({
+vi.mock('../redis.js', () => ({
   kv: {
     get: async (k) => (store.has(k) ? structuredClone(store.get(k)) : null),
     set: async (k, v) => { writes.push(k); store.set(k, structuredClone(v)) },
@@ -13,7 +13,7 @@ vi.mock('../_lib/redis.js', () => ({
 }))
 
 const handler = (await import('./resolve-email.js')).default
-const { writeBinding } = await import('../_lib/emailWallets.js')
+const { writeBinding } = await import('../emailWallets.js')
 
 function invoke(body, method = 'POST') {
   const res = {

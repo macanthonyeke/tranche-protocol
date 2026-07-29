@@ -19,11 +19,11 @@
 // must come back before anything is committed. Returning users whose binding
 // already exists skip all of that — they proved this email once already.
 
-import { getArcWallet, getCircleClient } from '../_lib/circle.js'
-import { readBinding, restoreOtpSession, takeOtpSession, writeBinding } from '../_lib/emailWallets.js'
-import { createVerification, CODE_TTL_MINUTES } from '../_lib/emailVerification.js'
-import { sendEmail, verificationMessage } from '../_lib/resend.js'
-import { postRoute, requireString, RequestError } from '../_lib/walletRoute.js'
+import { getArcWallet, getCircleClient } from '../circle.js'
+import { readBinding, restoreOtpSession, takeOtpSession, writeBinding } from '../emailWallets.js'
+import { createVerification, CODE_TTL_MINUTES } from '../emailVerification.js'
+import { sendEmail, verificationMessage } from '../resend.js'
+import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const sessionId = requireString(body, 'sessionId', { max: 128 })

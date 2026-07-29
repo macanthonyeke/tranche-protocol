@@ -4,8 +4,8 @@
 // no business sitting in a URL, where it would land in access logs and
 // Referer headers.
 
-import { getCircleClient, ARC_BLOCKCHAIN } from '../_lib/circle.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { getCircleClient, ARC_BLOCKCHAIN } from '../circle.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const userToken = requireString(body, 'userToken')

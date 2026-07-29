@@ -5,8 +5,8 @@
 // so this exists only because an SCA wallet's id (not its address) is the
 // handle Circle indexes balances by.
 
-import { getCircleClient } from '../_lib/circle.js'
-import { postRoute, requireString } from '../_lib/walletRoute.js'
+import { getCircleClient } from '../circle.js'
+import { postRoute, requireString } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const userToken = requireString(body, 'userToken')
