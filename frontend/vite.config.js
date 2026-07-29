@@ -37,15 +37,26 @@ export default defineConfig({
           if (/[\\/]node_modules[\\/](wagmi|viem|@wagmi|@reown|@walletconnect|ox|abitype|@coinbase|@safe-global|@metamask)[\\/]/.test(id)) {
             return 'wallet'
           }
-          if (/[\\/]node_modules[\\/](framer-motion|motion-utils|motion-dom)[\\/]/.test(id)) {
-            return 'motion'
-          }
           // Circle's web SDK is only pulled in once someone chooses the email
           // sign-in path. Its own chunk keeps it off the landing page's
           // critical path, matching how the wallet stack is treated above.
           if (/[\\/]node_modules[\\/]@circle-fin[\\/]/.test(id)) {
             return 'circle'
           }
+
+          // DO NOT add a manual chunk for framer-motion here. There used to be
+          // one, and combined with nodePolyfills above it white-screened the
+          // entire app: the forced motion chunk was evaluated before the entry
+          // chunk had initialised React's exports, so framer-motion's
+          // top-level createContext call hit an undefined React namespace and
+          // threw before anything rendered. It failed at runtime only — the
+          // build succeeded and every unit test passed, which is why it
+          // reached a deployment.
+          //
+          // Rollup still emits a motion chunk on its own; the difference is
+          // that it then owns the ordering and gets it right. Forcing the
+          // split bought nothing anyway, since main.jsx imports MotionConfig
+          // eagerly, so framer-motion is on the critical path either way.
         }
       }
     }
