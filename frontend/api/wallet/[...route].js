@@ -46,19 +46,69 @@ const ROUTES = {
   'verify-email': verifyEmail
 }
 
-export default async function handler(req, res) {
-  // Vercel supplies the matched segments as req.query.route — an array for a
-  // multi-segment path, a plain string for one. Normalising to a joined
-  // string means a nested path like /api/wallet/a/b looks up "a/b", misses,
-  // and 404s, rather than silently matching on its first segment.
-  const segments = req.query?.route
-  const name = Array.isArray(segments) ? segments.join('/') : segments ?? ''
+const PREFIX = '/api/wallet/'
 
+/* Candidate route names for a request, most trustworthy first.
+ *
+ * The URL path comes first deliberately. An earlier version read only
+ * req.query.route, on the assumption that the platform hands back the matched
+ * segment as ['email-token'] or 'email-token'. Every wallet endpoint 404'd in
+ * production because that assumption was wrong, and the unit tests encoded
+ * the same assumption so they passed throughout. The request path is the one
+ * thing that is unambiguous and identical across environments, so it is what
+ * decides; the dynamic param remains a fallback rather than the contract.
+ */
+function candidateNames(req) {
+  const names = []
+
+  const path = String(req.url ?? '').split('?')[0]
+  const at = path.indexOf(PREFIX)
+  if (at !== -1) {
+    const rest = path.slice(at + PREFIX.length).replace(/^\/+|\/+$/g, '')
+    if (rest) {
+      names.push(rest)
+      // Percent-encoding is legal in a path; a mismatch here must not be the
+      // reason a valid route misses.
+      try {
+        const decoded = decodeURIComponent(rest)
+        if (decoded !== rest) names.push(decoded)
+      } catch {
+        // Malformed escape — the raw form above is still worth trying.
+      }
+    }
+  }
+
+  const seg = req.query?.route
+  if (Array.isArray(seg)) {
+    if (seg.length) names.push(seg.join('/'))
+    // A platform that includes the parent segment ('wallet/email-token')
+    // would otherwise never match; the last segment is the route either way.
+    if (seg.length > 1) names.push(seg[seg.length - 1])
+  } else if (typeof seg === 'string' && seg) {
+    const trimmed = seg.replace(/^\/+|\/+$/g, '')
+    if (trimmed) names.push(trimmed)
+    const tail = trimmed.split('/').pop()
+    if (tail && tail !== trimmed) names.push(tail)
+  }
+
+  return names
+}
+
+export default async function handler(req, res) {
   // Object.hasOwn, not `ROUTES[name]`: a bare lookup would resolve inherited
   // keys like "constructor" or "toString" to Object.prototype members and
   // then try to call one as a handler.
-  if (!Object.hasOwn(ROUTES, name)) {
-    res.status(404).json({ error: 'Not found.' })
+  const name = candidateNames(req).find((n) => Object.hasOwn(ROUTES, n))
+
+  if (!name) {
+    // Echo what was actually received. This is the caller's own path, and
+    // having it in the response is what turns "Not found" from a dead end
+    // into a one-look diagnosis — the absence of it cost a full debugging
+    // round on this very endpoint. JSON-encoded, so nothing is interpreted.
+    res.status(404).json({
+      error: 'Not found.',
+      received: { url: req.url ?? null, route: req.query?.route ?? null }
+    })
     return
   }
 

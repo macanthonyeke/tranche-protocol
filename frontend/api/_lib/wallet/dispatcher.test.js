@@ -25,7 +25,7 @@ for (const name of [
 
 const dispatcher = (await import('../../wallet/[...route].js')).default
 
-function invoke(route, method = 'POST') {
+function invoke(route, method = 'POST', url = undefined) {
   const res = {
     statusCode: null,
     payload: null,
@@ -33,7 +33,31 @@ function invoke(route, method = 'POST') {
     status(c) { this.statusCode = c; return this },
     json(p) { this.payload = p; return this }
   }
-  return dispatcher({ method, query: { route }, body: {} }, res).then(() => res)
+  return dispatcher({ method, url, query: { route }, body: {} }, res).then(() => res)
+}
+
+/* Invoke with a fully custom req, for shapes the helpers above can't express. */
+function dispatcherWith({ url, query, method = 'POST' }) {
+  const res = {
+    statusCode: null,
+    payload: null,
+    setHeader() {},
+    status(c) { this.statusCode = c; return this },
+    json(p) { this.payload = p; return this }
+  }
+  return dispatcher({ method, url, query, body: {} }, res).then(() => res)
+}
+
+/* Invoke by URL alone, with no dynamic param at all. */
+function invokeByUrl(url, method = 'POST') {
+  const res = {
+    statusCode: null,
+    payload: null,
+    setHeader() {},
+    status(c) { this.statusCode = c; return this },
+    json(p) { this.payload = p; return this }
+  }
+  return dispatcher({ method, url, query: {}, body: {} }, res).then(() => res)
 }
 
 beforeEach(() => { calls.length = 0 })
@@ -55,6 +79,76 @@ describe('/api/wallet/[...route] dispatch', () => {
   it('accepts the segment as a bare string as well as an array', async () => {
     const res = await invoke('register')
     expect(res.payload).toEqual({ handled: 'register' })
+  })
+
+  /* These encode the failure that took every wallet endpoint down in
+     production while this suite stayed green.
+
+     The dispatcher originally read only req.query.route and assumed it would
+     be ['email-token'] or 'email-token'. The tests asserted exactly that
+     shape, so they agreed with the bug. In the real deployment the value
+     arrived differently and every route answered 404 {"error":"Not found."}.
+
+     Resolution is now driven by the request path, which is identical in every
+     environment, with the dynamic param as a fallback. Each case below is a
+     shape that previously 404'd. */
+  describe('resolves regardless of how the platform shapes the dynamic param', () => {
+    it('resolves from the URL when no param is supplied at all', async () => {
+      const res = await invokeByUrl('/api/wallet/email-token')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('resolves from the URL when the param is named unexpectedly', async () => {
+      const res = await dispatcherWith({ url: '/api/wallet/email-token', query: { '...route': 'email-token' } })
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('resolves when the param includes the parent segment', async () => {
+      const res = await invoke(['wallet', 'email-token'], 'POST', '/api/wallet/email-token')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('resolves when the param is a full path string', async () => {
+      const res = await invoke('wallet/email-token', 'POST', '/api/wallet/email-token')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('resolves when the param carries a leading slash', async () => {
+      const res = await invoke('/email-token', 'POST', '/api/wallet/email-token')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('ignores a querystring on the URL', async () => {
+      const res = await invokeByUrl('/api/wallet/email-token?utm=x')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('falls back to the param when the URL is the unexpanded file path', async () => {
+      const res = await invoke('email-token', 'POST', '/api/wallet/[...route]')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    it('resolves a percent-encoded path', async () => {
+      const res = await invokeByUrl('/api/wallet/email%2Dtoken')
+      expect(res.payload).toEqual({ handled: 'email-token' })
+    })
+
+    // Every wallet endpoint, by URL alone — the consolidation must not have
+    // left any single route behind, which is how this surfaced.
+    it.each([
+      'balances', 'email-resend', 'email-token', 'execute-contract-call',
+      'initialize', 'list', 'register', 'resend-verification',
+      'resolve-email', 'tx-status', 'verify-email'
+    ])('resolves %s from the URL alone', async (name) => {
+      const res = await invokeByUrl(`/api/wallet/${name}`)
+      expect(res.payload).toEqual({ handled: name })
+    })
+  })
+
+  it('reports what it received when nothing matches', async () => {
+    const res = await invokeByUrl('/api/wallet/does-not-exist')
+    expect(res.statusCode).toBe(404)
+    expect(res.payload.received.url).toBe('/api/wallet/does-not-exist')
   })
 
   it('404s an unknown route without invoking any handler', async () => {
