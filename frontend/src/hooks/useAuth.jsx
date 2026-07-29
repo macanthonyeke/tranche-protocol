@@ -88,9 +88,25 @@ export function AuthProvider({ children }) {
     if (sdkRef.current) return sdkRef.current
 
     const { W3SSdk } = await import('@circle-fin/w3s-pw-web-sdk')
+
+    // BUILD-TIME, NOT RUNTIME. Vite substitutes import.meta.env.VITE_* with a
+    // string literal while bundling, so this reads whatever was in the build
+    // environment — never what is set on the server now. When the variable is
+    // absent at build time the expression becomes `undefined`, the minifier
+    // folds `if (!undefined)` to always-true, and the branch below is emitted
+    // as an unconditional throw with no check left in the shipped code.
+    //
+    // The practical consequence, which has already cost one debugging round:
+    // adding VITE_CIRCLE_APP_ID in the hosting dashboard does nothing to an
+    // already-built deployment. It has to be rebuilt. Hence the wording of
+    // the message — "not configured" alone sends people to re-check a
+    // dashboard that is already correct.
     const appId = import.meta.env.VITE_CIRCLE_APP_ID
     if (!appId) {
-      throw new Error('Email sign-in is not configured. Connect a wallet instead.')
+      throw new Error(
+        'Email sign-in is unavailable in this build: VITE_CIRCLE_APP_ID was not set ' +
+        'when it was compiled. Setting it now requires a redeploy. Connect a wallet instead.'
+      )
     }
 
     const sdk = new W3SSdk({ appSettings: { appId } }, (error, result) => {
