@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAccount, useReadContract } from 'wagmi'
+import { useReadContract } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { decodeEventLog } from 'viem'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -147,7 +148,7 @@ export default function CreateEscrow() {
 
 function Flow() {
   const navigate = useNavigate()
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { supported, isLoading: loadingDomains, refetch: refetchDomains } = useSupportedDomains()
   const { config } = useProtocolConfig()
   const feeBps = config?.protocolFeeBps ?? 199n
@@ -687,10 +688,95 @@ function PartiesSection({ state, setState, errors, touched, touch }) {
         )}
       </Field>
 
+      <FreelancerEmailLookup onResolved={(addr) => { set('freelancer')(addr); touch('freelancer') }} />
+
       {Number(state.destinationDomain) !== ARC_DOMAIN && (
         <div className="rounded-xl bg-sunk border border-rule px-3 py-2.5 text-[12.5px] text-ink-2 leading-relaxed">
           You're paying out on a different chain (set in Advanced settings). Safe and smart contract wallets have different addresses per chain — make sure this address is correct there.
         </div>
+      )}
+    </div>
+  )
+}
+
+/* Look a freelancer up by email instead of pasting an address.
+
+   Only resolves people who have already finished their own sign-in: the
+   lookup is read-only and never provisions a wallet for someone else (see
+   api/wallet/resolve-email.js). That's the point — an escrow must not be able
+   to name an address its owner has never proved control of, so a miss is
+   reported plainly as "ask them to sign up first" rather than papered over by
+   creating something on their behalf.
+
+   The resolved address is written into the same field a pasted address goes
+   into, and is shown in full before deposit, so the payer always confirms the
+   actual recipient rather than trusting the lookup blind. */
+function FreelancerEmailLookup({ onResolved }) {
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState(null) // null | 'looking' | 'missing' | 'error'
+  const [message, setMessage] = useState(null)
+
+  const lookup = async () => {
+    const trimmed = email.trim()
+    if (!trimmed) return
+    setStatus('looking')
+    setMessage(null)
+    try {
+      const res = await fetch('/api/wallet/resolve-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmed })
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setStatus('error')
+        setMessage(data.error || "Couldn't look that up. Please try again.")
+        return
+      }
+      if (!data.onboarded) {
+        setStatus('missing')
+        setMessage(`No wallet yet for ${trimmed}. Ask them to sign up at Tranche first — they'll need to finish setting up their own wallet before you can pay them.`)
+        return
+      }
+      setStatus(null)
+      setMessage(null)
+      setEmail('')
+      onResolved?.(data.address)
+    } catch {
+      setStatus('error')
+      setMessage("Couldn't reach the lookup service. Paste their address instead.")
+    }
+  }
+
+  return (
+    <div className="rounded-xl bg-sunk border border-rule px-3 py-3 flex flex-col gap-2">
+      <label htmlFor="freelancer-email" className="text-[12.5px] text-ink-2">
+        Don't have their address? Look them up by email.
+      </label>
+      <div className="flex gap-2">
+        <input
+          id="freelancer-email"
+          type="email"
+          autoComplete="off"
+          className="input flex-1"
+          placeholder="them@example.com"
+          value={email}
+          onChange={(e) => { setEmail(e.target.value); setStatus(null); setMessage(null) }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); lookup() } }}
+        />
+        <button
+          type="button"
+          onClick={lookup}
+          disabled={!email.trim() || status === 'looking'}
+          className="btn-secondary text-sm px-3 shrink-0"
+        >
+          {status === 'looking' ? 'Looking…' : 'Find'}
+        </button>
+      </div>
+      {message && (
+        <p className={`text-[12.5px] leading-relaxed ${status === 'error' ? 'text-danger' : 'text-ink-2'}`}>
+          {message}
+        </p>
       )}
     </div>
   )

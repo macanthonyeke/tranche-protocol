@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useAccount } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { motion, AnimatePresence } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
@@ -30,7 +30,7 @@ export default function Ledger() {
 }
 
 function LedgerInner() {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { escrows: payerEscrows, isLoading: loadingPayer } = useEscrowsForPayer(address)
   const { escrows: freelancerEscrows, isLoading: loadingFreelancer } = useEscrowsForFreelancer(address)
   const [filter, setFilter] = useState('all')

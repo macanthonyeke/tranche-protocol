@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { useAccount } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 
 import PageHeader from '../components/PageHeader.jsx'
 import ConnectGate from '../components/ConnectGate.jsx'
@@ -111,7 +111,7 @@ function Body() {
 }
 
 function ResolutionDrawer({ id, onClose, onResolved }) {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { detail, refetch } = useEscrowDetail(id, address, { pollMs: 0 })
   const hasInvoice = !!(detail?.escrow?.invoiceHash && detail.escrow.invoiceHash !== ZERO_BYTES32)
   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? id : null)

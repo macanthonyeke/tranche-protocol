@@ -5,6 +5,7 @@ import { useAccount, useSwitchChain } from 'wagmi'
 import IconButton from './IconButton.jsx'
 import WalletButton from './WalletButton.jsx'
 import ThemeToggle from './ThemeToggle.jsx'
+import VerifyEmailPrompt from './VerifyEmailPrompt.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useTheme } from '../hooks/useTheme.jsx'
 import { useActivityFeed } from '../hooks/useActivityFeed.js'
@@ -105,7 +106,7 @@ function useMobileNavLinks() {
 
 function TopNav() {
   const navLinks = useNavLinks()
-  const { address, isConnected } = useAccount()
+  const { address, isConnected } = useAuth()
   const [feedOpen, setFeedOpen] = useState(false)
   const feedRef = useRef(null)
   const { items, unreadCount, markRead } = useActivityFeed(isConnected ? address : null)
@@ -436,6 +437,14 @@ function WrongNetworkBanner() {
   // unfiltered per-connection value. Same fix as useTx.js's run(), verified
   // there against an isolated @wagmi/core harness.
   //
+  // Stays on wagmi's useAccount rather than useAuth, deliberately: this is
+  // the one piece of the shell that is genuinely about the injected wallet's
+  // connection, not about who the user is. An email (SCA) user has no
+  // injected chain to be on the wrong side of — Circle broadcasts to Arc
+  // directly — and useAccount().isConnected is false for them, so the early
+  // return below already keeps this banner away from them. Swapping this to
+  // useAuth would show every email user a network warning they cannot act on.
+  //
   // This banner is intentionally non-blocking: it doesn't gate or disable
   // any action below it. Enforcement happens at the write layer (useTx.js's
   // run(), which auto-prompts a switch via switchChainAsync before every
@@ -478,7 +487,15 @@ export default function AppShell({ children, maxWidth = 'content' }) {
     <div className="min-h-screen flex flex-col text-ink">
       <TopNav />
       <WrongNetworkBanner />
-      <main className={mainCls}>{children}</main>
+      <main className={mainCls}>
+        {/* Renders itself to null unless this email is awaiting Tranche's own
+            verification, so it costs nothing on every other page load. Lives
+            here rather than on one page because the user can navigate away
+            from sign-up before finishing, and the binding stays unwritten
+            until they do. */}
+        <VerifyEmailPrompt />
+        {children}
+      </main>
       <BottomNav />
     </div>
   )

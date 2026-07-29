@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAccount } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { motion, AnimatePresence, useReducedMotion, useInView, useAnimate } from 'framer-motion'
 
 import ConnectGate from '../components/ConnectGate.jsx'
@@ -137,7 +137,7 @@ function ArbiterDisputeBanner() {
 }
 
 function DashboardInner() {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { isArbiter } = useRoles()
 
   const { dashboard, isLoading, error: dashboardError, refetch } = useDashboard(address)

@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo } from 'react'
-import { useAccount } from 'wagmi'
+import { useAuth } from './useAuth.jsx'
 import { useAllCallerRoles } from './useArbiter.js'
 
 const EMPTY_ROLES = {
@@ -23,7 +23,7 @@ const RoleContext = createContext({
 })
 
 export function RoleProvider({ children }) {
-  const { address, isConnected } = useAccount()
+  const { address, isConnected } = useAuth()
   const { roles, isLoading, refetch } = useAllCallerRoles(address)
 
   const value = useMemo(() => {

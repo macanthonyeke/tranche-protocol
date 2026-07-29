@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useAccount } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 
 import ConnectGate from '../components/ConnectGate.jsx'
 import Field from '../components/Field.jsx'
@@ -37,7 +37,7 @@ function SettingsInner() {
 
 /* ---------- Refund Balance Withdrawal ---------- */
 function RefundSection() {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { balance, refetch } = useRefundBalance(address)
   const [recipient, setRecipient] = useState(address || '')
   const tx = useTx({ onConfirmed: () => refetch() })
@@ -97,7 +97,7 @@ function RefundSection() {
 
 /* ---------- Transfer Refund Credit ---------- */
 function TransferRefundCreditSection() {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const { balance, refetch } = useRefundBalance(address)
   const [recipient, setRecipient] = useState('')
   const tx = useTx({ onConfirmed: () => refetch() })
@@ -190,7 +190,7 @@ function ThemeOption({ active, onClick, label }) {
 
 /* ---------- Connected Account ---------- */
 function AccountSection() {
-  const { address } = useAccount()
+  const { address } = useAuth()
   return (
     <Section title="Connected wallet" description="The wallet you are currently connected with.">
       <div className="flex items-center justify-between">

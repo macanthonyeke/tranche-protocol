@@ -1,19 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
-import { useAccount, useConnect, useDisconnect } from 'wagmi'
+import { useAccount, useConnect } from 'wagmi'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { arcTestnet } from '../config/wagmi'
 import { truncateAddr } from '../utils/format'
 
+/* The account pill in the header, and the connect button on the sign-in wall.
+
+   Identity comes from useAuth, so this renders the same pill whichever way
+   the user signed in — an email user gets their SCA address here just like a
+   wallet user gets their EOA. Connecting stays pure wagmi: this button only
+   ever starts the injected-wallet path, because email sign-in has its own
+   form (EmailSignIn.jsx) and reaching it through here would be a dead end. */
 export default function WalletButton() {
+  const { address, isConnected, isSca, email, signOut } = useAuth()
   // useAccount().chainId, NOT wagmi's useChainId(): useChainId() only syncs
   // when the wallet's real chain is registered in config.chains (wagmi.js
   // registers only arcTestnet), so a wallet on any other chain never syncs
   // and useChainId() keeps reporting the arcTestnet default forever — this
   // would show "Arc Testnet" here even on a mainnet wallet. Same fix as
   // useTx.js's run() and AppShell.jsx's WrongNetworkBanner.
-  const { address, isConnected, chainId } = useAccount()
+  //
+  // Read from wagmi rather than useAuth on purpose: it describes the injected
+  // wallet's connection, which an email user simply doesn't have. Their
+  // network label is fixed (see below), not read from a connector.
+  const { chainId } = useAccount()
   const { connect, connectors, isPending } = useConnect()
-  const { disconnect } = useDisconnect()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const ref = useRef(null)
@@ -40,7 +52,11 @@ export default function WalletButton() {
     } catch {}
   }
 
-  const networkLabel = chainId === arcTestnet.id ? 'Arc Testnet' : `Chain ${chainId}`
+  // A Circle wallet is always on Arc — there is no connector whose chain
+  // could drift, so it is never reported as being on the wrong one.
+  const networkLabel = isSca
+    ? 'Arc Testnet'
+    : chainId === arcTestnet.id ? 'Arc Testnet' : `Chain ${chainId}`
   const SLIDE = { initial: { opacity: 0, y: 6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -6 }, transition: { duration: 0.18, ease: [0.22, 1, 0.36, 1] } }
 
   return (
@@ -78,6 +94,12 @@ export default function WalletButton() {
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
                 className="absolute right-0 top-[calc(100%+8px)] z-50 w-72 card-surface p-4 flex flex-col gap-3"
               >
+                {isSca && email && (
+                  <div>
+                    <div className="text-xs text-ink-2">Signed in as</div>
+                    <div className="text-sm text-ink break-all">{email}</div>
+                  </div>
+                )}
                 <div>
                   <div className="text-xs text-ink-2">Network</div>
                   <div className="text-sm text-ink">{networkLabel}</div>
@@ -93,10 +115,10 @@ export default function WalletButton() {
                   </button>
                 </div>
                 <button
-                  onClick={() => { disconnect(); setOpen(false) }}
+                  onClick={() => { signOut(); setOpen(false) }}
                   className="btn-danger w-full text-sm py-2"
                 >
-                  Disconnect wallet
+                  {isSca ? 'Sign out' : 'Disconnect wallet'}
                 </button>
               </motion.div>
             )}

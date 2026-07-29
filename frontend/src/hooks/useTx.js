@@ -2,17 +2,58 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAccount, useSwitchChain, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 
 import { txToast } from './useToast.jsx'
+import { useAuth } from './useAuth.jsx'
 import { parseRevertReason } from '../utils/errors'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
 import { arcTestnet } from '../config/wagmi'
+
+// How long to wait for Circle to broadcast an approved challenge. Generous:
+// by this point the user has already approved with their PIN and the
+// transaction is in flight, so giving up early would report a failure for
+// something that is about to succeed.
+const SCA_POLL_INTERVAL_MS = 2000
+const SCA_POLL_TIMEOUT_MS = 120000
+
+/* Poll tx-status until Circle reports a hash for the challenge's transaction.
+   Throws if Circle reports the transaction failed, or on timeout. */
+async function awaitScaTxHash({ challengeId, userToken }) {
+  const deadline = Date.now() + SCA_POLL_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const res = await fetch('/api/wallet/tx-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challengeId, userToken })
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) {
+      if (data.failed) throw new Error(data.errorReason || 'The network rejected this transaction.')
+      // A hash is all that's needed — the shared receipt wait below takes it
+      // from here, so there's no reason to also wait on Circle's own
+      // terminal state.
+      if (data.txHash) return data.txHash
+    }
+    await new Promise((r) => setTimeout(r, SCA_POLL_INTERVAL_MS))
+  }
+  throw new Error('Timed out waiting for the transaction to be submitted.')
+}
 
 /* Drives a single write transaction with:
    - optimistic onSign callback (instant UI feedback the moment the user signs)
    - Sonner loading toast that flips to success / error
    - onConfirmed / onReverted lifecycle hooks
-   - rollback hook so callers can revert local state on revert */
+   - rollback hook so callers can revert local state on revert
+
+   Handles both wallet types behind one API, so the ~25 call sites that do
+   tx.run(escrowWrite(fn, args)) need no branching and were not touched when
+   email sign-in landed. The paths differ only in how a hash is obtained: an
+   EOA returns one from writeContract, a Circle SCA must be polled for one
+   after the user approves in Circle's hosted PIN dialog. Once a hash exists
+   both converge on the same receipt wait below, so onConfirmed always gets a
+   real on-chain receipt with real logs — CreateEscrow depends on that, since
+   it reads the new escrow id out of receipt.logs. */
 export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
   const { writeContractAsync } = useWriteContract()
+  const { executeContractCall, isSca } = useAuth()
   // useAccount().chainId, NOT wagmi's useChainId(): useChainId() reads a
   // top-level state value that wagmi's syncConnectedChain subscriber only
   // updates when the wallet's real chain is in config.chains. Our config
@@ -66,6 +107,25 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
     setStatus('confirming')
     toastRef.current = txToast({ loading: loadingMessage })
     try {
+      // Circle SCA path. Deliberately ahead of the network-switch block: a
+      // Circle wallet has no injected connector and no "current chain" to
+      // switch — Circle broadcasts to Arc directly, and useAccount().chainId
+      // is undefined for these users, so running the switch would prompt a
+      // wallet that isn't there and fail every write.
+      if (isSca) {
+        const pending = await executeContractCall(args)
+        if (!pending) throw new Error('Could not reach your wallet. Please sign in again.')
+        // The user has approved in Circle's dialog; from here it behaves like
+        // a submitted transaction.
+        toastRef.current.update('Approved. Submitting…')
+        const tx = await awaitScaTxHash(pending)
+        setHash(tx)
+        setStatus('pending')
+        toastRef.current.update('Submitted. Waiting for confirmation…')
+        callbacksRef.current.onSign?.(tx)
+        return tx
+      }
+
       // Auto-switch strategy: gate every write on Arc Testnet, prompting a
       // switch rather than just disabling the action. switchChainAsync's
       // injected-connector implementation already falls back to
@@ -107,7 +167,7 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
       callbacksRef.current.onSettled?.(null)
       throw err
     }
-  }, [writeContractAsync, chainId, switchChainAsync])
+  }, [writeContractAsync, chainId, switchChainAsync, isSca, executeContractCall])
 
   const reset = useCallback(() => {
     setStatus('idle'); setHash(null); setError(null)

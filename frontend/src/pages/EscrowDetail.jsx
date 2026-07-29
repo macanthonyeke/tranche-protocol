@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useAccount, useReadContract } from 'wagmi'
+import { useReadContract } from 'wagmi'
+import { useAuth } from '../hooks/useAuth.jsx'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 
@@ -71,7 +72,7 @@ export default function EscrowDetail() {
 
 function DetailInner() {
   const { id } = useParams()
-  const { address } = useAccount()
+  const { address } = useAuth()
 
   // After a tx confirms, poll at 3s until state updates or 30s elapses.
   const [fastPollUntil, setFastPollUntil] = useState(null)
@@ -588,7 +589,7 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
    receiving address / split address flows share one interaction pattern
    instead of four hand-rolled inline-edit cards. */
 function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const mySplitIndex = role === 'freelancer' && splits
     ? splits.findIndex((s) => {
         const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
@@ -1823,7 +1824,7 @@ function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneInde
    Explains what happened in plain English and walks the user through relaying
    the CCTP message on the destination chain to complete the transfer. */
 function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex, copied, onCopied }) {
-  const { address } = useAccount()
+  const { address } = useAuth()
   const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
   const [relayTxHash, setRelayTxHash] = useState(null)
   const [relayError, setRelayError] = useState(null)
