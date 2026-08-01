@@ -21,10 +21,16 @@ describe('Circle widget theme', () => {
   })
 
   // Reuses the stylesheet index.html already loads; nothing is re-hosted.
-  it('points the font at the existing Switzer CDN stylesheet', () => {
+  it('points the font at a stable absolute production URL Circle can fetch', () => {
     expect(TRANCHE_FONT.name).toBe('Switzer')
-    expect(TRANCHE_FONT.url).toContain('api.fontshare.com')
-    expect(TRANCHE_FONT.url).toContain('switzer')
+    // Absolute: the widget iframe is on pw-auth.circle.com, so a relative
+    // path would resolve against Circle's origin.
+    expect(TRANCHE_FONT.url.startsWith('https://')).toBe(true)
+    // Production domain, not a preview host that disappears when the
+    // deployment is cleaned up and would leave the widget silently unstyled.
+    expect(new URL(TRANCHE_FONT.url).hostname).toBe('trancheprotocol.xyz')
+    expect(TRANCHE_FONT.url).not.toMatch(/vercel\.app/)
+    expect(TRANCHE_FONT.url).toContain('/fonts/tranche-fonts.css')
   })
 
   it('replaces the disclaimer with plain factual copy', () => {

@@ -61,15 +61,27 @@ export const TRANCHE_THEME = {
 }
 
 /* Switzer is the UI face (tailwind.config.js `sans`). The SDK's fontFamily
-   takes a single { name, url } pointing at a CSS stylesheet — the same shape
-   as the Google Fonts URL in its own docs — so this reuses the exact Fontshare
-   stylesheet index.html already loads rather than re-hosting anything. Nothing
-   is self-hosted in public/; both faces come from CDNs today.
-   Only one family can be passed, so Fraunces (display) is not sent — the
-   widget is UI chrome, not a place display type would appear. */
+   takes a single { name, url } pointing at a CSS stylesheet, and this is the
+   same self-hosted file index.html loads — public/fonts/tranche-fonts.css.
+   Only one family can be passed, so the widget gets the UI face; Fraunces is
+   display type and would not appear in this chrome anyway.
+
+   ABSOLUTE, and pinned to the production domain on purpose. The widget runs
+   in an iframe on pw-auth.circle.com, so a relative path would resolve
+   against Circle's origin and find nothing. It must also be a URL that
+   outlives this branch: a Vercel preview URL stops existing once the
+   deployment is cleaned up, which would leave the widget silently unstyled
+   long after anyone remembered why. That does mean previews and localhost
+   load the widget's font from production — correct, since it is the only
+   address Circle can reach, and the file is immutable and CORS-open
+   (see the /fonts/* headers in vercel.json).
+
+   The app itself does NOT use this constant; index.html links the same
+   stylesheet by relative path, so local and preview builds serve their own
+   copy. Only the cross-origin iframe needs the absolute form. */
 export const TRANCHE_FONT = {
   name: 'Switzer',
-  url: 'https://api.fontshare.com/v2/css?f[]=switzer@300,400,500,600,700&display=swap'
+  url: 'https://trancheprotocol.xyz/fonts/tranche-fonts.css'
 }
 
 /* Replaces Circle's default disclaimer on the security-question screen.

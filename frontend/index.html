@@ -21,18 +21,12 @@
     <meta name="twitter:description" content="Trustless invoice escrow and milestone-driven USDC payments. Built on Arc." />
     <meta name="twitter:image" content="https://trancheprotocol.xyz/og-image.png" />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="preconnect" href="https://api.fontshare.com">
-    <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin>
-    <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@0,9..144,400..700,30..100,0..1;1,9..144,400..700,30..100,0..1&family=Geist+Mono:wght@400..600&display=swap"
-      rel="stylesheet"
-    >
-    <link
-      href="https://api.fontshare.com/v2/css?f[]=switzer@300,400,500,600,700&display=swap"
-      rel="stylesheet"
-    >
+    <!-- Self-hosted typefaces. Same origin as the app, so no preconnect and
+         no third-party request on first paint. The same file is handed to
+         Circle's wallet widget by absolute URL (src/utils/circleTheme.js), so
+         edit public/fonts/tranche-fonts.css rather than adding faces here. -->
+    <link rel="preload" href="/fonts/Switzer-Variable.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/fonts/tranche-fonts.css">
     <script>
       (function () {
         try {

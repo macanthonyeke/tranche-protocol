@@ -1,0 +1,66 @@
+/* Tranche's typefaces, self-hosted.
+ *
+ * Serves two consumers from one file:
+ *   1. the app, via <link> in index.html
+ *   2. Circle's wallet widget, which runs in an iframe on pw-auth.circle.com
+ *      and is handed this file's absolute URL (see src/utils/circleTheme.js)
+ *
+ * url() paths are RELATIVE on purpose. A relative url() in CSS resolves
+ * against the stylesheet's own address, so the same file works unmodified
+ * from localhost, from a Vercel preview, and from the production domain that
+ * Circle fetches — no per-environment build step, and no chance of a preview
+ * deployment quietly pulling fonts from production.
+ *
+ * Cross-origin note: fonts (unlike stylesheets) are always fetched in CORS
+ * mode, so Circle's iframe can only use these if the font files answer with
+ * Access-Control-Allow-Origin. That header is set for /fonts/* in
+ * vercel.json; without it this file loads for Circle but every face silently
+ * falls back.
+ *
+ * All three faces are variable, so one file per family covers the whole
+ * weight range the design system uses. Fraunces also carries the opsz, SOFT
+ * and WONK axes that styles/globals.css drives via font-variation-settings.
+ *
+ * font-display: swap matches the metric-compatible fallbacks defined in
+ * styles/globals.css, which exist to keep layout shift near zero on first
+ * paint. Changing one without the other reintroduces the shift.
+ */
+
+@font-face {
+  font-family: 'Switzer';
+  src: url('./Switzer-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Switzer';
+  src: url('./Switzer-VariableItalic.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Fraunces';
+  src: url('./Fraunces-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Fraunces italic is deliberately not self-hosted. The only rule that would
+   use it, .display-italic in styles/globals.css, is not applied anywhere in
+   the app, and the italic variable face is 229 KB — larger than every other
+   font here combined. If .display-italic is ever used, add
+   Fraunces-VariableItalic.woff2 alongside a matching @font-face rather than
+   letting the browser synthesise an oblique, which looks poor on a serif. */
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./GeistMono-Variable.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
