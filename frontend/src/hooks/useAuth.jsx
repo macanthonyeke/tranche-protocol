@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useAccount, useDisconnect } from 'wagmi'
 import { encodeFunctionData } from 'viem'
+import { applyTrancheTheme } from '../utils/circleTheme.js'
 
 /* One source of truth for "who is the current user and how do they sign".
    Both sign-in paths land here, and the rest of the app reads identity from
@@ -119,6 +120,8 @@ export function AuthProvider({ children }) {
       }
       waiter.resolve(result)
     })
+
+    applyTrancheTheme(sdk)
 
     // getDeviceId() must run before anything else touches the SDK. The device
     // token minted server-side is bound to this id, and calling execute() or
