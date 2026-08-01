@@ -78,17 +78,17 @@ function candidateNames(req) {
     }
   }
 
+  // Fallback only, for a request that somehow arrives without a usable path.
+  // Matched whole, never by trailing segment: a "last segment wins" rule would
+  // quietly make /api/wallet/anything/register an alias for register, which is
+  // an alias nobody asked for and everybody reading this later would have to
+  // have explained to them.
   const seg = req.query?.route
   if (Array.isArray(seg)) {
     if (seg.length) names.push(seg.join('/'))
-    // A platform that includes the parent segment ('wallet/email-token')
-    // would otherwise never match; the last segment is the route either way.
-    if (seg.length > 1) names.push(seg[seg.length - 1])
   } else if (typeof seg === 'string' && seg) {
     const trimmed = seg.replace(/^\/+|\/+$/g, '')
     if (trimmed) names.push(trimmed)
-    const tail = trimmed.split('/').pop()
-    if (tail && tail !== trimmed) names.push(tail)
   }
 
   return names

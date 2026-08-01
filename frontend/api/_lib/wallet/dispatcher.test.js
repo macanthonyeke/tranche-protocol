@@ -103,12 +103,15 @@ describe('/api/wallet/[...route] dispatch', () => {
       expect(res.payload).toEqual({ handled: 'email-token' })
     })
 
-    it('resolves when the param includes the parent segment', async () => {
+    // These two resolve off the URL, not off the param. The param is useless
+    // in both cases ('wallet/email-token' matches no key) and is deliberately
+    // no longer rescued by taking its last segment — see the alias tests below.
+    it('resolves from the URL when the param includes the parent segment', async () => {
       const res = await invoke(['wallet', 'email-token'], 'POST', '/api/wallet/email-token')
       expect(res.payload).toEqual({ handled: 'email-token' })
     })
 
-    it('resolves when the param is a full path string', async () => {
+    it('resolves from the URL when the param is a full path string', async () => {
       const res = await invoke('wallet/email-token', 'POST', '/api/wallet/email-token')
       expect(res.payload).toEqual({ handled: 'email-token' })
     })
@@ -142,6 +145,31 @@ describe('/api/wallet/[...route] dispatch', () => {
     ])('resolves %s from the URL alone', async (name) => {
       const res = await invokeByUrl(`/api/wallet/${name}`)
       expect(res.payload).toEqual({ handled: name })
+    })
+  })
+
+  /* A route name is matched whole, never by trailing segment.
+     A "last segment wins" fallback briefly existed to rescue a param that
+     included the parent segment. URL resolution covers every real case, so it
+     bought nothing and silently made /api/wallet/anything/register an alias
+     for register. These pin the aliases as gone. */
+  describe('does not alias a route onto a trailing segment', () => {
+    it.each([
+      ['/api/wallet/anything/register', ['anything', 'register']],
+      ['/api/wallet/x/y/verify-email', ['x', 'y', 'verify-email']]
+    ])('404s %s', async (url, route) => {
+      const res = await invoke(route, 'POST', url)
+      expect(res.statusCode).toBe(404)
+      expect(calls).toEqual([])
+    })
+
+    it.each([
+      ['array param', ['wallet', 'register']],
+      ['string param', 'wallet/register']
+    ])('404s a %s whose tail is a real route, with no URL to fall back on', async (_label, route) => {
+      const res = await invoke(route)
+      expect(res.statusCode).toBe(404)
+      expect(calls).toEqual([])
     })
   })
 
