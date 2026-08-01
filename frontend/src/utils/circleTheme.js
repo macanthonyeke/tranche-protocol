@@ -18,23 +18,21 @@
  * Re-check the types before changing any of it on an SDK bump. */
 export const TRANCHE_THEME = {
   // Design tokens are authored in oklch (see styles/globals.css); the SDK
-  // takes plain hex, so these are the converted equivalents.
-  //
-  // NOTE: #c4622d is the value specified for this work. The --clay token
-  // itself, oklch(58% 0.165 38), actually converts to #c84e25 — a slightly
-  // redder, more saturated terracotta. Kept as specified rather than
-  // silently substituted; swap to #c84e25 to track the token exactly.
-  mainBtnBg: '#c4622d',
+  // takes plain hex, so these are the converted equivalents. #c84e25 is
+  // --clay, oklch(58% 0.165 38), converted through oklab to sRGB — not an
+  // eyeballed approximation. Recompute rather than nudge by hand if the token
+  // ever moves.
+  mainBtnBg: '#c84e25',
   mainBtnBgOnHover: '#b73500',   // --clay-hover
   mainBtnText: '#f8f1e5',        // --paper, matching .btn-primary's text
   mainBtnTextOnHover: '#f8f1e5',
 
   secondBtnText: '#231814',      // --ink
   secondBtnBorder: '#bfb2a3',    // --rule-2, as .btn-secondary uses
-  secondBtnBorderOnHover: '#c4622d',
+  secondBtnBorderOnHover: '#c84e25',
   secondBtnBgOnHover: '#f0e7d8', // --sunk
 
-  plainBtnText: '#c4622d',
+  plainBtnText: '#c84e25',
   plainBtnTextOnHover: '#b73500',
 
   bg: '#f8f1e5',                 // --paper
@@ -43,15 +41,15 @@ export const TRANCHE_THEME = {
   textAuxiliary: '#5c4f4b',      // --ink-2
   textSummary: '#5c4f4b',
   textPlaceholder: '#6c605c',    // --ink-3
-  textInteractive: '#c4622d',
-  textSummaryHighlight: '#c4622d',
+  textInteractive: '#c84e25',
+  textSummaryHighlight: '#c84e25',
 
   inputText: '#231814',
   inputBg: '#f0e7d8',            // --sunk, as .input uses
-  inputBorderFocused: '#c4622d',
+  inputBorderFocused: '#c84e25',
   inputBorderFocusedError: '#c9222b',
 
-  pinDotActivated: '#c4622d',
+  pinDotActivated: '#c84e25',
   pinDotBaseBorder: '#bfb2a3',
 
   success: '#007840',            // --ok

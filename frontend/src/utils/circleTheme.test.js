@@ -3,7 +3,7 @@ import { TRANCHE_THEME, TRANCHE_FONT, SECURITY_CONFIRM_ITEMS, applyTrancheTheme 
 
 describe('Circle widget theme', () => {
   it('uses Tranche clay for the primary action', () => {
-    expect(TRANCHE_THEME.mainBtnBg).toBe('#c4622d')
+    expect(TRANCHE_THEME.mainBtnBg).toBe('#c84e25')
   })
 
   // Explicitly against the design system: one saturated colour, no gradients.
