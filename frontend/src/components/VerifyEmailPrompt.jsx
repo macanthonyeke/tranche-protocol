@@ -54,15 +54,25 @@ export default function VerifyEmailPrompt() {
   return (
     <div className="card-surface p-5 flex flex-col gap-3">
       <div>
-        <h3 className="text-sm font-semibold text-ink">Verify your email</h3>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-ink">Verify your email</h3>
+          <span className="text-[11px] uppercase tracking-wide text-ink-3">Optional</span>
+        </div>
+        {/* Leads with who can ignore this. Arriving mid-onboarding, a code
+            field reads as a second mandatory login step unless it says
+            otherwise — and most people signing in are payers, for whom it
+            does nothing at all. */}
         <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
+          Skip this if you're just paying someone. You'll only need it if you want
+          people to find you by email to send you an escrow.
+        </p>
+        <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1.5">
           We sent a code to <span className="text-ink">{pendingVerification.email}</span>.
-          Entering it lets clients pay you at this email address. Until then your
-          wallet works normally — people just can't look you up by email.
+          Your wallet works either way — without it, people just can't look you up by email.
         </p>
       </div>
 
-      <form onSubmit={submit} className="flex gap-2">
+      <form onSubmit={submit} className="flex flex-col gap-2">
         <label htmlFor="verify-code" className="sr-only">Verification code</label>
         <input
           id="verify-code"
@@ -74,15 +84,28 @@ export default function VerifyEmailPrompt() {
           onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
           disabled={busy}
           placeholder="000000"
-          className="input num flex-1 tracking-[0.3em]"
+          className="input num w-full tracking-[0.3em]"
         />
-        <button
-          type="submit"
-          disabled={busy || code.length !== 6}
-          className="btn-primary text-sm px-4 shrink-0"
-        >
-          {busy ? 'Checking…' : 'Verify'}
-        </button>
+        {/* Equal weight, side by side and same size: skipping is a legitimate
+            outcome here, not a way out of a task. Neither is the "real"
+            button. */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="submit"
+            disabled={busy || code.length !== 6}
+            className="btn-primary text-sm py-2"
+          >
+            {busy ? 'Checking…' : 'Verify'}
+          </button>
+          <button
+            type="button"
+            onClick={dismissEmailVerification}
+            disabled={busy}
+            className="btn-secondary text-sm py-2"
+          >
+            Skip for now
+          </button>
+        </div>
       </form>
 
       {error && (
@@ -92,12 +115,9 @@ export default function VerifyEmailPrompt() {
         <p className="text-[12.5px] text-ink-2">A new code is on its way.</p>
       )}
 
-      <div className="flex items-center gap-4 text-[12.5px]">
+      <div className="text-[12.5px]">
         <button type="button" onClick={resend} className="text-clay hover:opacity-80 underline-offset-2 hover:underline">
           Send a new code
-        </button>
-        <button type="button" onClick={dismissEmailVerification} className="text-ink-3 hover:text-ink-2">
-          Skip for now
         </button>
       </div>
     </div>
