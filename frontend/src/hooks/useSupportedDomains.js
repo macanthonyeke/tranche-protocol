@@ -9,7 +9,17 @@ export function useSupportedDomains() {
       abi: ESCROW_ABI,
       functionName: 'supportedDomains',
       args: [d]
-    }))
+    })),
+    query: {
+      // Unlike the app's other reads (useEscrows.js, EscrowDetail.jsx),
+      // this one had no self-healing path: a single RPC failure during page
+      // load (the shared Arc Testnet RPC 429s under any burst -- see
+      // config/wagmi.js) left `data` undefined forever, permanently
+      // blocking Create Escrow behind the manual Retry button in Advanced
+      // settings. Same poll-until-it-lands pattern as useEscrowInvoice.
+      refetchInterval: (query) => (query.state.data ? false : 5_000),
+      refetchIntervalInBackground: false
+    }
   })
 
   const supported = []
