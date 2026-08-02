@@ -30,6 +30,7 @@ const SUMMARY_FIELDS = `
   invoiceHash
   invoiceURI
   invoiceAcknowledgedAt
+  milestones { state }
 `
 
 async function gql(query, variables) {
@@ -49,7 +50,9 @@ async function gql(query, variables) {
 
 // Maps a subgraph Escrow node to the same shape normaliseSummary() produces,
 // so downstream components are unchanged.
-function toSummary(node) {
+// Exported for tests: lets the milestone derivation be exercised against a
+// real subgraph record rather than a hand-built stand-in.
+export function toSummary(node) {
   return {
     id: Number(node.escrowId),
     depositor: node.depositor,
@@ -66,7 +69,34 @@ function toSummary(node) {
     // the dashboard can tell "not started" apart from "acknowledged, delivery
     // not yet claimed" — two states the Incoming section previously described
     // with one sentence that was wrong for the second.
-    invoiceAcknowledgedAt: node.invoiceAcknowledgedAt ? BigInt(node.invoiceAcknowledgedAt) : null
+    invoiceAcknowledgedAt: node.invoiceAcknowledgedAt ? BigInt(node.invoiceAcknowledgedAt) : null,
+    ...milestoneTally(node)
+  }
+}
+
+/* Milestone counts derived from the nested `milestones { state }` list.
+ *
+ * ABSENT MEANS PENDING. Milestone entities are created lazily by the
+ * subgraph — getOrCreateMilestone only runs when an event touches that
+ * milestone (indexer/src/mapping.ts) — so an escrow nobody has claimed,
+ * disputed or released returns `milestones: []` even though it has real
+ * pending milestones on-chain. Escrow 5 on the live 0.5.3 endpoint is exactly
+ * that: milestoneCount 1, milestones [].
+ *
+ * So pending is counted DOWN from milestoneCount rather than up from the
+ * array. Counting up, or asking `milestones.every(isFulfilled)`, reads as
+ * true for an empty array and would treat an untouched escrow as fully
+ * delivered — the opposite of the truth.
+ */
+function milestoneTally(node) {
+  const milestones = node.milestones ?? []
+  const total = Number(node.milestoneCount)
+  // Present-and-not-PENDING are the only ones we can be sure have moved on.
+  // Everything else — absent, or present but still PENDING — is pending.
+  const settledOrMoved = milestones.filter((m) => m.state !== 'PENDING').length
+  return {
+    fulfilledMilestoneCount: milestones.filter((m) => m.state === 'FULFILLED').length,
+    pendingMilestoneCount: Math.max(0, total - settledOrMoved)
   }
 }
 

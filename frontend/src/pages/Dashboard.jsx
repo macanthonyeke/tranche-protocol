@@ -72,6 +72,23 @@ const LEDGER_TABS = [
    it as set would file a never-accepted escrow under "awaiting your claim". */
 export const isAcknowledged = (summary) => !!summary?.invoiceAcknowledgedAt
 
+/* Incoming: the recipient still has something to do on this escrow.
+ *
+ * Requires at least one PENDING milestone. Once every remaining milestone has
+ * been claimed the ball is in the payer's court for the review window, so the
+ * escrow leaves this section entirely rather than sitting under a third label
+ * describing work that is already done.
+ *
+ * pendingMilestoneCount is derived in goldsky.js against milestoneCount, not
+ * by inspecting the nested milestones array — see milestoneTally() there for
+ * why an empty array does NOT mean "nothing pending". */
+export const isIncoming = (e) =>
+  !e.isPayer &&
+  e.state === 0 &&
+  e.releasedMilestoneCount === 0 &&
+  e.disputedMilestoneCount === 0 &&
+  (e.pendingMilestoneCount ?? 0) > 0
+
 export default function Dashboard() {
   return (
     <ConnectGate>
@@ -176,10 +193,7 @@ function DashboardInner() {
   // Incoming: freelancer role, active, no released/disputed milestones yet —
   // escrows the user hasn't engaged with. Shown in a separate section so new
   // requests don't blend into the user's own active work.
-  const incomingEscrows = useMemo(
-    () => mySummaries.filter((e) => !e.isPayer && e.state === 0 && e.releasedMilestoneCount === 0 && e.disputedMilestoneCount === 0),
-    [mySummaries]
-  )
+  const incomingEscrows = useMemo(() => mySummaries.filter(isIncoming), [mySummaries])
   // Presentation-only split of the same list — see the Incoming section below.
   // No escrow enters or leaves the section as a result of these.
   const incomingUnacknowledged = useMemo(
@@ -191,10 +205,12 @@ function DashboardInner() {
     [incomingEscrows]
   )
 
-  const mainEscrows = useMemo(
-    () => mySummaries.filter((e) => e.isPayer || e.state !== 0 || e.releasedMilestoneCount > 0 || e.disputedMilestoneCount > 0),
-    [mySummaries]
-  )
+  // Strict complement of Incoming, not a second hand-written predicate. These
+  // two lists were previously independent filters that happened to be
+  // opposites; adding the pending-milestone condition to one and not the
+  // other would have silently dropped every fully-claimed escrow off the
+  // dashboard altogether.
+  const mainEscrows = useMemo(() => mySummaries.filter((e) => !isIncoming(e)), [mySummaries])
 
   const totalOnChain = Math.round(useCountUp(mySummaries.length, 1400))
 
