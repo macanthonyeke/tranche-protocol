@@ -29,6 +29,7 @@ const SUMMARY_FIELDS = `
   disputedMilestoneCount
   invoiceHash
   invoiceURI
+  invoiceAcknowledgedAt
 `
 
 async function gql(query, variables) {
@@ -60,7 +61,12 @@ function toSummary(node) {
     releasedMilestoneCount: Number(node.releasedMilestoneCount),
     disputedMilestoneCount: Number(node.disputedMilestoneCount),
     invoiceHash: node.invoiceHash,
-    invoiceURI: node.invoiceURI
+    invoiceURI: node.invoiceURI,
+    // Null until the recipient acknowledges. Carried on the summary purely so
+    // the dashboard can tell "not started" apart from "acknowledged, delivery
+    // not yet claimed" — two states the Incoming section previously described
+    // with one sentence that was wrong for the second.
+    invoiceAcknowledgedAt: node.invoiceAcknowledgedAt ? BigInt(node.invoiceAcknowledgedAt) : null
   }
 }
 

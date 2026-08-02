@@ -65,6 +65,13 @@ const LEDGER_TABS = [
   { key: 'cancelled',     label: 'Cancelled',     filter: (e) => e.state === 2 }
 ]
 
+/* Has the recipient accepted the invoice terms yet?
+   Exported so the Incoming-section grouping can be tested against the real
+   predicate rather than a copy of it. Note 0n is the subgraph's "never
+   acknowledged" for this BigInt field, and is correctly falsy here — treating
+   it as set would file a never-accepted escrow under "awaiting your claim". */
+export const isAcknowledged = (summary) => !!summary?.invoiceAcknowledgedAt
+
 export default function Dashboard() {
   return (
     <ConnectGate>
@@ -173,6 +180,17 @@ function DashboardInner() {
     () => mySummaries.filter((e) => !e.isPayer && e.state === 0 && e.releasedMilestoneCount === 0 && e.disputedMilestoneCount === 0),
     [mySummaries]
   )
+  // Presentation-only split of the same list — see the Incoming section below.
+  // No escrow enters or leaves the section as a result of these.
+  const incomingUnacknowledged = useMemo(
+    () => incomingEscrows.filter((e) => !isAcknowledged(e)),
+    [incomingEscrows]
+  )
+  const incomingAcknowledged = useMemo(
+    () => incomingEscrows.filter(isAcknowledged),
+    [incomingEscrows]
+  )
+
   const mainEscrows = useMemo(
     () => mySummaries.filter((e) => e.isPayer || e.state !== 0 || e.releasedMilestoneCount > 0 || e.disputedMilestoneCount > 0),
     [mySummaries]
@@ -243,14 +261,42 @@ function DashboardInner() {
         <section>
           <div className="flex items-center justify-between gap-4 mb-2">
             <h2 className="text-xl font-bold text-ink tracking-tight">Incoming requests</h2>
-            <span className="text-xs text-ink-3">{incomingEscrows.length} new</span>
+            <span className="text-xs text-ink-3">{incomingEscrows.length}</span>
           </div>
-          <p className="text-sm text-ink-2 mb-6">Escrows you've been added to as a recipient but haven't started working on yet.</p>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {incomingEscrows.map((e) => (
-              <PremiumEscrowCard key={e.id} summary={e} />
-            ))}
-          </div>
+          {/* Split by acknowledgement rather than described in one sentence.
+              The old copy — "haven't started working on yet" — stayed on screen
+              after a successful acknowledge, which read as though the
+              acknowledge hadn't registered. Acknowledging IS starting; what's
+              outstanding after it is the delivery claim. Membership of this
+              section is unchanged; only how it's labelled. */}
+          {incomingUnacknowledged.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-sm font-semibold text-ink mb-1">Not yet accepted</h3>
+              <p className="text-sm text-ink-2 mb-4">
+                Escrows you've been added to as a recipient but haven't accepted yet. Review the
+                terms and accept to get started.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {incomingUnacknowledged.map((e) => (
+                  <PremiumEscrowCard key={e.id} summary={e} />
+                ))}
+              </div>
+            </div>
+          )}
+          {incomingAcknowledged.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-ink mb-1">Awaiting your delivery claim</h3>
+              <p className="text-sm text-ink-2 mb-4">
+                You've accepted these. Mark a milestone as delivered when the work is done, and the
+                payer's review window starts.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {incomingAcknowledged.map((e) => (
+                  <PremiumEscrowCard key={e.id} summary={e} />
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
