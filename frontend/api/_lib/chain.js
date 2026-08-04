@@ -4,8 +4,10 @@
 // Can't import frontend/src/config/wagmi.js here: it references
 // import.meta.env (Vite-only, undefined in a plain Node/Vercel serverless
 // function) and pulls in wagmi's browser connector stack, neither of which
-// belongs in a server context. The RPC URL is duplicated from there instead
-// — keep the two in sync if Arc Testnet's endpoint ever changes.
+// belongs in a server context. The RPC URL constant below is duplicated
+// from there instead, but both read the same VITE_ARC_RPC_URL_ALCHEMY env
+// var (see that file), so there's a single source of truth for the actual
+// endpoint even though the client setup itself can't be shared.
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,7 +15,13 @@ import { createPublicClient, http } from 'viem'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ABI_PATH = path.resolve(__dirname, '../../src/abi/TrancheProtocol.json')
-const ARC_TESTNET_RPC = 'https://rpc.testnet.arc.network'
+// Same VITE_ARC_RPC_URL_ALCHEMY as config/wagmi.js -- Vercel injects every
+// env var into a serverless function's process.env regardless of the VITE_
+// prefix (that prefix only controls Vite's client-bundle inclusion), so one
+// var name covers both the browser and this server context. See wagmi.js
+// for why: Circle's shared gateway (the fallback below) has been observed
+// returning HTTP 400 on CORS preflight requests.
+const ARC_TESTNET_RPC = process.env.VITE_ARC_RPC_URL_ALCHEMY || 'https://rpc.testnet.arc.network'
 
 const abi = JSON.parse(fs.readFileSync(ABI_PATH, 'utf8'))
 const client = createPublicClient({ transport: http(ARC_TESTNET_RPC) })

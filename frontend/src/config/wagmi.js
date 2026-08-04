@@ -2,11 +2,20 @@ import { createConfig, http } from 'wagmi'
 import { defineChain } from 'viem'
 import { injected, mock } from 'wagmi/connectors'
 
+// Circle's shared Arc Testnet gateway (the fallback below) has been observed
+// returning HTTP 400 on CORS preflight (OPTIONS) requests -- confirmed with
+// a raw curl -X OPTIONS, independent of this app or any client library, so
+// every browser-side RPC call fails regardless of retries once it happens.
+// VITE_ARC_RPC_URL_ALCHEMY points at a dedicated Alchemy endpoint instead;
+// the fallback exists only so local dev works without every contributor
+// provisioning their own Alchemy key.
+const ARC_RPC_URL = import.meta.env.VITE_ARC_RPC_URL_ALCHEMY || 'https://rpc.testnet.arc.network'
+
 export const arcTestnet = defineChain({
   id: 5042002,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
-  rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
+  rpcUrls: { default: { http: [ARC_RPC_URL] } },
   blockExplorers: {
     default: { name: 'Arc Explorer', url: 'https://testnet.arcscan.app' }
   },
