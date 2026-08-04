@@ -495,6 +495,7 @@ Frontend responsive e2e tests run in the same workflow.
 | Variable | Purpose |
 |---|---|
 | `VITE_CONTRACT_ADDRESS` | Deployed contract address |
+| `VITE_ARC_RPC_URL_ALCHEMY` | Arc Testnet RPC endpoint (also read server-side by `api/_lib/chain.js`). Defaults to Circle's shared public gateway if unset, but that gateway has been observed failing CORS preflight for browser requests — point this at a dedicated provider (e.g. Alchemy) instead. |
 | `VITE_GOLDSKY_ENDPOINT` | Goldsky subgraph query URL |
 | `VITE_PINATA_GATEWAY` | IPFS gateway subdomain for pinned invoice attachments (optional — defaults to the team's dedicated gateway) |
 | `PINATA_JWT` | Server-side only (`api/pin-invoice.js`). Pinata JWT for pinning invoice attachments and encrypted private-invoice envelopes to IPFS. |
