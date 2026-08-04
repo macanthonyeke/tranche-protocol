@@ -9,6 +9,13 @@ import { injected, mock } from 'wagmi/connectors'
 // VITE_ARC_RPC_URL_ALCHEMY points at a dedicated Alchemy endpoint instead;
 // the fallback exists only so local dev works without every contributor
 // provisioning their own Alchemy key.
+//
+// This same var/key is also read server-side by api/_lib/chain.js -- for
+// now that's intentional (one endpoint, one thing to configure). Do NOT
+// add an Alchemy origin allowlist to this key without first provisioning
+// a separate server-only key: Vercel serverless functions don't carry the
+// app's browser origin, so an allowlist scoped to this site would start
+// silently failing chain.js's reads the moment it's applied.
 const ARC_RPC_URL = import.meta.env.VITE_ARC_RPC_URL_ALCHEMY || 'https://rpc.testnet.arc.network'
 
 export const arcTestnet = defineChain({

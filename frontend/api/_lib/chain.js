@@ -21,6 +21,12 @@ const ABI_PATH = path.resolve(__dirname, '../../src/abi/TrancheProtocol.json')
 // var name covers both the browser and this server context. See wagmi.js
 // for why: Circle's shared gateway (the fallback below) has been observed
 // returning HTTP 400 on CORS preflight requests.
+//
+// This key is intentionally shared with the browser for now. Do NOT add
+// an Alchemy origin allowlist to it without first provisioning a separate
+// server-only key -- this function's requests come from Vercel's backend,
+// not the app's browser origin, so an allowlist scoped to this site would
+// silently break these reads the moment one is applied.
 const ARC_TESTNET_RPC = process.env.VITE_ARC_RPC_URL_ALCHEMY || 'https://rpc.testnet.arc.network'
 
 const abi = JSON.parse(fs.readFileSync(ABI_PATH, 'utf8'))
