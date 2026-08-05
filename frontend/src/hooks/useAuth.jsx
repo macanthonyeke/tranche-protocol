@@ -191,10 +191,15 @@ export function AuthProvider({ children }) {
     onStage?.('creating')
     const init = await postJson('/api/wallet/initialize', { userToken: login.userToken })
 
+    // TEMP DEBUG — remove before merging. Confirms whether execute()'s
+    // callback actually fires and with what, for the missing-PIN-dialog
+    // investigation.
+    console.log('[tranche-debug] initialize response', { challengeId: init.challengeId, alreadyInitialized: init.alreadyInitialized })
     if (init.challengeId) {
       sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
       await new Promise((resolve, reject) => {
         sdk.execute(init.challengeId, (error) => {
+          console.log('[tranche-debug] execute() callback fired', { error })
           if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
           else resolve()
         })
