@@ -117,7 +117,11 @@ const sanitizeDraft = (raw) => {
   const arr = Array.isArray(raw.milestones) ? raw.milestones : []
   const milestones = arr.length === 0 ? [emptyMilestone()] : arr.slice(0, 10).map(sanitizeMilestone)
   const invoice = sanitizeInvoice(raw.invoice)
-  return { ...merged, milestones, invoice }
+  // Private invoice mode is temporarily disabled at the UI level (see the
+  // visibility toggle below) — force false here too so a draft persisted
+  // before this restriction, or a hand-edited localStorage value, can never
+  // resurrect a private submission.
+  return { ...merged, milestones, invoice, privateMode: false }
 }
 
 export default function CreateEscrow() {
@@ -184,6 +188,10 @@ function Flow() {
   // whichever mode is now active.
   const setPrivateMode = (value) => {
     if (value === state.privateMode) return
+    // Private invoice mode is temporarily disabled — see the visibility
+    // toggle below. Enforced here, not just by disabling the button, so
+    // this can never be flipped to true from anywhere else in the UI.
+    if (value) return
     // A plaintext attachment can only exist here if it was pinned during
     // public mode (private mode never pins on select — see onPinFile).
     // Best-effort unpin so Tranche stops hosting it now that it's being
@@ -1422,10 +1430,16 @@ function AdvancedSection({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onSetPrivateMode(true)}
-                    className={`rounded-xl border px-4 py-3 text-left transition-colors ${state.privateMode ? 'border-clay bg-clay/5 text-clay' : 'border-rule text-ink-2 hover:border-rule-2'}`}
+                    disabled
+                    title="Private invoices are temporarily unavailable"
+                    className="rounded-xl border px-4 py-3 text-left transition-colors border-rule text-ink-2 opacity-50 cursor-not-allowed"
                   >
-                    <p className="text-[13.5px] font-medium">Private — hash only</p>
+                    <p className="text-[13.5px] font-medium flex items-center gap-1.5">
+                      Private — hash only
+                      <span className="text-[9px] font-normal uppercase tracking-[0.14em] text-ink-3 px-1.5 py-0.5 rounded-sm bg-sunk border border-rule">
+                        Coming soon
+                      </span>
+                    </p>
                     <p className="text-[11.5px] mt-0.5 opacity-60">Contents kept off-chain</p>
                   </button>
                 </div>
