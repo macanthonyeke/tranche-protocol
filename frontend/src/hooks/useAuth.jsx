@@ -195,11 +195,23 @@ export function AuthProvider({ children }) {
     // callback actually fires and with what, for the missing-PIN-dialog
     // investigation.
     console.log('[tranche-debug] initialize response', { challengeId: init.challengeId, alreadyInitialized: init.alreadyInitialized })
+    try {
+      localStorage.setItem('tranche-debug-initialize', JSON.stringify({
+        challengeId: init.challengeId, alreadyInitialized: init.alreadyInitialized,
+        timestamp: Date.now()
+      }))
+    } catch {}
     if (init.challengeId) {
       sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
       await new Promise((resolve, reject) => {
         sdk.execute(init.challengeId, (error) => {
           console.log('[tranche-debug] execute() callback fired', { error })
+          try {
+            localStorage.setItem('tranche-debug-execute', JSON.stringify({
+              fired: true, error: error ? String(error.message || error) : null,
+              timestamp: Date.now()
+            }))
+          } catch {}
           if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
           else resolve()
         })
