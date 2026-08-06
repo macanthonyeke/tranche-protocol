@@ -204,11 +204,12 @@ export function AuthProvider({ children }) {
     if (init.challengeId) {
       sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
       await new Promise((resolve, reject) => {
-        sdk.execute(init.challengeId, (error) => {
-          console.log('[tranche-debug] execute() callback fired', { error })
+        sdk.execute(init.challengeId, (error, result) => {
+          console.log('[tranche-debug] execute() callback fired', { error, status: result?.status })
           try {
             localStorage.setItem('tranche-debug-execute', JSON.stringify({
               fired: true, error: error ? String(error.message || error) : null,
+              status: result?.status ?? null,
               timestamp: Date.now()
             }))
           } catch {}
