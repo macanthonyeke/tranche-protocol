@@ -86,16 +86,43 @@ export const TRANCHE_FONT = {
   url: 'https://trancheprotocol.xyz/fonts/tranche-fonts.css'
 }
 
-/* Replaces Circle's default disclaimer on the security-question screen.
-   Plain and factual: what the answers are for, and the one consequence that
-   actually matters — losing them means losing the wallet, which no one at
-   Tranche can undo. Passed as the third argument of
-   setCustomSecurityQuestions; there is no standalone setter for it. */
-export const SECURITY_CONFIRM_ITEMS = [
-  'Your recovery answers are the only way back into this wallet if you forget your PIN.',
-  'Tranche cannot see your answers and cannot reset them for you.',
-  'If you lose both your PIN and these answers, the funds in this wallet cannot be recovered.'
-]
+/* NO setCustomSecurityQuestions CALL, DELIBERATELY — do not re-add one.
+ *
+ * There used to be a SECURITY_CONFIRM_ITEMS constant here, replacing Circle's
+ * default disclaimer on the security-questions screen. It was removed because
+ * these users never see that screen, and its copy had gone stale in a way that
+ * proved it: it talked about forgetting "your PIN", and email-auth wallets have
+ * no PIN at all.
+ *
+ * Why the screen is unreachable, traced through the installed SDK (1.1.11)
+ * rather than assumed:
+ *
+ *  - The only wallet-creation call in this codebase is
+ *    createUserPinWithWallets (api/_lib/wallet/initialize.js), whose challenge
+ *    is the sole thing that could surface security questions.
+ *  - dist/src/index.js:243-247 — the public execute() we use for that
+ *    challenge (and for every contract execution) calls exec(onCompleted,
+ *    false), i.e. showIframe = false unconditionally. appendIframe then sizes
+ *    the iframe 0%/0% at z-index -1 with display:none (index.js:346-361).
+ *  - index.js:98-106 — it becomes visible ONLY when Circle's own iframe posts
+ *    { showUi: true } back. So Circle decides server-side, per challenge and
+ *    per auth mode, whether any UI appears at all.
+ *  - For email auth Circle sends no showUi for the initialization challenge:
+ *    a confirmed first-time signup produced no PIN-or-security-questions
+ *    dialog (the investigation behind commits b2d709f..42c387f). Contract
+ *    executions DO get showUi — that is the confirm screen this module
+ *    themes — which shows the mechanism genuinely discriminates rather than
+ *    the UI being globally suppressed.
+ *
+ * Removing the call is a clean no-op for that screen: setCustomSecurityQuestions
+ * writes only three fields, all read at one place —
+ * customizations.securityQuestions.{questions, requiredCount,
+ * securityConfirmItems} (index.js:60-63). One consequence if that screen ever
+ * does render: requiredCount falls back to the SDK's default of 2
+ * (index.js:39) where we used to pass 1, and Circle's default questions and
+ * disclaimer apply. Cosmetic, and only reachable if the premise above stops
+ * holding — which is what to re-check first if you find yourself wanting this
+ * back. */
 
 /** Apply Tranche's theming to a freshly constructed SDK instance. */
 export function applyTrancheTheme(sdk) {
@@ -110,13 +137,6 @@ export function applyTrancheTheme(sdk) {
     sdk.setResources({ fontFamily: TRANCHE_FONT })
   } catch (err) {
     console.warn('Circle widget font skipped:', err)
-  }
-  try {
-    // null keeps Circle's default question set; only the disclaimer copy is
-    // ours. The middle argument is requiredCount, left at the default 1.
-    sdk.setCustomSecurityQuestions(null, 1, SECURITY_CONFIRM_ITEMS)
-  } catch (err) {
-    console.warn('Circle widget security copy skipped:', err)
   }
 }
 

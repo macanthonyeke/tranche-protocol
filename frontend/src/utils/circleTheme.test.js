@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
-  TRANCHE_THEME, TRANCHE_FONT, SECURITY_CONFIRM_ITEMS,
+  TRANCHE_THEME, TRANCHE_FONT,
   applyTrancheTheme, buildContractInteraction, applyConfirmLocalization
 } from './circleTheme.js'
 
@@ -36,13 +36,6 @@ describe('Circle widget theme', () => {
     expect(TRANCHE_FONT.url).toContain('/fonts/tranche-fonts.css')
   })
 
-  it('replaces the disclaimer with plain factual copy', () => {
-    expect(SECURITY_CONFIRM_ITEMS.length).toBeGreaterThan(0)
-    const joined = SECURITY_CONFIRM_ITEMS.join(' ')
-    expect(joined).toContain('Tranche cannot see your answers')
-    // No marketing register: no exclamation, no superlatives.
-    expect(joined).not.toMatch(/!|seamless|effortless|secure your future|peace of mind/i)
-  })
 })
 
 describe('applyTrancheTheme', () => {
@@ -50,18 +43,26 @@ describe('applyTrancheTheme', () => {
     const calls = []
     const sdk = {
       setThemeColor: (v) => calls.push(['setThemeColor', v]),
-      setResources: (v) => calls.push(['setResources', v]),
-      // securityConfirmItems is the THIRD argument of this method in 1.1.11 —
-      // there is no standalone setter for it.
-      setCustomSecurityQuestions: (q, n, items) => calls.push(['setCustomSecurityQuestions', q, n, items])
+      setResources: (v) => calls.push(['setResources', v])
     }
     applyTrancheTheme(sdk)
 
-    expect(calls.map((c) => c[0])).toEqual(['setThemeColor', 'setResources', 'setCustomSecurityQuestions'])
+    expect(calls.map((c) => c[0])).toEqual(['setThemeColor', 'setResources'])
     expect(calls[0][1]).toBe(TRANCHE_THEME)
     expect(calls[1][1].fontFamily).toBe(TRANCHE_FONT)
-    expect(calls[2][1]).toBeNull()          // keep Circle's default questions
-    expect(calls[2][3]).toBe(SECURITY_CONFIRM_ITEMS)
+  })
+
+  /* Security-questions config is deliberately absent — see the long note in
+     circleTheme.js. The screen it configures is unreachable for email-auth
+     users, and its copy had gone stale (it referenced a PIN these wallets do
+     not have). Asserted rather than merely deleted, so quietly re-adding the
+     call trips a test and sends whoever did it to that note first. */
+  it('configures no security questions at all', () => {
+    const setCustomSecurityQuestions = vi.fn()
+    applyTrancheTheme({
+      setThemeColor() {}, setResources() {}, setCustomSecurityQuestions
+    })
+    expect(setCustomSecurityQuestions).not.toHaveBeenCalled()
   })
 
   // Theming is cosmetic; an SDK bump that renames a setter must not be able to
@@ -70,8 +71,7 @@ describe('applyTrancheTheme', () => {
     expect(() => applyTrancheTheme({})).not.toThrow()
     expect(() => applyTrancheTheme({
       setThemeColor() { throw new Error('gone') },
-      setResources() { throw new Error('gone') },
-      setCustomSecurityQuestions() { throw new Error('gone') }
+      setResources() { throw new Error('gone') }
     })).not.toThrow()
   })
 })
