@@ -14,6 +14,55 @@ import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
 import { formatUSDC, truncateAddr } from '../utils/format.js'
+import { CONTRACT_ADDRESS } from '../config/contract.js'
+
+/* ---------- Confirm-screen descriptors ----------
+   First CONFIG-CHANGE descriptor in the app: no `amount`, because nothing
+   moves. buildContractInteraction omits the currency row cleanly when amount
+   is absent, so there is no placeholder figure to invent. What replaces it is
+   an old-value → new-value line in `parameters`, since a config change has no
+   number to anchor on but does have a before and an after.
+
+   Takes the CURRENT on-chain state and describes the transition away from it.
+   PauseControl renders its two buttons from a ternary on the same flag, so a
+   descriptor pinned to the wrong branch would read "Pause" while calling
+   unpause — hence the direction and the function name are derived together
+   here rather than written out twice at the call sites. */
+export function pauseConfirm({ paused }) {
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS
+  }
+
+  if (paused) {
+    return {
+      ...base,
+      title: 'Resume new deposits',
+      subtitle: 'Lets new escrows be created again, protocol-wide.',
+      functionName: 'unpause',
+      parameters: [
+        'Deposits: Paused → Active',
+        'Affects the whole protocol, not one escrow.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Pause new deposits',
+    subtitle: 'Stops any new escrow from being created, protocol-wide. Money already in escrow is not affected.',
+    functionName: 'pause',
+    parameters: [
+      'Deposits: Active → Paused',
+      'Affects the whole protocol, not one escrow.',
+      // Verified against the contract: deposit() is the ONLY function carrying
+      // whenNotPaused, so every settlement path stays open while paused. If a
+      // future change adds the modifier elsewhere, this line stops being true.
+      'Only new deposits are blocked — release, refund and dispute paths stay open.',
+      'Existing escrows carry on as normal.'
+    ]
+  }
+}
 
 export default function ProtocolSettings() {
   return (
@@ -407,7 +456,10 @@ function PauseControl({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={tx.isBusy || !loaded}
-            onClick={() => tx.run(escrowWrite('unpause', []), { loadingMessage: 'Unpause.' })}
+            onClick={() => tx.run(escrowWrite('unpause', []), {
+              loadingMessage: 'Unpause.',
+              confirm: pauseConfirm({ paused: isPaused })
+            })}
           >
             {tx.isBusy ? 'Working…' : 'Unpause deposits'}
           </button>
@@ -415,7 +467,10 @@ function PauseControl({ config, refetch }) {
           <button
             className="btn-danger"
             disabled={tx.isBusy || !loaded}
-            onClick={() => tx.run(escrowWrite('pause', []), { loadingMessage: 'Pause.' })}
+            onClick={() => tx.run(escrowWrite('pause', []), {
+              loadingMessage: 'Pause.',
+              confirm: pauseConfirm({ paused: isPaused })
+            })}
           >
             {tx.isBusy ? 'Working…' : 'Pause deposits'}
           </button>

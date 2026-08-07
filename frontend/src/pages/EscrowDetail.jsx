@@ -2804,6 +2804,30 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
   }
 }
 
+/* EVIDENCE/STATE: retractCancelApproval clears the caller's own flag and
+   nothing else (TrancheProtocol.sol:1062). There is no figure to anchor on, so
+   the copy carries the consequence instead.
+
+   The retract button only renders once the caller has approved, and an escrow
+   where BOTH parties have approved cannot still be ACTIVE — the second
+   approval finalises the cancellation in the same call. So at this point the
+   caller has approved and the other party has not, which is what makes
+   "the other party can no longer complete it on their own" true. */
+export function retractCancelConfirm({ escrow }) {
+  return {
+    title: 'Withdraw your cancellation approval',
+    subtitle: 'Takes back your approval to cancel this escrow. The escrow stays active and its milestones carry on as normal.',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'retractCancelApproval',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      'The other party can no longer complete the cancellation on their own.',
+      'No funds move on this transaction. You can approve again at any time.'
+    ]
+  }
+}
+
 function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
@@ -2833,7 +2857,10 @@ function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, cl
 
   const retract = () => retractTx.run(
     escrowWrite('retractCancelApproval', [BigInt(escrow.id)]),
-    { loadingMessage: 'Retracting. Check your wallet.' }
+    {
+      loadingMessage: 'Retracting. Check your wallet.',
+      confirm: retractCancelConfirm({ escrow })
+    }
   )
 
   // Has the caller approved on-chain, and not yet optimistically retracted?

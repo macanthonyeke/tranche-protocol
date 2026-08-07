@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest'
    them apart, and it has to compute the refundable figure the way the
    contract does — PENDING milestones only, with IN_REVIEW/DISPUTED making the
    finalising call revert rather than refund. */
-import { cancelEscrowConfirm } from './EscrowDetail.jsx'
+import { cancelEscrowConfirm, retractCancelConfirm } from './EscrowDetail.jsx'
 import { buildContractInteraction } from '../utils/circleTheme.js'
 
 const REFUND_TO = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
@@ -143,5 +143,41 @@ describe('cancelEscrowConfirm — wording and edge cases', () => {
     for (const x of [d([PENDING(1n)], false), d([PENDING(1n)], true), d([IN_REVIEW(1n)], true)]) {
       expect(x.functionName).toBe('mutualCancel')
     }
+  })
+})
+
+/* EVIDENCE/STATE: clears the caller's own flag and nothing else
+   (TrancheProtocol.sol:1062). No value, no old → new pair worth showing —
+   the consequence is the whole content. */
+describe('retractCancelConfirm', () => {
+  const r = () => retractCancelConfirm({ escrow })
+
+  it('carries no amount and renders no currency row', () => {
+    expect(r()).not.toHaveProperty('amount')
+    const built = buildContractInteraction(r())
+    expect(built).not.toHaveProperty('mainCurrency')
+    expect(built).not.toHaveProperty('total')
+  })
+
+  it('spells out the consequence, since there is no figure to anchor on', () => {
+    expect(paramText(r())).toContain('The other party can no longer complete the cancellation on their own.')
+  })
+
+  it('says the escrow survives and the action is reversible', () => {
+    expect(r().subtitle).toMatch(/escrow stays active/i)
+    expect(paramText(r())).toMatch(/approve again at any time/i)
+    expect(paramText(r())).toContain('No funds move on this transaction.')
+  })
+
+  it('names the real function', () => {
+    expect(r().functionName).toBe('retractCancelApproval')
+  })
+
+  /* Same card, opposite intent — retracting must never read like approving. */
+  it('is not confusable with the approval descriptor', () => {
+    const approve = d([PENDING(1n)], false)
+    expect(r().title).not.toBe(approve.title)
+    expect(r().functionName).not.toBe(approve.functionName)
+    expect(paramText(r())).not.toMatch(/Would refund/)
   })
 })
