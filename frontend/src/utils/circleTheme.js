@@ -149,6 +149,16 @@ export function applyTrancheTheme(sdk) {
  * genuinely cannot know what the call is worth and has nothing to put there.
  * Only the caller knows, so the caller supplies it.
  *
+ * VERIFIED LIVE 2026-08-07, on a real UCW create-escrow: Circle's iframe does
+ * honour these fields and the Total field renders the real formatted amount —
+ * confirmed on BOTH signing steps, the USDC approve and the deposit, which is
+ * what the two descriptors in pages/CreateEscrow.jsx feed.
+ * Worth stating outright because it could not be established from the
+ * installed package — index.js:60-64 only shows the localizations being SENT
+ * in the postMessage payload; what the remote app at pw-auth.circle.com does
+ * with them is not in the package, so this needed eyes on a real transaction.
+ * Note fc8ff42's commit message predates that check and says the opposite.
+ *
  * Two things about the SDK's model drive the shape of this code, both read off
  * the installed package rather than the docs (1.1.11):
  *
