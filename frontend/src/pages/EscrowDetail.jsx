@@ -237,6 +237,7 @@ function DetailInner() {
             escrow={escrow}
             role={role}
             splits={splits}
+            milestones={milestones}
             onChange={handleChange}
             optimistic={optimistic}
             setOpt={setOpt}
@@ -543,7 +544,7 @@ function FocusIcon({ tone }) {
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
-function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
+function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, setOpt, clearOpt }) {
   const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
 
@@ -599,7 +600,7 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
 
       {role && escrow.state === 0 && (
         <CancelCard
-          escrow={escrow} role={role} onChange={onChange}
+          escrow={escrow} role={role} milestones={milestones} onChange={onChange}
           optimistic={optimistic} setOpt={setOpt} clearOpt={clearOpt}
         />
       )}
@@ -2724,7 +2725,86 @@ function Countdown({ label, target, tone = 'warning' }) {
 }
 
 /* ---------- Cancel by mutual agreement ---------- */
-function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
+
+/* Confirm-screen copy for mutualCancel, which is two different transactions
+   behind one button (TrancheProtocol.sol:735).
+ *
+ *  - First party to call: sets their approval flag and returns. Nothing moves.
+ *  - Second party to call: both flags are now true, so the same call falls into
+ *    the refund branch, cancels the escrow and credits the payer.
+ *
+ * So `otherApproved` decides whether this is EVIDENCE/STATE or VALUE-MOVING.
+ * The button already knows — it switches its own label between "Approve
+ * cancellation" and "Finalize cancellation" — and the signing screen has to
+ * make the same distinction, or the approving party sees a Total for money
+ * that this transaction does not move.
+ *
+ * The refundable figure is the sum of PENDING milestones only. RELEASED ones
+ * are already paid out and are not clawed back; REFUNDED ones are already
+ * credited. It is NOT total-minus-released, because IN_REVIEW milestones are
+ * neither — they make the finalising call revert outright
+ * (CannotCancelDuringDispute, :752), which is the third case below. */
+export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
+  const list = milestones || []
+  const pending = list.filter((m) => m.state === 0)
+  const refundable = pending.reduce((sum, m) => sum + m.amount, 0n)
+  // IN_REVIEW(1) and DISPUTED(2) both trip CannotCancelDuringDispute.
+  const blocking = list.filter((m) => m.state === 1 || m.state === 2)
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'mutualCancel'
+  }
+
+  if (!otherApproved) {
+    // No `amount`: this call only writes a flag. A Total here would show the
+    // refund figure on the one call that does not perform the refund.
+    return {
+      ...base,
+      title: 'Approve cancelling this escrow',
+      subtitle: 'Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the payer.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Would refund ${formatUSDC(refundable)} across ${pending.length} unstarted milestone${pending.length === 1 ? '' : 's'} once both parties approve.`,
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  if (blocking.length > 0) {
+    // Both parties have approved, so this call takes the refund branch — and
+    // that branch reverts while any milestone is in review or disputed. Do not
+    // put a refund figure on a screen for a transaction that cannot succeed.
+    return {
+      ...base,
+      title: 'Cancel this escrow and refund the payer',
+      subtitle: 'The contract rejects a cancellation while a milestone is in review or disputed, so this transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Blocked by ${blocking.length} milestone${blocking.length === 1 ? '' : 's'} in review or disputed.`,
+        'Let those milestones settle, or resolve the dispute, then try again.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Cancel this escrow and refund the payer',
+    subtitle: 'Both parties have now approved. This cancels the escrow and refunds every milestone that has not started. This cannot be undone.',
+    amount: refundable,
+    amountLabel: 'Amount refunded',
+    parameters: [
+      `Escrow #${escrow.id} — ${pending.length} of ${Number(escrow.milestoneCount)} milestones refunded`,
+      `Credited to: ${escrow.refundTo}`,
+      'Already-released milestones are not clawed back.',
+      'No protocol fee is taken.',
+      'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+    ]
+  }
+}
+
+function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
   const optApproved = optimistic.cancel === 'approved'
@@ -2745,7 +2825,10 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
 
   const submit = () => tx.run(
     escrowWrite('mutualCancel', [BigInt(escrow.id)]),
-    { loadingMessage: 'Submitting. Check your wallet.' }
+    {
+      loadingMessage: 'Submitting. Check your wallet.',
+      confirm: cancelEscrowConfirm({ escrow, milestones, otherApproved: otherFlag })
+    }
   )
 
   const retract = () => retractTx.run(
