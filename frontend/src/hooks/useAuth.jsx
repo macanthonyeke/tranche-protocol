@@ -10,8 +10,10 @@ import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleThem
      - 'eoa'        an existing wallet connected through wagmi. Signs in the
                     wallet, pays its own gas.
      - 'circle-sca' a Circle User-Controlled Wallet created from an email.
-                    Signs with a PIN in Circle's hosted dialog; gas is
-                    sponsored by Circle's Gas Station.
+                    Authenticated by email OTP, and there is no PIN — Circle
+                    does not issue one for email auth. Signing goes through
+                    Circle's hosted confirm screen; gas is sponsored by
+                    Circle's Gas Station.
 
    This is not role-based. A payer and a freelancer each pick either one
    independently, and neither the contract nor the UI knows the difference —
@@ -23,12 +25,63 @@ import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleThem
    an injected wallet keeps working exactly as before. */
 
 const STORAGE_KEY = 'tranche.circleSession'
-// Circle's userToken expires after 60 minutes. Re-authenticating is a full
-// OTP round trip, so a session restored from storage is only trusted while
-// comfortably inside that window.
-const SESSION_TTL_MS = 55 * 60 * 1000
+// Last meaningful action, in its own key so recording activity never rewrites
+// (and so can never corrupt) the session blob itself.
+const ACTIVITY_KEY = 'tranche.circleActivity'
+
+/* Circle's email/social userToken lives 14 days from issuance. MEASURED, not
+   read off documentation: a real UCW userToken was taken from this app's own
+   localStorage on 2026-08-06 and its JWT `iat`/`exp` claims decoded, giving
+   exactly 336 hours. 13 days here keeps a day of margin, so a session is never
+   trusted right up to the edge of a token Circle has already stopped accepting.
+
+   DO NOT "correct" this back to 60 minutes. That figure is real but belongs to
+   a DIFFERENT token — the session token from createUserToken
+   (POST /users/token), which is the PIN flow's, not ours. It leaks into this
+   area from two directions: Circle's reset-account-pin page, where it is
+   accurate; and the OpenAPI-generated comment "The token will expire after 60
+   minutes", which @circle-fin/user-controlled-wallets repeats verbatim on
+   every field typed as a userToken — including email-login responses it does
+   not describe. This app authenticates with email OTP (see signInWithEmail),
+   so 14 days is the applicable lifetime and the measurement above is the
+   authority over both. */
+const SESSION_TTL_MS = 13 * 24 * 60 * 60 * 1000
+
+/* The boundary that actually bites. Being shorter than the token's own life,
+   this is what ends a session first for anyone not using the app continuously
+   — SESSION_TTL_MS above is effectively just the ceiling's own backstop.
+
+   The tradeoff is deliberate and it is not free. A stolen device, or a copied
+   localStorage session, stays usable for up to a week of the owner's
+   inactivity before Circle's OTP is required again. These wallets have no PIN
+   (email auth doesn't have one — see the 'circle-sca' note in the file
+   header), so this window is the only thing between a lifted session and the
+   funds it can move. A week is chosen against the cost of re-OTPing people in
+   the middle of a multi-day project. Shorten it if that balance ever looks
+   wrong; do not lengthen it toward SESSION_TTL_MS without deciding a
+   fortnight of that exposure is acceptable. */
+const INACTIVITY_CEILING_MS = 7 * 24 * 60 * 60 * 1000
 
 const AuthContext = createContext(null)
+
+function readActivityAt() {
+  try {
+    const raw = localStorage.getItem(ACTIVITY_KEY)
+    const ts = raw ? Number(JSON.parse(raw)?.lastActivityAt) : NaN
+    return Number.isFinite(ts) ? ts : null
+  } catch {
+    return null
+  }
+}
+
+function writeActivityAt(ts = Date.now()) {
+  try {
+    localStorage.setItem(ACTIVITY_KEY, JSON.stringify({ lastActivityAt: ts }))
+  } catch {
+    // Private-mode storage failure. The ceiling then measures from issuedAt
+    // (see below), which is stricter rather than looser — nothing to recover.
+  }
+}
 
 function readStoredSession() {
   try {
@@ -36,7 +89,19 @@ function readStoredSession() {
     if (!raw) return null
     const s = JSON.parse(raw)
     if (!s?.userToken || !s?.address) return null
-    if (!s.issuedAt || Date.now() - s.issuedAt > SESSION_TTL_MS) return null
+    if (!s.issuedAt) return null
+    // Two independent gates, both hard: the token's own life, and the
+    // inactivity ceiling. Either one lapsing means a full OTP round trip —
+    // there is no refresh path, by design (refreshUserToken exists in Circle's
+    // API but is only needed to outlive the 14 days, which the ceiling makes
+    // unreachable).
+    if (Date.now() - s.issuedAt > SESSION_TTL_MS) return null
+    // No activity record — a session written before this key existed, or
+    // storage that dropped it — falls back to issuedAt. Signing in IS an
+    // activity, and the fallback can only shorten the window, never extend it,
+    // so deleting the activity key is not a way to revive a stale session.
+    const lastActivityAt = readActivityAt() ?? s.issuedAt
+    if (Date.now() - lastActivityAt > INACTIVITY_CEILING_MS) return null
     return s
   } catch {
     return null
@@ -137,8 +202,17 @@ export function AuthProvider({ children }) {
   const persist = useCallback((session) => {
     setCircle(session)
     try {
-      if (session) localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
-      else localStorage.removeItem(STORAGE_KEY)
+      if (session) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
+        // Signing in is itself an activity, so the ceiling starts here rather
+        // than relying on the first transaction to open the window.
+        writeActivityAt()
+      } else {
+        // Both keys, always together: a session cleared without its activity
+        // stamp, or vice versa, is a half-state nothing else here expects.
+        localStorage.removeItem(STORAGE_KEY)
+        localStorage.removeItem(ACTIVITY_KEY)
+      }
     } catch {
       // Private-mode storage failures shouldn't break an otherwise-valid
       // session; it just won't survive a reload.
@@ -277,10 +351,15 @@ export function AuthProvider({ children }) {
   const dismissEmailVerification = useCallback(() => setPendingVerification(null), [])
 
   const signOut = useCallback(() => {
-    if (circle) persist(null)
+    // Unconditional, where this used to be guarded on `circle`: persist(null)
+    // is what clears the activity stamp as well, and logout has to be terminal
+    // — leaving a stamp behind would be leaving a session half-revived.
+    // Harmless when there was no Circle session; setCircle(null) on already-null
+    // state doesn't re-render, and removeItem on an absent key is a no-op.
+    persist(null)
     if (eoaConnected) disconnect()
     setPendingVerification(null)
-  }, [circle, eoaConnected, persist, disconnect])
+  }, [eoaConnected, persist, disconnect])
 
   /* The single write path. Callers hand over exactly what wagmi's
      writeContract takes, and this decides how it gets signed.
@@ -322,11 +401,34 @@ export function AuthProvider({ children }) {
       })
     })
 
+    // Approving a transaction is the clearest signal a session is in live use.
+    // Stamped after approval and never before, so a challenge the user
+    // abandoned or rejected does not extend the inactivity ceiling.
+    writeActivityAt()
+
     return { challengeId, userToken: circle.userToken }
   }, [circle, getSdk])
 
-  // Expire a stale Circle session in place rather than letting the app act as
-  // though a dead userToken is still good.
+  /* Opening the app on a session that survived BOTH gates in readStoredSession
+     counts as activity: the owner came back. Mount-only, and deliberately not
+     keyed on `circle` — a tab left open for a week would otherwise keep
+     renewing its own stamp on every state change and the ceiling would never
+     bind. Sign-in is stamped by persist() instead, so nothing is missed here. */
+  useEffect(() => {
+    if (circle) writeActivityAt()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /* Expire a stale Circle session in place rather than letting the app act as
+     though a dead userToken is still good.
+
+     This timer watches SESSION_TTL_MS only. The inactivity ceiling is enforced
+     at restore (readStoredSession), not on a timer — by design: an open tab
+     belongs to someone who already got past the device, and logging them out
+     from under a form they are filling in buys nothing. The ceiling's job is to
+     stop a session being *resumed* later, and that is a restore-time question.
+     13 days is also comfortably inside setTimeout's ~24.8-day ceiling, so this
+     needs no chunking. */
   useEffect(() => {
     if (!circle) return
     const remaining = SESSION_TTL_MS - (Date.now() - circle.issuedAt)
