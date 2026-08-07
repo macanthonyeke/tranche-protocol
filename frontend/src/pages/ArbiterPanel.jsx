@@ -21,6 +21,7 @@ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+import { CONTRACT_ADDRESS } from '../config/contract.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -283,6 +284,7 @@ function DisputeBlock({ detail, index, refetch }) {
         id={detail.id} index={index}
         escrow={e}
         milestone={m}
+        splits={detail.splits}
         bpsDenominator={bpsDenominator}
         onResolved={handleResolve}
         canTimeout={canTimeout}
@@ -423,7 +425,84 @@ function EvidenceHashRow({ label, hash }) {
   )
 }
 
-function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
+/* Where each half of a timeout settlement lands.
+ *
+ * Deliberately NOT EscrowDetail's payoutLines(): that one describes a CCTP
+ * payout ("Paid on: Base"), and a timeout settlement never routes through
+ * CCTP. Both halves become Arc refund credits regardless of the escrow's
+ * destinationDomain (TrancheProtocol.sol:596, :614), so borrowing that helper
+ * would name a chain the money never reaches.
+ *
+ * Split escrows fan the freelancer's half across the split legs, credited to
+ * each leg's decoded Arc address. The proportional/last-absorbs-dust mechanics
+ * and the SE-4 non-EVM caveat are real but belong in the docs, not on a
+ * signing screen — same level of abstraction as Round 1's split handling. */
+export function timeoutCreditLines(escrow, splits) {
+  return [
+    splits?.length > 0
+      ? `Freelancer's share is divided across ${splits.length} split recipients`
+      : `Freelancer's share goes to ${escrow.recipient}`,
+    `Payer's share goes to ${escrow.refundTo}`
+  ]
+}
+
+/* The 50/50 shares, mirroring TrancheProtocol.sol:576-578 exactly — including
+   the remainder. recipientShare rounds down and depositorShare is the
+   subtraction, so on an odd amount the payer absorbs the odd base unit and the
+   two shares always sum to the milestone amount.
+ *
+ * Split out and exported because that invariant cannot be checked through the
+ * rendered copy: the remainder is at most one base unit (0.000001 USDC) and
+ * formatUSDC rounds to two decimals, so both a correct implementation and a
+ * naive amount/2 print the same string. */
+export function timeoutShares(amount, bpsDenominator) {
+  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
+  const recipientShare = (amount * 5000n) / denom
+  return { recipientShare, depositorShare: amount - recipientShare }
+}
+
+/* VALUE-MOVING. resolveDisputeByTimeout is the contract's automatic fallback
+   for a dispute no arbiter ruled on within ARBITER_WINDOW (14 days). It is
+   permissionless and takes no caller input: defaultBps is hardcoded to 5000
+   (TrancheProtocol.sol:576).
+
+   Two things the copy has to keep apart, because the same panel offers both
+   and they are easy to conflate — the arbiter's discretionary resolve (a
+   percentage the arbiter chooses, settled via CCTP) and this, a fixed 50/50
+   that nobody chooses and that never leaves Arc. Whoever signs this may not
+   be the arbiter at all.
+
+   Gross figures only. The two halves are exact — computed the way the
+   contract computes them, with the remainder going to the payer — but the
+   protocol fee is escrowFeeBps, snapshotted at deposit and unreadable from
+   the frontend, so the freelancer's net is not stated. The asymmetry is,
+   because it holds regardless of the rate: the fee comes off the
+   freelancer's half only (:583). */
+export function timeoutSettlementConfirm({ escrow, milestone, index, splits, timeoutAt, bpsDenominator }) {
+  const { recipientShare, depositorShare } = timeoutShares(milestone.amount, bpsDenominator)
+
+  return {
+    title: 'Settle this dispute by timeout',
+    subtitle: 'The arbitration window closed with no arbiter ruling, so the contract settles it automatically. Anyone can trigger this, and the outcome is fixed.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'resolveDisputeByTimeout',
+    parameters: [
+      `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)}`,
+      'Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.',
+      `Freelancer's half: ${formatUSDC(recipientShare)}`,
+      `Payer's half: ${formatUSDC(depositorShare)}`,
+      ...timeoutCreditLines(escrow, splits),
+      "The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.",
+      'Both halves are credited as withdrawable balances on Arc, not sent to a wallet.',
+      `Arbitration window closed ${formatTimestamp(timeoutAt)}. Anyone can submit this.`
+    ]
+  }
+}
+
+function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
   // User works in whole percent (0–100); the contract receives BPS (0–10,000).
   const [pct, setPct] = useState('50')
   const [resolutionUri, setResolutionUri] = useState('')
@@ -578,7 +657,12 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved,
               className="btn-quiet"
               onClick={() => timeoutTx.run(
                 escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
-                { loadingMessage: 'Settling by timeout.' }
+                {
+                  loadingMessage: 'Settling by timeout.',
+                  confirm: timeoutSettlementConfirm({
+                    escrow, milestone, index, splits, timeoutAt, bpsDenominator
+                  })
+                }
               )}
               disabled={timeoutTx.isBusy}
             >
