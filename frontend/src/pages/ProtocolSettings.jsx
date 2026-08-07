@@ -8,13 +8,41 @@ import Field from '../components/Field.jsx'
 import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 
+import { useReadContract } from 'wagmi'
+
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
+import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
-import { formatUSDC, truncateAddr } from '../utils/format.js'
-import { CONTRACT_ADDRESS } from '../config/contract.js'
+import { formatUSDC, formatTimestamp, truncateAddr } from '../utils/format.js'
+import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+/* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
+   bytecode-budget note), so the 14 days is mirrored here rather than read. */
+const RECOVERY_WINDOW_SECONDS = 14 * 24 * 60 * 60
+
+export function expiryOf(proposedAt) {
+  const at = Number(proposedAt ?? 0)
+  return at > 0 ? at + RECOVERY_WINDOW_SECONDS : null
+}
+
+/* Both recovery getters are public on the contract and already in the ABI;
+   nothing here writes, it only lets the confirm screens state what is true. */
+function usePendingRecovery(address) {
+  const enabled = !!address
+  const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, query: { enabled } }
+  const { data: proposedOwner } = useReadContract({
+    ...base, functionName: 'pendingRefundRecovery', args: enabled ? [address] : undefined
+  })
+  const { data: proposedAt } = useReadContract({
+    ...base, functionName: 'pendingRefundRecoveryAt', args: enabled ? [address] : undefined
+  })
+  return { proposedOwner: proposedOwner ?? null, proposedAt: proposedAt ?? 0n }
+}
 
 /* ---------- Confirm-screen descriptors ----------
    First CONFIG-CHANGE descriptor in the app: no `amount`, because nothing
@@ -439,12 +467,102 @@ function RecoveryControls() {
   )
 }
 
+/* ---------- Two-step refund-credit recovery (M-03) ----------
+ *
+ * The highest-trust pair in the app: a RECOVERY_MANAGER moving somebody
+ * else's balance. Read against TrancheProtocol.sol:918-954. Four things the
+ * two halves do NOT share, none of which the panels currently say:
+ *
+ * 1. The amount is never fixed at propose time. proposeRefundCreditTransfer
+ *    requires a non-zero balance (:924) but stores no amount — claim sweeps
+ *    refundBalances[blacklistedWallet] as it stands at CLAIM (:945). Anything
+ *    credited to that wallet during the 14-day window (a milestone refund
+ *    landing in refundBalances[e.refundTo], a partial settlement, a mutual
+ *    cancel) is swept too. The manager is authorising a sweep of a figure
+ *    they cannot see and which can grow after they sign. Settled #4 records
+ *    the full-balance sweep as intentional; the timing is the part nothing
+ *    discloses.
+ *
+ * 2. Only propose is role-gated. claimRefundCreditTransfer has no onlyRole at
+ *    all — the gate is msg.sender == proposed (:943). Two different
+ *    audiences, so two different screens rather than a mirrored pair.
+ *
+ * 3. Expiry is enforced only on claim, at proposedAt + ARBITER_WINDOW = 14
+ *    days (:71, :940). Propose writes the timestamp and never reads it. A
+ *    stale proposal simply becomes unclaimable and is overwritable by a fresh
+ *    propose (:926-927, unconditional).
+ *
+ * 4. F5 liveness silently cancels a pending proposal: withdrawRefund
+ *    (:851-852) and transferRefundCredit (:897-898) both delete it for
+ *    msg.sender. If the supposedly-frozen wallet does anything at all, the
+ *    proposal evaporates and the claim reverts NoPendingRecovery — with no
+ *    notification to either party.
+ *
+ * Shared by both, and the trap Settings.jsx already documents for
+ * transferRefundCredit: neither moves USDC. Both only re-key an internal
+ * balance, so the claimer still has to call withdrawRefund afterwards. */
+
+export function proposeRecoveryConfirm({ from, to, balance, existingOwner, existingExpiry }) {
+  // No `amount`. This call writes a pointer and a timestamp; a Total would
+  // assert a sweep that happens in a different transaction, and would have to
+  // invent a figure the contract never captures.
+  const replacing = !!existingOwner && existingOwner !== ZERO_ADDRESS
+
+  return {
+    title: 'Propose a recovery destination',
+    subtitle: "Names the wallet allowed to claim this balance. Nothing moves now — the proposed wallet has to claim it itself, which is what proves it is real and controlled.",
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'proposeRefundCreditTransfer',
+    parameters: [
+      `Restricted wallet: ${from}`,
+      `Proposed destination: ${to}`,
+      // Finding ①, and the single most important line here.
+      `Balance today: ${formatUSDC(balance ?? 0n)} — the claim takes whatever the wallet holds at that moment, which may be more than this.`,
+      replacing
+        ? `Replaces the pending proposal to ${existingOwner}${existingExpiry ? `, which expires ${formatTimestamp(existingExpiry)}` : ''}. That wallet can no longer claim.`
+        : 'No proposal is currently pending for this wallet.',
+      'The proposed wallet has 14 days to claim. After that this expires and a new proposal is needed.',
+      'If the restricted wallet withdraws or transfers its own credit first, this proposal is cancelled silently — neither party is notified.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
+export function claimRecoveryConfirm({ blacklisted, balance, expiry }) {
+  return {
+    title: 'Claim this refund credit',
+    subtitle: "Moves the restricted wallet's entire refund credit to you. Only the wallet named in the proposal can do this.",
+    // An amount, like transferRefundCredit: the whole credit changes hands and
+    // becomes yours to withdraw. Read live, because the contract sweeps the
+    // balance as it stands right now rather than a figure fixed at proposal.
+    amount: balance,
+    amountLabel: 'Credit claimed',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'claimRefundCreditTransfer',
+    parameters: [
+      `Claiming from: ${blacklisted}`,
+      'No USDC moves on this transaction — it re-keys who the credit belongs to.',
+      'This does not put funds in your wallet. Withdraw the credit separately once it is yours.',
+      ...(expiry ? [`Must be claimed by ${formatTimestamp(expiry)}. After that the proposal expires and this transaction is rejected.`] : []),
+      'Only the wallet named in the proposal can claim; any other caller is rejected.'
+    ]
+  }
+}
+
 function ProposeRecovery() {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [confirm, setConfirm] = useState(false)
   const tx = useTx({ onConfirmed: () => { setFrom(''); setTo(''); setConfirm(false) } })
   const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
+
+  // Read-only: what the balance is now, and whether a proposal is already
+  // standing for this wallet. Feeds the confirm screen only — nothing here
+  // changes what is clickable or what executes.
+  const { balance } = useRefundBalance(isAddress(from) ? from : undefined)
+  const { proposedOwner, proposedAt } = usePendingRecovery(isAddress(from) ? from : undefined)
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
@@ -491,7 +609,12 @@ function ProposeRecovery() {
             <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
               className="btn-danger"
-              onClick={() => tx.run(escrowWrite('proposeRefundCreditTransfer', [from, to]), { loadingMessage: 'Submitting proposal…' })}
+              onClick={() => tx.run(escrowWrite('proposeRefundCreditTransfer', [from, to]), {
+                loadingMessage: 'Submitting proposal…',
+                confirm: proposeRecoveryConfirm({
+                  from, to, balance, existingOwner: proposedOwner, existingExpiry: expiryOf(proposedAt)
+                })
+              })}
               disabled={tx.isBusy}
             >
               {tx.isBusy ? 'Submitting…' : 'Confirm proposal'}
@@ -508,6 +631,12 @@ function ClaimRecovery() {
   const [confirm, setConfirm] = useState(false)
   const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
   const valid = isAddress(blacklisted)
+
+  // The claim sweeps the balance as it stands at claim time, so the figure on
+  // the confirm screen has to be read live off the source wallet — not off
+  // anything captured when the proposal was made.
+  const { balance } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
+  const { proposedAt } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
@@ -542,7 +671,10 @@ function ClaimRecovery() {
             <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
               className="btn-primary"
-              onClick={() => tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), { loadingMessage: 'Claiming refund credit…' })}
+              onClick={() => tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), {
+                loadingMessage: 'Claiming refund credit…',
+                confirm: claimRecoveryConfirm({ blacklisted, balance, expiry: expiryOf(proposedAt) })
+              })}
               disabled={tx.isBusy}
             >
               {tx.isBusy ? 'Claiming…' : 'Confirm claim'}
