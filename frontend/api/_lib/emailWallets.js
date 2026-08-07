@@ -71,7 +71,7 @@ export function normalizeEmail(email) {
 const bindingKey = (email) => `wallet:email:${email}`
 const sessionKey = (sessionId) => `wallet:otp:${sessionId}`
 
-// Long enough to read an email and finish PIN setup, short enough that an
+// Long enough to read an email and finish wallet setup, short enough that an
 // abandoned session isn't sitting around claimable.
 const SESSION_TTL_SECONDS = 15 * 60
 

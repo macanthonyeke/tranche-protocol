@@ -8,8 +8,8 @@ import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
 import { arcTestnet } from '../config/wagmi'
 
 // How long to wait for Circle to broadcast an approved challenge. Generous:
-// by this point the user has already approved with their PIN and the
-// transaction is in flight, so giving up early would report a failure for
+// by this point the user has already approved on Circle's confirm screen and
+// the transaction is in flight, so giving up early would report a failure for
 // something that is about to succeed.
 const SCA_POLL_INTERVAL_MS = 2000
 const SCA_POLL_TIMEOUT_MS = 120000
@@ -47,7 +47,7 @@ async function awaitScaTxHash({ challengeId, userToken }) {
    tx.run(escrowWrite(fn, args)) need no branching and were not touched when
    email sign-in landed. The paths differ only in how a hash is obtained: an
    EOA returns one from writeContract, a Circle SCA must be polled for one
-   after the user approves in Circle's hosted PIN dialog. Once a hash exists
+   after the user approves on Circle's hosted confirm screen. Once a hash exists
    both converge on the same receipt wait below, so onConfirmed always gets a
    real on-chain receipt with real logs — CreateEscrow depends on that, since
    it reads the new escrow id out of receipt.logs. */
