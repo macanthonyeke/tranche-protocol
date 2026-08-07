@@ -48,7 +48,7 @@ export default postRoute(async (body) => {
 
   const wallet = await getArcWallet(userToken)
   if (!wallet) {
-    // The challenge hasn't finished indexing, or the user abandoned PIN setup.
+    // The challenge hasn't finished indexing, or the user abandoned setup.
     // Nothing to bind yet — the client retries after its post-execute delay.
     //
     // Uniquely among the failures here, this one is a transient race and not

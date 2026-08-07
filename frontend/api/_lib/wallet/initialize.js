@@ -1,10 +1,13 @@
 // POST /api/wallet/initialize — create the user's Arc wallet.
 //
-// Returns a challengeId that the browser SDK executes (sdk.execute) to put up
-// Circle's hosted PIN + security-questions UI. The wallet only exists once
-// the user completes that challenge on their own device; nothing here creates
-// a wallet server-side, and no key material is ever reachable from this
-// process.
+// Returns a challengeId that the browser SDK executes (sdk.execute). Despite
+// the SDK wrapper's name, createUserPinWithWallets calls the REST endpoint
+// Users.createUserWithPinChallenge, whose own summary is "create a challenge
+// for user initialization with wallet creation" — an INITIALIZE challenge, not
+// a request for PIN authentication. Email-auth users have no PIN for it to
+// set. The wallet only exists once the user completes the challenge on their
+// own device; nothing here creates a wallet server-side, and no key material
+// is ever reachable from this process.
 //
 // accountType SCA is required for Circle's Gas Station to sponsor gas — the
 // whole point of the email path is that the user never holds native currency.

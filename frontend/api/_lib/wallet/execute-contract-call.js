@@ -1,8 +1,9 @@
 // POST /api/wallet/execute-contract-call — the SCA half of every contract
 // write in the app.
 //
-// Returns a challengeId; the browser SDK executes it, the user approves with
-// their PIN, and Circle broadcasts. Gas is sponsored by Circle's Gas Station
+// Returns a challengeId; the browser SDK executes it, the user approves on
+// Circle's confirm screen, and Circle broadcasts. These wallets have no PIN —
+// email auth doesn't issue one. Gas is sponsored by Circle's Gas Station
 // (the wallet is an SCA — see _lib/circle.js), so the user never needs native
 // currency on Arc.
 //
