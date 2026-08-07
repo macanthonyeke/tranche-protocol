@@ -638,7 +638,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
           const last = i === rows.length - 1
           if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
           if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
-          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} onChange={onChange} last={last} />
           if (key === 'split') {
             const s = splits[mySplitIndex]
             return (
@@ -731,7 +731,125 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
   )
 }
 
-function ReceivingAddressEditRow({ escrow, onChange, last }) {
+/* ---------- Payout redirects ----------
+ *
+ * Nominally CONFIG-CHANGE, but these decide WHERE money later goes, so they
+ * get the scrutiny of a value-moving site. Three things separate them from
+ * Round 6's protocol setters:
+ *
+ * 1. No snapshot. e.mintRecipient / e.destinationDomain are read at release
+ *    time, not captured at deposit — the exact opposite of protocolFeeBps and
+ *    protocolTreasury. So a redirect takes effect on every milestone that has
+ *    not settled yet, including one already claimed and sitting in review.
+ *    Round 6's screens reassure that in-flight escrows are untouched; these
+ *    have to say the opposite, and say it plainly.
+ *
+ * 2. F3 makes some redirects revert. An escrow (or split leg) currently paying
+ *    on Arc cannot be redirected to a cross-chain domain: its milestones were
+ *    never floor-validated against the CCTP forwarding fee at deposit
+ *    (TrancheProtocol.sol:982 and :1033, both reverting MilestoneBelowForwardFee).
+ *    Cross-chain -> cross-chain and anything -> Arc stay allowed. The chain
+ *    dropdown does not filter these out, so the user can pick one and the
+ *    transaction reverts under an error name that does not hint at the cause.
+ *    Same treatment as Round 3's blocked mutualCancel: no promise, say why.
+ *
+ * 3. ARC_DOMAIN is 26 here, and a plain CCTP domain number otherwise — domain
+ *    0 means Ethereum Sepolia. That is NOT the domain-0 sentinel from
+ *    Settings.jsx's withdrawRefund, where 0 means "stay on Arc". Same number,
+ *    opposite meaning, two screens apart; getDomainName is correct here and
+ *    would have been wrong there.
+ */
+
+const REDIRECT_BLOCKED_REASON =
+  'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
+
+export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain }) {
+  const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+  const oldDomain = Number(escrow.destinationDomain)
+  const domain = Number(newDomain)
+  // Mirrors :982 exactly, including the splits carve-out: with splits
+  // configured, e.destinationDomain is not what the burn uses, so the guard
+  // does not apply.
+  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN && !hasSplits
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateReceivingAddress'
+  }
+
+  if (blocked) {
+    return {
+      ...base,
+      title: 'Change where this escrow pays out',
+      subtitle: 'This transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        REDIRECT_BLOCKED_REASON,
+        'You can still change the address while staying on Arc.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Change where this escrow pays out',
+    subtitle: 'Redirects your milestone payments to a different address. This takes effect immediately for everything not yet released.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      `Address: ${oldAddress} → ${newAddress}`,
+      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+      'Applies to every milestone not yet released, including any currently in review.',
+      'Milestones already released are unaffected and cannot be recalled.'
+    ]
+  }
+}
+
+export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain }) {
+  const oldDomain = Number(currentDomain)
+  const domain = Number(newDomain)
+  // Mirrors :1033 — no splits carve-out here; this leg's own domain is what
+  // the burn uses.
+  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateSplitReceivingAddress'
+  }
+
+  const shareLabel = `${pct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% share`
+
+  if (blocked) {
+    return {
+      ...base,
+      title: 'Change where your split share pays out',
+      subtitle: 'This transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
+        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        REDIRECT_BLOCKED_REASON,
+        'You can still change the address while staying on Arc.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Change where your split share pays out',
+    subtitle: 'Redirects your share of this escrow to a different address. Other recipients are not affected.',
+    parameters: [
+      `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
+      `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
+      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+      'Applies to every milestone not yet released, including any currently in review.',
+      'Milestones already released are unaffected and cannot be recalled.'
+    ]
+  }
+}
+
+function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
   const [saveNonce, setSaveNonce] = useState(0)
   const [successInfo, setSuccessInfo] = useState(null)
   const { supported } = useSupportedDomains()
@@ -766,7 +884,12 @@ function ReceivingAddressEditRow({ escrow, onChange, last }) {
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
           escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
-          { loadingMessage: 'Updating. Check your wallet.' }
+          {
+            loadingMessage: 'Updating. Check your wallet.',
+            confirm: redirectPayoutConfirm({
+              escrow, hasSplits, newAddress: d.addr, newDomain: Number(d.domain)
+            })
+          }
         )
       }}
       last={last}
@@ -809,7 +932,13 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
           escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
-          { loadingMessage: 'Updating. Check your wallet.' }
+          {
+            loadingMessage: 'Updating. Check your wallet.',
+            confirm: redirectSplitConfirm({
+              escrow, splitIndex, currentAddress, currentDomain, pct,
+              newAddress: d.addr, newDomain: Number(d.domain)
+            })
+          }
         )
       }}
       last={last}
