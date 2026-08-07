@@ -20,7 +20,7 @@ import { resolveMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
-  isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
+  isValidAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
   NO_ATTACHMENT_URI
 } from '../utils/format.js'
@@ -217,6 +217,7 @@ function DetailInner() {
             escrow={escrow}
             milestones={milestones}
             disputes={disputes}
+            splits={splits}
             role={role}
             userAddress={address}
             reviewWindowExpired={reviewWindowExpired}
@@ -353,7 +354,30 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           disabled={busy}
           onClick={() => declineTx.run(
             escrowWrite('declineEscrow', [BigInt(escrow.id)]),
-            { loadingMessage: 'Check your wallet.' }
+            {
+              loadingMessage: 'Check your wallet.',
+              // The banner's two buttons sit side by side and the destructive
+              // one is one click from the constructive one, with no app-side
+              // confirmation between. Circle's screen is the only place this
+              // says out loud that it cancels the whole escrow, not one
+              // milestone. Full totalAmount, no protocol fee, credited on Arc
+              // (TrancheProtocol.sol:1091).
+              confirm: {
+                title: 'Decline this escrow',
+                subtitle: 'Rejects the whole engagement and returns everything to the payer. This cannot be undone — a new escrow would have to be created.',
+                amount: escrow.totalAmount,
+                amountLabel: 'Amount returned to payer',
+                contractName: 'Tranche Protocol Escrow',
+                contractAddress: CONTRACT_ADDRESS,
+                functionName: 'declineEscrow',
+                parameters: [
+                  `Escrow #${escrow.id} — all ${Number(escrow.milestoneCount)} milestones refunded`,
+                  `Credited to: ${escrow.refundTo}`,
+                  'No protocol fee is taken.',
+                  'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+                ]
+              }
+            }
           )}
           title="Reject the whole escrow. Refunds the full amount to the payer — no protocol fee. Only available while every milestone is still pending."
         >
@@ -913,7 +937,7 @@ function defaultOpenIndex(milestones) {
 }
 
 function MilestoneStack({
-  escrow, milestones, disputes, role, userAddress,
+  escrow, milestones, disputes, splits, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadlines,
   optimistic, onChange, setOpt, clearOpt, flashIndex, openRef
 }) {
@@ -979,6 +1003,7 @@ function MilestoneStack({
                   escrow={escrow}
                   milestone={m}
                   dispute={disputes?.[i]}
+                  splits={splits}
                   role={role}
                   userAddress={userAddress}
                   reviewWindowExpired={!!reviewWindowExpired[i]}
@@ -1062,7 +1087,7 @@ function readCctpTrack(escrowId, milestoneIndex) {
 }
 
 function MilestoneRow({
-  escrow, milestone, dispute, role, userAddress,
+  escrow, milestone, dispute, splits, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadline,
   optimisticBadge, prevTerminal, onChange, setOpt, clearOpt,
   open, onToggle, flash
@@ -1181,6 +1206,7 @@ function MilestoneRow({
                   <MilestoneAction
                     escrow={escrow}
                     milestone={milestone}
+                    splits={splits}
                     role={role}
                     gracePassed={gracePassed}
                     reviewWindowExpired={reviewWindowExpired}
@@ -2134,6 +2160,30 @@ function MilestoneStateGlyph({ state }) {
    Single most relevant action per role/state. Glowing clay for primary
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
+/* Payout-destination lines for a signing screen's `parameters`.
+ *
+ * A split escrow pays each leg to its own address on its own destination
+ * domain, so naming escrow.mintRecipient there would state something false on
+ * the one screen that has to be true. Describe the fan-out instead and let the
+ * ledger column carry the per-leg detail.
+ *
+ * Deliberately no fee or net-of-fee figure: the fee actually applied is
+ * escrowFeeBps, snapshotted at deposit (TrancheProtocol.sol), an internal
+ * mapping with no getter. The only bps the frontend can see is the live global
+ * from getProtocolConfig(), which drifts from the snapshot the moment an admin
+ * calls setProtocolFee. A wrong number on a confirm screen is worse than none —
+ * same reasoning as networkFee in utils/circleTheme.js. */
+export function payoutLines(escrow, splits) {
+  if (splits?.length > 0) {
+    return [`Paid to: ${splits.length} split recipients, each on their own chain`]
+  }
+  const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+  return [
+    `Paid to: ${addr}`,
+    `Paid on: ${getDomainName(Number(escrow.destinationDomain))}`
+  ]
+}
+
 // Picks the single highest-priority action available to a given caller role
 // on a milestone right now. Shared between MilestoneAction (which submits
 // the tx) and FocusBar (which only needs to know what's next). Lifecycle:
@@ -2165,8 +2215,96 @@ function computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, 
   return null
 }
 
+/* Confirm-screen copy for the four actions computeMilestoneAction can return,
+   keyed the same way. See utils/circleTheme.js for the descriptor shape; this
+   is the only description of these calls a UCW user ever sees, since none of
+   the four has an app-side confirmation step in front of it. */
+export function milestoneConfirm(action, escrow, milestone, splits) {
+  const n = milestone.index + 1
+  const of = Number(escrow.milestoneCount) || n
+  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: action.fn
+  }
+
+  if (action.key === 'claim') {
+    // No `amount`: claimDelivery moves nothing. Putting the milestone figure in
+    // the Total row would tell the freelancer they are being paid right now.
+    return {
+      ...base,
+      title: 'Mark this milestone as delivered',
+      subtitle: "Starts the client's review window. If they don't dispute before it ends, the milestone can be released.",
+      parameters: [milestoneLine, 'No funds move on this transaction.']
+    }
+  }
+
+  if (action.key === 'refund') {
+    // refundAfterDeadline credits refundBalances[e.refundTo] on Arc — it does
+    // not transfer and does not go cross-chain (TrancheProtocol.sol:715). The
+    // copy has to say credited, not sent, or the payer will go looking for it
+    // in their wallet.
+    return {
+      ...base,
+      title: 'Refund this milestone to the payer',
+      subtitle: 'The deadline and its 72-hour grace period have both passed, so this milestone can be refunded. No protocol fee is taken.',
+      amount: milestone.amount,
+      amountLabel: 'Amount refunded',
+      parameters: [
+        milestoneLine,
+        `Credited to: ${escrow.refundTo}`,
+        'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+      ]
+    }
+  }
+
+  const releaseParams = [
+    milestoneLine,
+    ...payoutLines(escrow, splits),
+    'Protocol fee is deducted from this amount before payout.'
+  ]
+
+  if (action.key === 'approve') {
+    return {
+      ...base,
+      title: 'Approve and release this milestone',
+      subtitle: 'Releases the milestone out of escrow to the freelancer. This cannot be undone.',
+      amount: milestone.amount,
+      amountLabel: 'Amount released',
+      parameters: releaseParams
+    }
+  }
+
+  if (action.key === 'release') {
+    // Permissionless once the review window has lapsed.
+    return {
+      ...base,
+      title: 'Release this milestone',
+      subtitle: 'The review window closed without a dispute, so this milestone can now be released to the freelancer by anyone.',
+      amount: milestone.amount,
+      amountLabel: 'Amount released',
+      parameters: releaseParams
+    }
+  }
+
+  /* computeMilestoneAction returns a closed set of four keys today. This is
+     deliberately not an unconditional `release` fallback: a fifth key added
+     there without a descriptor here would inherit release's title AND its
+     Total row, i.e. a signing screen confidently describing the wrong
+     transaction. Fail visibly instead, and fall back to copy that is vague
+     but true — no `amount`, since an unknown action's value is unknown. */
+  console.warn(`No confirm descriptor for milestone action "${action.key}" — falling back to generic copy.`)
+  return {
+    ...base,
+    title: 'Confirm this milestone action',
+    subtitle: 'Check the details below, then confirm to sign.',
+    parameters: [milestoneLine]
+  }
+}
+
 function MilestoneAction({
-  escrow, milestone, role, gracePassed, reviewWindowExpired,
+  escrow, milestone, splits, role, gracePassed, reviewWindowExpired,
   setOpt, clearOpt, onChange, onCrossChainRelease
 }) {
   const [activeKey, setActiveKey] = useState(null)
@@ -2215,7 +2353,10 @@ function MilestoneAction({
     }
 
     try {
-      const txHash = await tx.run(escrowWrite(action.fn, args), { loadingMessage: 'Check your wallet.' })
+      const txHash = await tx.run(escrowWrite(action.fn, args), {
+        loadingMessage: 'Check your wallet.',
+        confirm: milestoneConfirm(action, escrow, milestone, splits)
+      })
       if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
