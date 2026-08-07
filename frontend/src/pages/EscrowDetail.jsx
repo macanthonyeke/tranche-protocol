@@ -1469,6 +1469,7 @@ function MilestoneRow({
                   escrow={escrow}
                   milestone={milestone}
                   dispute={dispute}
+                  splits={splits}
                   role={role}
                   userAddress={userAddress}
                   onChange={onChange}
@@ -1680,7 +1681,7 @@ const DISPUTE_TABS = [
   ['settle', 'Settle']
 ]
 
-function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange, onCrossChainRelease }) {
+function DisputePanel({ escrow, milestone, dispute, splits, role, userAddress, onChange, onCrossChainRelease }) {
   const [tab, setTab] = useState('overview')
 
   return (
@@ -1737,6 +1738,7 @@ function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange,
         <SettlementPanel
           escrow={escrow}
           milestone={milestone}
+          splits={splits}
           role={role}
           onChange={onChange}
           onCrossChainRelease={onCrossChainRelease}
@@ -1932,11 +1934,138 @@ function DisputeDetails({ dispute }) {
   )
 }
 
+/* VALUE-MOVING: mutualSettle is the densest signing site in the app, and the
+ * things that make it dense are mostly NOT what they look like from the
+ * frontend. Read against TrancheProtocol.sol:521-559 and :1222-1334:
+ *
+ * 1. The caller's `maxFee` is dead. It is in the signature and never read in
+ *    the body — the executing branch burns at e.escrowCctpForwardFee, the
+ *    per-escrow snapshot, precisely so one party cannot pick a fee that
+ *    strands the other's payout (:552-556; settled decision #7). The panel
+ *    still quotes Circle live before submitting and passes it, so the number
+ *    the app fetched is not the number the burn uses. Nothing on this screen
+ *    may present it as a cost.
+ *
+ * 2. The protocol fee is escrowFeeBps, snapshotted at deposit, an internal
+ *    mapping with no getter. The only bps the frontend can read is the live
+ *    global, which drifts the moment an admin calls setProtocolFee. Same rule
+ *    payoutLines and timeoutSettlementConfirm already follow: gross figures
+ *    only, state the asymmetry (fee off the freelancer's share alone,
+ *    :1270-1271), never a rate and never a net.
+ *
+ * 3. Execution needs an EXACT bps match from both sides (:549). A different
+ *    number from the other party does not part-settle and does not
+ *    counter-offer — it just sits there. That is the case a signer is most
+ *    likely to misread as agreement.
+ *
+ * 4. A proposal is overwritable (:541-542, unconditional assignment), so
+ *    unlike Round 8's milestone cancel this one CAN be changed later. Worth
+ *    saying, because the neighbouring screen says the opposite.
+ *
+ * 5. Finding 3 / SE-3 bites hardest here. A partial settlement scales the
+ *    freelancer's share down; if it lands at-or-below the escrow's forwarding
+ *    fee it is credited on Arc instead of delivered cross-chain (:1291,
+ *    :1319). A FULL release can never reach that branch (:1285-1288), so this
+ *    is specific to the partial case — which is the only case this screen
+ *    ever describes. */
+const BPS = 10_000n
+
+function settlementIsCrossChain(escrow, splits) {
+  // Mirrors _assertCrossChainFee: with splits, any non-Arc leg counts.
+  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
+  return Number(escrow.destinationDomain) !== ARC_DOMAIN
+}
+
+export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+  const n = milestone.index + 1
+  const of = Number(escrow.milestoneCount) || n
+  const pct = bps / 100
+  const recipientShare = (milestone.amount * BigInt(bps)) / BPS
+  const payerShare = milestone.amount - recipientShare
+  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)} in dispute`
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'mutualSettle'
+  }
+
+  const theirBps = theirs?.exists ? Number(theirs.bps) : null
+  const matches = theirBps !== null && theirBps === bps
+
+  if (!matches) {
+    // Nothing executes. No `amount` — the figures below are what WOULD happen,
+    // and a Total row would assert they are happening now.
+    const splitLine = `Would pay ${formatUSDC(recipientShare)} to the freelancer and ${formatUSDC(payerShare)} to the payer.`
+    return {
+      ...base,
+      title: 'Propose settling this dispute',
+      subtitle: 'Records the split you are proposing. Nothing settles until both sides have proposed exactly the same percentage.',
+      parameters: [
+        milestoneLine,
+        `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
+        splitLine,
+        ...(theirBps !== null
+          ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
+          : ['The other party has not proposed anything yet.']),
+        'You can change your number later by proposing again.',
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  // Both sides now agree; this call settles the milestone.
+  const crossChain = settlementIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+  const partial = bps > 0 && bps < 10_000
+
+  const params = [
+    milestoneLine,
+    `Agreed split: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
+  ]
+
+  if (bps > 0) {
+    params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
+  }
+  if (bps < 10_000) {
+    params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+  }
+  if (bps > 0) {
+    params.push(...payoutLines(escrow, splits))
+    params.push("The protocol fee is taken from the freelancer's share only.")
+  } else {
+    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+  }
+  if (bps < 10_000) {
+    params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
+  }
+  if (crossChain && bps > 0) {
+    params.push(`Cross-chain delivery uses this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded.`)
+    if (partial) {
+      params.push(
+        splits?.length > 0
+          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
+          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
+      )
+    }
+  }
+  params.push('This cannot be undone.')
+
+  return {
+    ...base,
+    title: 'Settle this dispute now',
+    subtitle: 'Both sides have proposed the same split, so signing settles the milestone and pays out immediately.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    parameters: params
+  }
+}
+
 /* Mutual settlement (mutualSettle). Either party proposes a recipient share in
    whole percent; when both parties' proposals match, the contract executes the
    split automatically. We surface both standing proposals and a one-click
    "agree to their number" path. */
-function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainRelease }) {
+function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossChainRelease }) {
   const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
@@ -1976,7 +2105,10 @@ function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainReleas
     }
     const txHash = await tx.run(
       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
-      { loadingMessage: 'Check your wallet.' }
+      {
+        loadingMessage: 'Check your wallet.',
+        confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+      }
     )
     if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
       localStorage.setItem(
