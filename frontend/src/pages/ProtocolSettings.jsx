@@ -64,6 +64,115 @@ export function pauseConfirm({ paused }) {
   }
 }
 
+/* The three fee-family setters share one real consequence, and it is the
+   reassuring kind: all three values are snapshotted per-escrow at deposit
+   (TrancheProtocol.sol:325, :348, :349), so none of them touches an escrow
+   that already exists. That is the H-05 protection, and it is worth stating
+   on the screen rather than leaving the admin to wonder.
+
+   Treasury carries an extra consequence the other two do not, and it runs the
+   opposite way to the obvious assumption. Changing it does NOT redirect all
+   future fee payments: fees from escrows that already exist keep going to the
+   OLD address, because :621 and :1269 pay escrowTreasury[escrowId], the
+   snapshot. So rotating a compromised treasury does not stop money reaching
+   it — that has to be said out loud, since the natural reading of "update
+   treasury" is the opposite. */
+
+const CONFIG_BASE = {
+  contractName: 'Tranche Protocol Escrow',
+  contractAddress: CONTRACT_ADDRESS
+}
+
+const SNAPSHOT_NOTE = 'Applies to escrows created after this transaction. Escrows that already exist keep the value they snapshotted at deposit.'
+
+export function protocolFeeConfirm({ currentBps, newBps }) {
+  return {
+    ...CONFIG_BASE,
+    title: 'Change the protocol fee',
+    subtitle: 'Sets the fee charged on future escrows. Escrows already in flight are not affected.',
+    functionName: 'setProtocolFee',
+    parameters: [
+      `Protocol fee: ${formatBps(currentBps)} → ${formatBps(newBps)}`,
+      SNAPSHOT_NOTE
+    ]
+  }
+}
+
+export function protocolTreasuryConfirm({ currentTreasury, newTreasury }) {
+  return {
+    ...CONFIG_BASE,
+    title: 'Change the protocol treasury',
+    subtitle: 'Sets where fees from future escrows are paid. Fees from existing escrows continue going to the current address.',
+    functionName: 'setProtocolTreasury',
+    parameters: [
+      `Treasury: ${currentTreasury || 'unknown'} → ${newTreasury}`,
+      SNAPSHOT_NOTE,
+      // The one that catches people out: this is not a kill switch on the old
+      // address. See the header comment above.
+      'This does not stop fees already owed to the current address — in-flight escrows will keep paying it on release.'
+    ]
+  }
+}
+
+export function cctpForwardFeeConfirm({ currentFee, newFee }) {
+  return {
+    ...CONFIG_BASE,
+    title: 'Change the CCTP forwarding fee floor',
+    subtitle: "Sets the minimum forwarding fee the contract accepts on cross-chain releases for future escrows.",
+    functionName: 'setCctpForwardFee',
+    parameters: [
+      `CCTP forwarding fee: ${formatUSDC(currentFee)} → ${formatUSDC(newFee)}`,
+      SNAPSHOT_NOTE,
+      // Not cosmetic: permissionless release() burns at the escrow's snapshot
+      // and ignores the caller's quote, so a floor below Circle's live fee
+      // leaves those burns attested but never minted (INSUFFICIENT_FEE).
+      "Keep this at or above Circle's live forwarding fee, or permissionless releases will not auto-deliver."
+    ]
+  }
+}
+
+/* Domains are the one pair here that is NOT symmetric, so they do not share a
+   builder with an inverted arrow.
+ *
+ * Removing a domain does not strand escrows already heading there: the release
+ * paths never consult supportedDomains, so those deliver as normal. What it
+ * does block is every path that consults it — new escrows to that domain
+ * (:255, :264), cross-chain refund withdrawals to it (:866), and redirecting a
+ * payout to it (:975, :1027). Someone holding a refund credit they meant to
+ * withdraw there loses that route with no warning anywhere else in the UI. */
+export function domainConfirm({ domain, domainName, enabled }) {
+  if (enabled) {
+    return {
+      ...CONFIG_BASE,
+      title: `Stop accepting ${domainName}`,
+      subtitle: 'Removes this chain as a destination for new escrows and payouts.',
+      functionName: 'removeSupportedDomain',
+      parameters: [
+        `${domainName} (domain ${domain}): Accepted → Not accepted`,
+        'Escrows already heading to this chain still release and deliver normally.',
+        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
+      ]
+    }
+  }
+
+  return {
+    ...CONFIG_BASE,
+    title: `Start accepting ${domainName}`,
+    subtitle: 'Adds this chain as a destination for new escrows and payouts.',
+    functionName: 'addSupportedDomain',
+    parameters: [
+      `${domainName} (domain ${domain}): Not accepted → Accepted`,
+      'New escrows may name this chain, and payouts may be redirected to it.'
+    ]
+  }
+}
+
+// bps → percent, matching how the page already renders the current fee.
+function formatBps(bps) {
+  if (bps === undefined || bps === null) return 'unknown'
+  return `${(Number(bps) / 100).toFixed(2)}% (${Number(bps)} bps)`
+}
+
 export default function ProtocolSettings() {
   return (
     <div>
@@ -215,7 +324,10 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!bpsValid || feeTx.isBusy}
-            onClick={() => feeTx.run(escrowWrite('setProtocolFee', [BigInt(bps || 0)]), { loadingMessage: 'Set protocol fee.' })}
+            onClick={() => feeTx.run(escrowWrite('setProtocolFee', [BigInt(bps || 0)]), {
+              loadingMessage: 'Set protocol fee.',
+              confirm: protocolFeeConfirm({ currentBps: config?.protocolFeeBps, newBps: BigInt(bps || 0) })
+            })}
           >
             {feeTx.isBusy ? 'Working…' : 'Update fee'}
           </button>
@@ -234,7 +346,10 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!trValid || trTx.isBusy}
-            onClick={() => trTx.run(escrowWrite('setProtocolTreasury', [tr]), { loadingMessage: 'Set treasury.' })}
+            onClick={() => trTx.run(escrowWrite('setProtocolTreasury', [tr]), {
+              loadingMessage: 'Set treasury.',
+              confirm: protocolTreasuryConfirm({ currentTreasury: config?.protocolTreasury, newTreasury: tr })
+            })}
           >
             {trTx.isBusy ? 'Working…' : 'Update treasury'}
           </button>
@@ -253,7 +368,10 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!cctpValid || cctpTx.isBusy}
-            onClick={() => cctpTx.run(escrowWrite('setCctpForwardFee', [BigInt(cctpVal || 0)]), { loadingMessage: 'Set CCTP fee.' })}
+            onClick={() => cctpTx.run(escrowWrite('setCctpForwardFee', [BigInt(cctpVal || 0)]), {
+              loadingMessage: 'Set CCTP fee.',
+              confirm: cctpForwardFeeConfirm({ currentFee: config?.cctpForwardFee, newFee: BigInt(cctpVal || 0) })
+            })}
           >
             {cctpTx.isBusy ? 'Working…' : 'Update CCTP fee'}
           </button>
@@ -288,10 +406,12 @@ function DomainControls() {
               <button
                 className={on ? 'btn-quiet text-bad hover:text-bad' : 'btn-quiet text-clay hover:text-clay'}
                 disabled={(on ? removeTx.isBusy : addTx.isBusy)}
-                onClick={() => (on
-                  ? removeTx.run(escrowWrite('removeSupportedDomain', [d]), { loadingMessage: `Remove ${getDomainName(d)}.` })
-                  : addTx.run(escrowWrite('addSupportedDomain', [d]), { loadingMessage: `Add ${getDomainName(d)}.` })
-                )}
+                onClick={() => {
+                  const confirm = domainConfirm({ domain: d, domainName: getDomainName(d), enabled: on })
+                  return on
+                    ? removeTx.run(escrowWrite('removeSupportedDomain', [d]), { loadingMessage: `Remove ${getDomainName(d)}.`, confirm })
+                    : addTx.run(escrowWrite('addSupportedDomain', [d]), { loadingMessage: `Add ${getDomainName(d)}.`, confirm })
+                }}
               >
                 {on ? 'Disable' : 'Enable'}
               </button>
