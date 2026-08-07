@@ -102,7 +102,12 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
     }
   }, [receipt, receiptIsError, receiptError, hash])
 
-  const run = useCallback(async (args, { loadingMessage = 'Awaiting wallet signature…' } = {}) => {
+  /* `confirm` describes what this call is worth, for Circle's hosted confirm
+     screen (utils/circleTheme.js). Optional, and only the SCA path reads it —
+     an injected wallet builds its own confirmation from the calldata and has
+     nowhere to put ours. Call sites that omit it get a generic-but-branded
+     screen, not a stale one. */
+  const run = useCallback(async (args, { loadingMessage = 'Awaiting wallet signature…', confirm } = {}) => {
     setError(null)
     setStatus('confirming')
     toastRef.current = txToast({ loading: loadingMessage })
@@ -113,7 +118,7 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
       // is undefined for these users, so running the switch would prompt a
       // wallet that isn't there and fail every write.
       if (isSca) {
-        const pending = await executeContractCall(args)
+        const pending = await executeContractCall(args, { confirm })
         if (!pending) throw new Error('Could not reach your wallet. Please sign in again.')
         // The user has approved in Circle's dialog; from here it behaves like
         // a submitted transaction.
