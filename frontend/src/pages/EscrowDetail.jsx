@@ -322,6 +322,43 @@ function StateGlowPill({ state }) {
   )
 }
 
+/* EVIDENCE/STATE: acknowledgeInvoice is the recipient's one-way door. It
+ * stamps invoiceAcknowledgedAt (:367) and a second call reverts
+ * InvoiceAlreadyAcknowledged (:366) — there is no un-acknowledge anywhere in
+ * the contract.
+ *
+ * The banner calls it "a record that you agreed to this scope", which
+ * undersells both halves of what it does:
+ *
+ * 1. It is the gate on claimDelivery, and the only ack-gated function there
+ *    is. Until the recipient accepts, they cannot claim a milestone and so
+ *    cannot be paid at all. That is the reason to sign, and the banner never
+ *    states it.
+ * 2. It simultaneously locks the payer out of updateInvoiceURI for good
+ *    (:376, InvoiceLocked). That is a protection the signer is switching on
+ *    for themselves, and the flip side of why accepting early is a bad idea:
+ *    it is the last moment the link can still be corrected.
+ *
+ * Deliberately not pausable (:363-364) — a release precondition must not be
+ * censorable — so there is no paused branch to describe here. */
+export function acknowledgeInvoiceConfirm({ escrow }) {
+  const n = Number(escrow.milestoneCount)
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'acknowledgeInvoice',
+    title: 'Accept these invoice terms',
+    subtitle: 'Records on-chain that you agree to the scope as written. This cannot be undone — there is no way to un-accept.',
+    parameters: [
+      `Escrow #${escrow.id} — ${formatUSDC(escrow.totalAmount)} across ${n} milestone${n === 1 ? '' : 's'}`,
+      'Unlocks your ability to mark milestones delivered. Until you accept, you cannot claim delivery or be paid.',
+      'Locks the invoice link: the payer can no longer change it once you accept.',
+      'Check the invoice document now — this is the last point at which it can still be corrected.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
 /* ---------- Invoice acknowledgment banner ----------
    Shown to the freelancer when the escrow is active, has an invoice, and the
    recipient hasn't yet emitted InvoiceAcknowledged on-chain. */
@@ -344,7 +381,10 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           disabled={busy}
           onClick={() => acceptTx.run(
             escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
-            { loadingMessage: 'Check your wallet.' }
+            {
+              loadingMessage: 'Check your wallet.',
+              confirm: acknowledgeInvoiceConfirm({ escrow })
+            }
           )}
         >
           {acceptTx.isBusy ? 'Working…' : 'Accept terms'}
@@ -661,6 +701,37 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
   )
 }
 
+/* CONFIG-CHANGE: extendDeadline is one-way. newDeadline must strictly exceed
+ * the current one (:1055, DeadlineNotExtended), so the payer can give time
+ * away but can never take it back — extending again is the only move
+ * available afterwards.
+ *
+ * The figure that actually matters is not the deadline itself. The payer's
+ * refundAfterDeadline does not open at the deadline; it opens 72 hours later,
+ * once DELIVERY_GRACE_PERIOD has fully elapsed (:703), because the recipient
+ * may still claim inside that window (:405). Both dates go on the screen —
+ * the deadline the parties talk about, and the date the money actually
+ * becomes refundable. */
+export function extendDeadlineConfirm({ escrow, newDeadline }) {
+  const GRACE = 72 * 60 * 60
+  const current = Number(escrow.deadline)
+  const next = Number(newDeadline)
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'extendDeadline',
+    title: 'Give this escrow more time',
+    subtitle: 'Moves the deadline later. The deadline can only ever move later — this cannot be shortened or reverted afterwards.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      `Deadline: ${formatDeadline(current)} → ${formatDeadline(next)}`,
+      `Your refund path moves with it: undelivered milestones become refundable to you from ${formatDeadline(next + GRACE)}, 72 hours after the new deadline.`,
+      'The freelancer gets that much longer to deliver. Their consent is not required.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
 function DeadlineEditRow({ escrow, onChange, last }) {
   const [saveNonce, setSaveNonce] = useState(0)
   const [successTs, setSuccessTs] = useState(null)
@@ -691,11 +762,46 @@ function DeadlineEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const newTs = toTs(d)
         setSuccessTs(newTs)
-        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), { loadingMessage: 'Extending. Check your wallet.' })
+        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), {
+          loadingMessage: 'Extending. Check your wallet.',
+          confirm: extendDeadlineConfirm({ escrow, newDeadline: newTs })
+        })
       }}
       last={last}
     />
   )
+}
+
+/* CONFIG-CHANGE: updateInvoiceURI swaps e.invoiceURI and nothing else (:379).
+ * invoiceHash is untouched and never covered this field in the first place —
+ * that is SE-6, and it means there is no on-chain mismatch to detect after a
+ * swap. So the screen must not imply the terms were re-committed, and the
+ * row's help text is already careful about this.
+ *
+ * What keeps the swap honest is the event: InvoiceURIUpdated carries old AND
+ * new (:380) and the subgraph keeps every one of them, so the recipient can
+ * see the link changed and what it used to be. Worth saying plainly — a payer
+ * should not think this is a quiet edit.
+ *
+ * The window closes at acknowledgement (:376, InvoiceLocked), so once the
+ * recipient accepts there is no further chance to correct a bad link. */
+export function updateInvoiceURIConfirm({ escrow, newURI }) {
+  const current = (escrow.invoiceURI && escrow.invoiceURI !== NO_ATTACHMENT_URI) ? escrow.invoiceURI : null
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateInvoiceURI',
+    title: 'Change the invoice link',
+    subtitle: 'Replaces the link to the full invoice document. The invoice terms committed on-chain do not change — only this link.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      current ? `Link: ${current} → ${newURI}` : `New link: ${newURI}`,
+      'The on-chain invoice fingerprint is not recalculated. This link is a convenience pointer, not part of the committed terms.',
+      'The change is logged publicly with both the old and new link — the freelancer can see it.',
+      'Only possible until the freelancer accepts the terms. After that the link is locked for good.',
+      'No funds move on this transaction.'
+    ]
+  }
 }
 
 function InvoiceLinkEditRow({ escrow, onChange, last }) {
@@ -724,7 +830,10 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const trimmed = d.url.trim()
         setSaved(true)
-        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), { loadingMessage: 'Updating. Check your wallet.' })
+        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), {
+          loadingMessage: 'Updating. Check your wallet.',
+          confirm: updateInvoiceURIConfirm({ escrow, newURI: trimmed })
+        })
       }}
       last={last}
     />
