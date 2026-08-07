@@ -502,6 +502,120 @@ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, tim
   }
 }
 
+/* Mirrors _assertCrossChainFee (TrancheProtocol.sol): with splits configured,
+   e.destinationDomain is not what the burn uses, so ANY non-Arc leg makes the
+   settlement cross-chain. */
+function resolveIsCrossChain(escrow, splits) {
+  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
+  return Number(escrow.destinationDomain) !== ARC_DOMAIN
+}
+
+/* VALUE-MOVING, and the last signing site in the project. This is the twin
+   timeoutSettlementConfirm above warns about — same panel, same milestone,
+   opposite mechanics — so the two screens have to be impossible to mix up:
+
+   - The timeout is permissionless, fixed at 50/50, and NEVER LEAVES ARC: both
+     halves land as refund credits (:593-614). This one is ARBITER_ROLE-gated
+     (:495), the percentage is chosen, and the freelancer's share is really
+     burned through CCTP to their destination chain (:516 → :1248-1299). That
+     difference is the single most important thing on the screen.
+
+   Three more things the contract decides that the form does not show:
+
+   1. maxFee is LIVE here, unlike mutualSettle where the same parameter is
+      dead. _assertCrossChainFee floors the CALLER's maxFee (:510), and the
+      no-split burn uses it (:1298). Split legs do not — each burns at the
+      e.escrowCctpForwardFee snapshot instead (:1329). That is settled
+      decision #7's asymmetry, and it is stateable rather than arcane: the fee
+      figure that governs differs between the two shapes, so the screen names
+      whichever one actually applies.
+
+   2. The protocol fee is still escrowFeeBps, snapshotted, no getter. Same
+      rule as everywhere else: exact gross halves, the asymmetry stated, never
+      a rate and never a net.
+
+   3. Once ARBITER_WINDOW has elapsed the timeout becomes available to anyone,
+      so a late ruling races a permissionless 50/50. `canTimeout` is already
+      computed for the button below, so the screen can say so.
+
+   The resolution hash and URI are stored in DisputeData (:512-513) — public
+   and permanent, like the evidence in Round 8. */
+export function resolveDisputeConfirm({
+  escrow, milestone, index, splits, bps, resolutionUri, maxFee, canTimeout, bpsDenominator
+}) {
+  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
+  const recipientShare = (milestone.amount * BigInt(bps)) / denom
+  const payerShare = milestone.amount - recipientShare
+  const pct = bps / 100
+  const crossChain = resolveIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+  const partial = bps > 0 && bps < 10_000
+
+  const params = [
+    `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)} in dispute`,
+    `Your ruling: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
+  ]
+
+  if (bps > 0) {
+    params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
+  }
+  if (bps < 10_000) {
+    params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+  }
+
+  if (bps > 0) {
+    params.push(
+      splits?.length > 0
+        ? `Freelancer's share is divided across ${splits.length} split recipients, each on their own chain`
+        : `Freelancer's share is sent to ${escrow.recipient} on ${getDomainName(Number(escrow.destinationDomain))}`
+    )
+    params.push("The protocol fee is taken from the freelancer's share only.")
+  } else {
+    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+  }
+
+  if (bps < 10_000) {
+    params.push(`Payer's share is credited to ${escrow.refundTo} as a withdrawable balance on Arc, not sent to a wallet.`)
+  }
+
+  if (crossChain && bps > 0) {
+    // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
+    // at the snapshot floor regardless of what was quoted. Name the one that
+    // actually applies rather than both.
+    params.push(
+      splits?.length > 0
+        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
+        : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
+    )
+    if (partial) {
+      params.push(
+        splits?.length > 0
+          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
+          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
+      )
+    }
+  }
+
+  params.push(`Your written reasoning at ${resolutionUri} is stored on-chain permanently and readable by anyone.`)
+
+  if (canTimeout) {
+    params.push('The arbitration window has already closed, so anyone can now settle this at a fixed 50/50 instead. Submitting first is what makes your ruling the outcome.')
+  }
+
+  params.push('This is final. The contract has no appeal path.')
+
+  return {
+    title: 'Resolve this dispute',
+    subtitle: 'Your ruling settles the milestone and pays both sides immediately. It cannot be appealed, reversed, or re-ruled.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'resolveDispute',
+    parameters: params
+  }
+}
+
 function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
   // User works in whole percent (0–100); the contract receives BPS (0–10,000).
   const [pct, setPct] = useState('50')
@@ -563,7 +677,13 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
       escrowWrite('resolveDispute', [
         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
       ]),
-      { loadingMessage: 'Sign to resolve.' }
+      {
+        loadingMessage: 'Sign to resolve.',
+        confirm: resolveDisputeConfirm({
+          escrow, milestone, index, splits, bps,
+          resolutionUri: resolutionUri.trim(), maxFee, canTimeout, bpsDenominator
+        })
+      }
     )
     onResolved?.(txHash ?? null)
   }
