@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { TRANCHE_THEME, TRANCHE_FONT, SECURITY_CONFIRM_ITEMS, applyTrancheTheme } from './circleTheme.js'
+import {
+  TRANCHE_THEME, TRANCHE_FONT, SECURITY_CONFIRM_ITEMS,
+  applyTrancheTheme, buildContractInteraction, applyConfirmLocalization
+} from './circleTheme.js'
 
 describe('Circle widget theme', () => {
   it('uses Tranche clay for the primary action', () => {
@@ -70,5 +73,84 @@ describe('applyTrancheTheme', () => {
       setResources() { throw new Error('gone') },
       setCustomSecurityQuestions() { throw new Error('gone') }
     })).not.toThrow()
+  })
+})
+
+describe('buildContractInteraction', () => {
+  const DEPOSIT = {
+    title: 'Lock funds into escrow',
+    subtitle: 'Step 2 of 2.',
+    amount: 1234560000n,
+    amountLabel: 'Total locked',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: '0x6bf5e723b5a542b8d49bedab7c8eb2791af00d3d',
+    functionName: 'deposit',
+    parameters: ['Milestones: 3']
+  }
+
+  // The whole point of the round: Total was blank because Circle cannot read
+  // pre-encoded calldata, so the figure has to come from us.
+  it('fills the total with a real formatted USDC amount', () => {
+    const ci = buildContractInteraction(DEPOSIT)
+    expect(ci.mainCurrency).toEqual({ amount: '1,234.56', symbol: 'USDC' })
+    expect(ci.total).toEqual(['1,234.56 USDC'])
+    expect(ci.totalLabel).toBe('Total locked')
+  })
+
+  it('names the contract in words and keeps its address', () => {
+    const ci = buildContractInteraction(DEPOSIT)
+    expect(ci.contractInfo).toEqual(['Tranche Protocol Escrow', DEPOSIT.contractAddress])
+  })
+
+  it('exposes the real function and args under details', () => {
+    const ci = buildContractInteraction(DEPOSIT)
+    expect(ci.dataDetails.abiInfo.functionName).toBe('deposit')
+    expect(ci.dataDetails.abiInfo.parameters).toEqual(['Milestones: 3'])
+  })
+
+  // A currency symbol with no figure beside it reads as a label attached to
+  // nothing, so the pair is all-or-nothing.
+  it('omits mainCurrency and total entirely when there is no amount', () => {
+    const ci = buildContractInteraction({ title: 'Mark delivered', functionName: 'claimDelivery' })
+    expect('mainCurrency' in ci).toBe(false)
+    expect('total' in ci).toBe(false)
+    expect('totalLabel' in ci).toBe(false)
+  })
+
+  // Zero is an amount. `if (confirm.amount)` here would drop it.
+  it('treats a zero amount as an amount', () => {
+    expect(buildContractInteraction({ amount: 0n }).total).toEqual(['0.00 USDC'])
+  })
+
+  it('falls back to branded generic copy with no descriptor at all', () => {
+    const ci = buildContractInteraction(undefined)
+    expect(ci.title).not.toMatch(/contract interaction/i)
+    expect(ci.contractInfo).toEqual(['Tranche Protocol'])
+    expect('mainCurrency' in ci).toBe(false)
+  })
+})
+
+describe('applyConfirmLocalization', () => {
+  /* The SDK instance is a singleton and its setters just overwrite fields, so
+     a call that skipped setLocalizations would leave the PREVIOUS
+     transaction's amount on this transaction's signing screen. Stale is worse
+     than blank — this must write on every call, descriptor or not. */
+  it('always writes, so no amount can survive into the next transaction', () => {
+    const calls = []
+    const sdk = { setLocalizations: (v) => calls.push(v) }
+
+    applyConfirmLocalization(sdk, { amount: 250000000n, amountLabel: 'Total locked' })
+    applyConfirmLocalization(sdk, undefined)
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0].contractInteraction.total).toEqual(['250.00 USDC'])
+    expect('total' in calls[1].contractInteraction).toBe(false)
+  })
+
+  it('never throws when the setter is missing or fails', () => {
+    expect(() => applyConfirmLocalization({}, { amount: 1n })).not.toThrow()
+    expect(() => applyConfirmLocalization({
+      setLocalizations() { throw new Error('gone') }
+    }, { amount: 1n })).not.toThrow()
   })
 })

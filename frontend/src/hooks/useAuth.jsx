@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useAccount, useDisconnect } from 'wagmi'
 import { encodeFunctionData } from 'viem'
-import { applyTrancheTheme } from '../utils/circleTheme.js'
+import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleTheme.js'
 
 /* One source of truth for "who is the current user and how do they sign".
    Both sign-in paths land here, and the rest of the app reads identity from
@@ -288,9 +288,15 @@ export function AuthProvider({ children }) {
      For 'eoa' it returns null, which tells useTx to run its existing wagmi
      path untouched — keeping that path literally unchanged rather than
      re-implementing it here. For 'circle-sca' it encodes the call, opens
-     Circle's PIN dialog, and hands back the challengeId that useTx polls to a
-     transaction hash. */
-  const executeContractCall = useCallback(async ({ address, abi, functionName, args }) => {
+     Circle's confirm screen, and hands back the challengeId that useTx polls
+     to a transaction hash.
+
+     `confirm` is the optional descriptor for Circle's confirm screen (see
+     utils/circleTheme.js). It has no equivalent on the EOA side — an injected
+     wallet renders its own confirmation from the calldata and takes no copy
+     from us — so it is not part of the shared write API's semantics, just
+     something this path can use when the caller knows what the call is worth. */
+  const executeContractCall = useCallback(async ({ address, abi, functionName, args }, { confirm } = {}) => {
     if (!circle) return null
 
     const callData = encodeFunctionData({ abi, functionName, args })
@@ -304,6 +310,10 @@ export function AuthProvider({ children }) {
 
     const sdk = await getSdk()
     sdk.setAuthentication({ userToken: circle.userToken, encryptionKey: circle.encryptionKey })
+    // Unconditional, and it must stay that way: the SDK is a singleton, so
+    // skipping this when `confirm` is absent would leave the last
+    // transaction's amount on this one's signing screen.
+    applyConfirmLocalization(sdk, confirm)
 
     await new Promise((resolve, reject) => {
       sdk.execute(challengeId, (error) => {

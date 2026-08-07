@@ -98,8 +98,25 @@ describe('useTx — Circle SCA (email sign-in)', () => {
     await act(async () => { hash = await result.current.run(ARGS) })
 
     expect(hash).toBe('0xSCAHASH')
-    expect(auth.executeContractCall).toHaveBeenCalledWith(ARGS)
+    expect(auth.executeContractCall).toHaveBeenCalledWith(ARGS, { confirm: undefined })
     expect(writeContractAsync).not.toHaveBeenCalled()
+  })
+
+  // The confirm descriptor is SCA-only, and useTx is the only thing that
+  // routes it — a caller passing one must reach Circle's dialog, since the
+  // alternative is a signing screen showing the previous transaction's amount.
+  it('forwards the confirm descriptor for Circle’s signing screen', async () => {
+    const auth = asSca()
+    globalThis.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ txHash: '0xSCAHASH', done: true, failed: false })
+    })
+    const confirm = { title: 'Lock funds into escrow', amount: 250000000n }
+
+    const { result } = renderHook(() => useTx())
+    await act(async () => { await result.current.run(ARGS, { confirm }) })
+
+    expect(auth.executeContractCall).toHaveBeenCalledWith(ARGS, { confirm })
   })
 
   // An SCA user has no injected connector, so useAccount().chainId is
