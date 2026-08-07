@@ -292,3 +292,9 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
 
 - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."
 - SE-6 (remaining piece): `EscrowDetail.jsx`'s `AckBanner` should block "Accept terms" when `InvoiceViewer`'s SHA-256 check fails. Verification itself now exists (see "Frontend: invoice attachment pinning (IPFS)" above) — this is only the missing gate on acknowledgement.
+
+Found during the Circle confirm-descriptor sweep on `feature/confirm-descriptors`. All three are missing *behaviour*, not missing copy, which is why none was fixed in that work:
+
+- `EscrowDetail.jsx`'s `CancelCard`: the finalize button stays enabled when a milestone is `IN_REVIEW`/`DISPUTED`, so a user can submit a `mutualCancel` that is proven to revert (`CannotCancelDuringDispute`). The confirm screen now warns before signing — `cancelEscrowConfirm`'s blocked branch — but the button should be disabled in that state.
+- `InvoiceCard.jsx:68`: reads `useAccount`/`useSignMessage` directly instead of going through `useAuth`, so it silently no-ops for UCW users.
+- `EscrowDetail.jsx:1872`: gated on `window.ethereum`, so UCW users get only a copy-calldata fallback for CCTP self-relay recovery.
