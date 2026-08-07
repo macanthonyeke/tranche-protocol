@@ -3,13 +3,13 @@ import { useAuth } from '../hooks/useAuth.jsx'
 
 /* Email sign-in: the default way into the app.
 
-   Circle owns the two dialogs that matter (OTP entry, then PIN + security
-   questions), so this component is deliberately thin — an email field, a
-   button, and honest progress copy. Everything security-relevant happens in
-   Circle's hosted UI or server-side.
+   Circle owns the dialog that matters (email OTP entry — these wallets have
+   no PIN), so this component is deliberately thin — an email field, a button,
+   and honest progress copy. Everything security-relevant happens in Circle's
+   hosted UI or server-side.
 
    Stage copy is spelled out rather than a generic spinner because the flow
-   hands off to a Circle dialog twice, and a user who doesn't know a popup is
+   hands off to Circle's dialog mid-way, and a user who doesn't know a popup is
    coming reads the pause as the app having hung. */
 
 const STAGE_LABEL = {
@@ -72,8 +72,8 @@ export default function EmailSignIn({ onDone }) {
       )}
 
       <p className="text-[12.5px] text-ink-3 leading-relaxed">
-        We'll create a wallet you control, secured by a PIN. Gas is covered —
-        you don't need any crypto to start.
+        We'll create a wallet you control, secured by a one-time code sent to
+        your email. Gas is covered — you don't need any crypto to start.
       </p>
     </form>
   )
