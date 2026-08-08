@@ -142,9 +142,13 @@ describe('extendDeadlineConfirm', () => {
   /* The point of the descriptor. refundAfterDeadline opens at deadline + 72h
      (:703), not at the deadline — the row's own help text says "past the
      deadline", which is 72 hours optimistic. */
+  // Phase C #15 rewrote this line twice over: "from <date>" became "only
+  // after <date>" (the guard is `<=`, so the refund opens strictly after), and
+  // "refundable to you" lost its beneficiary claim (the credit goes to
+  // refundTo). The 72-hour offset itself is unchanged.
   it('states the refund date as 72 hours after the new deadline, not the deadline', () => {
-    expect(paramText(d())).toContain('refundable to you from 3 Feb 2026')
-    expect(paramText(d())).toContain('72 hours after the new deadline')
+    expect(paramText(d())).toContain('refundable only after 3 Feb 2026')
+    expect(paramText(d())).toContain('72 hours past the new deadline, not at it')
   })
 
   it('says the direction is one-way', () => {
@@ -161,6 +165,6 @@ describe('extendDeadlineConfirm', () => {
   it('derives the refund date from the NEW deadline plus exactly 72 hours', () => {
     const far = extendDeadlineConfirm({ escrow, newDeadline: Number(escrow.deadline) + 365 * DAY })
     // 1 Jan 2026 + 365d = 1 Jan 2027; + 72h = 4 Jan 2027.
-    expect(paramText(far)).toContain('refundable to you from 4 Jan 2027')
+    expect(paramText(far)).toContain('refundable only after 4 Jan 2027')
   })
 })

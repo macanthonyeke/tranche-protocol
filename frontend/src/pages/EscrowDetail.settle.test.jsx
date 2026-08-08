@@ -58,8 +58,10 @@ describe('a proposal that does not match settles nothing', () => {
     }
   )
 
+  /* Phase C #10 split this line into the three things it was flattening: the
+     freelancer's figure is gross, and the payer's is a credit, not a payment. */
   it('states the split as a conditional, not as a fact', () => {
-    expect(paramText(first())).toContain('Would pay 125.00 USDC to the freelancer and 125.00 USDC to the payer.')
+    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
   })
 
   /* The case most likely to be misread as agreement: the contract requires
@@ -91,8 +93,11 @@ describe('a matching proposal settles now', () => {
     expect(buildContractInteraction(d())).toHaveProperty('mainCurrency')
   })
 
-  it('says both sides agreed and that it pays out immediately', () => {
+  // Phase C #10: the subtitle no longer claims it "pays out immediately" —
+  // only one of the three destinations behaves that way.
+  it('says both sides agreed and that this settles the milestone', () => {
     expect(d().subtitle).toContain('Both sides have proposed the same split')
+    expect(d().subtitle).not.toMatch(/pays out immediately/i)
     expect(paramText(d())).toContain('This cannot be undone.')
   })
 
@@ -159,7 +164,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     mutualSettleConfirm({ escrow: escrowOn(BASE), milestone, splits, bps, theirs: agreed(bps) })
 
   it('names the escrow fixed forwarding fee rather than a live quote', () => {
-    expect(paramText(cross(5000))).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded.")
+    expect(paramText(cross(5000))).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
   })
 
   it('warns that a small share is credited on Arc instead of delivered', () => {
@@ -188,7 +193,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     const t = paramText(mutualSettleConfirm({
       escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
     }))
-    expect(t).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC")
+    expect(t).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
     expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
   })
 

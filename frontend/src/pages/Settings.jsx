@@ -21,7 +21,16 @@ import { CONTRACT_ADDRESS } from '../config/contract.js'
    These are the far end of the language used on the release/refund screens
    in EscrowDetail: milestones are "credited" to a refund balance, and this
    is where credited finally becomes sent. Only withdrawRefund actually sends
-   anything — see transferRefundCreditConfirm below. */
+   anything — see transferRefundCreditConfirm below.
+
+   Both also carry a side effect nothing on screen mentions. F5: each one
+   deletes any pending two-step recovery proposal targeting the caller's
+   wallet (TrancheProtocol.sol:851-852, :897-898), on the reasoning that a
+   wallet able to transact is not a wallet needing recovery. That is correct,
+   but it is destructive to somebody else's in-flight work: a RECOVERY_MANAGER
+   proposal made minutes earlier is gone, and the 14-day clock restarts from
+   whenever they propose again. A user mid-recovery who withdraws a small
+   balance in the meantime has silently undone it. */
 
 export function withdrawRefundConfirm({ balance, recipient, signer }) {
   const parameters = [
@@ -32,7 +41,8 @@ export function withdrawRefundConfirm({ balance, recipient, signer }) {
     // with getDomainName(0): in CCTP_DOMAINS domain 0 is Ethereum Sepolia, so
     // that would name the wrong chain on a signing screen.
     'Sent on: Arc — a direct USDC transfer, not a cross-chain delivery.',
-    'Withdraws your entire refund balance. Partial withdrawals are not supported.'
+    'Withdraws your entire refund balance. Partial withdrawals are not supported.',
+    'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
   ]
 
   // Withdrawing to a wallet other than the signer is a supported flow (that is
@@ -72,7 +82,8 @@ export function transferRefundCreditConfirm({ balance, recipient }) {
     parameters: [
       `New owner: ${recipient}`,
       'No USDC moves on this transaction — it re-keys who the credit belongs to.',
-      'The new owner withdraws it from their own wallet.'
+      'The new owner withdraws it from their own wallet.',
+      'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
     ]
   }
 }

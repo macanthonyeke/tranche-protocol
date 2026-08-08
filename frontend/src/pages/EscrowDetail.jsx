@@ -408,22 +408,22 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
               // (TrancheProtocol.sol:1091).
               confirm: {
                 title: 'Decline this escrow',
-                subtitle: 'Rejects the whole engagement and returns everything to the payer. This cannot be undone — a new escrow would have to be created.',
+                subtitle: "Rejects the whole engagement and returns everything to the escrow's refund address. This cannot be undone — a new escrow would have to be created.",
                 amount: escrow.totalAmount,
-                amountLabel: 'Amount returned to payer',
+                amountLabel: 'Amount refunded',
                 contractName: 'Tranche Protocol Escrow',
                 contractAddress: CONTRACT_ADDRESS,
                 functionName: 'declineEscrow',
                 parameters: [
                   `Escrow #${escrow.id} — all ${Number(escrow.milestoneCount)} milestones refunded`,
-                  `Credited to: ${escrow.refundTo}`,
+                  ...refundToLines(escrow),
                   'No protocol fee is taken.',
                   'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
                 ]
               }
             }
           )}
-          title="Reject the whole escrow. Refunds the full amount to the payer — no protocol fee. Only available while every milestone is still pending."
+          title="Reject the whole escrow. Refunds the full amount to the escrow's refund address — no protocol fee. Only available while every milestone is still pending."
         >
           {declineTx.isBusy ? 'Working…' : 'Decline escrow'}
         </button>
@@ -729,7 +729,14 @@ function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, o
  * once DELIVERY_GRACE_PERIOD has fully elapsed (:703), because the recipient
  * may still claim inside that window (:405). Both dates go on the screen —
  * the deadline the parties talk about, and the date the money actually
- * becomes refundable. */
+ * becomes refundable.
+ *
+ * Two things that date is not. The guard is `block.timestamp <= deadline +
+ * GRACE` (:703), so the refund opens strictly AFTER that moment, not at it —
+ * a signer who reads it as "from 3 Feb" and submits at 3 Feb will be reverted
+ * by DeadlineNotReached. And the refund is credited to e.refundTo (:715),
+ * which is only the depositor when address(0) was passed at deposit
+ * (:274-275); "refundable to you" is an assumption the contract never makes. */
 export function extendDeadlineConfirm({ escrow, newDeadline }) {
   const GRACE = 72 * 60 * 60
   const current = Number(escrow.deadline)
@@ -743,7 +750,8 @@ export function extendDeadlineConfirm({ escrow, newDeadline }) {
     parameters: [
       `Escrow #${escrow.id}`,
       `Deadline: ${formatDeadline(current)} → ${formatDeadline(next)}`,
-      `Your refund path moves with it: undelivered milestones become refundable to you from ${formatDeadline(next + GRACE)}, 72 hours after the new deadline.`,
+      `Your refund path moves with it: undelivered milestones become refundable only after ${formatDeadline(next + GRACE)} — 72 hours past the new deadline, not at it.`,
+      `Refunds are credited to this escrow's refund address, ${escrow.refundTo} — which is not necessarily the wallet you are signing with.`,
       'The freelancer gets that much longer to deliver. Their consent is not required.',
       'No funds move on this transaction.'
     ]
@@ -772,7 +780,7 @@ function DeadlineEditRow({ escrow, onChange, last }) {
       label="Deadline"
       ownerTag="Payer"
       currentDisplay={formatDeadline(escrow.deadline)}
-      help="You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you."
+      help="You can only move the deadline later, never earlier. Once 72 hours past the deadline have elapsed, any undelivered milestone can be refunded to this escrow's refund address."
       fields={[{ key: 'deadline', label: 'New deadline', type: 'datetime', min: minStr }]}
       validate={(d) => toTs(d) > currentTs}
       busy={tx.isBusy}
@@ -1547,6 +1555,7 @@ function MilestoneRow({
                   <MilestoneCancelControl
                     escrow={escrow}
                     milestone={milestone}
+                    milestones={milestones}
                     role={role}
                     onChange={onChange}
                   />
@@ -1573,6 +1582,36 @@ function ChevronIcon({ open }) {
   )
 }
 
+/* Shared by proposeMilestoneCancelConfirm below and by the panel's own blurb,
+ * so the signing screen and the screen behind it cannot reach opposite
+ * conclusions about the same cancellation. Terminal states are RELEASED(3) and
+ * REFUNDED(4) — the same two _checkEscrowCompletion accepts (:727).
+ *
+ * `reconciled` is the honesty gate rather than a loading check: today
+ * getEscrowDetail builds `milestones` as `new Milestone[](e.milestoneCount)` in
+ * the same call that returns the escrow (:1163-1184), and useEscrowDetail
+ * derives both from that one response, so a short list cannot occur through the
+ * app's own path. It guards the exported descriptor, which any future caller
+ * can hand a partial list. */
+export function milestoneCancelCompletion(escrow, milestoneIndex, milestones) {
+  const list = milestones || []
+  const reconciled = list.length > 0 && list.length === Number(escrow?.milestoneCount)
+  const completesEscrow = reconciled &&
+    list.every((m) => m.index === milestoneIndex || m.state === 3 || m.state === 4)
+  return { reconciled, completesEscrow }
+}
+
+/* The panel's static blurb. Three-way for the same reason the descriptor is:
+ * with nothing to reconcile against, "the rest of the escrow continues" is a
+ * claim, not a default. */
+export function milestoneCancelBlurb({ reconciled, completesEscrow }) {
+  const base = 'Both the payer and freelancer must propose. Once both agree, this milestone'
+  if (!reconciled) return `${base} is refunded.`
+  return completesEscrow
+    ? `${base}'s amount is refunded to the escrow's refund address — and since every other milestone has settled, that completes the whole escrow.`
+    : `${base}'s amount is refunded to the escrow's refund address and the rest of the escrow continues.`
+}
+
 /* EVIDENCE/STATE: proposeMilestoneCancel is two transactions wearing one
  * button. With the counterparty not yet on board it writes a single bool
  * (:799); with them already on board the same call falls straight through to
@@ -1585,8 +1624,16 @@ function ChevronIcon({ open }) {
  * clears the escrow-level flags. Nothing clears milestoneCancelProposals
  * except the refund branch itself or a completed escrow-wide mutualCancel
  * (:761-762). A milestone proposal is therefore irrevocable, which is exactly
- * the sort of thing a user assumes carries over from the screen next door. */
-export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed }) {
+ * the sort of thing a user assumes carries over from the screen next door.
+ *
+ * "The rest of the escrow carries on" is the other claim that needs care: the
+ * refund branch calls _checkEscrowCompletion (:814), which flips the escrow to
+ * COMPLETED once every milestone is RELEASED or REFUNDED (:722-733). Cancel the
+ * last nonterminal one and this transaction ends the engagement rather than
+ * trimming it. That needs the sibling milestones to know, so `milestones` is
+ * passed in; when it cannot be reconciled against milestoneCount the line is
+ * dropped rather than guessed, since both readings are consequential. */
+export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed, milestones }) {
   const line = milestoneLineFor(escrow, milestone)
   const base = {
     contractName: 'Tranche Protocol Escrow',
@@ -1615,19 +1662,25 @@ export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherPr
     }
   }
 
+  const { reconciled, completesEscrow } = milestoneCancelCompletion(escrow, milestone.index, milestones)
+
   return {
     ...base,
-    title: 'Cancel this milestone and refund the payer',
+    title: 'Cancel this milestone and refund it',
     subtitle: 'The other party has already proposed this, so signing cancels the milestone and refunds it now. This cannot be undone.',
     amount: milestone.amount,
     amountLabel: 'Amount refunded',
     parameters: [
       line,
-      `Credited to: ${escrow.refundTo}`,
+      ...refundToLines(escrow),
       ...(givingUp ? ['This is your payment for this milestone. You will not be paid for it.'] : []),
       'No protocol fee is taken.',
       'Credited as a withdrawable refund balance on Arc, not sent to a wallet.',
-      'The rest of the escrow carries on — only this milestone is cancelled.'
+      ...(completesEscrow
+        ? ['Every other milestone has already settled, so this completes the whole escrow — nothing carries on afterwards.']
+        : reconciled
+          ? ['The rest of the escrow carries on — only this milestone is cancelled.']
+          : [])
     ]
   }
 }
@@ -1690,7 +1743,7 @@ function TimeoutSettlementTrigger({ escrow, milestone, dispute, splits, onChange
    parties have proposed — the milestone-level analogue of {mutualCancel}. The
    public `milestoneCancelProposals` mapping is read directly for both parties
    so each side sees the live approval state. */
-function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
+function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange }) {
   const [open, setOpen] = useState(false)
   const milestoneIndex = milestone.index
 
@@ -1720,11 +1773,15 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
 
   const otherProposed = role === 'payer' ? freelancerProposed : payerProposed
 
+  // Literally the same call the descriptor makes, so the panel and the signing
+  // screen cannot disagree about whether this cancellation ends the escrow.
+  const completion = milestoneCancelCompletion(escrow, milestoneIndex, milestones)
+
   const submit = () => tx.run(
     escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
     {
       loadingMessage: 'Submitting. Check your wallet.',
-      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed })
+      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, milestones, role, otherProposed })
     }
   )
 
@@ -1752,7 +1809,7 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
         </button>
       </div>
       <p className="text-xs text-ink-2 leading-relaxed">
-        Both the payer and freelancer must propose. Once both agree, this milestone's amount is refunded to the payer and the rest of the escrow continues.
+        {milestoneCancelBlurb(completion)}
       </p>
       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
         <ApprovalRow label="Payer" approved={payerProposed} />
@@ -2101,7 +2158,11 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   if (!matches) {
     // Nothing executes. No `amount` — the figures below are what WOULD happen,
     // and a Total row would assert they are happening now.
-    const splitLine = `Would pay ${formatUSDC(recipientShare)} to the freelancer and ${formatUSDC(payerShare)} to the payer.`
+    // "Would pay X and Y" flattens three different things: the freelancer's
+    // figure is gross (the protocol fee comes off it, :1270-1271), and the
+    // payer's is never paid at all — it becomes a refund credit they have to
+    // withdraw (:1241).
+    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited to the payer's refund balance.`
     return {
       ...base,
       title: 'Propose settling this dispute',
@@ -2137,6 +2198,16 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   }
   if (bps > 0) {
     params.push(...payoutLines(escrow, splits))
+    // Three different arrival behaviours hide behind "pays out": an Arc leg is
+    // a safeTransfer inside this transaction (:1343-1346), a cross-chain leg is
+    // a burn that Circle mints minutes later, and the payer's half is a credit
+    // that is never sent anywhere (:1241). The subtitle no longer claims one
+    // speed for all three, so the distinction has to appear here.
+    params.push(
+      crossChain
+        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+        : "The freelancer's share is transferred on Arc as this transaction executes."
+    )
     params.push("The protocol fee is taken from the freelancer's share only.")
   } else {
     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
@@ -2145,7 +2216,10 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
   }
   if (crossChain && bps > 0) {
-    params.push(`Cross-chain delivery uses this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded.`)
+    // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
+    // Circle deducts its actual forwarding fee — which may be less — from the
+    // burned amount on the destination (TrancheProtocol.sol:874-877).
+    params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
     if (partial) {
       params.push(
         splits?.length > 0
@@ -2159,7 +2233,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   return {
     ...base,
     title: 'Settle this dispute now',
-    subtitle: 'Both sides have proposed the same split, so signing settles the milestone and pays out immediately.',
+    subtitle: 'Both sides have proposed the same split, so signing settles the milestone now. Where each share goes, and when it actually arrives, is set out below.',
     amount: milestone.amount,
     amountLabel: 'Amount settled',
     parameters: params
@@ -2706,6 +2780,29 @@ function MilestoneStateGlyph({ state }) {
    Single most relevant action per role/state. Glowing clay for primary
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
+/* Refund-destination lines, the counterpart to payoutLines below.
+ *
+ * Every refund in this contract credits e.refundTo, and refundTo is whatever
+ * address was passed at deposit — it falls back to the depositor only when
+ * address(0) was supplied (TrancheProtocol.sol:274-275). So "refunded to the
+ * payer" is an assumption the contract never makes: a payer who set a treasury
+ * or a co-founder's wallet as refundTo gets a screen promising them money that
+ * goes somewhere else.
+ *
+ * The address alone does not fix that — a signer who assumes it is their own
+ * wallet reads past it. State the divergence only where it is real, so the
+ * ordinary case (refundTo == depositor) stays quiet. */
+export function refundToLines(escrow) {
+  const to = escrow?.refundTo
+  if (!to) return []
+  const lines = [`Credited to: ${to}`]
+  const depositor = escrow?.depositor
+  if (depositor && to.toLowerCase() !== depositor.toLowerCase()) {
+    lines.push("That is this escrow's configured refund address, not the payer's own wallet.")
+  }
+  return lines
+}
+
 /* Payout-destination lines for a signing screen's `parameters`.
  *
  * A split escrow pays each leg to its own address on its own destination
@@ -2721,7 +2818,13 @@ function MilestoneStateGlyph({ state }) {
  * same reasoning as networkFee in utils/circleTheme.js. */
 export function payoutLines(escrow, splits) {
   if (splits?.length > 0) {
-    return [`Paid to: ${splits.length} split recipients, each on their own chain`]
+    // Not "each on their own chain": a leg whose share rounds down to zero is
+    // skipped outright by the `share > 0` guard (:1312), so it is paid nothing
+    // and reaches no chain at all.
+    return [
+      `Paid to: ${splits.length} split recipients, each to their configured chain`,
+      'A recipient whose share rounds down to zero is paid nothing.'
+    ]
   }
   const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
   return [
@@ -2793,13 +2896,13 @@ export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
     // in their wallet.
     return {
       ...base,
-      title: 'Refund this milestone to the payer',
+      title: 'Refund this milestone',
       subtitle: 'The deadline and its 72-hour grace period have both passed, so this milestone can be refunded. No protocol fee is taken.',
       amount: milestone.amount,
       amountLabel: 'Amount refunded',
       parameters: [
         milestoneLine,
-        `Credited to: ${escrow.refundTo}`,
+        ...refundToLines(escrow),
         'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
       ]
     }
@@ -3150,21 +3253,36 @@ const EVIDENCE_BASE = {
 
 /* raiseDispute freezes the milestone into DISPUTED (:456) and writes the
  * reason and URI into DisputeData as plain strings (:443-454). There is no
- * withdrawDispute anywhere in the contract — once raised, the only exits are
- * the arbiter's resolveDispute or resolveDisputeByTimeout. Both facts belong
- * on the screen: this is not a reversible "flag for review". */
+ * withdrawDispute anywhere in the contract — once raised, it cannot be taken
+ * back. That much belongs on the screen: this is not a reversible "flag for
+ * review".
+ *
+ * What the copy previously got wrong is the other half — that raising a
+ * dispute "hands it to the arbiter", as though the arbiter were the only way
+ * out. Three exits exist, and two of them need no arbiter at all:
+ *
+ *   - mutualSettle accepts DISPUTED explicitly (:534), so the two parties can
+ *     still agree a split between themselves afterwards;
+ *   - resolveDisputeByTimeout has no role gate (:561), so once ARBITER_WINDOW
+ *     elapses anyone — including either party — can settle it at a fixed
+ *     50/50;
+ *   - resolveDispute, the arbiter's discretionary ruling (:495).
+ *
+ * A signer told the arbiter decides will wait for one, which is exactly the
+ * inaction the timeout exists to route around. */
 export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName }) {
   return {
     ...EVIDENCE_BASE,
     functionName: 'raiseDispute',
     title: 'Dispute this milestone',
-    subtitle: 'Freezes the milestone and hands it to the arbiter, who decides how much of it each side receives. A dispute cannot be withdrawn once raised.',
+    subtitle: 'Freezes the milestone so it cannot be released while the disagreement is open. A dispute cannot be withdrawn once raised.',
     parameters: [
       `${milestoneLineFor(escrow, milestone)} — frozen, not refunded`,
       `Reason: "${truncateText(reason)}"`,
       ...evidenceLines({ uri, fileName }),
       'Your reason and link are stored on-chain in the clear, readable by anyone, permanently.',
       'The arbiter can award any split from 0 to 100% — disputing does not guarantee a refund.',
+      'An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.',
       'No funds move on this transaction.'
     ]
   }
@@ -3465,7 +3583,7 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
     return {
       ...base,
       title: 'Approve cancelling this escrow',
-      subtitle: 'Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the payer.',
+      subtitle: "Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the escrow's refund address.",
       parameters: [
         `Escrow #${escrow.id}`,
         `Would refund ${formatUSDC(refundable)} across ${pending.length} unstarted milestone${pending.length === 1 ? '' : 's'} once both parties approve.`,
@@ -3480,7 +3598,7 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
     // put a refund figure on a screen for a transaction that cannot succeed.
     return {
       ...base,
-      title: 'Cancel this escrow and refund the payer',
+      title: 'Cancel this escrow and refund it',
       subtitle: 'The contract rejects a cancellation while a milestone is in review or disputed, so this transaction will not go through.',
       parameters: [
         `Escrow #${escrow.id}`,
@@ -3492,13 +3610,13 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
 
   return {
     ...base,
-    title: 'Cancel this escrow and refund the payer',
+    title: 'Cancel this escrow and refund it',
     subtitle: 'Both parties have now approved. This cancels the escrow and refunds every milestone that has not started. This cannot be undone.',
     amount: refundable,
     amountLabel: 'Amount refunded',
     parameters: [
       `Escrow #${escrow.id} — ${pending.length} of ${Number(escrow.milestoneCount)} milestones refunded`,
-      `Credited to: ${escrow.refundTo}`,
+      ...refundToLines(escrow),
       'Already-released milestones are not clawed back.',
       'No protocol fee is taken.',
       'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'

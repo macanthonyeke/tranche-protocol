@@ -182,12 +182,15 @@ describe('timeoutCreditLines', () => {
      mechanics stay off the signing screen. */
   it('describes the fan-out for a split escrow without naming one recipient', () => {
     const lines = timeoutCreditLines(escrow, SPLITS)
-    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients")
+    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients by their configured percentages")
     expect(lines.join('\n')).not.toContain(RECIPIENT)
   })
 
+  // Phase C #11: the split branch now carries a rounding caveat, so the payer
+  // line is last rather than second.
   it('still names the payer destination on a split escrow', () => {
-    expect(timeoutCreditLines(escrow, SPLITS)[1]).toBe(`Payer's share goes to ${REFUND_TO}`)
+    const lines = timeoutCreditLines(escrow, SPLITS)
+    expect(lines[lines.length - 1]).toBe(`Payer's share goes to ${REFUND_TO}`)
   })
 
   it('keeps split dust mechanics off the screen', () => {

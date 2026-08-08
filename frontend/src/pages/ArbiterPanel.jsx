@@ -439,9 +439,15 @@ function EvidenceHashRow({ label, hash }) {
  * signing screen — same level of abstraction as Round 1's split handling. */
 export function timeoutCreditLines(escrow, splits) {
   return [
-    splits?.length > 0
-      ? `Freelancer's share is divided across ${splits.length} split recipients`
-      : `Freelancer's share goes to ${escrow.recipient}`,
+    ...(splits?.length > 0
+      // Not every configured recipient necessarily gets something: the credit
+      // loop is guarded by `share > 0` (:608), so a leg whose proportional
+      // share rounds down to zero is skipped entirely.
+      ? [
+        `Freelancer's share is divided across ${splits.length} split recipients by their configured percentages`,
+        'A recipient whose share rounds down to zero is credited nothing.'
+      ]
+      : [`Freelancer's share goes to ${escrow.recipient}`]),
     `Payer's share goes to ${escrow.refundTo}`
   ]
 }
@@ -580,12 +586,28 @@ export function resolveDisputeConfirm({
   if (bps > 0) {
     params.push(
       splits?.length > 0
-        ? `Freelancer's share is divided across ${splits.length} split recipients, each on their own chain`
+        // "each on their own chain" promises delivery this call cannot
+        // guarantee: a leg rounding to zero is skipped (:1312), and on a
+        // partial ruling a sub-floor cross-chain leg is credited on Arc
+        // instead (:1319) — the caveat pushed below.
+        ? `Freelancer's share is divided across ${splits.length} split recipients, each to their configured chain`
         // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
         // updateReceivingAddress rewrites mintRecipient and leaves recipient
         // untouched (:986-990), so the two diverge the moment a freelancer
         // redirects — and recipient is the stale one.
         : `Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`
+    )
+    if (splits?.length > 0) {
+      params.push('A recipient whose share rounds down to zero is paid nothing.')
+    }
+    // "Pays both sides immediately" was true of neither half. A cross-chain
+    // share is a burn Circle mints minutes later; an Arc share is a
+    // safeTransfer inside this transaction (:1343-1346); and the payer's half
+    // is a credit that is never sent anywhere (:606 below).
+    params.push(
+      crossChain
+        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+        : "The freelancer's share is transferred on Arc as this transaction executes."
     )
     params.push("The protocol fee is taken from the freelancer's share only.")
   } else {
@@ -602,7 +624,10 @@ export function resolveDisputeConfirm({
     // actually applies rather than both.
     params.push(
       splits?.length > 0
-        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
+        // A cap, not a charge: the snapshot is passed to CCTP as maxFee and
+        // Circle deducts its actual fee — possibly less — from the burned
+        // amount on the destination (TrancheProtocol.sol:874-877).
+        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
         : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
     )
     if (partial) {
@@ -626,7 +651,7 @@ export function resolveDisputeConfirm({
 
   return {
     title: 'Resolve this dispute',
-    subtitle: 'Your ruling settles the milestone and pays both sides immediately. It cannot be appealed, reversed, or re-ruled.',
+    subtitle: 'Your ruling settles the milestone now. It cannot be appealed, reversed, or re-ruled — but the two shares do not reach the parties the same way, or at the same speed.',
     amount: milestone.amount,
     amountLabel: 'Amount settled',
     contractName: 'Tranche Protocol Escrow',

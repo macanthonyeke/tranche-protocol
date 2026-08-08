@@ -49,7 +49,12 @@ describe('payoutLines', () => {
   it('describes the fan-out for a split escrow and names no individual recipient', () => {
     const lines = payoutLines(escrow, SPLITS)
 
-    expect(lines).toEqual(['Paid to: 2 split recipients, each on their own chain'])
+    // Phase C #11: "each on their own chain" became "each to their configured
+    // chain", plus a rounding caveat — a leg rounding to zero reaches nobody.
+    expect(lines).toEqual([
+      'Paid to: 2 split recipients, each to their configured chain',
+      'A recipient whose share rounds down to zero is paid nothing.'
+    ])
     expect(lines.join('\n')).not.toContain(RECIPIENT)
     expect(lines.join('\n')).not.toContain(FALLBACK_RECIPIENT)
   })

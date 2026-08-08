@@ -184,13 +184,13 @@ describe('the maxFee asymmetry between split and no-split', () => {
      state a figure the contract never uses. */
   it('quotes the escrow snapshot floor for split legs, never the caller maxFee', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of 0.20 USDC, deducted from that leg's share on delivery.")
+    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery.")
     expect(t).not.toContain('0.45 USDC')
   })
 
   it('describes a split payout as a fan-out rather than one address', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each on their own chain")
+    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each to their configured chain")
     expect(t).not.toContain(`sent to ${RECIPIENT}`)
   })
 })
@@ -216,7 +216,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(ARC), splits }))
-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of 0.20 USDC")
+    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
     expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
   })
 

@@ -202,9 +202,19 @@ describe('proposeMilestoneCancelConfirm — first proposer', () => {
   })
 })
 
+/* Phase C #12: the "rest of the escrow carries on" line is now conditional on
+   the sibling milestones, so the executing branch needs them. Milestone 0 is
+   released and 2 is still pending, which is the ordinary mid-escrow case the
+   line was always describing. */
+const SIBLINGS = [
+  { index: 0, amount: 250000000n, state: 3 },
+  { index: 1, amount: 250000000n, state: 1 },
+  { index: 2, amount: 250000000n, state: 0 }
+]
+
 describe('proposeMilestoneCancelConfirm — second proposer executes', () => {
   const d = (role = 'payer') =>
-    proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed: true })
+    proposeMilestoneCancelConfirm({ escrow, milestone, milestones: SIBLINGS, role, otherProposed: true })
 
   /* Here the same call falls through to the refund branch (:803-817), so the
      figure is real and belongs in the Total. */

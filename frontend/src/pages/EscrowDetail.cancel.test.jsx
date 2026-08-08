@@ -94,7 +94,9 @@ describe('cancelEscrowConfirm — second party finalising', () => {
   })
 
   it('is titled as the cancellation it performs', () => {
-    expect(d(ms, true).title).toBe('Cancel this escrow and refund the payer')
+    // Phase C #9: not "refund the payer" — the credit goes to refundTo, which
+    // is only the payer when address(0) was passed at deposit.
+    expect(d(ms, true).title).toBe('Cancel this escrow and refund it')
   })
 })
 
