@@ -54,8 +54,14 @@ describe('redirectPayoutConfirm — an allowed redirect', () => {
      destinationDomain are read at release time, never snapshotted, so this
      reaches milestones that already exist — including one already claimed and
      waiting on the payer. */
-  it('says it applies to everything unsettled, including milestones in review', () => {
-    expect(paramText(d())).toContain('Applies to every milestone not yet released, including any currently in review.')
+  /* Round 15 #6: the leading sentence itself now names the timeout exception
+     rather than a separate line appended after it — "every milestone" was
+     never quite true of a milestone that times out with no arbiter ruling,
+     which always pays the ORIGINAL recipient regardless of this redirect. */
+  it('says it applies to everything unsettled, including milestones in review, except a timeout', () => {
+    const t = paramText(d())
+    expect(t).toContain('Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review.')
+    expect(t).toContain("A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.")
   })
 
   it('does not claim in-flight milestones are protected', () => {
@@ -112,7 +118,7 @@ describe('redirectPayoutConfirm — the directions F3 allows', () => {
      sentence passes for any other wrong output too — including a reworded
      block, or the split no-op branch. */
   const allows = (d) => {
-    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released, including any currently in review.')
+    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review.')
     expect(d.parameters.join('\n')).not.toContain(REDIRECT_BLOCKED_TEXT)
     expect(d.subtitle).toContain('Redirects your milestone payments')
   }
@@ -226,6 +232,19 @@ describe('redirectSplitConfirm', () => {
 
   it('survives an unknown current address', () => {
     expect(paramText(d({ currentAddress: null }))).toContain(`Address: unknown → ${NEW_ADDR}`)
+  })
+
+  /* Round 15 #7: unlike the no-split branch (where a timeout ignores the
+     redirect entirely), a split leg's timeout credit reads the LIVE
+     mintRecipient (TrancheProtocol.sol:609) — so an address change here does
+     reach a timeout settlement. What it never reads is destinationDomain
+     (:594-610): every leg's timeout share lands in refundBalances (an Arc
+     credit) no matter what chain is configured. Two different answers for
+     the two things this screen redirects together, so both need saying. */
+  it('says a timeout honors the updated address but always as an Arc credit, ignoring the chain', () => {
+    const t = paramText(d())
+    expect(t).toContain("A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit.")
+    expect(t).toContain('It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.')
   })
 })
 

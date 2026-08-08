@@ -128,6 +128,16 @@ describe('#7 — domain toggles have three carve-outs', () => {
       .toContain('This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.')
   })
 
+  /* Round 15 #7: domain 0's refund-sentinel meaning (withdrawRefund) and its
+     ordinary meaning as a real CCTP destination (Ethereum, for redirects) are
+     unrelated. F3 restricts redirecting an Arc-funded escrow there exactly
+     like any other non-Arc domain — the ADD screen for domain 0 was dropping
+     that caveat, unlike every other non-Arc domain. */
+  it('still warns that enabling domain 0 does not unblock Arc-funded escrows', () => {
+    expect(paramText(build(0, false)))
+      .toContain('Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.')
+  })
+
   /* Both redirects read `!= ARC_DOMAIN && !supportedDomains[...]` (:975, :1027),
      so Arc is exempt from the list entirely. */
   it('says Arc redirects survive removing Arc', () => {

@@ -987,13 +987,17 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
       `Escrow #${escrow.id}`,
       `Address: ${oldAddress} → ${newAddress}`,
       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
-      'Applies to every milestone not yet released, including any currently in review.',
+      // Round 15 #6/#8: this used to be an unqualified "every milestone",
+      // with the timeout exception appended several lines later — and
+      // dropped entirely when milestones was unavailable, at which point the
+      // still-present blanket claim was the LEAST accurate it ever got. The
+      // exception is a fact about mechanism, not about the exposure figure,
+      // so it belongs in this always-present sentence rather than gated
+      // alongside a number that may or may not be known.
+      "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.",
       ...(exposure === null
         ? []
-        : [
-            `That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`,
-            "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
-          ]),
+        : [`That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`]),
       'Milestones already released are unaffected and cannot be recalled.'
     ]
   }
@@ -1051,6 +1055,15 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
       ...(exposure === null
         ? []
         : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
+      // Round 15 #7: unlike the no-split branch, a timeout DOES honor a
+      // redirected split ADDRESS — the split loop reads the live, current
+      // s[i].mintRecipient (TrancheProtocol.sol:609). But that same loop
+      // never reads s[i].destinationDomain at all; every leg's share lands in
+      // refundBalances (an Arc credit) regardless of what chain it names
+      // (:594-610). So an address change here does apply to a timeout
+      // settlement; a chain change does not — two different answers for the
+      // two things this one screen lets you redirect together.
+      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit. It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.",
       'Milestones already released are unaffected and cannot be recalled.'
     ]
   }

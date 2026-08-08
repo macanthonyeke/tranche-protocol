@@ -167,9 +167,12 @@ describe('#18.3 — a redirect states what it is worth', () => {
     expect(t).toContain('A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.')
   })
 
+  /* Round 15 #6: the exception moved INTO the leading "Applies to every
+     milestone" sentence rather than sitting several lines below it as a
+     separate correction. */
   it('discloses that a no-split timeout pays the original recipient, not the redirected address', () => {
     expect(paramText(payout())).toContain(
-      "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
+      "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address."
     )
   })
 
@@ -178,10 +181,16 @@ describe('#18.3 — a redirect states what it is worth', () => {
     expect(paramText(payout())).not.toMatch(/\bnet\b/i)
   })
 
-  it('omits the figure and the timeout caveat when the milestones are not available', () => {
+  /* Round 15 #8: the old copy kept the blanket "every milestone" claim active
+     when milestones was unavailable while dropping the timeout exception —
+     the LEAST accurate combination, exactly when there's no ceiling figure to
+     compensate. The exception is a mechanism fact, not a number, so it's now
+     part of the always-present leading sentence: only the ceiling FIGURE is
+     what's actually milestones-dependent, and that's still correctly omitted. */
+  it('keeps the timeout exception even when the milestones are not available, and omits only the figure', () => {
     const t = paramText(payout({ milestones: undefined }))
-    expect(t).not.toMatch(/ceiling of|still to be paid|undefined|NaN|times out/)
-    expect(t).toContain('Applies to every milestone not yet released, including any currently in review.')
+    expect(t).not.toMatch(/ceiling of|still to be paid|undefined|NaN/)
+    expect(t).toContain("A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.")
   })
 
   /* The split branch's write changes no destination at all, and the blocked
@@ -226,5 +235,15 @@ describe('#18.3 — a redirect states what it is worth', () => {
 
   it('omits it on the split redirect too when unavailable', () => {
     expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid|ceiling on gross principal/)
+  })
+
+  /* Round 15 #7: distinct from the address-recipient issue above — this is
+     about the destination CHAIN specifically, and (like the #6/#8 leading
+     sentence) it's a mechanism fact rather than a number, so it stays present
+     even when the ceiling figure is omitted for lack of milestone data. */
+  it('keeps the destination-chain-ignored-at-timeout caveat even when milestones are unavailable', () => {
+    expect(paramText(split({ milestones: [] }))).toContain(
+      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit."
+    )
   })
 })

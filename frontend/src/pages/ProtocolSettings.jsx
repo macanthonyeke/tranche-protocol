@@ -240,6 +240,12 @@ function domainRemovalBlocks(domain) {
   return 'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
 }
 
+// F3 rejects redirecting an Arc-funded escrow cross-chain independently of
+// supportedDomains (:982, :1033) — true for every domain except Arc itself,
+// which this list has no power to change either way.
+const ARC_FUNDED_REDIRECT_CAVEAT =
+  'Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.'
+
 /* Two carve-outs that still belong on the ADD screen. Neither corrects a
    claim the leading sentence made — "new escrows may name this chain, and
    payouts may be redirected to it" says nothing about refund-withdrawal
@@ -249,21 +255,30 @@ function domainRemovalBlocks(domain) {
 
    1. Domain 0 doubles as withdrawRefund's Arc sentinel, so adding it to
       supportedDomains does not create a new withdrawal route through it.
+      That sentinel meaning is unrelated to domain 0's OTHER, ordinary
+      meaning as a real CCTP destination (Ethereum) for redirect purposes —
+      F3 restricts an Arc-funded escrow from redirecting there exactly like
+      any other domain, so this case still needs the same F3 caveat every
+      other non-Arc domain gets, alongside the sentinel note.
    2. ARC_DOMAIN is exempt from both redirect guards by construction (:975,
       :1027), so re-adding it does not change redirect availability — it was
-      already reachable.
+      already reachable, and (being Arc) it does not need the F3 caveat
+      either: F3 restricts redirecting AWAY from Arc, not TO it.
    3. Enabling a domain does not make it reachable for every escrow. An
       Arc-funded escrow (or Arc split leg) still cannot be redirected
       cross-chain — F3 rejects it independently of supportedDomains (:982,
       :1033). */
 function domainAdditionCaveats(domain) {
   if (Number(domain) === 0) {
-    return ['This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.']
+    return [
+      'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.',
+      ARC_FUNDED_REDIRECT_CAVEAT
+    ]
   }
   if (Number(domain) === ARC_DOMAIN) {
     return ['Arc was already always available for redirects; the contract exempts it from this list.']
   }
-  return ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
+  return [ARC_FUNDED_REDIRECT_CAVEAT]
 }
 
 export function domainConfirm({ domain, domainName, enabled }) {
