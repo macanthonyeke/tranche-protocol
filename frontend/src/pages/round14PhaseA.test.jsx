@@ -101,6 +101,18 @@ const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
 const RECOVERY_DEBOUNCE_MS = 400
 const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
 
+// Real "now" in seconds, not fake timers — this file uses real timers for the
+// debounce (see settleLookup). A fixed calendar date goes stale the moment
+// real time passes it, which is exactly the trap the expiry fix below exists
+// to catch — Round 15 #2 found this file's own fixtures had already fallen
+// into it. DAY/RECOVERY_WINDOW_DAYS mirror ProtocolSettings.jsx's own
+// ARBITER_WINDOW mirror (14 days, no on-chain getter).
+const DAY = 24 * 60 * 60
+const RECOVERY_WINDOW_DAYS = 14
+const NOW = Math.floor(Date.now() / 1000)
+const RECENT_PROPOSED_AT = BigInt(NOW - DAY) // well inside the 14-day window
+const EXPIRED_PROPOSED_AT = BigInt(NOW - (RECOVERY_WINDOW_DAYS + 1) * DAY) // past it
+
 afterEach(() => { cleanup() })
 
 beforeEach(() => {
@@ -163,6 +175,22 @@ describe('#1/#2 — the propose panel re-validates at the moment of signing', ()
 })
 
 describe('#1/#2 — the claim panel re-validates at the moment of signing', () => {
+  // Round 15 #1/#2 require a real, non-expired, matching proposal to even
+  // reach the confirm panel — the outer beforeEach defaults both addresses to
+  // "nothing pending" (ZERO), which is correct for #4's tests but would block
+  // this bypass scenario before it gets started. Both A and B get one here
+  // since the whole point of these tests is editing between the two.
+  beforeEach(() => {
+    proposedOwners.current = {
+      [ADDR_A.toLowerCase()]: authMock.current.address,
+      [ADDR_B.toLowerCase()]: authMock.current.address
+    }
+    proposedAts.current = {
+      [ADDR_A.toLowerCase()]: RECENT_PROPOSED_AT,
+      [ADDR_B.toLowerCase()]: RECENT_PROPOSED_AT
+    }
+  })
+
   const openConfirm = async () => {
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
@@ -244,7 +272,7 @@ describe('#3 — claim is reachable by any connected wallet, independent of role
 describe('#4 — claim warns before signing as the wrong wallet', () => {
   it('blocks and warns when the proposal names a different wallet than the connected one', async () => {
     proposedOwners.current[ADDR_A.toLowerCase()] = ADDR_B // NOT authMock's connected address
-    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
+    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
     await act(settleLookup)
@@ -255,7 +283,7 @@ describe('#4 — claim warns before signing as the wrong wallet', () => {
 
   it('does not warn when the connected wallet IS the proposed nominee', async () => {
     proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
-    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
+    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
     await act(settleLookup)
@@ -264,12 +292,78 @@ describe('#4 — claim warns before signing as the wrong wallet', () => {
     expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
   })
 
-  it('does not warn when nothing is pending (zero address reads as no proposal, not a mismatch)', async () => {
+  /* Round 15 #1: this assertion had it backwards — "nothing pending" (zero
+     address reads as no proposal, not a mismatch) is its own guaranteed
+     revert (NoPendingRecovery, TrancheProtocol.sol:937), so the button must
+     stay disabled here too. The mismatch-warning-absence half was already
+     correct: a genuinely empty proposal is not "the wrong wallet", so no
+     mismatch text should appear — only the disabled-state expectation was
+     wrong, not the reason for it. */
+  it('blocks claiming when nothing is pending, without a mismatch warning (zero address reads as no proposal)', async () => {
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+    await act(settleLookup)
+
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
+  })
+})
+
+/* Round 15 #2: claimRefundCreditTransfer also reverts RecoveryProposalExpired
+   once block.timestamp passes proposedAt + ARBITER_WINDOW
+   (TrancheProtocol.sol:940-942). expiryOf(proposedAt) was read only for
+   display before this fix — never checked against "now" in the gate — so a
+   genuinely expired proposal for the correct nominee still reached a
+   guaranteed-revert signature. */
+describe('#2 — claim blocks an expired proposal', () => {
+  it('blocks claiming once the proposal has passed its 14-day window, even for the correct nominee', async () => {
+    proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
+    proposedAts.current[ADDR_A.toLowerCase()] = EXPIRED_PROPOSED_AT
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+    await act(settleLookup)
+
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+    // Expired is a different reason than a mismatched nominee — the
+    // mismatch-specific warning must not fire for it.
+    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
+  })
+
+  it('allows claiming a proposal that is still inside its window', async () => {
+    proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
+    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
     await act(settleLookup)
 
     expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
-    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
+  })
+})
+
+/* Round 15 #3: proposeRefundCreditTransfer reverts NothingToWithdraw when
+   refundBalances[blacklistedWallet] == 0 (TrancheProtocol.sol:924). A
+   successfully-resolved zero balance is not a pending read — readsPending
+   alone never caught it — so Propose's gate needed its own balance check,
+   the same shape as the existing zero-address guard on the replacement
+   field. */
+describe('#3 — propose blocks a successfully-read zero balance', () => {
+  it('blocks proposing when the resolved balance is genuinely zero', async () => {
+    balances.current[ADDR_A.toLowerCase()] = 0n
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
+    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
+    await act(settleLookup)
+
+    expect(screen.getByRole('button', { name: /^propose transfer$/i })).toBeDisabled()
+  })
+
+  it('allows proposing once the resolved balance is nonzero', async () => {
+    balances.current[ADDR_A.toLowerCase()] = 1n
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
+    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
+    await act(settleLookup)
+
+    expect(screen.getByRole('button', { name: /^propose transfer$/i })).not.toBeDisabled()
   })
 })

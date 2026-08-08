@@ -20,7 +20,13 @@ const runMock = vi.hoisted(() => vi.fn())
 const txState = vi.hoisted(() => ({ current: { run: null, isBusy: false, status: 'idle', hash: null, error: null } }))
 const authMock = vi.hoisted(() => ({ current: { address: '0x1111111111111111111111111111111111111111' } }))
 const refundBalanceMock = vi.hoisted(() => ({ current: { balance: 250000000n, isLoading: false, refetch: vi.fn() } }))
+// `pendingRefundRecoveryAt` (feeds expiryOf). `pendingRefundRecovery`
+// (proposedOwner) is split into its own mock below — Round 15 #1 made claim's
+// gate depend on proposedOwner actually being a real address (hasProposal),
+// so the two reads can no longer share one mock value the way they used to
+// when proposedOwner only ever fed display text.
 const readContractMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
+const proposedOwnerMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
 const rolesMock = vi.hoisted(() => ({ current: { roles: {}, isLoading: false } }))
 const protocolConfigMock = vi.hoisted(() => ({ current: { config: { protocolFeeBps: 199n, protocolTreasury: '0x2222222222222222222222222222222222222222', cctpForwardFee: 200000n, paused: false }, refetch: vi.fn() } }))
 
@@ -38,7 +44,7 @@ vi.mock('../hooks/useArbiter.js', () => ({ useProtocolConfig: () => protocolConf
 vi.mock('../hooks/useSupportedDomains.js', () => ({ useSupportedDomains: () => ({ supported: [], refetch: vi.fn() }) }))
 vi.mock('wagmi', async (importOriginal) => ({
   ...(await importOriginal()),
-  useReadContract: () => readContractMock.current,
+  useReadContract: (opts) => opts?.functionName === 'pendingRefundRecovery' ? proposedOwnerMock.current : readContractMock.current,
   // WalletButton renders inside both pages and reaches for the wagmi provider,
   // which these tests deliberately do not stand up.
   useAccount: () => ({ address: authMock.current?.address, isConnected: true, chainId: 5042002 }),
@@ -84,6 +90,12 @@ const type = (el, value) => fireEvent.change(el, { target: { value } })
 const RECOVERY_DEBOUNCE_MS = 400
 const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
 
+// Real "now", not fake timers (this file uses real timers for the debounce).
+// A fixed calendar date goes stale the moment real time passes it — Round 15
+// #2 added an expiry check to the claim gate, so a hardcoded past date would
+// now read as an expired proposal and wrongly disable the button under test.
+const RECENT_PROPOSED_AT = BigInt(Math.floor(Date.now() / 1000) - 24 * 60 * 60)
+
 // The treasury field is labelled rather than uniquely placeheld (several
 // inputs share the bare "0x…" placeholder), so select it by its label.
 const treasuryInput = () => screen.getByLabelText(/treasury address/i)
@@ -98,6 +110,7 @@ beforeEach(() => {
   authMock.current = { address: '0x1111111111111111111111111111111111111111' }
   refundBalanceMock.current = { balance: 250000000n, isLoading: false, refetch: vi.fn() }
   readContractMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
+  proposedOwnerMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
   rolesMock.current = { roles: {}, isLoading: false }
 })
 
@@ -181,7 +194,15 @@ describe('the treasury setter is wired to its descriptor', () => {
 
 describe('the recovery claim is wired to its descriptor', () => {
   // No admin role: this is the nominee path, which the page must still expose.
-  beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
+  // Default proposedOwner to the connected wallet — a real, non-expired,
+  // matching proposal — so tests that don't care about the gate itself
+  // (Round 15 #1/#2 now require hasProposal and !expired) aren't all forced
+  // to set it individually; tests below override where the gate IS the point.
+  beforeEach(() => {
+    rolesMock.current = { roles: {}, isLoading: false }
+    proposedOwnerMock.current = { data: authMock.current.address, isLoading: false, refetch: vi.fn() }
+    readContractMock.current = { data: RECENT_PROPOSED_AT, isLoading: false, refetch: vi.fn() }
+  })
 
   const openClaim = async () => {
     render(<ProtocolSettings />)
@@ -198,7 +219,6 @@ describe('the recovery claim is wired to its descriptor', () => {
   })
 
   it('passes the real claimRecoveryConfirm output to tx.run', async () => {
-    readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
     fireEvent.click(await openClaim())
 
     const confirm = lastConfirm()
@@ -206,7 +226,7 @@ describe('the recovery claim is wired to its descriptor', () => {
     expect(confirm).toEqual(claimRecoveryConfirm({
       blacklisted: GOOD,
       balance: 250000000n,
-      expiry: Number(1767225600n) + 14 * 24 * 60 * 60
+      expiry: Number(RECENT_PROPOSED_AT) + 14 * 24 * 60 * 60
     }))
   })
 
@@ -223,6 +243,25 @@ describe('the recovery claim is wired to its descriptor', () => {
     readContractMock.current = { data: undefined, isLoading: true, refetch: vi.fn() }
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+  })
+
+  /* Round 15 #1/#2: the gate now also requires a real, non-expired proposal —
+     not just settled reads. Pin both new conditions at the wiring level too,
+     not only in round14PhaseA.test.jsx's pure-hook tests. */
+  it('blocks submission when the resolved proposal is empty (nothing pending)', async () => {
+    proposedOwnerMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    await act(settleLookup)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+  })
+
+  it('blocks submission when the resolved proposal has expired', async () => {
+    readContractMock.current = { data: BigInt(Math.floor(Date.now() / 1000) - 15 * 24 * 60 * 60), isLoading: false, refetch: vi.fn() }
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    await act(settleLookup)
     expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
   })
 

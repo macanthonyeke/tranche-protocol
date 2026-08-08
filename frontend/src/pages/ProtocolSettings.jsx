@@ -715,9 +715,14 @@ function ProposeRecovery() {
   // moment of signing rather than trusted from when the panel opened, or
   // editing the fields afterward (to an unread wallet, or to the zero
   // address) would slip past the checks that already run below.
+  //
+  // proposeRefundCreditTransfer reverts NothingToWithdraw when
+  // refundBalances[blacklistedWallet] == 0 (:924). A successfully-resolved
+  // zero balance is not a pending read — readsPending alone does not catch
+  // it — so it needs its own check, same as the zero-address guard on `to`.
   const valid =
     isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
-    from.toLowerCase() !== to.toLowerCase() && !readsPending
+    from.toLowerCase() !== to.toLowerCase() && !readsPending && balance > 0n
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
@@ -816,12 +821,28 @@ function ClaimRecovery() {
   const hasProposal = isAddress(proposedOwner) && proposedOwner !== ZERO_ADDRESS
   const nomineeMismatch = hasProposal && !!connected && proposedOwner.toLowerCase() !== connected.toLowerCase()
 
+  // claimRefundCreditTransfer also reverts RecoveryProposalExpired once
+  // block.timestamp passes proposedAt + ARBITER_WINDOW (:940-942).
+  // expiryOf(proposedAt) was previously read only for display; a proposal
+  // read as genuinely expired is just as much a guaranteed revert as a
+  // mismatched nominee, so it gates the same way.
+  const expiry = expiryOf(proposedAt)
+  const expired = hasProposal && expiry !== null && Math.floor(Date.now() / 1000) > expiry
+
   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
   // execution-time balance (:945), and drops the expiry line entirely. The
   // same check runs again on the confirm-stage button below — see the note
   // in ProposeRecovery on why `valid` cannot be trusted only at panel-open
   // time once the field stays editable underneath it.
-  const valid = isAddress(blacklisted) && !readsPending && !nomineeMismatch
+  //
+  // hasProposal is its own required condition, not folded into
+  // nomineeMismatch: "nothing pending" (proposed == address(0), reverts
+  // NoPendingRecovery at :937) and "wrong wallet" (reverts NotProposedOwner
+  // at :941) are two different reasons to block, not one — nomineeMismatch
+  // is deliberately false when there is no proposal at all (see its own
+  // comment above), so without hasProposal here a genuine "nothing pending"
+  // read would sail through as valid.
+  const valid = isAddress(blacklisted) && !readsPending && hasProposal && !expired && !nomineeMismatch
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
