@@ -502,6 +502,20 @@ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, tim
   }
 }
 
+/* Where a no-split payout actually lands. The CCTP burn targets
+   e.mintRecipient (TrancheProtocol.sol:1298); e.recipient is only the
+   authorisation identity, and updateReceivingAddress moves mintRecipient
+   without ever touching it (:986-990). Naming `recipient` on a signing screen
+   therefore shows the pre-redirect address as though it were the destination.
+
+   The one place recipient IS the destination is the Finding 3 divert: a
+   cross-chain share at-or-below the floor is credited to
+   refundBalances[e.recipient] on Arc instead (:1291-1293). Handled separately
+   below, and deliberately not conflated with this. */
+function payoutAddress(escrow) {
+  return escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+}
+
 /* Mirrors _assertCrossChainFee (TrancheProtocol.sol): with splits configured,
    e.destinationDomain is not what the burn uses, so ANY non-Arc leg makes the
    settlement cross-chain. */
@@ -567,7 +581,11 @@ export function resolveDisputeConfirm({
     params.push(
       splits?.length > 0
         ? `Freelancer's share is divided across ${splits.length} split recipients, each on their own chain`
-        : `Freelancer's share is sent to ${escrow.recipient} on ${getDomainName(Number(escrow.destinationDomain))}`
+        // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
+        // updateReceivingAddress rewrites mintRecipient and leaves recipient
+        // untouched (:986-990), so the two diverge the moment a freelancer
+        // redirects — and recipient is the stale one.
+        : `Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`
     )
     params.push("The protocol fee is taken from the freelancer's share only.")
   } else {
@@ -591,7 +609,9 @@ export function resolveDisputeConfirm({
       params.push(
         splits?.length > 0
           ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
-          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
+          // The divert credits refundBalances[e.recipient] (:1292) — the one
+          // branch where `recipient`, not `mintRecipient`, is the destination.
+          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`
       )
     }
   }

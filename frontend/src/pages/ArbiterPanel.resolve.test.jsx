@@ -25,10 +25,18 @@ const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
 const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
 const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
 
+/* mintRecipient deliberately differs from recipient. The burn targets
+   mintRecipient (:1298) while recipient is only the authorisation identity, and
+   updateReceivingAddress moves one without the other (:986-990) — so a fixture
+   where they match cannot tell a correct descriptor from one reading the stale
+   field. REDIRECTED is what a freelancer redirected TO; RECIPIENT is what they
+   redirected away from. */
+const REDIRECTED = '0x8ba1f109551bd432803012645ac136ddd64dba72'
 const escrowOn = (domain) => ({
   id: 7,
   milestoneCount: 3,
   recipient: RECIPIENT,
+  mintRecipient: B32(REDIRECTED),
   refundTo: REFUND_TO,
   destinationDomain: domain,
   escrowCctpForwardFee: 200000n // 0.20 USDC
@@ -97,7 +105,23 @@ describe('the ruling itself', () => {
 describe('told apart from the fixed 50/50 timeout', () => {
   it('sends the freelancer share to their chain rather than crediting Arc', () => {
     const t = paramText(build({ escrow: escrowOn(BASE) }))
-    expect(t).toContain(`Freelancer's share is sent to ${RECIPIENT} on Base Sepolia`)
+    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
+  })
+
+  /* The bug this guards: naming e.recipient shows the pre-redirect address as
+     though it were the destination, so an arbiter signing after a redirect
+     would be told the money goes somewhere it does not. */
+  it('names the redirected mintRecipient, never the stale recipient field', () => {
+    const t = paramText(build({ escrow: escrowOn(BASE) }))
+    expect(t).toContain(REDIRECTED)
+    expect(t).not.toContain(`sent to ${RECIPIENT}`)
+  })
+
+  /* Only the Finding 3 divert credits recipient (:1292), and it says so
+     explicitly rather than reusing the delivery wording. */
+  it('names recipient only for the Arc divert, and labels it as such', () => {
+    const t = paramText(build({ escrow: escrowOn(BASE) }))
+    expect(t).toContain(`credited on Arc to ${RECIPIENT} instead of being delivered cross-chain`)
   })
 
   /* The payer half genuinely is an Arc credit on both paths, so this line is
@@ -135,8 +159,10 @@ describe('the two edges of the ruling', () => {
   })
 
   it('does not warn about the Arc divert on a full award', () => {
+    // Substring must not assume the sentence's exact shape — a reworded divert
+    // line would otherwise slip past this.
     expect(paramText(build({ bps: 10_000, escrow: escrowOn(BASE), maxFee: 500000n })))
-      .not.toContain('credited on Arc instead')
+      .not.toMatch(/credited on Arc/i)
   })
 })
 
@@ -172,7 +198,7 @@ describe('the maxFee asymmetry between split and no-split', () => {
 describe('Finding 3 — a partial award can fall below the delivery floor', () => {
   it('warns for a no-split cross-chain partial', () => {
     expect(paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n })))
-      .toContain("If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc instead of being delivered cross-chain.")
+      .toContain(`If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
   })
 
   it('phrases the divert per leg for a split escrow', () => {

@@ -288,6 +288,15 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
 
 ---
 
+## Circle confirm-descriptor coverage
+
+Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory:
+
+- **26 lexical `escrowWrite(...)` call sites**, of which 2 take the function name from a variable — `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`.
+- **31 executable paths** once those two expand (24 static + 4 milestone actions + 3 evidence modes).
+
+`CreateEscrow.jsx`'s `deposit` is one of the 26; its descriptor predates the descriptor sweep and came from `feature/circle-ucw-wallets`. Any coverage claim quoting a smaller number (e.g. "24 of 24") is counting only quoted call sites, or only files changed in one PR — say which, or use the figures above.
+
 ## Open FRONTEND follow-ups (not contract, not blocking)
 
 - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."

@@ -136,10 +136,14 @@ describe.each([
     expect(d().amountLabel).toBe('Amount released')
   })
 
+  /* Literal expectations. Looping over payoutLines(...) and asserting the
+     descriptor contains them is circular — both sides come from the same
+     helper, so it holds even if that helper prints the wrong address. */
   it('embeds the real payout destination lines', () => {
-    for (const line of payoutLines(escrow, [])) {
-      expect(d().parameters).toContain(line)
-    }
+    expect(d().parameters).toContain(`Paid to: ${RECIPIENT}`)
+    expect(d().parameters).toContain('Paid on: Base Sepolia')
+    // The stale field must not appear in its place.
+    expect(d().parameters.join('\n')).not.toContain(FALLBACK_RECIPIENT)
   })
 
   it('discloses that the protocol fee comes out of the figure shown', () => {

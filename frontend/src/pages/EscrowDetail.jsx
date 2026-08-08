@@ -20,7 +20,7 @@ import { resolveMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
-  isValidAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+  isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
   NO_ATTACHMENT_URI
 } from '../utils/format.js'
@@ -584,7 +584,25 @@ function FocusIcon({ tone }) {
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
+/* A split recipient is authorised by the contract on the strength of the
+   address currently encoded in their split leg (:1021), not on being
+   e.recipient. Role detection only knows depositor/recipient, so an
+   independent split payee classified as `null` could never reach the row that
+   redirects their own money. Detected separately here rather than folded into
+   `role`, which stays a two-value depositor/recipient concept everywhere else. */
+function useSplitRecipientIndex(splits) {
+  const { address } = useAuth()
+  return useMemo(() => {
+    if (!splits?.length || !address) return -1
+    return splits.findIndex((s) => {
+      const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+      return addr && addr.toLowerCase() === address.toLowerCase()
+    })
+  }, [splits, address])
+}
+
 function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, setOpt, clearOpt }) {
+  const mySplitIndex = useSplitRecipientIndex(splits)
   const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
 
@@ -634,8 +652,11 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, 
 
       {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} />}
 
-      {role && escrow.state === 0 && (
-        <EditableParamsPanel escrow={escrow} role={role} splits={splits} hasInvoice={hasInvoice} onChange={onChange} />
+      {(role || mySplitIndex >= 0) && escrow.state === 0 && (
+        <EditableParamsPanel
+          escrow={escrow} role={role} splits={splits} mySplitIndex={mySplitIndex}
+          hasInvoice={hasInvoice} onChange={onChange}
+        />
       )}
 
       {role && escrow.state === 0 && (
@@ -653,20 +674,14 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, 
    built on the shared EditableRow primitive so the deadline / invoice link /
    receiving address / split address flows share one interaction pattern
    instead of four hand-rolled inline-edit cards. */
-function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
-  const { address } = useAuth()
-  const mySplitIndex = role === 'freelancer' && splits
-    ? splits.findIndex((s) => {
-        const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
-        return addr && address && addr.toLowerCase() === address.toLowerCase()
-      })
-    : -1
-
+function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, onChange }) {
   const rows = []
   if (role === 'payer') rows.push('deadline')
   if (role === 'payer' && hasInvoice) rows.push('invoice')
   if (role === 'freelancer') rows.push('receiving')
-  if (role === 'freelancer' && mySplitIndex >= 0) rows.push('split')
+  // Not gated on role: the contract authorises whoever currently holds the
+  // leg's encoded address (:1021), which need not be e.recipient.
+  if (mySplitIndex >= 0) rows.push('split')
   if (rows.length === 0) return null
 
   return (
@@ -901,6 +916,26 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
     }
   }
 
+  // With splits configured the burn loop reads s[i].mintRecipient exclusively
+  // (:1280-1332) and e.mintRecipient is never consulted. The write succeeds and
+  // changes nothing about where money goes, so promising a redirect here would
+  // be the most expensive kind of wrong: a signed transaction, a paid fee, and
+  // a payout that still lands at the old address.
+  if (hasSplits) {
+    return {
+      ...base,
+      title: 'Change where this escrow pays out',
+      subtitle: 'This escrow pays through split recipients, so this setting no longer affects where money goes.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Address: ${oldAddress} → ${newAddress}`,
+        `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        'Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.',
+        'To redirect your own share, use the split address row instead.'
+      ]
+    }
+  }
+
   return {
     ...base,
     title: 'Change where this escrow pays out',
@@ -986,7 +1021,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain || ARC_DOMAIN }
       ]}
-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
       busy={tx.isBusy}
       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
       onSubmit={(d) => {
@@ -1034,7 +1069,7 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain }
       ]}
-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
       busy={tx.isBusy}
       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
       onSubmit={(d) => {
@@ -1594,16 +1629,20 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
   const milestoneIndex = milestone.index
 
   const baseArgs = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'milestoneCancelProposals' }
-  const { data: payerProposedRaw, refetch: refetchPayer } = useReadContract({
+  const { data: payerProposedRaw, isLoading: payerLoading, refetch: refetchPayer } = useReadContract({
     ...baseArgs,
     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.depositor],
     query: { refetchInterval: POLL_MS }
   })
-  const { data: freelancerProposedRaw, refetch: refetchFreelancer } = useReadContract({
+  const { data: freelancerProposedRaw, isLoading: freelancerLoading, refetch: refetchFreelancer } = useReadContract({
     ...baseArgs,
     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.recipient],
     query: { refetchInterval: POLL_MS }
   })
+  // An unread proposal coerces to false, which is the same value as "they have
+  // not proposed" — and that is the branch deciding whether this call records a
+  // vote or immediately refunds the milestone (:803).
+  const proposalsLoading = payerLoading || freelancerLoading
 
   const tx = useTx({
     onConfirmed: () => { refetchPayer(); refetchFreelancer(); onChange?.() }
@@ -1656,7 +1695,7 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
       <TxButton
         className="btn-danger text-sm py-2"
         onClick={submit}
-        disabled={iProposed || tx.isBusy}
+        disabled={iProposed || tx.isBusy || proposalsLoading}
         loading={tx.isBusy}
         label={iProposed
           ? 'You proposed this'
@@ -2066,7 +2105,12 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
    split automatically. We surface both standing proposals and a one-click
    "agree to their number" path. */
 function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossChainRelease }) {
-  const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
+  // isLoading matters here, not just for spinners: an unread proposal looks
+  // exactly like "no proposal", and the descriptor branches on that to decide
+  // between "nothing settles yet" and a settlement that executes on this very
+  // transaction (:549). Submitting mid-read can therefore promise the wrong
+  // one of those two.
+  const { depositorProposal, recipientProposal, isLoading: proposalsLoading, refetch } = useSettlementProposals(
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
   const { config } = useProtocolConfig()
@@ -2084,7 +2128,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
 
   const pctNum = pct === '' ? NaN : Number(pct)
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
-  const canSubmit = pctValid && !tx.isBusy
+  const canSubmit = pctValid && !tx.isBusy && !proposalsLoading
 
   // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
   // Circle's live forwarding fee on the recipient's share, quoted at submit time.
@@ -2124,7 +2168,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   const bpsToPct = (bps) => Number(bps) / 100
   // Their proposal differs from mine (or I have none): offer to accept it,
   // which makes both proposals match and settles on-chain.
-  const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
+  const canAgree = !proposalsLoading && theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
 
   // Perspective-relative copy: `role === 'payer'` is the depositor (client),
   // otherwise the recipient (freelancer). Both sides always enter the

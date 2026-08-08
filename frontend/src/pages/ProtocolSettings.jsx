@@ -16,7 +16,7 @@ import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
-import { formatUSDC, formatTimestamp, truncateAddr } from '../utils/format.js'
+import { formatUSDC, formatTimestamp, truncateAddr, isNonZeroAddress } from '../utils/format.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
@@ -35,13 +35,20 @@ export function expiryOf(proposedAt) {
 function usePendingRecovery(address) {
   const enabled = !!address
   const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, query: { enabled } }
-  const { data: proposedOwner } = useReadContract({
+  const { data: proposedOwner, isLoading: ownerLoading } = useReadContract({
     ...base, functionName: 'pendingRefundRecovery', args: enabled ? [address] : undefined
   })
-  const { data: proposedAt } = useReadContract({
+  const { data: proposedAt, isLoading: atLoading } = useReadContract({
     ...base, functionName: 'pendingRefundRecoveryAt', args: enabled ? [address] : undefined
   })
-  return { proposedOwner: proposedOwner ?? null, proposedAt: proposedAt ?? 0n }
+  // `?? null` / `?? 0n` are indistinguishable from a real empty result, so the
+  // loading flag has to travel with them: "no pending proposal" and "haven't
+  // looked yet" must not render as the same sentence on a confirm screen.
+  return {
+    proposedOwner: proposedOwner ?? null,
+    proposedAt: proposedAt ?? 0n,
+    isLoading: enabled && (ownerLoading || atLoading)
+  }
 }
 
 /* ---------- Confirm-screen descriptors ----------
@@ -221,8 +228,21 @@ function Gate() {
     roles.isDefaultAdmin || roles.isFeeManager ||
     roles.isDomainManager || roles.isRecoveryManager || roles.isPauser
   if (!allowed) {
+    /* claimRefundCreditTransfer is address-gated, not role-gated: the contract
+       only requires msg.sender == the nominated wallet (:943). A nominee who
+       holds no admin role was previously bounced off this page entirely and
+       had no way to claim credit that is already theirs to take.
+
+       The panel is shown rather than auto-detected because the nomination
+       mapping is keyed by the BLACKLISTED wallet — there is no reverse index
+       from nominee to source, and RefundCreditTransferProposed is in the ABI
+       but not indexed by the subgraph, so "is this wallet nominated anywhere"
+       is not a question the frontend can currently ask. The claimer supplies
+       the source address, and the on-chain gate plus the live reads behind the
+       confirm screen do the rest. Nothing here is privileged: every value it
+       surfaces is already public. */
     return (
-      <div className="max-w-prose flex flex-col gap-4">
+      <div className="max-w-prose flex flex-col gap-6">
         <p className="text-ink-2 text-[15px] leading-relaxed">
           This wallet doesn't hold any admin role. The default admin can grant{' '}
           <span className="num text-[12.5px]">FEE_MANAGER_ROLE</span>,{' '}
@@ -231,6 +251,15 @@ function Gate() {
           <span className="num text-[12.5px]">PAUSER_ROLE</span>.
         </p>
         <div><WalletButton /></div>
+        <div className="rule" />
+        <div className="flex flex-col gap-3">
+          <h2 className="display text-[24px] leading-tight text-ink">Claim recovered refund credit</h2>
+          <p className="text-[13.5px] text-ink-2 leading-relaxed">
+            No admin role is needed for this. If a recovery manager has nominated this wallet to
+            receive another wallet's refund credit, enter that wallet's address to claim it.
+          </p>
+          <ClaimRecovery />
+        </div>
       </div>
     )
   }
@@ -332,7 +361,8 @@ function FeeControls({ config, refetch }) {
 
   const maxBps = config ? Number(config.maxProtocolFeeBps) : 1000
   const bpsValid = /^\d+$/.test(bps) && Number(bps) <= maxBps
-  const trValid = isAddress(tr)
+  // setProtocolTreasury reverts ZeroAddress (sol:197).
+  const trValid = isAddress(tr) && isNonZeroAddress(tr)
   const cctpValid = /^\d+$/.test(cctpVal)
 
   const currentFee = config ? `${(Number(config.protocolFeeBps) / 100).toFixed(2)}%` : '—'
@@ -556,13 +586,20 @@ function ProposeRecovery() {
   const [to, setTo] = useState('')
   const [confirm, setConfirm] = useState(false)
   const tx = useTx({ onConfirmed: () => { setFrom(''); setTo(''); setConfirm(false) } })
-  const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
-
   // Read-only: what the balance is now, and whether a proposal is already
   // standing for this wallet. Feeds the confirm screen only — nothing here
-  // changes what is clickable or what executes.
-  const { balance } = useRefundBalance(isAddress(from) ? from : undefined)
-  const { proposedOwner, proposedAt } = usePendingRecovery(isAddress(from) ? from : undefined)
+  // changes what is clickable except the loading gate below.
+  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(from) ? from : undefined)
+  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(from) ? from : undefined)
+  const readsPending = balanceLoading || recoveryLoading
+
+  // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
+  // pending" — both of which are what an unresolved read looks like, and both
+  // of which are exactly wrong when the truth is a funded wallet with a
+  // standing nomination about to be overwritten.
+  const valid =
+    isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
+    from.toLowerCase() !== to.toLowerCase() && !readsPending
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
@@ -630,13 +667,17 @@ function ClaimRecovery() {
   const [blacklisted, setBlacklisted] = useState('')
   const [confirm, setConfirm] = useState(false)
   const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
-  const valid = isAddress(blacklisted)
 
   // The claim sweeps the balance as it stands at claim time, so the figure on
   // the confirm screen has to be read live off the source wallet — not off
   // anything captured when the proposal was made.
-  const { balance } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
-  const { proposedAt } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
+  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
+  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
+  const readsPending = balanceLoading || recoveryLoading
+
+  // A mid-read submit shows a 0.00 Total on a call that sweeps the full
+  // execution-time balance (:945), and drops the expiry line entirely.
+  const valid = isAddress(blacklisted) && !readsPending
 
   return (
     <div className="panel p-4 flex flex-col gap-3">

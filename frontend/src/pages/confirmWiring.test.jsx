@@ -1,0 +1,220 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+
+/* Wiring tests.
+ *
+ * Every other confirm test in this suite calls a descriptor directly and
+ * asserts its output. That proves the descriptor is right; it proves nothing
+ * about whether the app ever hands it to the signing screen. A call site that
+ * forgot `confirm:` entirely, or passed a stale variable, or wired the wrong
+ * descriptor to the wrong button, would leave all of those tests green.
+ *
+ * These render the real components and assert what actually reaches tx.run —
+ * the object Circle's screen is built from. They also pin the guards that stop
+ * a submission happening at all: the zero-address checks (which the contract
+ * rejects on-chain) and the loading gates (where an unresolved read is
+ * indistinguishable from a real empty answer).
+ */
+
+const runMock = vi.hoisted(() => vi.fn())
+const txState = vi.hoisted(() => ({ current: { run: null, isBusy: false, status: 'idle', hash: null, error: null } }))
+const authMock = vi.hoisted(() => ({ current: { address: '0x1111111111111111111111111111111111111111' } }))
+const refundBalanceMock = vi.hoisted(() => ({ current: { balance: 250000000n, isLoading: false, refetch: vi.fn() } }))
+const readContractMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
+const rolesMock = vi.hoisted(() => ({ current: { roles: {}, isLoading: false } }))
+const protocolConfigMock = vi.hoisted(() => ({ current: { config: { protocolFeeBps: 199n, protocolTreasury: '0x2222222222222222222222222222222222222222', cctpForwardFee: 200000n, paused: false }, refetch: vi.fn() } }))
+
+vi.mock('../hooks/useTx.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  useTx: () => ({ ...txState.current, run: runMock })
+}))
+vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => authMock.current }))
+vi.mock('../hooks/useEscrows.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  useRefundBalance: () => refundBalanceMock.current
+}))
+vi.mock('../hooks/useRoles.jsx', () => ({ useRoles: () => rolesMock.current }))
+vi.mock('../hooks/useArbiter.js', () => ({ useProtocolConfig: () => protocolConfigMock.current }))
+vi.mock('../hooks/useSupportedDomains.js', () => ({ useSupportedDomains: () => ({ supported: [], refetch: vi.fn() }) }))
+vi.mock('wagmi', async (importOriginal) => ({
+  ...(await importOriginal()),
+  useReadContract: () => readContractMock.current,
+  // WalletButton renders inside both pages and reaches for the wagmi provider,
+  // which these tests deliberately do not stand up.
+  useAccount: () => ({ address: authMock.current?.address, isConnected: true, chainId: 5042002 }),
+  useConnect: () => ({ connect: vi.fn(), connectors: [] })
+}))
+
+// Both pages sit behind the connect gate, which otherwise renders a sign-in
+// form instead of the controls under test. The gate is not what these tests
+// are about; the mocked useAuth above already represents a connected wallet.
+vi.mock('../components/ConnectGate.jsx', () => ({
+  default: ({ children }) => children
+}))
+
+// Settings renders an appearance section that requires ThemeProvider; the
+// theme is irrelevant to what these tests assert.
+vi.mock('../hooks/useTheme.jsx', () => ({
+  useTheme: () => ({ theme: 'light', setTheme: vi.fn(), resolved: 'light' })
+}))
+
+const Settings = (await import('./Settings.jsx')).default
+const ProtocolSettings = (await import('./ProtocolSettings.jsx')).default
+const { withdrawRefundConfirm } = await import('./Settings.jsx')
+const { claimRecoveryConfirm, protocolTreasuryConfirm } = await import('./ProtocolSettings.jsx')
+
+const ZERO = '0x0000000000000000000000000000000000000000'
+const GOOD = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
+
+// The options object tx.run received, i.e. what actually feeds the signing screen.
+const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
+
+const type = (el, value) => fireEvent.change(el, { target: { value } })
+
+// The treasury field is labelled rather than uniquely placeheld (several
+// inputs share the bare "0x…" placeholder), so select it by its label.
+const treasuryInput = () => screen.getByLabelText(/treasury address/i)
+
+// vitest.config.js does not set `globals`, so RTL's automatic cleanup is never
+// registered and renders accumulate across tests.
+afterEach(() => { cleanup() })
+
+beforeEach(() => {
+  runMock.mockReset()
+  txState.current = { run: null, isBusy: false, status: 'idle', hash: null, error: null }
+  authMock.current = { address: '0x1111111111111111111111111111111111111111' }
+  refundBalanceMock.current = { balance: 250000000n, isLoading: false, refetch: vi.fn() }
+  readContractMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
+  rolesMock.current = { roles: {}, isLoading: false }
+})
+
+describe('withdrawRefund is wired to its descriptor', () => {
+  const openWithdraw = () => {
+    render(<Settings />)
+    return screen.getByRole('button', { name: /withdraw funds/i })
+  }
+
+  it('passes the real withdrawRefundConfirm output to tx.run', () => {
+    const btn = openWithdraw()
+    fireEvent.click(btn)
+
+    expect(runMock).toHaveBeenCalledTimes(1)
+    const confirm = lastConfirm()
+    expect(confirm).toBeTruthy()
+    expect(confirm.functionName).toBe('withdrawRefund')
+    // Independently rebuilt from the same inputs the component had, so a call
+    // site that passed a stale balance or the wrong recipient fails here.
+    expect(confirm).toEqual(withdrawRefundConfirm({
+      balance: 250000000n,
+      recipient: authMock.current.address,
+      signer: authMock.current.address
+    }))
+  })
+
+  it('carries the live balance, not a placeholder', () => {
+    refundBalanceMock.current = { balance: 987654321n, isLoading: false, refetch: vi.fn() }
+    fireEvent.click(openWithdraw())
+    expect(lastConfirm().amount).toBe(987654321n)
+  })
+
+  /* withdrawRefund reverts ZeroAddress on-chain, so submitting is a guaranteed
+     paid failure. isValidAddress passes the zero address on hex shape alone. */
+  it('refuses to submit to the zero address', () => {
+    render(<Settings />)
+    const input = screen.getAllByPlaceholderText('0x…')[0]
+    type(input, ZERO)
+    const btn = screen.getByRole('button', { name: /withdraw funds/i })
+    expect(btn).toBeDisabled()
+    fireEvent.click(btn)
+    expect(runMock).not.toHaveBeenCalled()
+  })
+
+  it('still allows an ordinary address', () => {
+    render(<Settings />)
+    type(screen.getAllByPlaceholderText('0x…')[0], GOOD)
+    const btn = screen.getByRole('button', { name: /withdraw funds/i })
+    expect(btn).not.toBeDisabled()
+    fireEvent.click(btn)
+    expect(lastConfirm().parameters.join('\n')).toContain(GOOD)
+  })
+})
+
+describe('the treasury setter is wired to its descriptor', () => {
+  beforeEach(() => { rolesMock.current = { roles: { isFeeManager: true }, isLoading: false } })
+
+  it('passes the real protocolTreasuryConfirm output to tx.run', () => {
+    render(<ProtocolSettings />)
+    type(treasuryInput(), GOOD)
+    fireEvent.click(screen.getByRole('button', { name: /update treasury/i }))
+
+    const confirm = lastConfirm()
+    expect(confirm.functionName).toBe('setProtocolTreasury')
+    expect(confirm).toEqual(protocolTreasuryConfirm({
+      currentTreasury: protocolConfigMock.current.config.protocolTreasury,
+      newTreasury: GOOD
+    }))
+  })
+
+  /* setProtocolTreasury reverts ZeroAddress (sol:197). */
+  it('refuses to submit the zero address as treasury', () => {
+    render(<ProtocolSettings />)
+    type(treasuryInput(), ZERO)
+    const btn = screen.getByRole('button', { name: /update treasury/i })
+    expect(btn).toBeDisabled()
+    fireEvent.click(btn)
+    expect(runMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('the recovery claim is wired to its descriptor', () => {
+  // No admin role: this is the nominee path, which the page must still expose.
+  beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
+
+  const openClaim = () => {
+    render(<ProtocolSettings />)
+    const input = screen.getByPlaceholderText(/the restricted wallet from step 1/i)
+    type(input, GOOD)
+    fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
+    return screen.getByRole('button', { name: /confirm claim/i })
+  }
+
+  it('reaches a wallet holding no admin role at all', () => {
+    render(<ProtocolSettings />)
+    expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
+  })
+
+  it('passes the real claimRecoveryConfirm output to tx.run', () => {
+    readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
+    fireEvent.click(openClaim())
+
+    const confirm = lastConfirm()
+    expect(confirm.functionName).toBe('claimRefundCreditTransfer')
+    expect(confirm).toEqual(claimRecoveryConfirm({
+      blacklisted: GOOD,
+      balance: 250000000n,
+      expiry: Number(1767225600n) + 14 * 24 * 60 * 60
+    }))
+  })
+
+  /* The claim sweeps the execution-time balance (sol:945). A mid-read submit
+     would put a 0.00 Total on that, and drop the expiry line entirely. */
+  it('blocks submission while the balance read is still in flight', () => {
+    refundBalanceMock.current = { balance: 0n, isLoading: true, refetch: vi.fn() }
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+  })
+
+  it('blocks submission while the pending-proposal read is still in flight', () => {
+    readContractMock.current = { data: undefined, isLoading: true, refetch: vi.fn() }
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+  })
+
+  it('allows submission once both reads have resolved', () => {
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
+  })
+})

@@ -9,7 +9,7 @@ import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTheme } from '../hooks/useTheme.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { formatUSDC, isValidAddress } from '../utils/format.js'
+import { formatUSDC, isValidAddress, isNonZeroAddress } from '../utils/format.js'
 import { CONTRACT_ADDRESS } from '../config/contract.js'
 
 /* ---------- Confirm-screen descriptors ----------
@@ -111,7 +111,7 @@ function RefundSection() {
   useEffect(() => { if (address) setRecipient(address) }, [address])
 
   const submit = () => {
-    if (!isValidAddress(recipient)) return
+    if (!isNonZeroAddress(recipient)) return
     tx.run(
       escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
       {
@@ -152,7 +152,7 @@ function RefundSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
+        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
       >
         {tx.isBusy ? 'Submitting…' : 'Withdraw funds'}
       </button>
@@ -172,7 +172,7 @@ function TransferRefundCreditSection() {
   const tx = useTx({ onConfirmed: () => refetch() })
 
   const submit = () => {
-    if (!isValidAddress(recipient)) return
+    if (!isNonZeroAddress(recipient)) return
     tx.run(
       escrowWrite('transferRefundCredit', [recipient]),
       {
@@ -211,7 +211,7 @@ function TransferRefundCreditSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
+        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
       >
         {tx.isBusy ? 'Submitting…' : 'Transfer credit'}
       </button>

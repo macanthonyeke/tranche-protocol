@@ -76,9 +76,26 @@ describe('timeoutShares', () => {
     }
   })
 
+  /* Independent literals, not another call of the function under test.
+     Comparing timeoutShares(x, 0n) to timeoutShares(x, 10000n) holds for ANY
+     implementation that ignores its denominator — including one that always
+     divides by 2, or always returns zero. */
   it('falls back to 10,000 when the denominator has not loaded', () => {
-    expect(timeoutShares(250000000n, 0n)).toEqual(timeoutShares(250000000n, 10000n))
-    expect(timeoutShares(250000000n, undefined)).toEqual(timeoutShares(250000000n, 10000n))
+    expect(timeoutShares(250000000n, 0n)).toEqual({
+      recipientShare: 125000000n, depositorShare: 125000000n
+    })
+    expect(timeoutShares(250000000n, undefined)).toEqual({
+      recipientShare: 125000000n, depositorShare: 125000000n
+    })
+  })
+
+  /* Pins that the denominator is actually used: a real 5000n bps denominator
+     makes the 5000-bps numerator a full 100% share, which a hardcoded halving
+     would get wrong. */
+  it('honours a denominator that is not 10,000', () => {
+    expect(timeoutShares(250000000n, 5000n)).toEqual({
+      recipientShare: 250000000n, depositorShare: 0n
+    })
   })
 })
 

@@ -30,6 +30,11 @@ const escrowOn = (domain) => ({
 
 const paramText = (d) => (d.parameters || []).join('\n')
 
+// The real rejection sentence, so the negative assertions below track the copy
+// rather than a paraphrase of it.
+const REDIRECT_BLOCKED_TEXT =
+  'An escrow paying on Arc cannot be moved to another chain after deposit'
+
 describe('redirectPayoutConfirm — an allowed redirect', () => {
   const d = () => redirectPayoutConfirm({
     escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: OP
@@ -103,24 +108,62 @@ describe('redirectPayoutConfirm — the directions F3 allows', () => {
     escrow: escrowOn(from), hasSplits, newAddress: NEW_ADDR, newDomain: to
   })
 
+  /* Asserting the ALLOWED descriptor positively. Excluding one exact rejection
+     sentence passes for any other wrong output too — including a reworded
+     block, or the split no-op branch. */
+  const allows = (d) => {
+    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released, including any currently in review.')
+    expect(d.parameters.join('\n')).not.toContain(REDIRECT_BLOCKED_TEXT)
+    expect(d.subtitle).toContain('Redirects your milestone payments')
+  }
+
   it('allows cross-chain → cross-chain', () => {
-    expect(build(BASE, OP).subtitle).not.toBe('This transaction will not go through.')
+    allows(build(BASE, OP))
   })
 
   it('allows cross-chain → Arc', () => {
-    expect(build(BASE, ARC).subtitle).not.toBe('This transaction will not go through.')
+    allows(build(BASE, ARC))
   })
 
   it('allows Arc → Arc', () => {
-    expect(build(ARC, ARC).subtitle).not.toBe('This transaction will not go through.')
+    allows(build(ARC, ARC))
   })
 
   /* The carve-out at :982: with splits configured, e.destinationDomain is not
-     what the burn uses, so the guard does not apply and Arc → cross-chain is
-     permitted on this path. */
-  it('allows Arc → cross-chain when the escrow has splits', () => {
-    expect(build(ARC, BASE, true).subtitle).not.toBe('This transaction will not go through.')
-    expect(build(ARC, BASE, false).subtitle).toBe('This transaction will not go through.')
+     what the burn uses, so the F3 guard does not apply and the call is not
+     blocked. Asserting the blocked TEXT rather than an exact subtitle, so the
+     split branch (which is also not blocked, and also not the allowed one)
+     cannot satisfy this by accident. */
+  it('is not F3-blocked when the escrow has splits', () => {
+    expect(paramText(build(ARC, BASE, true))).not.toContain(REDIRECT_BLOCKED_TEXT)
+    expect(paramText(build(ARC, BASE, false))).toContain(REDIRECT_BLOCKED_TEXT)
+  })
+})
+
+/* Not blocked is not the same as effective. With splits configured the burn
+   loop reads s[i].mintRecipient exclusively (:1280-1332) and never consults
+   e.mintRecipient, so updateReceivingAddress succeeds and moves no payout at
+   all. Promising a redirect here costs a signature and a fee for nothing. */
+describe('redirectPayoutConfirm — a split escrow makes this a no-op', () => {
+  const build = (hasSplits) => redirectPayoutConfirm({
+    escrow: escrowOn(BASE), hasSplits, newAddress: NEW_ADDR, newDomain: OP
+  })
+
+  it('says payouts follow the split recipients instead', () => {
+    expect(paramText(build(true))).toContain('Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.')
+  })
+
+  it('does not promise the redirect applies to unreleased milestones', () => {
+    expect(paramText(build(true))).not.toContain('Applies to every milestone not yet released')
+  })
+
+  it('points at the split row as the thing that does work', () => {
+    expect(paramText(build(true))).toContain('To redirect your own share, use the split address row instead.')
+  })
+
+  it('leaves the no-split case promising a real redirect', () => {
+    expect(paramText(build(false))).toContain('Applies to every milestone not yet released')
+    expect(paramText(build(false))).not.toContain('Payouts follow the split recipients')
   })
 })
 

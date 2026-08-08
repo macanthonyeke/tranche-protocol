@@ -108,6 +108,17 @@ export const ESCROW_BADGE_CLASS = {
 export const isValidAddress = (addr) =>
   typeof addr === 'string' && /^0x[a-fA-F0-9]{40}$/.test(addr)
 
+export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+/* Hex shape alone is not enough at a submission point. The zero address is
+   well-formed and passes isValidAddress (and viem's isAddress), but every
+   contract path that takes an address rejects it — setProtocolTreasury,
+   proposeRefundCreditTransfer, withdrawRefund/transferRefundCredit and both
+   payout redirects all revert ZeroAddress. Letting it through only buys the
+   user a paid, guaranteed-to-fail transaction. */
+export const isNonZeroAddress = (addr) =>
+  isValidAddress(addr) && addr.toLowerCase() !== ZERO_ADDRESS
+
 export const isValidUrl = (s) => {
   if (!s || typeof s !== 'string') return false
   try { new URL(s); return true } catch { return false }

@@ -85,11 +85,21 @@ describe('raiseDisputeConfirm', () => {
     expect(paramText(d())).toContain('does not guarantee a refund')
   })
 
-  it('truncates a reason too long for a confirm screen', () => {
-    const long = 'x'.repeat(400)
-    const text = paramText(d({ reason: long }))
-    expect(text).toContain('…')
-    expect(text).not.toContain('x'.repeat(200))
+  /* truncateText caps at 140 including the ellipsis, so the rendered reason is
+     exactly 139 x's + '…'. Asserting the precise boundary rather than "contains
+     an ellipsis somewhere", which any output with a '…' anywhere satisfies —
+     including one that truncated nothing, or truncated to the wrong length. */
+  it('truncates a long reason to exactly the 140-character cap', () => {
+    const text = paramText(d({ reason: 'x'.repeat(400) }))
+    expect(text).toContain(`Reason: "${'x'.repeat(139)}…"`)
+    expect(text).not.toContain('x'.repeat(140))
+  })
+
+  it('leaves a reason inside the cap completely untouched', () => {
+    const exact = 'y'.repeat(140)
+    const text = paramText(d({ reason: exact }))
+    expect(text).toContain(`Reason: "${exact}"`)
+    expect(text).not.toContain('…')
   })
 })
 
