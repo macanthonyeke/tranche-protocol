@@ -10,6 +10,7 @@ import WalletButton from '../components/WalletButton.jsx'
 
 import { useReadContract } from 'wagmi'
 
+import { useAuth } from '../hooks/useAuth.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
@@ -46,9 +47,13 @@ const RECOVERY_LOOKUP_DELAY_MS = 400
  * too. Exact string comparison, not case-insensitive: the debounced value is
  * the same string arriving later, and a checksum-case difference is a
  * different lookup key to react-query anyway. */
-export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading }) {
+export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading, balanceError, recoveryError }) {
   if (isAddress(typed) && typed !== debounced) return true
-  return !!(balanceLoading || recoveryLoading)
+  // A failed read is not a resolved one. `?? null` / `?? 0n` below make an
+  // errored read LOOK like a genuine empty result — same shape as the
+  // in-flight case this gate already exists to catch, so it is folded in
+  // here rather than checked separately at every call site.
+  return !!(balanceLoading || recoveryLoading || balanceError || recoveryError)
 }
 
 /* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
@@ -65,19 +70,22 @@ export function expiryOf(proposedAt) {
 function usePendingRecovery(address) {
   const enabled = !!address
   const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, query: { enabled } }
-  const { data: proposedOwner, isLoading: ownerLoading } = useReadContract({
+  const { data: proposedOwner, isLoading: ownerLoading, error: ownerError } = useReadContract({
     ...base, functionName: 'pendingRefundRecovery', args: enabled ? [address] : undefined
   })
-  const { data: proposedAt, isLoading: atLoading } = useReadContract({
+  const { data: proposedAt, isLoading: atLoading, error: atError } = useReadContract({
     ...base, functionName: 'pendingRefundRecoveryAt', args: enabled ? [address] : undefined
   })
   // `?? null` / `?? 0n` are indistinguishable from a real empty result, so the
   // loading flag has to travel with them: "no pending proposal" and "haven't
-  // looked yet" must not render as the same sentence on a confirm screen.
+  // looked yet" must not render as the same sentence on a confirm screen. An
+  // RPC failure is a third case that reads identically to both if it is not
+  // also carried out — see recoveryReadsPending.
   return {
     proposedOwner: proposedOwner ?? null,
     proposedAt: proposedAt ?? 0n,
-    isLoading: enabled && (ownerLoading || atLoading)
+    isLoading: enabled && (ownerLoading || atLoading),
+    error: enabled ? (ownerError || atError || null) : null
   }
 }
 
@@ -349,10 +357,8 @@ function Body({ roles }) {
         <DomainControls />
         <div className="rule" />
       </>)}
-      {roles.isRecoveryManager && (<>
-        <RecoveryControls />
-        <div className="rule" />
-      </>)}
+      <RecoveryControls canPropose={roles.isRecoveryManager} />
+      <div className="rule" />
       {roles.isPauser && <PauseControl config={config} refetch={refetch} />}
     </div>
   )
@@ -550,8 +556,19 @@ function DomainControls() {
   )
 }
 
-/* ---------- Recovery Controls ---------- */
-function RecoveryControls() {
+/* ---------- Recovery Controls ----------
+   claimRefundCreditTransfer has no onlyRole — the contract gates it on
+   msg.sender == proposed (:943), a specific address, not a role. So Claim is
+   always rendered here, independent of `canPropose`. Gating it on
+   isRecoveryManager (as this used to) locked out a nominee who happens to
+   also hold some unrelated role (fee manager, domain manager, pauser,
+   default admin): that wallet reaches Body rather than the no-role fallback
+   below, and Body used to show RecoveryControls — and therefore Claim — only
+   to recovery managers. There is no reverse index from nominee to source (see
+   the no-role branch's comment in Gate()), so this cannot detect "is this
+   wallet nominated anywhere" up front; unconditional visibility is the only
+   way every nominee reaches the form regardless of what else they hold. */
+function RecoveryControls({ canPropose }) {
   return (
     <section className="flex flex-col gap-6 max-w-prose">
       <div>
@@ -560,7 +577,7 @@ function RecoveryControls() {
           Two-step emergency refund credit recovery. Step 1 (admin): propose the transfer. Step 2 (new owner): claim from their wallet.
         </p>
       </div>
-      <ProposeRecovery />
+      {canPropose && <ProposeRecovery />}
       <ClaimRecovery />
     </section>
   )
@@ -662,16 +679,27 @@ function ProposeRecovery() {
   // Debounced so investigating a wallet is one lookup after typing stops, not
   // one per keystroke that happens to parse as an address.
   const lookupFrom = useDebouncedValue(from, RECOVERY_LOOKUP_DELAY_MS)
-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
-  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
+  const { balance, isLoading: balanceLoading, error: balanceError } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
+  const { proposedOwner, proposedAt, isLoading: recoveryLoading, error: recoveryError } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
   const readsPending = recoveryReadsPending({
-    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading
+    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading, balanceError, recoveryError
   })
+  // Only worth surfacing once the failure belongs to what's currently typed —
+  // while `from` is still catching up to `lookupFrom` the mismatch alone
+  // already holds `readsPending`, and an error left over from a
+  // since-abandoned lookup would be a stale complaint about a wallet the
+  // admin isn't even looking at anymore.
+  const readFailed = isAddress(from) && from === lookupFrom && !!(balanceError || recoveryError)
 
   // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
   // pending" — both of which are what an unresolved read looks like, and both
   // of which are exactly wrong when the truth is a funded wallet with a
-  // standing nomination about to be overwritten.
+  // standing nomination about to be overwritten. The same check runs again on
+  // the confirm-stage button below: `from`/`to` stay editable once the
+  // confirmation panel is open, so `valid` has to be re-evaluated live at the
+  // moment of signing rather than trusted from when the panel opened, or
+  // editing the fields afterward (to an unread wallet, or to the zero
+  // address) would slip past the checks that already run below.
   const valid =
     isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
     from.toLowerCase() !== to.toLowerCase() && !readsPending
@@ -705,6 +733,11 @@ function ProposeRecovery() {
           />
         )}
       </Field>
+      {readFailed && (
+        <p className="text-[12px] text-bad">
+          Could not read this wallet's balance or pending proposal. Try again before proposing.
+        </p>
+      )}
       {!confirm ? (
         <div>
           <button className="btn-danger" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
@@ -727,7 +760,7 @@ function ProposeRecovery() {
                   from, to, balance, existingOwner: proposedOwner, existingExpiry: expiryOf(proposedAt)
                 })
               })}
-              disabled={tx.isBusy}
+              disabled={!valid || tx.isBusy}
             >
               {tx.isBusy ? 'Submitting…' : 'Confirm proposal'}
             </button>
@@ -739,6 +772,7 @@ function ProposeRecovery() {
 }
 
 function ClaimRecovery() {
+  const { address: connected } = useAuth()
   const [blacklisted, setBlacklisted] = useState('')
   const [confirm, setConfirm] = useState(false)
   const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
@@ -749,15 +783,30 @@ function ClaimRecovery() {
   // Same debounce as step 1: the claim panel looks up the same two getters
   // against the same restricted wallet, so it leaks the same trail.
   const lookupAddr = useDebouncedValue(blacklisted, RECOVERY_LOOKUP_DELAY_MS)
-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
-  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
+  const { balance, isLoading: balanceLoading, error: balanceError } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
+  const { proposedOwner, proposedAt, isLoading: recoveryLoading, error: recoveryError } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
   const readsPending = recoveryReadsPending({
-    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading
+    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading, balanceError, recoveryError
   })
+  const readFailed = isAddress(blacklisted) && blacklisted === lookupAddr && !!(balanceError || recoveryError)
+
+  // claimRefundCreditTransfer has no onlyRole — the contract's only gate is
+  // msg.sender == proposed (:943). A wallet that reads a standing proposal
+  // for a DIFFERENT address is a guaranteed revert, same as submitting the
+  // zero address on the propose side: worth stopping client-side rather than
+  // paying gas to learn it on-chain. `proposedOwner` reads as the zero
+  // address when nothing is pending (see proposeRecoveryConfirm's own
+  // handling of the same getter), so that case is deliberately not treated
+  // as a mismatch here — it is "nothing to claim yet", not "wrong wallet".
+  const hasProposal = isAddress(proposedOwner) && proposedOwner !== ZERO_ADDRESS
+  const nomineeMismatch = hasProposal && !!connected && proposedOwner.toLowerCase() !== connected.toLowerCase()
 
   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
-  // execution-time balance (:945), and drops the expiry line entirely.
-  const valid = isAddress(blacklisted) && !readsPending
+  // execution-time balance (:945), and drops the expiry line entirely. The
+  // same check runs again on the confirm-stage button below — see the note
+  // in ProposeRecovery on why `valid` cannot be trusted only at panel-open
+  // time once the field stays editable underneath it.
+  const valid = isAddress(blacklisted) && !readsPending && !nomineeMismatch
 
   return (
     <div className="panel p-4 flex flex-col gap-3">
@@ -776,6 +825,16 @@ function ClaimRecovery() {
           />
         )}
       </Field>
+      {readFailed && (
+        <p className="text-[12px] text-bad">
+          Could not read this wallet's balance or pending proposal. Try again before claiming.
+        </p>
+      )}
+      {nomineeMismatch && (
+        <p className="text-[12px] text-bad">
+          This proposal names <span className="num">{truncateAddr(proposedOwner)}</span> as the wallet allowed to claim it — not the one you're connected with. Signing from this wallet will revert.
+        </p>
+      )}
       {!confirm ? (
         <div>
           <button className="btn-primary" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
@@ -796,7 +855,7 @@ function ClaimRecovery() {
                 loadingMessage: 'Claiming refund credit…',
                 confirm: claimRecoveryConfirm({ blacklisted, balance, expiry: expiryOf(proposedAt) })
               })}
-              disabled={tx.isBusy}
+              disabled={!valid || tx.isBusy}
             >
               {tx.isBusy ? 'Claiming…' : 'Confirm claim'}
             </button>
