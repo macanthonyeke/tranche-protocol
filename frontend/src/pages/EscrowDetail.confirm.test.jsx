@@ -49,14 +49,20 @@ describe('payoutLines', () => {
   it('describes the fan-out for a split escrow and names no individual recipient', () => {
     const lines = payoutLines(escrow, SPLITS)
 
-    // Round 14 #11: "each to their configured chain" over-promised delivery
-    // the very next line then had to walk back (a leg rounding to zero
-    // reaches nobody) — hedged to "most delivered" so the leading claim and
-    // the rounding caveat below it don't contradict each other.
+    // Round 15 #11: "most delivered" was itself still an unsupported
+    // quantifier — nothing in the contract guarantees a majority of legs
+    // clear the rounding/floor thresholds. Reworded to describe the
+    // mechanism (paid per configured shares/destinations) without asserting
+    // any fraction, and the rounding caveat below it stays a plain fact
+    // rather than something the leading line has to avoid contradicting.
     expect(lines).toEqual([
-      'Paid to: 2 split recipients, most delivered to their configured chain',
+      'Paid to: 2 split recipients, according to their configured shares and destinations',
       'A recipient whose share rounds down to zero is paid nothing.'
     ])
+    // No quantifier at all in the leading line — checked for absence, not
+    // just replaced with new exact wording, so a future rewrite can't
+    // reintroduce "most"/"each"/a fraction without this catching it.
+    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
     expect(lines.join('\n')).not.toContain(RECIPIENT)
     expect(lines.join('\n')).not.toContain(FALLBACK_RECIPIENT)
   })

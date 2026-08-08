@@ -222,10 +222,12 @@ describe('#10 — credit, transfer and pending delivery are three different thin
 describe('#11 — a configured split recipient does not always receive value', () => {
   it('drops the "each on their own chain" promise from the payout line', () => {
     const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
-    // Round 14 #11: "each to their configured chain" still over-promised —
-    // the very next line has to walk it back for a zero-rounded leg — so the
-    // leading claim is hedged rather than asserting all N reach their chain.
-    expect(lines[0]).toBe('Paid to: 2 split recipients, most delivered to their configured chain')
+    // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
+    // unsupported quantifier — no invariant guarantees a majority of legs
+    // clear the rounding/floor thresholds. The leading line now describes
+    // the mechanism instead and asserts no fraction at all.
+    expect(lines[0]).toBe('Paid to: 2 split recipients, according to their configured shares and destinations')
+    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
     expect(lines.join('\n')).not.toMatch(/each (on their own|to their configured) chain/)
   })
 

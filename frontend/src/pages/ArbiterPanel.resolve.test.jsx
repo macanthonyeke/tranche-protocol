@@ -188,13 +188,20 @@ describe('the maxFee asymmetry between split and no-split', () => {
     expect(t).not.toContain('0.45 USDC')
   })
 
-  it('describes a split payout as a fan-out rather than one address', () => {
+  it('describes a split payout as a fan-out rather than one address, with no quantified delivery claim', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    // Round 14 #11: "each to their configured chain" over-promised delivery
-    // the rounding and below-floor caveats then had to walk back — hedged so
-    // the leading claim doesn't contradict the lines that follow it.
-    expect(t).toContain("Freelancer's share is divided across 2 split recipients, most delivered to their configured chain")
-    expect(t).not.toMatch(/each (on their own|to their configured) chain/)
+    // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
+    // unsupported quantifier — no invariant guarantees a majority of legs
+    // clear the rounding/floor thresholds, that was a typical-case
+    // assumption dressed up as a description. The leading line is isolated
+    // rather than scanned for across the whole screen: this same escrow's
+    // output legitimately contains "Each cross-chain split leg pays..." a
+    // few lines down (the fee-cap disclosure), which is not the claim under
+    // test — checking the whole paramText for "each" would false-positive
+    // on it.
+    const fanOutLine = t.split('\n').find((line) => line.startsWith("Freelancer's share is divided across"))
+    expect(fanOutLine).toBe("Freelancer's share is divided across 2 split recipients, according to their configured shares and destinations")
+    expect(fanOutLine).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
     expect(t).not.toContain(`sent to ${RECIPIENT}`)
   })
 })
