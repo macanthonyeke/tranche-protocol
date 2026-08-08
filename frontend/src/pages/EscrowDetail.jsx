@@ -908,7 +908,15 @@ const REDIRECT_BLOCKED_REASON =
  * new read.
  *
  * Terminal states are RELEASED(3) and REFUNDED(4); everything else (PENDING,
- * IN_REVIEW, DISPUTED) still routes through the address being changed.
+ * IN_REVIEW, DISPUTED) is principal that has not settled yet — a CEILING on
+ * what could still route through the address, not a promise that it will.
+ * Round 14 #18.3: the copy that renders this used to overstate it as money
+ * "still to be paid". It is not: a pending milestone can end in a refund or a
+ * mutual cancellation, a disputed one can award the freelancer nothing, and —
+ * for a no-split escrow — a timeout settlement (resolveDisputeByTimeout,
+ * TrancheProtocol.sol:596) pays e.recipient, the ORIGINAL address, never the
+ * redirected e.mintRecipient; redirects only ever touch mintRecipient
+ * (:986-990), a field that function never reads.
  * Deliberately gross: netting it would need escrowFeeBps, which is
  * snapshotted with no getter — the same rule payoutLines follows.
  *
@@ -982,7 +990,10 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
       'Applies to every milestone not yet released, including any currently in review.',
       ...(exposure === null
         ? []
-        : [`That is ${formatUSDC(exposure)} still to be paid, before the protocol fee.`]),
+        : [
+            `That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`,
+            "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
+          ]),
       'Milestones already released are unaffected and cannot be recalled.'
     ]
   }
@@ -1032,9 +1043,14 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
       // the per-leg amount is computed from each release's post-fee remainder
       // (:1309), so a product of two gross numbers would be a number the
       // contract never arrives at.
+      //
+      // Round 14 #18.3: the share is what this leg actually receives out of
+      // that pool once a milestone resolves, not an unconditional cut of the
+      // gross figure — a pending milestone can still refund, and a disputed
+      // one can rule this leg's share to zero.
       ...(exposure === null
         ? []
-        : [`${formatUSDC(exposure)} is still to be paid across this escrow, of which this leg takes ${shareLabel} after the protocol fee.`]),
+        : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
       'Milestones already released are unaffected and cannot be recalled.'
     ]
   }
