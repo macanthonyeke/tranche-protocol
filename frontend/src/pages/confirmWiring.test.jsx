@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 
 /* Wiring tests.
  *
@@ -70,6 +70,19 @@ const GOOD = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
 const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
 
 const type = (el, value) => fireEvent.change(el, { target: { value } })
+
+/* Phase E: the recovery panels debounce their lookups by 400ms, and the submit
+   gate deliberately counts "typed, not yet looked up" as a read still pending
+   — otherwise the button would go live during the pause, which is the exact
+   mid-read submit the gate exists to prevent.
+ *
+ * So a test that types an address and immediately expects the button live is
+ * now asserting the wrong instant, not a broken gate. Advance past the window
+ * first. Uses real timers deliberately: this file renders components and
+ * fires events, and swapping the whole file to fake timers to serve two
+ * assertions would be a much larger change than waiting 400ms twice. */
+const RECOVERY_DEBOUNCE_MS = 400
+const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
 
 // The treasury field is labelled rather than uniquely placeheld (several
 // inputs share the bare "0x…" placeholder), so select it by its label.
@@ -170,10 +183,11 @@ describe('the recovery claim is wired to its descriptor', () => {
   // No admin role: this is the nominee path, which the page must still expose.
   beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
 
-  const openClaim = () => {
+  const openClaim = async () => {
     render(<ProtocolSettings />)
     const input = screen.getByPlaceholderText(/the restricted wallet from step 1/i)
     type(input, GOOD)
+    await act(settleLookup)
     fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
     return screen.getByRole('button', { name: /confirm claim/i })
   }
@@ -183,9 +197,9 @@ describe('the recovery claim is wired to its descriptor', () => {
     expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
   })
 
-  it('passes the real claimRecoveryConfirm output to tx.run', () => {
+  it('passes the real claimRecoveryConfirm output to tx.run', async () => {
     readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
-    fireEvent.click(openClaim())
+    fireEvent.click(await openClaim())
 
     const confirm = lastConfirm()
     expect(confirm.functionName).toBe('claimRefundCreditTransfer')
@@ -212,9 +226,15 @@ describe('the recovery claim is wired to its descriptor', () => {
     expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
   })
 
-  it('allows submission once both reads have resolved', () => {
+  /* Phase E: "resolved" now includes the debounce settling. Before the window
+     elapses the reads have not been issued at all, so the button must still be
+     disabled — asserted first, since that is the state the privacy change
+     introduced and the gate has to cover. */
+  it('allows submission once both reads have resolved', async () => {
     render(<ProtocolSettings />)
     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
+    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+    await act(settleLookup)
     expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
   })
 })

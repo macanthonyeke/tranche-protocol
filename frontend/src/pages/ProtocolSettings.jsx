@@ -14,12 +14,42 @@ import { useRoles } from '../hooks/useRoles.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useRefundBalance } from '../hooks/useEscrows.js'
+import { useDebouncedValue } from '../hooks/useDebouncedValue.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
 import { formatUSDC, formatTimestamp, truncateAddr, isNonZeroAddress } from '../utils/format.js'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+
+/* How long the recovery panel waits after typing stops before looking a wallet
+ * up. Long enough that correcting a mistyped character costs one read instead
+ * of several, short enough that the submit button does not feel stuck — the
+ * gate below holds it disabled for exactly this long after the last keystroke.
+ */
+const RECOVERY_LOOKUP_DELAY_MS = 400
+
+/* The recovery panels' submit gate, unchanged in intent from the loading gate
+ * it replaces: never let a proposal or a claim be submitted against figures
+ * that have not actually been read.
+ *
+ * Debouncing the lookup opens a window the old expression could not see. A
+ * freshly typed address is valid, but its reads have not been issued yet, so
+ * both `isLoading` flags are false — a disabled react-query is not a loading
+ * one. Gating on those alone would enable the button during the pause, which
+ * is precisely the mid-read submit the gate exists to prevent: a confirm
+ * screen showing 0.00 USDC and "no proposal is currently pending", both of
+ * which are what an unread result looks like and both of which are wrong when
+ * the truth is a funded wallet with a standing nomination.
+ *
+ * So "typed something the reads have not caught up with" counts as pending
+ * too. Exact string comparison, not case-insensitive: the debounced value is
+ * the same string arriving later, and a checksum-case difference is a
+ * different lookup key to react-query anyway. */
+export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading }) {
+  if (isAddress(typed) && typed !== debounced) return true
+  return !!(balanceLoading || recoveryLoading)
+}
 
 /* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
    bytecode-budget note), so the 14 days is mirrored here rather than read. */
@@ -628,9 +658,15 @@ function ProposeRecovery() {
   // Read-only: what the balance is now, and whether a proposal is already
   // standing for this wallet. Feeds the confirm screen only — nothing here
   // changes what is clickable except the loading gate below.
-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(from) ? from : undefined)
-  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(from) ? from : undefined)
-  const readsPending = balanceLoading || recoveryLoading
+  //
+  // Debounced so investigating a wallet is one lookup after typing stops, not
+  // one per keystroke that happens to parse as an address.
+  const lookupFrom = useDebouncedValue(from, RECOVERY_LOOKUP_DELAY_MS)
+  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
+  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
+  const readsPending = recoveryReadsPending({
+    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading
+  })
 
   // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
   // pending" — both of which are what an unresolved read looks like, and both
@@ -710,9 +746,14 @@ function ClaimRecovery() {
   // The claim sweeps the balance as it stands at claim time, so the figure on
   // the confirm screen has to be read live off the source wallet — not off
   // anything captured when the proposal was made.
-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
-  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
-  const readsPending = balanceLoading || recoveryLoading
+  // Same debounce as step 1: the claim panel looks up the same two getters
+  // against the same restricted wallet, so it leaks the same trail.
+  const lookupAddr = useDebouncedValue(blacklisted, RECOVERY_LOOKUP_DELAY_MS)
+  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
+  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
+  const readsPending = recoveryReadsPending({
+    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading
+  })
 
   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
   // execution-time balance (:945), and drops the expiry line entirely.
