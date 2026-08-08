@@ -190,7 +190,11 @@ describe('the maxFee asymmetry between split and no-split', () => {
 
   it('describes a split payout as a fan-out rather than one address', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each to their configured chain")
+    // Round 14 #11: "each to their configured chain" over-promised delivery
+    // the rounding and below-floor caveats then had to walk back — hedged so
+    // the leading claim doesn't contradict the lines that follow it.
+    expect(t).toContain("Freelancer's share is divided across 2 split recipients, most delivered to their configured chain")
+    expect(t).not.toMatch(/each (on their own|to their configured) chain/)
     expect(t).not.toContain(`sent to ${RECIPIENT}`)
   })
 })

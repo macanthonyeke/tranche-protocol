@@ -586,11 +586,12 @@ export function resolveDisputeConfirm({
   if (bps > 0) {
     params.push(
       splits?.length > 0
-        // "each on their own chain" promises delivery this call cannot
-        // guarantee: a leg rounding to zero is skipped (:1312), and on a
-        // partial ruling a sub-floor cross-chain leg is credited on Arc
-        // instead (:1319) — the caveat pushed below.
-        ? `Freelancer's share is divided across ${splits.length} split recipients, each to their configured chain`
+        // Hedged rather than "each to their configured chain": a leg rounding
+        // to zero is skipped (:1312), and on a partial ruling a sub-floor
+        // cross-chain leg is credited on Arc instead (:1319) — both detailed
+        // in the lines pushed below, so the leading claim should not promise
+        // what those lines then have to walk back.
+        ? `Freelancer's share is divided across ${splits.length} split recipients, most delivered to their configured chain`
         // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
         // updateReceivingAddress rewrites mintRecipient and leaves recipient
         // untouched (:986-990), so the two diverge the moment a freelancer

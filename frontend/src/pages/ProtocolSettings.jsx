@@ -215,39 +215,55 @@ export function cctpForwardFeeConfirm({ currentFee, newFee }) {
  * (:255, :264), cross-chain refund withdrawals to it (:866), and redirecting a
  * payout to it (:975, :1027). Someone holding a refund credit they meant to
  * withdraw there loses that route with no warning anywhere else in the UI. */
-/* Three carve-outs where the blanket "blocks/restores everything" reading is
-   simply false, and each has to be said on the screen for the domain it
-   applies to:
+/* What removing a domain actually blocks, stated as one accurate sentence per
+   case rather than a blanket "blocks everything" bullet followed by a bullet
+   that walks part of it back. Two of the three gated paths — new escrows
+   (:255, :264) and cross-chain refund withdrawals (:866) and payout redirects
+   (:975, :1027) — are each exempted for exactly one domain number, so each
+   exempt case gets its own sentence instead of sharing the general one:
 
    1. Domain 0 is withdrawRefund's Arc sentinel. That path returns before any
       supportedDomains lookup (:854-859), so removing domain 0 blocks no
-      withdrawal — and enabling it grants no cross-chain route either, since 0
-      can never reach the cross-chain branch at all.
+      withdrawal — new escrows and redirects to it are still blocked normally.
    2. ARC_DOMAIN is exempt by construction in both redirects: the guard reads
       `newDestinationDomain != ARC_DOMAIN && !supportedDomains[...]` (:975,
-      :1027), so an Arc redirect works whether or not Arc is on the list.
+      :1027), so an Arc redirect works whether or not Arc is on the list —
+      new escrows and cross-chain refund withdrawals to it are still blocked
+      normally. */
+function domainRemovalBlocks(domain) {
+  if (Number(domain) === 0) {
+    return 'Blocks new escrows to this chain and redirecting a payout to it. Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
+  }
+  if (Number(domain) === ARC_DOMAIN) {
+    return 'Blocks new escrows to this chain and cross-chain refund withdrawals to it. Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
+  }
+  return 'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
+}
+
+/* Two carve-outs that still belong on the ADD screen. Neither corrects a
+   claim the leading sentence made — "new escrows may name this chain, and
+   payouts may be redirected to it" says nothing about refund-withdrawal
+   routes or about redirects having already worked before this change — so
+   these stay appended facts rather than needing to move up into that
+   sentence:
+
+   1. Domain 0 doubles as withdrawRefund's Arc sentinel, so adding it to
+      supportedDomains does not create a new withdrawal route through it.
+   2. ARC_DOMAIN is exempt from both redirect guards by construction (:975,
+      :1027), so re-adding it does not change redirect availability — it was
+      already reachable.
    3. Enabling a domain does not make it reachable for every escrow. An
       Arc-funded escrow (or Arc split leg) still cannot be redirected
       cross-chain — F3 rejects it independently of supportedDomains (:982,
       :1033). */
-function domainCarveOuts(domain, enabled) {
+function domainAdditionCaveats(domain) {
   if (Number(domain) === 0) {
-    return [
-      enabled
-        ? 'Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
-        : 'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.'
-    ]
+    return ['This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.']
   }
   if (Number(domain) === ARC_DOMAIN) {
-    return [
-      enabled
-        ? 'Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
-        : 'Arc was already always available for redirects; the contract exempts it from this list.'
-    ]
+    return ['Arc was already always available for redirects; the contract exempts it from this list.']
   }
-  return enabled
-    ? []
-    : ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
+  return ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
 }
 
 export function domainConfirm({ domain, domainName, enabled }) {
@@ -260,8 +276,7 @@ export function domainConfirm({ domain, domainName, enabled }) {
       parameters: [
         `${domainName} (domain ${domain}): Accepted → Not accepted`,
         'Escrows already heading to this chain still release and deliver normally.',
-        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.',
-        ...domainCarveOuts(domain, true)
+        domainRemovalBlocks(domain)
       ]
     }
   }
@@ -274,7 +289,7 @@ export function domainConfirm({ domain, domainName, enabled }) {
     parameters: [
       `${domainName} (domain ${domain}): Not accepted → Accepted`,
       'New escrows may name this chain, and payouts may be redirected to it.',
-      ...domainCarveOuts(domain, false)
+      ...domainAdditionCaveats(domain)
     ]
   }
 }

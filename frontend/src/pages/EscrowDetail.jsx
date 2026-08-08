@@ -2854,11 +2854,12 @@ export function refundToLines(escrow) {
  * same reasoning as networkFee in utils/circleTheme.js. */
 export function payoutLines(escrow, splits) {
   if (splits?.length > 0) {
-    // Not "each on their own chain": a leg whose share rounds down to zero is
-    // skipped outright by the `share > 0` guard (:1312), so it is paid nothing
-    // and reaches no chain at all.
+    // Hedged rather than "each to their configured chain": a leg whose share
+    // rounds down to zero is skipped outright by the `share > 0` guard
+    // (:1312), so it is paid nothing and reaches no chain at all — detailed
+    // in the line below, which the leading claim should not have to walk back.
     return [
-      `Paid to: ${splits.length} split recipients, each to their configured chain`,
+      `Paid to: ${splits.length} split recipients, most delivered to their configured chain`,
       'A recipient whose share rounds down to zero is paid nothing.'
     ]
   }

@@ -147,6 +147,19 @@ describe('#7 — domain toggles have three carve-outs', () => {
     expect(paramText(build(ARC, false))).not.toContain('still cannot be redirected here')
   })
 
+  /* Round 14 #7: the removal screen used to state a blanket "blocks
+     everything" bullet and then correct part of it in a second, separate
+     bullet — the screen arguing with itself. The leading sentence itself now
+     has to be accurate, so neither exempt path should be named as blocked
+     anywhere in the same sentence as "Blocks". */
+  it('does not claim removing domain 0 blocks refund withdrawals (the self-contradiction it used to state)', () => {
+    expect(paramText(build(0, true))).not.toMatch(/blocks[^.]*refund withdrawals/i)
+  })
+
+  it('does not claim removing Arc blocks redirecting a payout (the self-contradiction it used to state)', () => {
+    expect(paramText(build(ARC, true))).not.toMatch(/blocks[^.]*redirect/i)
+  })
+
   it('keeps the ordinary consequences on an ordinary domain', () => {
     expect(paramText(build(BASE, true)))
       .toContain('Escrows already heading to this chain still release and deliver normally.')

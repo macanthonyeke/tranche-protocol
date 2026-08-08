@@ -191,8 +191,11 @@ describe('#10 — credit, transfer and pending delivery are three different thin
 describe('#11 — a configured split recipient does not always receive value', () => {
   it('drops the "each on their own chain" promise from the payout line', () => {
     const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
-    expect(lines[0]).toBe('Paid to: 2 split recipients, each to their configured chain')
-    expect(lines.join('\n')).not.toMatch(/each on their own chain/)
+    // Round 14 #11: "each to their configured chain" still over-promised —
+    // the very next line has to walk it back for a zero-rounded leg — so the
+    // leading claim is hedged rather than asserting all N reach their chain.
+    expect(lines[0]).toBe('Paid to: 2 split recipients, most delivered to their configured chain')
+    expect(lines.join('\n')).not.toMatch(/each (on their own|to their configured) chain/)
   })
 
   it('states the rounding case on the payout line', () => {
