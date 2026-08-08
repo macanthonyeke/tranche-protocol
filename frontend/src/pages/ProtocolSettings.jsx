@@ -137,14 +137,16 @@ export function protocolTreasuryConfirm({ currentTreasury, newTreasury }) {
   return {
     ...CONFIG_BASE,
     title: 'Change the protocol treasury',
-    subtitle: 'Sets where fees from future escrows are paid. Fees from existing escrows continue going to the current address.',
+    subtitle: 'Sets where fees from future escrows are paid. Every existing escrow keeps paying the address it snapshotted when it was funded.',
     functionName: 'setProtocolTreasury',
     parameters: [
       `Treasury: ${currentTreasury || 'unknown'} → ${newTreasury}`,
       SNAPSHOT_NOTE,
       // The one that catches people out: this is not a kill switch on the old
-      // address. See the header comment above.
-      'This does not stop fees already owed to the current address — in-flight escrows will keep paying it on release.'
+      // address. And "the current address" was itself wrong — escrowTreasury is
+      // per-escrow (:345, paid at :1269), so after two rotations the oldest
+      // escrows still pay the OLDEST address, not whatever is current now.
+      'This does not stop fees already owed. Each in-flight escrow pays whichever treasury address was set at its own deposit — which may be an older address than the one shown above.'
     ]
   }
 }
@@ -175,6 +177,41 @@ export function cctpForwardFeeConfirm({ currentFee, newFee }) {
  * (:255, :264), cross-chain refund withdrawals to it (:866), and redirecting a
  * payout to it (:975, :1027). Someone holding a refund credit they meant to
  * withdraw there loses that route with no warning anywhere else in the UI. */
+/* Three carve-outs where the blanket "blocks/restores everything" reading is
+   simply false, and each has to be said on the screen for the domain it
+   applies to:
+
+   1. Domain 0 is withdrawRefund's Arc sentinel. That path returns before any
+      supportedDomains lookup (:854-859), so removing domain 0 blocks no
+      withdrawal — and enabling it grants no cross-chain route either, since 0
+      can never reach the cross-chain branch at all.
+   2. ARC_DOMAIN is exempt by construction in both redirects: the guard reads
+      `newDestinationDomain != ARC_DOMAIN && !supportedDomains[...]` (:975,
+      :1027), so an Arc redirect works whether or not Arc is on the list.
+   3. Enabling a domain does not make it reachable for every escrow. An
+      Arc-funded escrow (or Arc split leg) still cannot be redirected
+      cross-chain — F3 rejects it independently of supportedDomains (:982,
+      :1033). */
+function domainCarveOuts(domain, enabled) {
+  if (Number(domain) === 0) {
+    return [
+      enabled
+        ? 'Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
+        : 'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.'
+    ]
+  }
+  if (Number(domain) === ARC_DOMAIN) {
+    return [
+      enabled
+        ? 'Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
+        : 'Arc was already always available for redirects; the contract exempts it from this list.'
+    ]
+  }
+  return enabled
+    ? []
+    : ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
+}
+
 export function domainConfirm({ domain, domainName, enabled }) {
   if (enabled) {
     return {
@@ -185,7 +222,8 @@ export function domainConfirm({ domain, domainName, enabled }) {
       parameters: [
         `${domainName} (domain ${domain}): Accepted → Not accepted`,
         'Escrows already heading to this chain still release and deliver normally.',
-        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
+        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.',
+        ...domainCarveOuts(domain, true)
       ]
     }
   }
@@ -197,7 +235,8 @@ export function domainConfirm({ domain, domainName, enabled }) {
     functionName: 'addSupportedDomain',
     parameters: [
       `${domainName} (domain ${domain}): Not accepted → Accepted`,
-      'New escrows may name this chain, and payouts may be redirected to it.'
+      'New escrows may name this chain, and payouts may be redirected to it.',
+      ...domainCarveOuts(domain, false)
     ]
   }
 }

@@ -12,6 +12,9 @@ import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
 import EditableRow from '../components/EditableRow.jsx'
 import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
+// One source of truth for the fixed-50/50 copy: ArbiterPanel's trigger and the
+// permissionless one added here must not drift.
+import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
@@ -1512,6 +1515,16 @@ function MilestoneRow({
                 />
               )}
 
+              {milestone.state === 2 && (
+                <TimeoutSettlementTrigger
+                  escrow={escrow}
+                  milestone={milestone}
+                  dispute={dispute}
+                  splits={splits}
+                  onChange={onChange}
+                />
+              )}
+
               {(milestone.state === 3 || milestone.state === 4) &&
                 dispute?.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
                   <ResolutionNote dispute={dispute} />
@@ -1617,6 +1630,59 @@ export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherPr
       'The rest of the escrow carries on — only this milestone is cancelled.'
     ]
   }
+}
+
+/* resolveDisputeByTimeout takes no caller input and carries no role gate
+   (:561): once block.timestamp reaches raisedAt + ARBITER_WINDOW, anyone can
+   settle the milestone at the fixed 50/50. Until now the only button for it
+   lived behind ArbiterPanel's role gate, so the permissionless escape hatch
+   was reachable only by the very party whose inaction it exists to route
+   around.
+
+   Rendered for ANY connected wallet, deliberately — that is the contract's
+   own access rule, not a relaxation of it. ArbiterPanel's own trigger is
+   untouched; this is an addition.
+
+   The descriptor is imported from ArbiterPanel rather than re-written, so the
+   two buttons cannot drift into describing the same call differently. */
+function TimeoutSettlementTrigger({ escrow, milestone, dispute, splits, onChange }) {
+  const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+  const tx = useTx({ onConfirmed: () => onChange?.() })
+
+  const raisedAt = Number(dispute?.raisedAt ?? 0)
+  const windowSecs = Number(arbiterWindow ?? 0n)
+  const timeoutAt = raisedAt + windowSecs
+  // Fails closed: an unloaded window or a dispute with no raisedAt yields
+  // nothing rather than an always-on button.
+  const reached = raisedAt > 0 && windowSecs > 0 && Math.floor(Date.now() / 1000) >= timeoutAt
+  if (!reached) return null
+
+  return (
+    <div className="mt-4 pt-4 border-t border-rule/50 flex flex-col gap-2">
+      <h4 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbitration window closed</h4>
+      <p className="text-xs text-ink-2 leading-relaxed">
+        No arbiter ruled within {formatWindow(arbiterWindow)}. Anyone can now settle this milestone
+        at the fixed 50/50 the contract falls back to — including you.
+      </p>
+      <div>
+        <TxButton
+          className="btn-secondary text-sm py-2"
+          onClick={() => tx.run(
+            escrowWrite('resolveDisputeByTimeout', [BigInt(escrow.id), BigInt(milestone.index)]),
+            {
+              loadingMessage: 'Settling by timeout.',
+              confirm: timeoutSettlementConfirm({
+                escrow, milestone, index: milestone.index, splits, timeoutAt, bpsDenominator
+              })
+            }
+          )}
+          disabled={tx.isBusy}
+          loading={tx.isBusy}
+          label="Settle by timeout"
+        />
+      </div>
+    </div>
+  )
 }
 
 /* ---------- Per-milestone mutual cancel ----------
@@ -2699,7 +2765,7 @@ function computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, 
    keyed the same way. See utils/circleTheme.js for the descriptor shape; this
    is the only description of these calls a UCW user ever sees, since none of
    the four has an app-side confirmation step in front of it. */
-export function milestoneConfirm(action, escrow, milestone, splits) {
+export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
   const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
@@ -2739,10 +2805,48 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
     }
   }
 
-  const releaseParams = [
+  /* The two release paths do NOT pay the same forwarding fee, so they cannot
+     share one line about it.
+
+     approveRelease hands the caller's quoted maxFee straight through (:647),
+     and the no-split burn uses it (:1298) — the depositor is opting into a
+     live figure. release() throws that argument away and substitutes
+     e.escrowCctpForwardFee (:674, :682) precisely because it is permissionless
+     and a griefer could otherwise authorise Circle to consume almost the whole
+     payout. Split legs always burn at the snapshot (:1329) whichever path ran.
+
+     So: caller's quote only when approving a no-split escrow; the escrow's
+     fixed floor in every other cross-chain case; nothing at all on Arc, where
+     _approveAndBurn forces maxFee = 0 (:1343-1346). */
+  const releaseFeeLines = (key) => {
+    const crossChain = splits?.length > 0
+      ? splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
+      : Number(escrow.destinationDomain) !== ARC_DOMAIN
+    if (!crossChain) return []
+
+    // A quote governs only the no-split approve path; everywhere else the
+    // snapshot does.
+    if (key === 'approve' && splits?.length === 0 && maxFee !== undefined && maxFee !== null) {
+      return [`Delivery costs up to ${formatUSDC(maxFee)} in Circle forwarding fees, quoted now and deducted from the payout on arrival.`]
+    }
+
+    // No quote to fall back on: an absent or zero snapshot means the figure is
+    // unknown, not that delivery is free. Printing "0.00 USDC" would state a
+    // fee that is both wrong and reassuring — say nothing instead.
+    const floor = escrow.escrowCctpForwardFee ?? 0n
+    if (floor === 0n) return []
+
+    if (splits?.length > 0) {
+      return [`Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted on delivery.`]
+    }
+    return [`Delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from the payout on arrival.`]
+  }
+
+  const releaseParams = (key) => [
     milestoneLine,
     ...payoutLines(escrow, splits),
-    'Protocol fee is deducted from this amount before payout.'
+    'Protocol fee is deducted from this amount before payout.',
+    ...releaseFeeLines(key)
   ]
 
   if (action.key === 'approve') {
@@ -2752,7 +2856,7 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
       subtitle: 'Releases the milestone out of escrow to the freelancer. This cannot be undone.',
       amount: milestone.amount,
       amountLabel: 'Amount released',
-      parameters: releaseParams
+      parameters: releaseParams('approve')
     }
   }
 
@@ -2764,7 +2868,7 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
       subtitle: 'The review window closed without a dispute, so this milestone can now be released to the freelancer by anyone.',
       amount: milestone.amount,
       amountLabel: 'Amount released',
-      parameters: releaseParams
+      parameters: releaseParams('release')
     }
   }
 
@@ -2811,6 +2915,9 @@ function MilestoneAction({
     setOpt(`milestone_${milestone.index}`, action.optimistic)
 
     let args = action.args
+    // Kept outside the try so the descriptor can name the figure that will
+    // actually govern an approveRelease burn.
+    let quotedMaxFee
     if (action.needsForwardFee) {
       // Whole milestone is released; burn amount is the milestone minus the
       // protocol fee. Quote Circle's live forwarding fee for the band check.
@@ -2824,6 +2931,7 @@ function MilestoneAction({
           burnAmount: milestone.amount - protocolFee
         })
         args = [...action.args, maxFee]
+        quotedMaxFee = maxFee
       } catch (err) {
         clearOpt(`milestone_${milestone.index}`)
         setActiveKey(null)
@@ -2835,7 +2943,7 @@ function MilestoneAction({
     try {
       const txHash = await tx.run(escrowWrite(action.fn, args), {
         loadingMessage: 'Check your wallet.',
-        confirm: milestoneConfirm(action, escrow, milestone, splits)
+        confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
       })
       if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
         localStorage.setItem(

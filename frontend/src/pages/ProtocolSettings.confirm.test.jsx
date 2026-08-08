@@ -152,14 +152,17 @@ describe('protocolTreasuryConfirm', () => {
      changing the global does NOT stop money reaching the old address —
      in-flight escrows keep paying it on release. Anyone rotating a compromised
      treasury needs to know that before they sign, not after. */
-  it('warns that the old address keeps receiving fees from existing escrows', () => {
+  /* Phase B #8 corrected this: "the current address" was itself wrong.
+     escrowTreasury is per-escrow (:345, paid :1269), so after two rotations the
+     oldest escrows still pay the OLDEST address — not whatever is current. */
+  it('attributes in-flight fees to each escrow own snapshot, not to the current address', () => {
     expect(paramText(d())).toContain(
-      'This does not stop fees already owed to the current address — in-flight escrows will keep paying it on release.'
+      'This does not stop fees already owed. Each in-flight escrow pays whichever treasury address was set at its own deposit — which may be an older address than the one shown above.'
     )
   })
 
   it('does not imply the redirect is total', () => {
-    expect(d().subtitle).toMatch(/existing escrows continue going to the current address/i)
+    expect(d().subtitle).toMatch(/keeps paying the address it snapshotted when it was funded/i)
   })
 
   /* The fee and CCTP-fee screens are plain value swaps; only treasury carries
