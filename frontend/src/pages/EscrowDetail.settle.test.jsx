@@ -59,9 +59,12 @@ describe('a proposal that does not match settles nothing', () => {
   )
 
   /* Phase C #10 split this line into the three things it was flattening: the
-     freelancer's figure is gross, and the payer's is a credit, not a payment. */
+     freelancer's figure is gross, and the payer's is a credit, not a payment.
+     Round 14 #9 dropped the flat "the payer's refund balance" clause — the
+     real destination comes from refundToLines, covered with a real refundTo
+     in phaseC.test.jsx; this fixture has none set, so no Credited-to line. */
   it('states the split as a conditional, not as a fact', () => {
-    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
+    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited as a refund balance.")
   })
 
   /* The case most likely to be misread as agreement: the contract requires
@@ -119,7 +122,7 @@ describe('a matching proposal settles now', () => {
   })
 
   it('says the payer half is an Arc credit, not a transfer', () => {
-    expect(paramText(d())).toContain("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
+    expect(paramText(d())).toContain('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
   })
 
   /* The caller's maxFee is never read (:521-559). Whatever Circle quoted, it

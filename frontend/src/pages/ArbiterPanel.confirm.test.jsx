@@ -42,12 +42,14 @@ describe('timeoutSettlementConfirm — the split itself', () => {
   })
 
   it('states both halves', () => {
-    expect(paramText(d())).toContain("Freelancer's half: 125.00 USDC")
+    // Round 14 #10: the freelancer's half is gross — label it that way, since
+    // the fee comes off before it is credited.
+    expect(paramText(d())).toContain("Freelancer's half: 125.00 USDC before the protocol fee")
     expect(paramText(d())).toContain("Payer's half: 125.00 USDC")
   })
 
   it('falls back to a 10,000 denominator when the config has not loaded', () => {
-    expect(paramText(d({ bpsDenominator: 0n }))).toContain("Freelancer's half: 125.00 USDC")
+    expect(paramText(d({ bpsDenominator: 0n }))).toContain("Freelancer's half: 125.00 USDC before the protocol fee")
   })
 })
 
@@ -125,9 +127,17 @@ describe('timeoutSettlementConfirm — not an arbiter ruling', () => {
 
 describe('timeoutSettlementConfirm — credited, not sent', () => {
   /* Both halves are refund credits on Arc (TrancheProtocol.sol:596, :614).
-     Neither side is transferred and neither goes cross-chain. */
-  it('says both halves are withdrawable Arc credits', () => {
-    expect(paramText(d())).toContain('Both halves are credited as withdrawable balances on Arc, not sent to a wallet.')
+     Neither side is transferred and neither goes cross-chain. But they are
+     not credited the SAME way: the payer's half has no fee (:614, in full);
+     the freelancer's half is credited net of the protocol fee (:593, :596/
+     :609), and the fee itself goes to the treasury separately (:621). Round
+     14 #10: the old copy said "Both halves are credited" right below the two
+     GROSS figures, which reads as promising the freelancer's gross half is
+     what lands in their balance — it is not. */
+  it('says both halves are withdrawable Arc credits, but not the same amount as shown above', () => {
+    const t = paramText(d())
+    expect(t).toContain("The payer's half is credited to Arc in full. The freelancer's half is credited net of that fee — the fee itself goes to the protocol treasury, not into either balance. Neither half is sent to a wallet.")
+    expect(t).not.toMatch(/Both halves are credited/)
   })
 
   /* A timeout settlement never routes through CCTP, so the escrow's
@@ -163,9 +173,16 @@ describe('timeoutSettlementConfirm — the fee asymmetry', () => {
     expect(amounts).toEqual(['250.00 USDC', '125.00 USDC', '125.00 USDC'])
   })
 
-  it('states no fee rate or net figure', () => {
-    expect(paramText(d())).not.toMatch(/\d+(\.\d+)?\s?%/)
-    expect(paramText(d())).not.toMatch(/\bnet\b/i)
+  it('states no fee rate, and never attaches an invented figure to "net"', () => {
+    const t = paramText(d())
+    expect(t).not.toMatch(/\d+(\.\d+)?\s?%/)
+    // Round 14 #10 uses "net" descriptively (the freelancer's half is
+    // credited net of the fee) without a number attached — escrowFeeBps has
+    // no getter, so a net AMOUNT would have to be fabricated; a qualitative
+    // "net of the fee" is not. The adjacent test pins the real invariant:
+    // exactly three USDC figures appear, the milestone total and the two
+    // gross halves — nothing computed from a rate this screen cannot read.
+    expect(t).not.toMatch(/net[^.]*\d+(\.\d+)?\s*USDC/i)
   })
 })
 

@@ -483,7 +483,16 @@ export function timeoutShares(amount, bpsDenominator) {
    protocol fee is escrowFeeBps, snapshotted at deposit and unreadable from
    the frontend, so the freelancer's net is not stated. The asymmetry is,
    because it holds regardless of the rate: the fee comes off the
-   freelancer's half only (:583). */
+   freelancer's half only (:583).
+
+   Round 14 #10: gross-only is fine as a design choice, but the credited-line
+   used to say "Both halves are credited" right below the two gross figures —
+   read together, that states the freelancer's GROSS half lands as their
+   credit. It does not: :593 computes recipientNet = recipientShare - fee and
+   THAT is what's credited (:596/:609); the fee is a separate safeTransfer to
+   the treasury (:621). The payer's half, with no fee, is credited in full
+   (:614) — so the two halves are not even credited the same way, which
+   "Both halves are credited" also flattens. */
 export function timeoutSettlementConfirm({ escrow, milestone, index, splits, timeoutAt, bpsDenominator }) {
   const { recipientShare, depositorShare } = timeoutShares(milestone.amount, bpsDenominator)
 
@@ -498,11 +507,11 @@ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, tim
     parameters: [
       `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)}`,
       'Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.',
-      `Freelancer's half: ${formatUSDC(recipientShare)}`,
+      `Freelancer's half: ${formatUSDC(recipientShare)} before the protocol fee`,
       `Payer's half: ${formatUSDC(depositorShare)}`,
       ...timeoutCreditLines(escrow, splits),
       "The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.",
-      'Both halves are credited as withdrawable balances on Arc, not sent to a wallet.',
+      "The payer's half is credited to Arc in full. The freelancer's half is credited net of that fee — the fee itself goes to the protocol treasury, not into either balance. Neither half is sent to a wallet.",
       `Arbitration window closed ${formatTimestamp(timeoutAt)}. Anyone can submit this.`
     ]
   }

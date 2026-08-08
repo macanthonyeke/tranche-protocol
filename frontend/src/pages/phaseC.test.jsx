@@ -16,6 +16,7 @@ import {
   mutualSettleConfirm,
   payoutLines,
   refundToLines,
+  refundDestinationPhrase,
   proposeMilestoneCancelConfirm,
   milestoneCancelCompletion,
   milestoneCancelBlurb,
@@ -142,6 +143,34 @@ describe('#9 — refunds go to refundTo, which need not be the payer', () => {
     const refund = milestoneConfirm({ key: 'refund', fn: 'refundAfterDeadline' }, escrowOn(ARC), { ...milestone, state: 0 }, [])
     expect(paramText(refund)).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
   })
+
+  /* Round 14 #9: Round 13 reached refundAfterDeadline, proposeMilestoneCancel
+     and cancelEscrowConfirm, but not mutualSettle's own two branches — both
+     still said flatly "the payer's refund balance" regardless of what
+     refundTo actually was. */
+  it('carries the disclosure through the settlement proposal (would-settle branch)', () => {
+    const t = paramText(settle({ theirs: { exists: false, bps: 0n } }))
+    expect(t).toContain(`Credited to: ${REFUND_TO}`)
+    expect(t).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
+    expect(t).not.toMatch(/credited to the payer's refund balance/)
+  })
+
+  it('carries the disclosure through the settlement execution (agreed branch)', () => {
+    const t = paramText(settle())
+    expect(t).toContain(`Credited to: ${REFUND_TO}`)
+    expect(t).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
+    expect(t).not.toMatch(/The payer's share is credited/)
+  })
+
+  /* The mutual-cancel card's own prose (not the confirm descriptor) had the
+     same flat "the payer's refund balance" line — refundDestinationPhrase is
+     what CancelCard renders inline. */
+  it('hedges the mutual-cancel card copy the same way, and stays quiet in the ordinary case', () => {
+    expect(refundDestinationPhrase(escrowOn(ARC))).toBe(
+      "this escrow's configured refund address, not necessarily the payer's own wallet"
+    )
+    expect(refundDestinationPhrase(escrowOn(ARC, { refundTo: DEPOSITOR }))).toBe("the payer's refund balance")
+  })
 })
 
 /* #10. "Pays both sides immediately" was true of neither side. The payer's
@@ -174,7 +203,9 @@ describe('#10 — credit, transfer and pending delivery are three different thin
      plain payments. The payer's is a credit; the freelancer's is pre-fee. */
   it('distinguishes gross from credited on the settlement proposal', () => {
     const t = paramText(settle({ theirs: { exists: false, bps: 0n } }))
-    expect(t).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
+    // Round 14 #9: dropped "credited to the payer's refund balance" — the
+    // real destination now comes from refundToLines, tested separately above.
+    expect(t).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited as a refund balance.")
     expect(t).not.toMatch(/Would pay .* to the payer/)
   })
 

@@ -2198,7 +2198,13 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     // figure is gross (the protocol fee comes off it, :1270-1271), and the
     // payer's is never paid at all — it becomes a refund credit they have to
     // withdraw (:1241).
-    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited to the payer's refund balance.`
+    //
+    // Round 14 #9: "credited to the payer's refund balance" is only true when
+    // refundTo happens to equal the depositor — the contract credits
+    // e.refundTo (:1241), which can be a different address set at deposit.
+    // refundToLines states the real destination and, only where it actually
+    // diverges, that it is not the payer's own wallet.
+    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited as a refund balance.`
     return {
       ...base,
       title: 'Propose settling this dispute',
@@ -2207,6 +2213,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
         milestoneLine,
         `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
         splitLine,
+        ...refundToLines(escrow),
         ...(theirBps !== null
           ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
           : ['The other party has not proposed anything yet.']),
@@ -2249,7 +2256,10 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
   }
   if (bps < 10_000) {
-    params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
+    // Round 14 #9: credits e.refundTo (:1241), not necessarily the payer's
+    // own wallet — same divergence refundToLines already discloses elsewhere.
+    params.push(...refundToLines(escrow))
+    params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
   }
   if (crossChain && bps > 0) {
     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
@@ -3714,6 +3724,18 @@ export function retractCancelConfirm({ escrow }) {
   }
 }
 
+// Round 14 #9: mutualCancel refunds e.refundTo (:1241 area — see
+// refundToLines above), which is the payer's own wallet only when nothing
+// else was set at deposit. Stated only where it actually diverges, same rule
+// refundToLines already follows for the confirm-screen version of this text.
+export function refundDestinationPhrase(escrow) {
+  const diverges = escrow?.refundTo && escrow?.depositor &&
+    escrow.refundTo.toLowerCase() !== escrow.depositor.toLowerCase()
+  return diverges
+    ? "this escrow's configured refund address, not necessarily the payer's own wallet"
+    : "the payer's refund balance"
+}
+
 function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
@@ -3757,7 +3779,7 @@ function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, cl
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Cancel by mutual agreement</h3>
-      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
+      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to {refundDestinationPhrase(escrow)}.</p>
       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
         <ApprovalRow label="Payer" approved={payerApproved} />
         <ApprovalRow label="Freelancer" approved={freelancerApproved} />
