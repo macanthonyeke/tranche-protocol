@@ -240,10 +240,18 @@ describe('#18.3 — a redirect states what it is worth', () => {
   /* Round 15 #7: distinct from the address-recipient issue above — this is
      about the destination CHAIN specifically, and (like the #6/#8 leading
      sentence) it's a mechanism fact rather than a number, so it stays present
-     even when the ceiling figure is omitted for lack of milestone data. */
+     even when the ceiling figure is omitted for lack of milestone data.
+
+     Round 16 #2: this used to be its own separate caveat, appended after an
+     unqualified "every milestone" leading sentence — the same
+     scope-in-one-field, caveat-in-another split Round 15 already fixed on
+     the no-split screen. Now folded into the leading sentence itself, so
+     it is checked as part of that unconditional parameter rather than a
+     standalone line — and deliberately not phrased as an "exception", since
+     the address change still applies at timeout; only the chain doesn't. */
   it('keeps the destination-chain-ignored-at-timeout caveat even when milestones are unavailable', () => {
-    expect(paramText(split({ milestones: [] }))).toContain(
-      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit."
-    )
+    const t = paramText(split({ milestones: [] }))
+    expect(t).toContain("this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain")
+    expect(t).toContain('changing the chain alone has no effect there.')
   })
 })

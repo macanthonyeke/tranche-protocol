@@ -982,7 +982,16 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
   return {
     ...base,
     title: 'Change where this escrow pays out',
-    subtitle: 'Redirects your milestone payments to a different address. This takes effect immediately for everything not yet released.',
+    // Round 16 #1: this used to claim completeness on its own — "takes
+    // effect immediately for everything not yet released" — which is the
+    // same blanket claim Round 15 already removed from the leading
+    // parameter below for making a promise the timeout exception breaks.
+    // Fixing the parameter and leaving the subtitle saying something
+    // different about the same fact is not a fix, it is moving the
+    // contradiction one field over. The subtitle now states only what is
+    // unconditionally true (the redirect writes now); scope and the
+    // exception live in exactly one place, the leading parameter.
+    subtitle: 'Redirects your milestone payments to a different address, effective immediately.',
     parameters: [
       `Escrow #${escrow.id}`,
       `Address: ${oldAddress} → ${newAddress}`,
@@ -1041,7 +1050,23 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
       `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
       `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
-      'Applies to every milestone not yet released, including any currently in review.',
+      // Round 16 #2: this used to be an unqualified "every milestone not yet
+      // released", identical in shape to the blanket claim Round 15 already
+      // fixed on the no-split screen above — with the actual caveat sitting
+      // in a separate line several lines down. Same bug, same fix: the
+      // caveat is a fact about mechanism, not a footnote, so it belongs in
+      // this always-present leading sentence. NOT phrased as "with one
+      // exception" — unlike the no-split screen's clean exclusion (a
+      // timeout pays the ORIGINAL recipient, full stop), a timeout here is a
+      // partial modification: the split loop reads the live, current
+      // s[i].mintRecipient (TrancheProtocol.sol:609), so the address change
+      // DOES still apply, just always credited on Arc rather than the
+      // configured chain, because that same loop never reads
+      // s[i].destinationDomain at all (:594-610). Calling that "an
+      // exception" reads as a full carve-out to anyone who just saw the
+      // no-split screen's genuine one and would pattern-match this the same
+      // way — it is not.
+      "Applies to every milestone not yet released, including any currently in review. If a milestone times out with no arbiter ruling, this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain; changing the chain alone has no effect there.",
       // The leg's own exposure, not the escrow's: this row moves one share.
       // Stated as the pool and the share rather than a multiplied-out figure —
       // the per-leg amount is computed from each release's post-fee remainder
@@ -1055,15 +1080,6 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
       ...(exposure === null
         ? []
         : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
-      // Round 15 #7: unlike the no-split branch, a timeout DOES honor a
-      // redirected split ADDRESS — the split loop reads the live, current
-      // s[i].mintRecipient (TrancheProtocol.sol:609). But that same loop
-      // never reads s[i].destinationDomain at all; every leg's share lands in
-      // refundBalances (an Arc credit) regardless of what chain it names
-      // (:594-610). So an address change here does apply to a timeout
-      // settlement; a chain change does not — two different answers for the
-      // two things this one screen lets you redirect together.
-      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit. It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.",
       'Milestones already released are unaffected and cannot be recalled.'
     ]
   }

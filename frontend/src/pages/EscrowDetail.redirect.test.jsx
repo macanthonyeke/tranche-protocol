@@ -69,6 +69,20 @@ describe('redirectPayoutConfirm — an allowed redirect', () => {
     expect(paramText(d())).toContain('Milestones already released are unaffected and cannot be recalled.')
   })
 
+  /* Round 16 #1: the subtitle used to independently claim "takes effect
+     immediately for everything not yet released" — the same completeness
+     claim the leading parameter above already states, including its
+     timeout exception. Two fields asserting the same fact is exactly how
+     they drifted apart across rounds (the parameter got the Round 15 fix,
+     the subtitle didn't); the subtitle now states only what's
+     unconditionally true — the write happens now — and defers scope
+     entirely to the parameter tested above. */
+  it('does not duplicate the scope/exception claim in the subtitle', () => {
+    const dd = d()
+    expect(dd.subtitle).not.toMatch(/everything not yet released|every milestone/i)
+    expect(dd.subtitle).toBe('Redirects your milestone payments to a different address, effective immediately.')
+  })
+
   it('names the real function', () => {
     expect(d().functionName).toBe('updateReceivingAddress')
   })
@@ -240,11 +254,32 @@ describe('redirectSplitConfirm', () => {
      reach a timeout settlement. What it never reads is destinationDomain
      (:594-610): every leg's timeout share lands in refundBalances (an Arc
      credit) no matter what chain is configured. Two different answers for
-     the two things this screen redirects together, so both need saying. */
-  it('says a timeout honors the updated address but always as an Arc credit, ignoring the chain', () => {
+     the two things this screen redirects together, so both need saying.
+
+     Round 16 #2: this used to be its own separate line, appended after an
+     unqualified "every milestone not yet released" leading sentence — the
+     same split-across-two-fields shape Round 15 already fixed on the
+     no-split screen (see 'does not duplicate the scope/exception claim in
+     the subtitle' above). Now folded into the leading sentence itself: one
+     place states scope, and it is never wrong about what it covers.
+
+     Deliberately NOT phrased as "with one exception" — unlike the no-split
+     screen's clean exclusion (a timeout pays the original recipient, full
+     stop), this is a partial modification: the address change still
+     applies at timeout, only the chain doesn't. "Exception" reads as a full
+     carve-out to anyone who just saw the no-split screen's genuine one. */
+  it('says a timeout still honors the updated address, but always credited on Arc rather than the configured chain', () => {
     const t = paramText(d())
-    expect(t).toContain("A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit.")
-    expect(t).toContain('It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.')
+    expect(t).toContain("If a milestone times out with no arbiter ruling, this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain")
+    expect(t).toContain('changing the chain alone has no effect there.')
+  })
+
+  it('folds the caveat into the SAME parameter as the scope claim, not a separate one, and does not call it an exception', () => {
+    const scopeLine = d().parameters.find((p) => p.startsWith('Applies to every milestone'))
+    expect(scopeLine).toBeDefined()
+    expect(scopeLine).toContain('is still honored')
+    expect(scopeLine).toContain('always credited on Arc')
+    expect(scopeLine).not.toMatch(/exception/i)
   })
 })
 
