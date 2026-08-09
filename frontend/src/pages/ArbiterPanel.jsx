@@ -592,6 +592,15 @@ export function resolveDisputeConfirm({
   // at all, so it gets its own branch rather than walking through
   // delivery/chain/fee copy for a transfer that never happens.
   const recipientGetsPaid = bps > 0 && recipientShare > 0n
+  // Round 17 Phase A: whenever both of these hold, Finding 3's sub-floor
+  // divert-to-Arc is reachable for THIS call — the frontend cannot compute
+  // the exact post-fee amount (escrowFeeBps has no getter), so it cannot
+  // know in advance which branch fires. Every destination/delivery/fee fact
+  // below has to hedge both outcomes together rather than assert one and
+  // append a correcting caveat afterward. When this is false, the existing
+  // unconditional wording is provably correct (a full ruling can never
+  // reach the divert branch) and stays exactly as it was.
+  const divertReachable = partial && crossChain
 
   const params = [
     `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)} in dispute`,
@@ -606,35 +615,50 @@ export function resolveDisputeConfirm({
   }
 
   if (recipientGetsPaid) {
-    params.push(
-      splits?.length > 0
-        // Round 15 #11 / Round 16 #1: "most delivered" was a quantified
-        // claim nothing in the contract backs, and "divided across N split
-        // recipients" (what Round 15 replaced it with) is itself still an
-        // outcome claim — it implies N recipients receive something, which
-        // rounding and the sub-floor divert below can both make false.
-        // Describes the escrow's CONFIGURATION instead — N split entries,
-        // each with its own percentage and chain — and leaves what actually
-        // happens to the caveats pushed below rather than a headcount here.
-        ? `${splits.length} configured split entries, by their configured share and destination chain`
-        // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
-        // updateReceivingAddress rewrites mintRecipient and leaves recipient
-        // untouched (:986-990), so the two diverge the moment a freelancer
-        // redirects — and recipient is the stale one.
-        : `Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`
-    )
     if (splits?.length > 0) {
+      // Round 15 #11 / Round 16 #1: "most delivered" was a quantified
+      // claim nothing in the contract backs, and "divided across N split
+      // recipients" (what Round 15 replaced it with) is itself still an
+      // outcome claim — it implies N recipients receive something, which
+      // rounding and the sub-floor divert below can both make false.
+      // Describes the escrow's CONFIGURATION instead — N split entries,
+      // each with its own percentage and chain — and leaves what actually
+      // happens to the caveats pushed below rather than a headcount here.
+      // Already fine as a leading line for Round 17 Phase A too: it never
+      // claimed delivery in the first place, so there's nothing to hedge.
+      params.push(`${splits.length} configured split entries, by their configured share and destination chain`)
       params.push('A recipient whose share rounds down to zero is paid nothing.')
+    } else if (divertReachable) {
+      // Round 17 Phase A: this used to state the destination as fact, then
+      // a caveat further down corrected it if the divert actually fired —
+      // the frontend genuinely cannot know in advance which branch fires,
+      // so both are stated together here instead.
+      params.push(`If this amount clears this escrow's forwarding-fee floor, it is paid to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}.`)
+      // The divert credits refundBalances[e.recipient] (:1292) — the one
+      // branch where `recipient`, not `mintRecipient`, is the destination.
+      params.push(`If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`)
+    } else {
+      // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
+      // updateReceivingAddress rewrites mintRecipient and leaves recipient
+      // untouched (:986-990), so the two diverge the moment a freelancer
+      // redirects — and recipient is the stale one.
+      params.push(`Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`)
     }
     // "Pays both sides immediately" was true of neither half. A cross-chain
     // share is a burn Circle mints minutes later; an Arc share is a
     // safeTransfer inside this transaction (:1343-1346); and the payer's half
     // is a credit that is never sent anywhere (:606 below).
-    params.push(
-      crossChain
-        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
-        : "The freelancer's share is transferred on Arc as this transaction executes."
-    )
+    if (divertReachable) {
+      params.push(
+        "If it clears the floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+      )
+    } else {
+      params.push(
+        crossChain
+          ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+          : "The freelancer's share is transferred on Arc as this transaction executes."
+      )
+    }
     params.push("The protocol fee is taken from the freelancer's share only.")
   } else if (bps > 0) {
     params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
@@ -650,21 +674,35 @@ export function resolveDisputeConfirm({
     // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
     // at the snapshot floor regardless of what was quoted. Name the one that
     // actually applies rather than both.
-    params.push(
-      splits?.length > 0
-        // A cap, not a charge: the snapshot is passed to CCTP as maxFee and
-        // Circle deducts its actual fee — possibly less — from the burned
-        // amount on the destination (TrancheProtocol.sol:874-877).
-        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
-        : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
-    )
-    if (partial) {
+    if (divertReachable) {
+      // Round 17 Phase A: this used to be an unconditional fee line
+      // immediately followed by a separate caveat correcting the
+      // destination if the divert fired — two facts about the same
+      // uncertain outcome, stated as if only one applied.
       params.push(
         splits?.length > 0
-          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
-          // The divert credits refundBalances[e.recipient] (:1292) — the one
-          // branch where `recipient`, not `mintRecipient`, is the destination.
-          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`
+          // Split legs have no earlier destination statement to duplicate
+          // (the split leading line above is a configuration fact, not a
+          // destination claim — see Round 16 #1), so fee and destination
+          // are consolidated into one hedge here, since they were already
+          // adjacent and both depend on the same clears-the-floor question.
+          ? `If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
+          // Unlike the split case, the no-split destination was ALREADY
+          // hedged above (the "If this amount clears... it is paid to...
+          // / If it does not... credited on Arc to escrow.recipient..."
+          // pair). Restating the destination here would repeat that fact
+          // rather than add the new one (the fee) — this states only what
+          // this line is actually for.
+          : `If this amount clears this escrow's forwarding-fee floor, delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival. If it does not clear the floor, no delivery fee is charged.`
+      )
+    } else {
+      params.push(
+        splits?.length > 0
+          // A cap, not a charge: the snapshot is passed to CCTP as maxFee and
+          // Circle deducts its actual fee — possibly less — from the burned
+          // amount on the destination (TrancheProtocol.sol:874-877).
+          ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
+          : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
       )
     }
   }

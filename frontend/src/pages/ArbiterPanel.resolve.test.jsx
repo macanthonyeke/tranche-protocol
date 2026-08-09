@@ -104,8 +104,11 @@ describe('the ruling itself', () => {
    timeout never leaves Arc, this one really delivers cross-chain. */
 describe('told apart from the fixed 50/50 timeout', () => {
   it('sends the freelancer share to their chain rather than crediting Arc', () => {
+    // build()'s default bps (60%) makes this a partial cross-chain ruling,
+    // so the destination is stated as a Round 17 Phase A hedge rather than
+    // a bare fact — this checks the "clears the floor" half of it.
     const t = paramText(build({ escrow: escrowOn(BASE) }))
-    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
+    expect(t).toContain(`it is paid to ${REDIRECTED} on Base Sepolia`)
   })
 
   /* The bug this guards: naming e.recipient shows the pre-redirect address as
@@ -121,7 +124,7 @@ describe('told apart from the fixed 50/50 timeout', () => {
      explicitly rather than reusing the delivery wording. */
   it('names recipient only for the Arc divert, and labels it as such', () => {
     const t = paramText(build({ escrow: escrowOn(BASE) }))
-    expect(t).toContain(`credited on Arc to ${RECIPIENT} instead of being delivered cross-chain`)
+    expect(t).toContain(`credited on Arc to ${RECIPIENT} instead — no cross-chain delivery`)
   })
 
   /* The payer half genuinely is an Arc credit on both paths, so this line is
@@ -176,15 +179,18 @@ describe('the maxFee asymmetry between split and no-split', () => {
   ]
 
   it('quotes the caller maxFee for a no-split cross-chain payout', () => {
+    // build()'s default bps (60%) makes the divert reachable, so the fee
+    // is stated as a Round 17 Phase A hedge — the property under test
+    // (which figure is named) still holds inside it.
     const t = paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n }))
-    expect(t).toContain("Delivery costs up to 0.45 USDC in Circle forwarding fees, deducted from the freelancer's share on arrival.")
+    expect(t).toContain("delivery costs up to 0.45 USDC in Circle forwarding fees, deducted from the freelancer's share on arrival.")
   })
 
   /* The quoted fee is not what a split leg burns at, so showing it there would
      state a figure the contract never uses. */
   it('quotes the escrow snapshot floor for split legs, never the caller maxFee', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery.")
+    expect(t).toContain("pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery.")
     expect(t).not.toContain('0.45 USDC')
   })
 
@@ -210,15 +216,49 @@ describe('the maxFee asymmetry between split and no-split', () => {
 })
 
 describe('Finding 3 — a partial award can fall below the delivery floor', () => {
-  it('warns for a no-split cross-chain partial', () => {
-    expect(paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n })))
-      .toContain(`If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
+  /* Round 17 Phase A: a fifth Codex pass found that whenever the divert is
+     reachable (partial && crossChain), this function stated destination,
+     delivery-timing and fee facts UNCONDITIONALLY first, then appended a
+     caveat that contradicted them if the divert actually fired. The gap
+     the review found in the tests below was that they only ever checked
+     the caveat's presence, never whether the unconditional claim it was
+     "correcting" had actually gone away — so this checks absence too. */
+  it('drops the unconditional destination and fee lines entirely when the divert is reachable', () => {
+    const t = paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n }))
+    expect(t).not.toMatch(/^Freelancer's share is sent to /m)
+    expect(t).not.toContain('Delivery costs up to 0.45 USDC in Circle forwarding fees, deducted from the freelancer\'s share on arrival.')
   })
 
-  it('phrases the divert per leg for a split escrow', () => {
+  it('warns for a no-split cross-chain partial, stating both outcomes as one conditional', () => {
+    const t = paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n }))
+    expect(t).toContain(`If this amount clears this escrow's forwarding-fee floor, it is paid to ${REDIRECTED} on Base Sepolia.`)
+    expect(t).toContain(`If it does not clear the floor, it is credited on Arc to ${RECIPIENT} instead — no cross-chain delivery.`)
+    // The fee hedge names the LIVE maxFee quote for no-split (:1298), not the
+    // escrow's fixed floor — the same distinction settled decision #7 already
+    // draws for the unconditional wording, preserved here.
+    expect(t).toContain("If this amount clears this escrow's forwarding-fee floor, delivery costs up to 0.45 USDC in Circle forwarding fees, deducted from the freelancer's share on arrival.")
+  })
+
+  /* The destination hedge above already states both outcomes ("paid to X" /
+     "credited on Arc to Z instead"). The fee hedge's job is to add the ONE
+     new fact — the fee — not re-derive the destination a second time.
+     Mirrors mutualSettleConfirm's lean "no delivery fee is charged", which
+     never had a destination to duplicate in the first place since it reads
+     that off payoutLines() separately. */
+  it("the fee hedge's second half states only the fee, not a repeat of the destination", () => {
+    const t = paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n }))
+    expect(t).toContain('If it does not clear the floor, no delivery fee is charged.')
+    expect(t).not.toContain(`it does not clear the floor, it is credited on Arc to ${RECIPIENT} instead — no cross-chain delivery, no fee`)
+  })
+
+  it('phrases the divert per leg for a split escrow, consolidating fee and destination into one hedge', () => {
     const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
-    expect(paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n })))
-      .toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+    const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+    expect(t).toContain("If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+    // The old two-line shape (a fee line, then a separate divert caveat) is
+    // gone — this is now one statement, not two adjacent ones.
+    expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
+    expect(t).not.toMatch(/^Any split leg whose share falls to/m)
   })
 
   /* With splits configured e.destinationDomain is not what the burn uses, so
@@ -230,8 +270,8 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(ARC), splits }))
-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
-    expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
+    expect(t).toContain("pays a forwarding fee of up to 0.20 USDC")
+    expect(t).toContain('is credited on Arc instead')
   })
 
   it('says nothing about delivery for a same-chain Arc escrow', () => {
@@ -274,9 +314,13 @@ describe('Round 16 #3 — a nonzero bps can still round the whole share to zero'
     // bps=5000 (50%): floor(9999 * 5000 / 10000) = 4999 — nonzero, so this
     // takes the normal ruling path. The property under test is the BRANCH,
     // not the formatted dollar string (4999 base units still displays as
-    // "0.00 USDC" at 2-decimal precision).
-    const t = paramText(at(5000, { escrow: escrowOn(BASE) }))
-    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
+    // "0.00 USDC" at 2-decimal precision). Uses an Arc-domain escrow (not
+    // cross-chain) specifically to isolate this from the separate Round 17
+    // Phase A divert hedge — any bps strictly between 0 and 10,000 is
+    // "partial" by definition, so a cross-chain escrow here would also
+    // exercise that unrelated property.
+    const t = paramText(at(5000, { escrow: escrowOn(ARC) }))
+    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Arc`)
     expect(t).not.toContain('rounds down to zero USDC')
   })
 })

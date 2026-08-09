@@ -86,12 +86,15 @@ const settle = (over = {}) => mutualSettleConfirm({
    delivery that comes in under the cap. */
 describe('#5 — the forwarding fee is a cap, not a charge', () => {
   it('caps the split-leg fee on an arbiter ruling', () => {
+    // resolve()'s default bps (50%) on a cross-chain escrow makes the divert
+    // reachable, so this is now a Round 17 Phase A hedge — the "cap, not a
+    // charge" property (up to X, not exactly X) still holds inside it.
     const t = paramText(resolve({ splits: splitsOn(BASE, BASE) }))
-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
+    expect(t).toContain("pays a forwarding fee of up to 0.20 USDC")
   })
 
   it('caps the delivery fee on a mutual settlement', () => {
-    expect(paramText(settle())).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
+    expect(paramText(settle())).toContain("delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
   })
 
   /* The specific fixed-amount phrasings that were there before must not come
@@ -188,8 +191,11 @@ describe('#10 — credit, transfer and pending delivery are three different thin
   })
 
   it('says a cross-chain share arrives later, on both screens', () => {
+    // resolve()/settle()'s defaults (a 50% cross-chain ruling/settlement)
+    // make the divert reachable, so this is a Round 17 Phase A hedge now —
+    // the "arrives later, not instant" property still holds inside it.
     for (const t of [paramText(resolve()), paramText(settle())]) {
-      expect(t).toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+      expect(t).toContain("it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     }
   })
 

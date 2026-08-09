@@ -92,12 +92,43 @@ describe('payoutLines', () => {
 
     it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
       const lines = payoutLines(escrow, [], { partial: true, crossChain: true, floor: 200000n })
-      expect(lines).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
+      expect(lines).toContain(`If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`)
     })
 
     it('stays absent when crossChain is false even if partial is true (an Arc leg is never diverted)', () => {
       expect(payoutLines(escrow, SPLITS, { partial: true, crossChain: false, floor: 200000n }).join('\n'))
         .not.toMatch(/credited on Arc/i)
+    })
+  })
+
+  /* Round 17 Phase A: a fifth Codex pass found that when the divert is
+     reachable, this used to state "Paid to: X" / "Paid on: Y" as fact and
+     append a caveat correcting it afterward if the divert actually fired —
+     the frontend cannot compute the exact post-fee amount (no getter for
+     escrowFeeBps), so it genuinely does not know in advance which branch
+     fires. The bug that survived two prior rounds' review of this same
+     function was tested only for the CAVEAT'S presence, never for whether
+     the unconditional claim it was supposed to be replacing had actually
+     gone away — so this checks absence, not just addition. */
+  describe('the no-split destination hedges instead of asserting when the divert is reachable', () => {
+    it('drops the unconditional "Paid to:" / "Paid on:" lines entirely', () => {
+      const lines = payoutLines(escrow, [], { partial: true, crossChain: true, floor: 200000n })
+      expect(lines.join('\n')).not.toMatch(/^Paid to:|^Paid on:/m)
+    })
+
+    it('states both possible destinations as one conditional, not one fact plus a correction', () => {
+      const lines = payoutLines(escrow, [], { partial: true, crossChain: true, floor: 200000n })
+      expect(lines).toEqual([
+        `If this amount clears this escrow's forwarding-fee floor, it is paid to ${RECIPIENT} on Base Sepolia.`,
+        `If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`
+      ])
+    })
+
+    it('keeps the plain unconditional lines when the divert is not reachable (partial false, crossChain false, or omitted)', () => {
+      const plain = [`Paid to: ${RECIPIENT}`, 'Paid on: Base Sepolia']
+      expect(payoutLines(escrow, [])).toEqual(plain)
+      expect(payoutLines(escrow, [], { partial: false, crossChain: true, floor: 200000n })).toEqual(plain)
+      expect(payoutLines(escrow, [], { partial: true, crossChain: false, floor: 200000n })).toEqual(plain)
     })
   })
 

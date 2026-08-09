@@ -166,16 +166,39 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
   const cross = (bps, splits = []) =>
     mutualSettleConfirm({ escrow: escrowOn(BASE), milestone, splits, bps, theirs: agreed(bps) })
 
-  it('names the escrow fixed forwarding fee rather than a live quote', () => {
-    expect(paramText(cross(5000))).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+  /* Round 17 Phase A: a fifth Codex pass found that whenever the divert is
+     reachable (partial && crossChain), this function stated destination,
+     delivery-timing and fee facts UNCONDITIONALLY first, then appended a
+     caveat that contradicted them if the divert actually fired — the same
+     leading-claim-vs-trailing-caveat shape already fixed three times this
+     round for other findings. The frontend cannot compute the exact
+     post-fee amount (no getter for escrowFeeBps), so it cannot know in
+     advance which branch fires — both outcomes are stated together now.
+     The gap the review found in the EXISTING tests below was that they only
+     ever checked the caveat's presence, never whether the unconditional
+     claim it was "correcting" had actually gone away — so this checks
+     absence explicitly, not just replacement text. */
+  it('drops the unconditional delivery-timing and fee lines entirely when the divert is reachable', () => {
+    const t = paramText(cross(5000))
+    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).not.toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+  })
+
+  it('states the fixed forwarding fee as a hedge covering both outcomes, not a live quote asserted as fact', () => {
+    expect(paramText(cross(5000))).toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
   })
 
   /* Round 16 #2: this caveat now lives inside payoutLines() itself rather
      than being hand-rolled by this function — and payoutLines names
      escrow.recipient explicitly as the divert destination, not the
-     redirectable mintRecipient (TrancheProtocol.sol:1292). */
+     redirectable mintRecipient (TrancheProtocol.sol:1292). Round 17 Phase
+     A: restructured from one fact plus a correction into one conditional
+     stating both outcomes together. */
   it('warns that a small share is credited on Arc instead of delivered', () => {
-    expect(paramText(cross(5000))).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
+    const t = paramText(cross(5000))
+    expect(t).toContain(`If this amount clears this escrow's forwarding-fee floor, it is paid to ${RECIPIENT} on Base Sepolia.`)
+    expect(t).toContain(`If it does not clear the floor, it is credited on Arc to ${RECIPIENT} instead — no cross-chain delivery.`)
+    expect(t).not.toMatch(/^Paid to:|^Paid on:/m)
   })
 
   /* Per-leg on a split escrow (:1319), so the wording has to change with it. */
@@ -184,7 +207,14 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
       { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
     ]
-    expect(paramText(cross(5000, splits))).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+    const t = paramText(cross(5000, splits))
+    expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+    // The fee line is a SEPARATE hedge from the destination caveat above —
+    // mutualSettleConfirm (unlike resolveDisputeConfirm) never had a
+    // split-specific fee line to consolidate with, so it stays its own
+    // conditional statement rather than being merged into one.
+    expect(t).toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
+    expect(t).not.toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded")
   })
 
   /* The case escrow.destinationDomain alone cannot answer: with splits
@@ -200,7 +230,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     const t = paramText(mutualSettleConfirm({
       escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
     }))
-    expect(t).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
+    expect(t).toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
     expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
   })
 
@@ -264,7 +294,11 @@ describe('Round 16 #3 — a nonzero bps can still round the whole share to zero'
     // runs, not the formatted dollar string (4999 base units still displays
     // as "0.00 USDC" at 2-decimal precision, which is exactly why the
     // branch condition checks the real recipientShare, not the display).
-    const t = paramText(at(5000))
+    // Uses an Arc-domain escrow (not cross-chain) specifically to isolate
+    // this from the separate Round 17 Phase A divert hedge — any bps
+    // strictly between 0 and 10,000 is "partial" by definition, so a
+    // cross-chain escrow here would also exercise that unrelated property.
+    const t = paramText(at(5000, { escrow: escrowOn(ARC) }))
     expect(t).toContain('Paid to:')
     expect(t).toContain('Paid on:')
     expect(t).not.toContain('rounds down to zero USDC')

@@ -2291,6 +2291,16 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   // so this gets its own branch below rather than walking through
   // delivery/chain/fee copy for a transfer that never happens.
   const recipientGetsPaid = bps > 0 && recipientShare > 0n
+  // Round 17 Phase A: whenever both of these hold, Finding 3's sub-floor
+  // divert-to-Arc is reachable for THIS call — the frontend cannot compute
+  // the exact post-fee amount (escrowFeeBps has no getter), so it cannot
+  // know in advance which branch fires. Every destination/delivery/fee fact
+  // below has to hedge both outcomes together rather than assert one and
+  // append a correcting caveat, the same shape already fixed elsewhere this
+  // round for scope claims. When this is false, the existing unconditional
+  // wording is provably correct (a full release/settlement can never reach
+  // the divert branch) and stays exactly as it was.
+  const divertReachable = partial && crossChain
 
   const params = [
     milestoneLine,
@@ -2310,11 +2320,17 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     // a burn that Circle mints minutes later, and the payer's half is a credit
     // that is never sent anywhere (:1241). The subtitle no longer claims one
     // speed for all three, so the distinction has to appear here.
-    params.push(
-      crossChain
-        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
-        : "The freelancer's share is transferred on Arc as this transaction executes."
-    )
+    if (divertReachable) {
+      params.push(
+        "If it clears this escrow's forwarding-fee floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+      )
+    } else {
+      params.push(
+        crossChain
+          ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+          : "The freelancer's share is transferred on Arc as this transaction executes."
+      )
+    }
     params.push("The protocol fee is taken from the freelancer's share only.")
   } else if (bps > 0) {
     params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
@@ -2331,7 +2347,11 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
     // Circle deducts its actual forwarding fee — which may be less — from the
     // burned amount on the destination (TrancheProtocol.sol:874-877).
-    params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
+    if (divertReachable) {
+      params.push(`If it clears the floor, delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}. If it does not clear the floor, no delivery fee is charged.`)
+    } else {
+      params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
+    }
   }
   params.push('This cannot be undone.')
 
@@ -2953,31 +2973,47 @@ export function payoutLines(escrow, splits, { partial = false, crossChain = fals
     // configured chain (:1319). Conflating the two would itself be
     // inaccurate: one is integer rounding, the other is the forwarding
     // floor, and they can fire independently of each other.
-    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
-    // above — a nonzero share that still can't clear this escrow's CCTP
-    // forwarding-fee floor lands as an Arc credit instead of reaching its
-    // configured chain (:1319). Conflating the two would itself be
-    // inaccurate: one is integer rounding, the other is the forwarding
-    // floor, and they can fire independently of each other.
+    //
+    // Round 17 Phase A investigated this branch specifically and found
+    // nothing to restructure here: unlike the no-split branch below, this
+    // line was never an unconditional destination claim in the first place
+    // — it already names the exception per leg ("Any split leg WHOSE
+    // share...") rather than asserting delivery as fact and correcting it
+    // afterward. The leading configuration line above doesn't claim
+    // delivery either. So this stays a single conditional line, not a
+    // two-sided hedge.
     if (partial && crossChain) {
       lines.push(`Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
     }
     return lines
   }
   const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
-  const lines = [
-    `Paid to: ${addr}`,
-    `Paid on: ${getDomainName(Number(escrow.destinationDomain))}`
-  ]
+  const chainName = getDomainName(Number(escrow.destinationDomain))
   if (partial && crossChain) {
-    // Credited to escrow.recipient specifically, NOT `addr` above — the
-    // divert targets refundBalances[e.recipient] on-chain (:1292), the
-    // pre-redirect authorization identity, even when mintRecipient has since
-    // been redirected elsewhere. See ArbiterPanel.jsx's payoutAddress() for
-    // the same distinction on the no-split path.
-    lines.push(`If the amount after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
+    // Round 17 Phase A: this used to state "Paid to: X" / "Paid on: Y" as
+    // fact, THEN append a caveat contradicting it if the divert actually
+    // fires — the same leading-claim-vs-trailing-caveat shape fixed
+    // elsewhere this round for other findings, just for a destination
+    // instead of a scope claim. The frontend cannot compute the exact
+    // post-fee amount (escrowFeeBps is snapshotted with no getter), so it
+    // cannot know in advance which branch fires: both outcomes are
+    // genuinely possible from the signer's perspective, so both are stated
+    // together as one conditional rather than one asserted and one
+    // appended as a correction.
+    return [
+      `If this amount clears this escrow's forwarding-fee floor, it is paid to ${addr} on ${chainName}.`,
+      // Credited to escrow.recipient specifically, NOT `addr` above — the
+      // divert targets refundBalances[e.recipient] on-chain (:1292), the
+      // pre-redirect authorization identity, even when mintRecipient has
+      // since been redirected elsewhere. See ArbiterPanel.jsx's
+      // payoutAddress() for the same distinction on the no-split path.
+      `If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`
+    ]
   }
-  return lines
+  return [
+    `Paid to: ${addr}`,
+    `Paid on: ${chainName}`
+  ]
 }
 
 // Picks the single highest-priority action available to a given caller role
