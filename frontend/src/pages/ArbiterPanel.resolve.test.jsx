@@ -20,6 +20,7 @@ import { buildContractInteraction } from '../utils/circleTheme.js'
 
 const ARC = 26
 const BASE = 6
+const ETH_SEPOLIA = 0
 
 const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
 const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
@@ -254,11 +255,65 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
   it('phrases the divert per leg for a split escrow, consolidating fee and destination into one hedge', () => {
     const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+    // Round 18 Phase A #2: "a given split leg" implied every leg in the
+    // configuration faces this floor check. An Arc leg never does
+    // (TrancheProtocol.sol:1343, direct transfer) — scoped to cross-chain legs.
+    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
     // The old two-line shape (a fee line, then a separate divert caveat) is
     // gone — this is now one statement, not two adjacent ones.
     expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
     expect(t).not.toMatch(/^Any split leg whose share falls to/m)
+  })
+
+  /* Round 18 Phase A: the fixture above has exactly one cross-chain leg,
+     which cannot exercise a genuinely mixed settlement — Solidity evaluates
+     each leg independently (TrancheProtocol.sol:1303-1312), so an Arc leg, a
+     cross-chain leg that clears the floor, and a cross-chain leg that
+     doesn't can all settle simultaneously within one ruling. Three legs
+     across three different domains (one Arc, two different cross-chain
+     domains) verifies the copy stays generically per-leg rather than reading
+     as though it only covers a single specific domain or a single leg. */
+  it('phrases the divert per leg for a genuinely mixed 3-leg split (Arc + two cross-chain domains)', () => {
+    const splits = [
+      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+      { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
+      { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+    // Never singles out one cross-chain domain, or "the split" as one unit —
+    // the hedge has to hold for both cross-chain legs (BASE and Ethereum
+    // Sepolia) simultaneously, regardless of what the Arc leg does.
+    expect(t).not.toMatch(/^Any split leg whose share falls to/m)
+    expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
+  })
+
+  /* Round 18 Phase A #3: timing is per-leg-type for a split escrow, not one
+     outcome for the whole ruling — an Arc leg settles immediately regardless
+     of what a cross-chain leg in the same ruling does. Zero prior coverage of
+     this branch existed before this round. */
+  it('separates Arc-leg timing from cross-chain-leg timing on a mixed partial split (divert reachable)', () => {
+    const splits = [
+      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
+    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+  })
+
+  /* Round 18 Phase A #4: a FULL (100%) split ruling can never reach the
+     divert, but a mix of Arc and cross-chain legs is still not one timing
+     outcome — "the entire freelancer share leaves Arc" was false for the Arc
+     leg, which transfers inside this transaction rather than leaving it. */
+  it('separates Arc-leg timing from cross-chain-leg timing on a mixed FULL split (divert not reachable)', () => {
+    const splits = [
+      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
+    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
   })
 
   /* With splits configured e.destinationDomain is not what the burn uses, so

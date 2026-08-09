@@ -648,7 +648,28 @@ export function resolveDisputeConfirm({
     // share is a burn Circle mints minutes later; an Arc share is a
     // safeTransfer inside this transaction (:1343-1346); and the payer's half
     // is a credit that is never sent anywhere (:606 below).
-    if (divertReachable) {
+    //
+    // Round 18 Phase A #3/#4: a split escrow is not one outcome here either —
+    // Solidity evaluates each leg independently (TrancheProtocol.sol:1303-
+    // 1312), so an Arc leg, a cross-chain leg that clears the floor, and a
+    // cross-chain leg that doesn't can all settle simultaneously within this
+    // one transaction. The clears/doesn't-clear pair below is correct for a
+    // single destination but was wrong to also apply, unchanged, to a fan-out
+    // — this states timing per leg-type instead of one outcome for the whole
+    // ruling whenever splits are configured.
+    if (splits?.length > 0) {
+      if (!crossChain) {
+        params.push('Each split leg is transferred on Arc as this transaction executes.')
+      } else if (divertReachable) {
+        params.push(
+          "Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)."
+        )
+      } else {
+        params.push(
+          "Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant."
+        )
+      }
+    } else if (divertReachable) {
       params.push(
         "If it clears the floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
       )
@@ -686,7 +707,11 @@ export function resolveDisputeConfirm({
           // destination claim — see Round 16 #1), so fee and destination
           // are consolidated into one hedge here, since they were already
           // adjacent and both depend on the same clears-the-floor question.
-          ? `If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
+          // Round 18 Phase A #2: "a given split leg" implied every leg in the
+          // configuration faces this floor check. An Arc leg never does
+          // (TrancheProtocol.sol:1343, direct transfer) — scoped to the legs
+          // that actually can be diverted.
+          ? `If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
           // Unlike the split case, the no-split destination was ALREADY
           // hedged above (the "If this amount clears... it is paid to...
           // / If it does not... credited on Arc to escrow.recipient..."

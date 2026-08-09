@@ -87,7 +87,7 @@ describe('payoutLines', () => {
     it('is present, and distinct from the rounds-to-zero caveat, for a reachable split payout', () => {
       const lines = payoutLines(escrow, SPLITS, { partial: true, crossChain: true, floor: 200000n })
       expect(lines).toContain('A recipient whose share rounds down to zero is paid nothing.')
-      expect(lines).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+      expect(lines).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
     })
 
     it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
