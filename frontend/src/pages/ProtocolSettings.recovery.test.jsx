@@ -65,6 +65,16 @@ describe('isRecoveryExpired', () => {
     expect(isRecoveryExpired(expiry, (expiry - MARGIN_S + 1) * 1000)).toBe(true)
   })
 
+  /* Round 17 Phase B: exact equality with the boundary used to read as NOT
+     expired (`>` is strict) — but the proactive timer in ClaimRecovery wakes
+     via `setTimeout` at precisely this instant (remaining === 0 the moment
+     Date.now() reaches boundaryMs), so a punctual callback fired while this
+     still said false. `>=` makes the boundary instant itself count as
+     expired, matching what the timer actually wakes at. */
+  it('is true at exact equality with the margin-adjusted boundary, not just strictly past it', () => {
+    expect(isRecoveryExpired(expiry, (expiry - MARGIN_S) * 1000)).toBe(true)
+  })
+
   it('is true at and after the literal on-chain deadline', () => {
     expect(isRecoveryExpired(expiry, expiry * 1000)).toBe(true)
     expect(isRecoveryExpired(expiry, (expiry + DAY) * 1000)).toBe(true)

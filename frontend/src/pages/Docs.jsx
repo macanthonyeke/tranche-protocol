@@ -37,12 +37,12 @@ const DISPUTE_STEPS = [
   { n: '4', title: 'Ruling + release', text: 'The arbiter decides how the milestone funds are split, and the release happens immediately.' },
 ]
 
-const GLOSSARY = [
+export const GLOSSARY = [
   { term: 'Escrow', def: 'The on-chain holding account created for a project. It holds the funds until they’re released.' },
   { term: 'Milestone', def: 'One piece of a project with its own payment amount and its own review period.' },
   { term: 'Review window', def: 'The time the payer has to check delivered work before it automatically pays out.' },
   { term: 'Silent approval', def: 'If the payer doesn’t respond within the review window, the milestone releases anyway. Nobody can hold a payment hostage by going quiet.' },
-  { term: 'Split recipient', def: 'A project can pay out to more than one recipient, each on their own chain, from a single escrow.' },
+  { term: 'Split recipient', def: 'A project can be configured to pay out to more than one recipient from a single escrow, each with their own share and chain.' },
   { term: 'Arbiter', def: 'A neutral third party who steps in only if a dispute is raised, and rules based on evidence from both sides.' },
 ]
 

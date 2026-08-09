@@ -77,7 +77,16 @@ const RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS = 5 * 60
 
 export function isRecoveryExpired(expiry, atMs = Date.now()) {
   if (expiry === null) return false
-  return Math.floor(atMs / 1000) > expiry - RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS
+  // Round 17 Phase B: was strict `>`, but the proactive timer below wakes
+  // at exact equality with this same boundary (setTimeout fires once
+  // `remaining` elapses, i.e. once Date.now() reaches boundaryMs) — so a
+  // punctual callback used to fire while this still read false, leaving the
+  // button undisabled until a later render or the click itself. `>=` makes
+  // "expired" include the boundary instant itself, matching what the timer
+  // actually wakes at. The click-time recheck was never affected by this —
+  // it just re-evaluates the same function with a later timestamp — this
+  // was a UI-reliability gap, not a safety one.
+  return Math.floor(atMs / 1000) >= expiry - RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS
 }
 
 /* Both recovery getters are public on the contract and already in the ABI;

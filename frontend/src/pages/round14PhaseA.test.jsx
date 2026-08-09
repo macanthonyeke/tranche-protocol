@@ -406,13 +406,22 @@ describe('Round 16 Phase A — expiry advances while the confirm panel is alread
     return screen.getByRole('button', { name: /^confirm claim$/i })
   }
 
-  it('disables the confirm button once expiry crosses while the panel sits open, with no other input', async () => {
+  it('disables the confirm button at the exact instant expiry crosses, not just eventually afterward', async () => {
     const confirmBtn = await openConfirm()
     expect(confirmBtn).not.toBeDisabled()
 
-    // Nothing but time passing happens here — no keystroke, no props change.
-    // The proactive timer inside ClaimRecovery is what should catch this.
-    await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+    // openConfirm() already advanced the clock by RECOVERY_DEBOUNCE_MS + 50
+    // (450ms) settling the lookup, and the boundary sits at BASE_MS + 20s —
+    // so advancing by exactly 19,550ms more lands the mocked clock AT the
+    // margin-adjusted boundary, not generously past it. That distinction
+    // matters: Round 17 Phase B found the proactive timer's setTimeout
+    // fires at precisely this instant (remaining reaches 0 the moment
+    // Date.now() reaches the boundary), but isRecoveryExpired used to be a
+    // strict `>` — so the timer fired here while `expired` still read
+    // false, and the button stayed enabled until a LATER render caught up.
+    // Overshooting the boundary (the old 25,000ms advance) can't catch that
+    // gap: it never exercises the exact-equality instant at all.
+    await act(async () => { await vi.advanceTimersByTimeAsync(19_550) })
 
     expect(screen.getByRole('button', { name: /^confirm claim$/i })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: /^confirm claim$/i }))
