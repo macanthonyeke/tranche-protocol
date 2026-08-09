@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest'
      withdraws or transfers (:851-852, :897-898), silently.
 
    And shared: neither moves USDC. Both only re-key an internal balance. */
-import { proposeRecoveryConfirm, claimRecoveryConfirm, expiryOf } from './ProtocolSettings.jsx'
+import { proposeRecoveryConfirm, claimRecoveryConfirm, expiryOf, isRecoveryExpired } from './ProtocolSettings.jsx'
 import { buildContractInteraction } from '../utils/circleTheme.js'
 
 const FROM = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
@@ -40,6 +40,34 @@ describe('expiryOf', () => {
     expect(expiryOf(0n)).toBeNull()
     expect(expiryOf(undefined)).toBeNull()
     expect(expiryOf(null)).toBeNull()
+  })
+})
+
+/* Round 16 Phase A: isRecoveryExpired is the single source of truth both the
+   render-time gate and the click-time recheck call — client Date.now() vs
+   the contract's block.timestamp (TrancheProtocol.sol:940) are two different
+   clocks, so this treats a proposal as expired 5 minutes before the literal
+   on-chain deadline rather than checking equality against it. */
+describe('isRecoveryExpired', () => {
+  const expiry = Number(PROPOSED_AT) + 14 * DAY
+  const MARGIN_S = 5 * 60
+
+  it('is false with no standing proposal (expiry === null)', () => {
+    expect(isRecoveryExpired(null, (expiry + 1_000_000) * 1000)).toBe(false)
+  })
+
+  it('is false comfortably inside the window', () => {
+    expect(isRecoveryExpired(expiry, (expiry - DAY) * 1000)).toBe(false)
+  })
+
+  it('is false right up to the safety margin, and true once inside it', () => {
+    expect(isRecoveryExpired(expiry, (expiry - MARGIN_S - 1) * 1000)).toBe(false)
+    expect(isRecoveryExpired(expiry, (expiry - MARGIN_S + 1) * 1000)).toBe(true)
+  })
+
+  it('is true at and after the literal on-chain deadline', () => {
+    expect(isRecoveryExpired(expiry, expiry * 1000)).toBe(true)
+    expect(isRecoveryExpired(expiry, (expiry + DAY) * 1000)).toBe(true)
   })
 })
 

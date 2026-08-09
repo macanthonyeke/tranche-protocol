@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { isAddress } from 'viem'
 
 import PageHeader from '../components/PageHeader.jsx'
@@ -63,6 +63,21 @@ const RECOVERY_WINDOW_SECONDS = 14 * 24 * 60 * 60
 export function expiryOf(proposedAt) {
   const at = Number(proposedAt ?? 0)
   return at > 0 ? at + RECOVERY_WINDOW_SECONDS : null
+}
+
+/* Client Date.now() and the contract's block.timestamp (TrancheProtocol.sol
+   :940) are two different clocks. A proposal that reads as valid client-side
+   right up to the literal deadline can still revert on-chain if the two have
+   drifted apart, or the reverse. 5 minutes comfortably covers realistic
+   RPC-node/client clock drift without meaningfully shrinking a 14-day window
+   — the same shape as SESSION_TTL_MS in useAuth.jsx sitting a day under the
+   token's real 14-day life: a margin under the real boundary, not equality
+   against it. */
+const RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS = 5 * 60
+
+export function isRecoveryExpired(expiry, atMs = Date.now()) {
+  if (expiry === null) return false
+  return Math.floor(atMs / 1000) > expiry - RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS
 }
 
 /* Both recovery getters are public on the contract and already in the ABI;
@@ -842,7 +857,30 @@ function ClaimRecovery() {
   // read as genuinely expired is just as much a guaranteed revert as a
   // mismatched nominee, so it gates the same way.
   const expiry = expiryOf(proposedAt)
-  const expired = hasProposal && expiry !== null && Math.floor(Date.now() / 1000) > expiry
+
+  // `expired` is a plain const, recomputed on every render — but nothing
+  // forces a render purely from time passing, so if the confirm panel is
+  // opened on a valid proposal and the expiry boundary is crossed while it
+  // sits there, this would otherwise stay stale (`valid` below stuck at
+  // true) until some unrelated state change happens to re-render this
+  // component. The unused state slot below exists only to give a render a
+  // reason to happen at the actual boundary; see the effect below. It is a
+  // proactive UI nicety, not what makes signing safe — the click handler on
+  // the confirm button re-derives expiry from its own fresh timestamp
+  // regardless of whether this timer has fired yet.
+  const [, forceExpiryRecheck] = useState(0)
+  const expired = hasProposal && isRecoveryExpired(expiry, Date.now())
+
+  useEffect(() => {
+    if (expiry === null) return
+    const boundaryMs = (expiry - RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS) * 1000
+    const remaining = boundaryMs - Date.now()
+    if (remaining <= 0) return
+    // Single scheduled wakeup at the exact boundary, same shape as
+    // useAuth.jsx's SESSION_TTL_MS timer — not a poll.
+    const t = setTimeout(() => forceExpiryRecheck((n) => n + 1), remaining)
+    return () => clearTimeout(t)
+  }, [expiry])
 
   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
   // execution-time balance (:945), and drops the expiry line entirely. The
@@ -902,10 +940,25 @@ function ClaimRecovery() {
             <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
               className="btn-primary"
-              onClick={() => tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), {
-                loadingMessage: 'Claiming refund credit…',
-                confirm: claimRecoveryConfirm({ blacklisted, balance, expiry: expiryOf(proposedAt) })
-              })}
+              onClick={() => {
+                // `valid` (and the `disabled` prop below) reflect the last
+                // render, and the proactive timer above is best-effort — it
+                // can itself race this click. Re-derive expiry from a
+                // timestamp read right now, not whatever `valid` computed to
+                // last, so a proposal that expired in the gap since the last
+                // render cannot be signed regardless.
+                const stillValid =
+                  isAddress(blacklisted) && !readsPending && hasProposal &&
+                  !nomineeMismatch && !isRecoveryExpired(expiry, Date.now())
+                if (!stillValid) {
+                  forceExpiryRecheck((n) => n + 1)
+                  return
+                }
+                tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), {
+                  loadingMessage: 'Claiming refund credit…',
+                  confirm: claimRecoveryConfirm({ blacklisted, balance, expiry })
+                })
+              }}
               disabled={!valid || tx.isBusy}
             >
               {tx.isBusy ? 'Claiming…' : 'Confirm claim'}

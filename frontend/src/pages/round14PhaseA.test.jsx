@@ -367,3 +367,76 @@ describe('#3 — propose blocks a successfully-read zero balance', () => {
     expect(screen.getByRole('button', { name: /^propose transfer$/i })).not.toBeDisabled()
   })
 })
+
+/* Round 16 Phase A: a fourth Codex pass on Round 15's own expiry fix (#2
+   above) found the check only covers "already expired before this render" —
+   `expired` is a plain const, recomputed on every render, but nothing forces
+   a render purely from time passing. A valid proposal that expires while the
+   confirm panel is already open would leave the signing button looking live
+   on whatever `valid` was computed to before expiry, same shape as the
+   #1/#2 two-stage bypass above, just triggered by a clock instead of an
+   input. Needs fake timers (unlike every other describe in this file, which
+   uses real ones for the debounce) because the fix under test is itself a
+   timer, and the 5-minute safety margin (RECOVERY_EXPIRY_SAFETY_MARGIN_SECONDS
+   in ProtocolSettings.jsx) is too long to wait out for real. */
+describe('Round 16 Phase A — expiry advances while the confirm panel is already open', () => {
+  const MARGIN_S = 5 * 60
+  const BASE_MS = 1_800_000_000_000 // arbitrary fixed epoch, deterministic across runs
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(BASE_MS)
+    const nowSec = Math.floor(BASE_MS / 1000)
+    proposedOwners.current = { [ADDR_A.toLowerCase()]: authMock.current.address }
+    // Boundary (proposedAt + 14 days - margin) lands 20s after mount — long
+    // enough to settle the lookup and open confirm first, short enough to
+    // cross with one timer advance.
+    proposedAts.current = { [ADDR_A.toLowerCase()]: BigInt(nowSec - RECOVERY_WINDOW_DAYS * DAY + MARGIN_S + 20) }
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const openConfirm = async () => {
+    render(<ProtocolSettings />)
+    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+    await act(async () => { await vi.advanceTimersByTimeAsync(RECOVERY_DEBOUNCE_MS + 50) })
+    fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
+    return screen.getByRole('button', { name: /^confirm claim$/i })
+  }
+
+  it('disables the confirm button once expiry crosses while the panel sits open, with no other input', async () => {
+    const confirmBtn = await openConfirm()
+    expect(confirmBtn).not.toBeDisabled()
+
+    // Nothing but time passing happens here — no keystroke, no props change.
+    // The proactive timer inside ClaimRecovery is what should catch this.
+    await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+
+    expect(screen.getByRole('button', { name: /^confirm claim$/i })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /^confirm claim$/i }))
+    expect(runMock).not.toHaveBeenCalled()
+  })
+
+  it('blocks the click-time recheck even when the proactive timer has not fired yet', async () => {
+    const confirmBtn = await openConfirm()
+    expect(confirmBtn).not.toBeDisabled()
+
+    // Jump the clock past the boundary WITHOUT running any timers, so the
+    // component's own setTimeout has not fired and `valid`/`disabled` are
+    // still whatever they were computed to before the jump — isolates the
+    // click-handler's fresh-Date.now() recheck from the proactive-disable
+    // timer, which is a UI nicety, not the safety mechanism.
+    vi.setSystemTime(BASE_MS + 25_000)
+
+    fireEvent.click(screen.getByRole('button', { name: /^confirm claim$/i }))
+    expect(runMock).not.toHaveBeenCalled()
+  })
+
+  it('still allows claiming comfortably inside the window', async () => {
+    const confirmBtn = await openConfirm()
+    fireEvent.click(confirmBtn)
+    expect(runMock).toHaveBeenCalledTimes(1)
+  })
+})
