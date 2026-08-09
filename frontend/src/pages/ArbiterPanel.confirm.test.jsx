@@ -196,10 +196,16 @@ describe('timeoutCreditLines', () => {
 
   /* On a split escrow the freelancer's half fans out across the legs, so
      naming escrow.recipient would be wrong — but the dust and non-EVM
-     mechanics stay off the signing screen. */
-  it('describes the fan-out for a split escrow without naming one recipient', () => {
+     mechanics stay off the signing screen.
+
+     Round 16 #1: "divided across N split recipients" was itself an outcome
+     claim contradicted by the very next line's rounding exception — same
+     shape as payoutLines/resolveDisputeConfirm's split branches. Reframed
+     around the escrow's configuration instead. */
+  it('describes the split as a CONFIGURATION fact, not a headcount of who got credited', () => {
     const lines = timeoutCreditLines(escrow, SPLITS)
-    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients by their configured percentages")
+    expect(lines[0]).toBe('2 configured split entries, by their configured percentages')
+    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bpaid\b|\bcredit\w*\b|%|\d+ of \d+/i)
     expect(lines.join('\n')).not.toContain(RECIPIENT)
   })
 

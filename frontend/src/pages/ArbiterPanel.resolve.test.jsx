@@ -188,20 +188,23 @@ describe('the maxFee asymmetry between split and no-split', () => {
     expect(t).not.toContain('0.45 USDC')
   })
 
-  it('describes a split payout as a fan-out rather than one address, with no quantified delivery claim', () => {
+  it('describes a split payout as a CONFIGURATION fact, not a headcount of who got paid', () => {
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
     // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
-    // unsupported quantifier — no invariant guarantees a majority of legs
-    // clear the rounding/floor thresholds, that was a typical-case
-    // assumption dressed up as a description. The leading line is isolated
-    // rather than scanned for across the whole screen: this same escrow's
-    // output legitimately contains "Each cross-chain split leg pays..." a
-    // few lines down (the fee-cap disclosure), which is not the claim under
-    // test — checking the whole paramText for "each" would false-positive
-    // on it.
-    const fanOutLine = t.split('\n').find((line) => line.startsWith("Freelancer's share is divided across"))
-    expect(fanOutLine).toBe("Freelancer's share is divided across 2 split recipients, according to their configured shares and destinations")
-    expect(fanOutLine).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
+    // unsupported quantifier. Round 16 #1: "divided across N split
+    // recipients" (what Round 15 replaced it with) was STILL an outcome
+    // claim — it implies N recipients receive something, which rounding and
+    // the sub-floor divert can both make false. The leading line now states
+    // only the escrow's configuration (N split entries exist, with their own
+    // share/chain) and leaves what actually happens to the caveats that
+    // follow. The leading line is isolated rather than scanned for across
+    // the whole screen: this same escrow's output legitimately contains
+    // "Each cross-chain split leg pays..." a few lines down (the fee-cap
+    // disclosure), which is not the claim under test — checking the whole
+    // paramText for "each" would false-positive on it.
+    const fanOutLine = t.split('\n').find((line) => line.startsWith(`${splits.length} configured split entries`))
+    expect(fanOutLine).toBe('2 configured split entries, by their configured share and destination chain')
+    expect(fanOutLine).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
     expect(t).not.toContain(`sent to ${RECIPIENT}`)
   })
 })
@@ -235,6 +238,46 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
     const t = paramText(build())
     expect(t).not.toMatch(/forwarding fee/i)
     expect(t).not.toContain('credited on Arc instead')
+  })
+})
+
+/* Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+   division can floor a small enough milestone amount times a small enough
+   ruling to zero even though the arbiter assigned a genuinely nonzero
+   percentage. Before this fix the code branched purely on `bps > 0` and
+   would still walk through payout/chain/fee copy for a transfer that never
+   happens. Distinct from a per-split-leg rounding-to-zero (still disclosed
+   when applicable): this is the WHOLE freelancer amount, before any split
+   division even runs. */
+describe('Round 16 #3 — a nonzero bps can still round the whole share to zero', () => {
+  // 9999 base units (0.009999 USDC): small enough that a 0.01% ruling floors
+  // to exactly 0n, while what's left for the payer (9999n) is comfortably
+  // nonzero at 2-decimal display precision.
+  const tinyMilestone = { index: 1, amount: 9999n, state: 2 }
+  const at = (bps, over = {}) => build({ milestone: tinyMilestone, bps, ...over })
+
+  it('says nothing is paid despite the nonzero ruling, distinctly from a 0% ruling', () => {
+    // bps=1 (0.01%): floor(9999 * 1 / 10000) = 0.
+    const t = paramText(at(1))
+    expect(t).toContain("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
+    expect(t).not.toContain('Nothing is paid to the freelancer. The milestone is refunded in full.')
+    expect(t).toContain("Freelancer's share: 0.00 USDC before the protocol fee")
+    expect(t).toContain("Payer's share: 0.01 USDC — no protocol fee is taken on this half")
+  })
+
+  it('does not describe a payout destination, chain, or delivery fee for the zero transfer', () => {
+    const t = paramText(at(1, { escrow: escrowOn(BASE) }))
+    expect(t).not.toMatch(/share is sent to|forwarding fee|Circle's cross-chain delivery|transferred on Arc/)
+  })
+
+  it('rules normally once the share clears zero', () => {
+    // bps=5000 (50%): floor(9999 * 5000 / 10000) = 4999 — nonzero, so this
+    // takes the normal ruling path. The property under test is the BRANCH,
+    // not the formatted dollar string (4999 base units still displays as
+    // "0.00 USDC" at 2-decimal precision).
+    const t = paramText(at(5000, { escrow: escrowOn(BASE) }))
+    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
+    expect(t).not.toContain('rounds down to zero USDC')
   })
 })
 

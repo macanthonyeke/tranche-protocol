@@ -170,8 +170,12 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     expect(paramText(cross(5000))).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
   })
 
+  /* Round 16 #2: this caveat now lives inside payoutLines() itself rather
+     than being hand-rolled by this function — and payoutLines names
+     escrow.recipient explicitly as the divert destination, not the
+     redirectable mintRecipient (TrancheProtocol.sol:1292). */
   it('warns that a small share is credited on Arc instead of delivered', () => {
-    expect(paramText(cross(5000))).toContain("If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc instead of being delivered cross-chain.")
+    expect(paramText(cross(5000))).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
   })
 
   /* Per-leg on a split escrow (:1319), so the wording has to change with it. */
@@ -219,5 +223,50 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
       escrow: escrowOn(ARC), milestone, splits: [], bps: 5000, theirs: agreed(5000)
     }))
     expect(t).not.toContain('forwarding fee')
+  })
+})
+
+/* Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+   division can floor a small enough milestone amount times a small enough
+   bps to zero even though a genuinely nonzero percentage was agreed. Before
+   this fix, the code branched purely on `bps > 0` and would still walk
+   through payoutLines/chain/fee copy for a transfer that never happens,
+   showing "Freelancer's share: 0.00 USDC" alongside delivery details for a
+   $0 delivery. Distinct from a per-split-leg rounding-to-zero (still
+   disclosed via payoutLines when applicable): this is the WHOLE freelancer
+   amount, before any split division even runs. */
+describe('Round 16 #3 — a nonzero bps can still round the whole share to zero', () => {
+  // 9999 base units (0.009999 USDC): small enough that a 0.01% ruling floors
+  // to exactly 0n in integer division, while what's LEFT for the payer
+  // (9999n) is comfortably nonzero at 2-decimal display precision.
+  const tinyMilestone = { index: 1, amount: 9999n, state: 2 }
+  const at = (bps, over = {}) => mutualSettleConfirm({
+    escrow: escrowOn(BASE), milestone: tinyMilestone, splits: [], bps, theirs: agreed(bps), ...over
+  })
+
+  it('says nothing is paid despite the nonzero share, distinctly from the 0% ruling', () => {
+    // bps=1 (0.01%): floor(9999 * 1 / 10000) = 0.
+    const t = paramText(at(1))
+    expect(t).toContain("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
+    expect(t).not.toContain('Nothing is paid to the freelancer. The milestone is refunded in full.')
+    expect(t).toContain("Freelancer's share: 0.00 USDC before the protocol fee")
+    expect(t).toContain("Payer's share: 0.01 USDC — no protocol fee is taken on this half")
+  })
+
+  it('does not describe a payout destination, chain, or delivery fee for the zero transfer', () => {
+    const t = paramText(at(1, { escrow: escrowOn(BASE) }))
+    expect(t).not.toMatch(/Paid to:|Paid on:|forwarding fee|Circle's cross-chain delivery|transferred on Arc/)
+  })
+
+  it('pays the freelancer normally once the share clears zero', () => {
+    // bps=5000 (50%): floor(9999 * 5000 / 10000) = 4999 — nonzero, so this
+    // takes the normal payout path. The property under test is which BRANCH
+    // runs, not the formatted dollar string (4999 base units still displays
+    // as "0.00 USDC" at 2-decimal precision, which is exactly why the
+    // branch condition checks the real recipientShare, not the display).
+    const t = paramText(at(5000))
+    expect(t).toContain('Paid to:')
+    expect(t).toContain('Paid on:')
+    expect(t).not.toContain('rounds down to zero USDC')
   })
 })

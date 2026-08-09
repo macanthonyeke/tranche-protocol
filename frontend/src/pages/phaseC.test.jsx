@@ -223,11 +223,14 @@ describe('#11 — a configured split recipient does not always receive value', (
   it('drops the "each on their own chain" promise from the payout line', () => {
     const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
     // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
-    // unsupported quantifier — no invariant guarantees a majority of legs
-    // clear the rounding/floor thresholds. The leading line now describes
-    // the mechanism instead and asserts no fraction at all.
-    expect(lines[0]).toBe('Paid to: 2 split recipients, according to their configured shares and destinations')
-    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
+    // unsupported quantifier. Round 16 #1: "Paid to: N split recipients"
+    // (what Round 15 replaced it with) was STILL an outcome claim — it
+    // asserts N recipients were paid, which rounding and the sub-floor
+    // divert can both make false. The leading line now states only the
+    // escrow's CONFIGURATION (N split entries exist, with their own
+    // share/chain), not a headcount of who got paid.
+    expect(lines[0]).toBe('2 configured split entries, by their configured share and destination chain')
+    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
     expect(lines.join('\n')).not.toMatch(/each (on their own|to their configured) chain/)
   })
 

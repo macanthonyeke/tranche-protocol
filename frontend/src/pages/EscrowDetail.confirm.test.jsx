@@ -46,25 +46,59 @@ describe('payoutLines', () => {
   /* A split escrow pays each leg to its own address on its own domain. Naming
      escrow.mintRecipient there would put a single address on the screen that
      is not where the money goes. */
-  it('describes the fan-out for a split escrow and names no individual recipient', () => {
+  it('describes the split as a CONFIGURATION fact, not a headcount of who got paid', () => {
     const lines = payoutLines(escrow, SPLITS)
 
     // Round 15 #11: "most delivered" was itself still an unsupported
     // quantifier — nothing in the contract guarantees a majority of legs
-    // clear the rounding/floor thresholds. Reworded to describe the
-    // mechanism (paid per configured shares/destinations) without asserting
-    // any fraction, and the rounding caveat below it stays a plain fact
-    // rather than something the leading line has to avoid contradicting.
+    // clear the rounding/floor thresholds. Round 16 #1: "Paid to: N split
+    // recipients" (what Round 15 replaced it with) was STILL an outcome
+    // claim — it asserts N recipients were paid, which rounding and the
+    // sub-floor divert can both make false. The leading line now states only
+    // the escrow's configuration (N split entries exist, with their own
+    // share/chain), leaving what actually happens to the caveats below.
     expect(lines).toEqual([
-      'Paid to: 2 split recipients, according to their configured shares and destinations',
+      '2 configured split entries, by their configured share and destination chain',
       'A recipient whose share rounds down to zero is paid nothing.'
     ])
-    // No quantifier at all in the leading line — checked for absence, not
-    // just replaced with new exact wording, so a future rewrite can't
-    // reintroduce "most"/"each"/a fraction without this catching it.
-    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
+    // No claim of who got paid, or how many, at all in the leading line —
+    // checked for absence, not just replaced with new exact wording, so a
+    // future rewrite can't reintroduce "most"/"each"/"paid to N" without
+    // this catching it.
+    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
     expect(lines.join('\n')).not.toContain(RECIPIENT)
     expect(lines.join('\n')).not.toContain(FALLBACK_RECIPIENT)
+  })
+
+  /* Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero caveat
+     above — a nonzero cross-chain share that still can't clear this
+     escrow's forwarding-fee floor lands as an Arc credit instead of its
+     configured chain (TrancheProtocol.sol:1291, :1319). Only surfaces when
+     the caller says the sub-floor divert is actually reachable (`partial`
+     AND `crossChain`) — a full release can never hit it (see the function's
+     own doc comment), so omitting the options must not silently print a
+     caveat that does not apply to that call. */
+  describe('the sub-floor divert-to-Arc caveat', () => {
+    it('is absent by default (a full release cannot reach it)', () => {
+      expect(payoutLines(escrow, SPLITS).join('\n')).not.toMatch(/credited on Arc/i)
+      expect(payoutLines(escrow, []).join('\n')).not.toMatch(/credited on Arc/i)
+    })
+
+    it('is present, and distinct from the rounds-to-zero caveat, for a reachable split payout', () => {
+      const lines = payoutLines(escrow, SPLITS, { partial: true, crossChain: true, floor: 200000n })
+      expect(lines).toContain('A recipient whose share rounds down to zero is paid nothing.')
+      expect(lines).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+    })
+
+    it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
+      const lines = payoutLines(escrow, [], { partial: true, crossChain: true, floor: 200000n })
+      expect(lines).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
+    })
+
+    it('stays absent when crossChain is false even if partial is true (an Arc leg is never diverted)', () => {
+      expect(payoutLines(escrow, SPLITS, { partial: true, crossChain: false, floor: 200000n }).join('\n'))
+        .not.toMatch(/credited on Arc/i)
+    })
   })
 
   it('decodes mintRecipient and names the destination chain when there is no split', () => {

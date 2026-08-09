@@ -1185,13 +1185,24 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
 /* ---------- Split recipients ----------
    Only present when the escrow was created with a multi-party split. Each
    released milestone's remainder (after the protocol fee) is divided across
-   these recipients by their bps share, each on its own CCTP destination. */
+   these recipients by their bps share, each configured with its own CCTP
+   destination.
+
+   Round 16 #4: the caption used to claim the outcome directly — "each on
+   its own destination chain" — the same shape as #11's "paid to N
+   recipients": true of the configuration, not guaranteed of any one
+   release. A share can round to zero (nothing paid) or land at-or-below
+   the forwarding-fee floor (credited on Arc instead of its configured
+   chain) — see payoutLines' caveats on the actual release/settle screens.
+   This caption now states only the configuration fact and points at where
+   the real disclosure lives, rather than repeating it here at a length a
+   caption card can't hold. */
 function SplitRecipients({ splits }) {
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
       <p className="text-xs text-ink-2 leading-relaxed">
-        Released funds are divided across these wallets by share, each on its own destination chain.
+        These wallets are configured with their own share and destination chain. A share can round to zero or fall below the delivery floor — see the payout details when a milestone releases or settles.
       </p>
       <div className="flex flex-col">
         {splits.map((s, i) => {
@@ -2272,6 +2283,14 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   const crossChain = settlementIsCrossChain(escrow, splits)
   const floor = escrow.escrowCctpForwardFee ?? 0n
   const partial = bps > 0 && bps < 10_000
+  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+  // division can floor a small enough milestone amount times a small enough
+  // bps to zero even though a genuinely nonzero percentage was agreed.
+  // Distinct from a per-leg rounding-to-zero (payoutLines already discloses
+  // that one when it applies): here NOTHING reaches the freelancer at all,
+  // so this gets its own branch below rather than walking through
+  // delivery/chain/fee copy for a transfer that never happens.
+  const recipientGetsPaid = bps > 0 && recipientShare > 0n
 
   const params = [
     milestoneLine,
@@ -2284,8 +2303,8 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   if (bps < 10_000) {
     params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
   }
-  if (bps > 0) {
-    params.push(...payoutLines(escrow, splits))
+  if (recipientGetsPaid) {
+    params.push(...payoutLines(escrow, splits, { partial, crossChain, floor }))
     // Three different arrival behaviours hide behind "pays out": an Arc leg is
     // a safeTransfer inside this transaction (:1343-1346), a cross-chain leg is
     // a burn that Circle mints minutes later, and the payer's half is a credit
@@ -2297,6 +2316,8 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
         : "The freelancer's share is transferred on Arc as this transaction executes."
     )
     params.push("The protocol fee is taken from the freelancer's share only.")
+  } else if (bps > 0) {
+    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
   } else {
     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
   }
@@ -2306,18 +2327,11 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     params.push(...refundToLines(escrow))
     params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
   }
-  if (crossChain && bps > 0) {
+  if (crossChain && recipientGetsPaid) {
     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
     // Circle deducts its actual forwarding fee — which may be less — from the
     // burned amount on the destination (TrancheProtocol.sol:874-877).
     params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
-    if (partial) {
-      params.push(
-        splits?.length > 0
-          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
-          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
-      )
-    }
   }
   params.push('This cannot be undone.')
 
@@ -2906,27 +2920,64 @@ export function refundToLines(escrow) {
  * mapping with no getter. The only bps the frontend can see is the live global
  * from getProtocolConfig(), which drifts from the snapshot the moment an admin
  * calls setProtocolFee. A wrong number on a confirm screen is worse than none —
- * same reasoning as networkFee in utils/circleTheme.js. */
-export function payoutLines(escrow, splits) {
+ * same reasoning as networkFee in utils/circleTheme.js.
+ *
+ * `partial`/`crossChain`/`floor` are optional context from a caller that
+ * knows whether Finding 3's sub-floor divert-to-Arc is reachable for THIS
+ * call (TrancheProtocol.sol:1291, :1319) — a full release (approveRelease /
+ * release) can never hit it, by construction of the deposit-time F2 floor
+ * check plus the F3 redirect guard, so callers that only ever pay the full
+ * amount simply omit them and get the plain description. Round 16 #2: this
+ * caveat used to be hand-rolled separately by mutualSettleConfirm after
+ * calling this function, duplicating logic resolveDisputeConfirm also
+ * hand-rolls independently — the exact "same fact, two places" shape Phase B
+ * of this round fixed for the redirect screens. Owning it here means no
+ * future caller can forget it. */
+export function payoutLines(escrow, splits, { partial = false, crossChain = false, floor = 0n } = {}) {
   if (splits?.length > 0) {
-    // Round 15 #11: "most delivered" was still a quantified claim nothing in
-    // the contract backs — no invariant guarantees a majority of legs clear
-    // the rounding floor, that was a typical-case assumption dressed up as a
-    // description. Describes the mechanism instead and asserts no fraction
-    // at all: a leg whose share rounds down to zero is skipped outright by
-    // the `share > 0` guard (:1312), so it is paid nothing and reaches no
-    // chain at all — detailed in the line below, which states the actual
-    // exception rather than the leading claim guessing how many it affects.
-    return [
-      `Paid to: ${splits.length} split recipients, according to their configured shares and destinations`,
+    // Round 15 #11 / Round 16 #1: "most delivered" was still a quantified
+    // claim nothing in the contract backs, and even "Paid to: N split
+    // recipients" (what Round 15 replaced it with) is itself an outcome
+    // claim — it asserts N recipients were paid, which rounding and the
+    // sub-floor divert below can both make false. Describes the escrow's
+    // CONFIGURATION instead — it has N split entries, each with its own
+    // percentage and chain — and leaves what actually happens to each to
+    // the caveats that follow, rather than asserting a headcount up front.
+    const lines = [
+      `${splits.length} configured split entries, by their configured share and destination chain`,
       'A recipient whose share rounds down to zero is paid nothing.'
     ]
+    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
+    // above — a nonzero share that still can't clear this escrow's CCTP
+    // forwarding-fee floor lands as an Arc credit instead of reaching its
+    // configured chain (:1319). Conflating the two would itself be
+    // inaccurate: one is integer rounding, the other is the forwarding
+    // floor, and they can fire independently of each other.
+    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
+    // above — a nonzero share that still can't clear this escrow's CCTP
+    // forwarding-fee floor lands as an Arc credit instead of reaching its
+    // configured chain (:1319). Conflating the two would itself be
+    // inaccurate: one is integer rounding, the other is the forwarding
+    // floor, and they can fire independently of each other.
+    if (partial && crossChain) {
+      lines.push(`Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
+    }
+    return lines
   }
   const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
-  return [
+  const lines = [
     `Paid to: ${addr}`,
     `Paid on: ${getDomainName(Number(escrow.destinationDomain))}`
   ]
+  if (partial && crossChain) {
+    // Credited to escrow.recipient specifically, NOT `addr` above — the
+    // divert targets refundBalances[e.recipient] on-chain (:1292), the
+    // pre-redirect authorization identity, even when mintRecipient has since
+    // been redirected elsewhere. See ArbiterPanel.jsx's payoutAddress() for
+    // the same distinction on the no-split path.
+    lines.push(`If the amount after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
+  }
+  return lines
 }
 
 // Picks the single highest-priority action available to a given caller role

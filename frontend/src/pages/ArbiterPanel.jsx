@@ -440,11 +440,16 @@ function EvidenceHashRow({ label, hash }) {
 export function timeoutCreditLines(escrow, splits) {
   return [
     ...(splits?.length > 0
-      // Not every configured recipient necessarily gets something: the credit
-      // loop is guarded by `share > 0` (:608), so a leg whose proportional
-      // share rounds down to zero is skipped entirely.
+      // Round 16 #1: found via the same grep #4 asked for, not itself named
+      // in scope, but the identical shape — "divided across N split
+      // recipients" is an outcome claim the very next line's exception
+      // already contradicts. Not every configured recipient necessarily
+      // gets something: the credit loop is guarded by `share > 0` (:608),
+      // so a leg whose proportional share rounds down to zero is skipped
+      // entirely. Reframed around the CONFIGURATION, same as payoutLines
+      // and resolveDisputeConfirm's split branches.
       ? [
-        `Freelancer's share is divided across ${splits.length} split recipients by their configured percentages`,
+        `${splits.length} configured split entries, by their configured percentages`,
         'A recipient whose share rounds down to zero is credited nothing.'
       ]
       : [`Freelancer's share goes to ${escrow.recipient}`]),
@@ -579,6 +584,14 @@ export function resolveDisputeConfirm({
   const crossChain = resolveIsCrossChain(escrow, splits)
   const floor = escrow.escrowCctpForwardFee ?? 0n
   const partial = bps > 0 && bps < 10_000
+  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+  // division can floor a small enough milestone amount times a small enough
+  // bps to zero even though the arbiter's ruling assigned a genuinely
+  // nonzero percentage. Distinct from a per-leg rounding-to-zero (still
+  // disclosed below when it applies): here nothing reaches the freelancer
+  // at all, so it gets its own branch rather than walking through
+  // delivery/chain/fee copy for a transfer that never happens.
+  const recipientGetsPaid = bps > 0 && recipientShare > 0n
 
   const params = [
     `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)} in dispute`,
@@ -592,20 +605,18 @@ export function resolveDisputeConfirm({
     params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
   }
 
-  if (bps > 0) {
+  if (recipientGetsPaid) {
     params.push(
       splits?.length > 0
-        // Round 15 #11: "most delivered" was still a quantified claim
-        // nothing in the contract backs — no invariant guarantees a majority
-        // of legs clear the rounding/floor thresholds, that was a
-        // typical-case assumption dressed up as a description. Describes the
-        // mechanism instead (paid per their configured shares/destinations)
-        // and asserts no fraction at all: a leg rounding to zero is skipped
-        // (:1312), and on a partial ruling a sub-floor cross-chain leg is
-        // credited on Arc instead (:1319) — both detailed in the lines
-        // pushed below, which state the actual exceptions rather than the
-        // leading claim guessing how many recipients they affect.
-        ? `Freelancer's share is divided across ${splits.length} split recipients, according to their configured shares and destinations`
+        // Round 15 #11 / Round 16 #1: "most delivered" was a quantified
+        // claim nothing in the contract backs, and "divided across N split
+        // recipients" (what Round 15 replaced it with) is itself still an
+        // outcome claim — it implies N recipients receive something, which
+        // rounding and the sub-floor divert below can both make false.
+        // Describes the escrow's CONFIGURATION instead — N split entries,
+        // each with its own percentage and chain — and leaves what actually
+        // happens to the caveats pushed below rather than a headcount here.
+        ? `${splits.length} configured split entries, by their configured share and destination chain`
         // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
         // updateReceivingAddress rewrites mintRecipient and leaves recipient
         // untouched (:986-990), so the two diverge the moment a freelancer
@@ -625,6 +636,8 @@ export function resolveDisputeConfirm({
         : "The freelancer's share is transferred on Arc as this transaction executes."
     )
     params.push("The protocol fee is taken from the freelancer's share only.")
+  } else if (bps > 0) {
+    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
   } else {
     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
   }
@@ -633,7 +646,7 @@ export function resolveDisputeConfirm({
     params.push(`Payer's share is credited to ${escrow.refundTo} as a withdrawable balance on Arc, not sent to a wallet.`)
   }
 
-  if (crossChain && bps > 0) {
+  if (crossChain && recipientGetsPaid) {
     // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
     // at the snapshot floor regardless of what was quoted. Name the one that
     // actually applies rather than both.
