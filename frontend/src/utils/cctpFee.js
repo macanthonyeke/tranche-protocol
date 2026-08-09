@@ -50,6 +50,34 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
  * @param {'low'|'med'|'high'} [p.level]
  * @returns {Promise<bigint>}
  */
+/**
+ * A lower bound on what the contract will actually remainder after its
+ * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
+ * (escrowFeeBps has no getter — see TrancheProtocol.sol:117). Every escrow's
+ * snapshot was checked against `maxProtocolFeeBps` (TrancheProtocol.sol:191,
+ * MAX_PROTOCOL_FEE) at the moment `setProtocolFee` set it, and that ceiling
+ * itself never changes — so the real per-escrow rate is always <= this
+ * ceiling, meaning the real fee is always <= worstCaseFee and the real
+ * remainder is always >= what this returns. Passing THIS as `burnAmount` to
+ * {resolveMaxFee} therefore guarantees the maxFee it resolves can never come
+ * in at or above the true on-chain remainder — closing the revert path
+ * rather than narrowing it, at the cost of being more conservative than
+ * necessary for any escrow funded below the ceiling rate.
+ * @param {bigint} amount             Gross amount the protocol fee is cut from.
+ * @param {bigint} [maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
+ *   Defaults to 500 (TrancheProtocol.sol:23's hardcoded MAX_PROTOCOL_FEE,
+ *   this contract's actual ceiling) for the brief window before
+ *   getProtocolConfig() resolves — NOT to 0, which would assume no fee at
+ *   all and overestimate the remainder, reproducing the exact bug this
+ *   function exists to close.
+ * @returns {bigint}
+ */
+export function worstCaseRemainder(amount, maxProtocolFeeBps) {
+  const ceiling = maxProtocolFeeBps ?? 500n
+  const worstCaseFee = (BigInt(amount) * BigInt(ceiling)) / 10_000n
+  return BigInt(amount) - worstCaseFee
+}
+
 export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, burnAmount, level = 'high' }) {
   if (Number(destinationDomain) === ARC_DOMAIN) return 0n
   // A pure refund / 0% recipient share triggers no recipient burn, so the

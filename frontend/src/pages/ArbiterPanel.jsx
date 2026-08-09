@@ -15,7 +15,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
-import { resolveMaxFee } from '../utils/cctpFee.js'
+import { resolveMaxFee, worstCaseRemainder } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
@@ -544,6 +544,63 @@ function resolveIsCrossChain(escrow, splits) {
   return Number(escrow.destinationDomain) !== ARC_DOMAIN
 }
 
+/* Round 18 Phase B. Decides what maxFee resolveDispute should submit, reusing
+   resolveIsCrossChain — the SAME split-aware determination the confirm
+   descriptor above already uses — instead of the raw escrow.destinationDomain
+   the submission code used to read independently. That gap meant an Arc-root
+   escrow with a cross-chain split leg would be quoted 0 by the raw check
+   while _assertCrossChainFee (TrancheProtocol.sol:1382) correctly saw the
+   split leg and required a floor-clearing value, so submission and descriptor
+   could disagree in a way that guarantees a revert.
+
+   Synchronous and pure on purpose: this test harness cannot execute real
+   Solidity or mock a live Circle fetch meaningfully, but it CAN verify this
+   decision — which of the three branches fires, and exactly what gets
+   submitted or quoted — independently of the component and the network call.
+   Returns either a maxFee ready to submit, or a signal that a live Circle
+   quote is required plus the exact params to fetch it with; the caller does
+   that async step itself. */
+export function resolveDisputeMaxFeePlan({ escrow, splits, bps, recipientAmount, maxProtocolFeeBps }) {
+  const crossChain = resolveIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+
+  // _assertCrossChainFee only runs at all when bps > 0 (TrancheProtocol.sol:
+  // 510) — at bps 0 there is no recipient share and nothing to clear a floor
+  // for.
+  if (!crossChain || !(bps > 0)) return { maxFee: 0n }
+
+  // Two distinct reasons a live Circle quote would be pointless here, both
+  // landing on the same fix — submit the escrow's own floor directly:
+  //  - Split legs always burn at the e.escrowCctpForwardFee snapshot
+  //    regardless of what's submitted (settled decision #7,
+  //    TrancheProtocol.sol:1324) — the caller's maxFee only has to clear
+  //    _assertCrossChainFee's floor check, it is never the value Circle
+  //    actually forwards against.
+  //  - recipientAmount rounding to zero (bps > 0 but the milestone amount is
+  //    too small to survive integer division) means no burn happens at all
+  //    (TrancheProtocol.sol:1248's `if (recipientAmount > 0)` guard) — yet
+  //    _assertCrossChainFee still ran because it gates on bps alone, so a
+  //    floor-clearing value is still required to avoid MaxFeeBelowFloor even
+  //    though nothing is delivered.
+  if (splits?.length > 0 || recipientAmount === 0n) return { maxFee: floor }
+
+  // The one case where the submitted maxFee genuinely governs a burn
+  // (TrancheProtocol.sol:1298) — it must clear Circle's live forwarding fee
+  // or the mint can fail with INSUFFICIENT_FEE even though this transaction
+  // itself succeeds. worstCaseRemainder uses the immutable protocol-fee
+  // ceiling instead of the live global rate, so the estimated remainder can
+  // never come in ABOVE the real snapshotted one — closing the
+  // MaxFeeExceedsBurnAmount revert rather than narrowing it.
+  return {
+    needsLiveQuote: true,
+    quoteParams: {
+      destinationDomain: escrow.destinationDomain,
+      escrowCctpForwardFee: floor,
+      burnAmount: worstCaseRemainder(recipientAmount, maxProtocolFeeBps)
+    }
+  }
+}
+
 /* VALUE-MOVING, and the last signing site in the project. This is the twin
    timeoutSettlementConfirm above warns about — same panel, same milestone,
    opposite mechanics — so the two screens have to be impossible to mix up:
@@ -795,18 +852,21 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
     }
     setErr('')
 
-    let maxFee
-    try {
-      const feeBps = config?.protocolFeeBps ?? 0n
-      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
-      maxFee = await resolveMaxFee({
-        destinationDomain: escrow.destinationDomain,
-        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-        burnAmount: recipientAmount - protocolFee
-      })
-    } catch (e) {
-      toast.error(e.message || "Couldn't check delivery fees. Please try again.")
-      return
+    // Round 18 Phase B: see resolveDisputeMaxFeePlan for why this reuses
+    // resolveIsCrossChain instead of reading escrow.destinationDomain
+    // directly, and why the split / rounds-to-zero cases skip Circle
+    // entirely. Only the genuine no-split cross-chain burn needs the network.
+    const plan = resolveDisputeMaxFeePlan({
+      escrow, splits, bps, recipientAmount, maxProtocolFeeBps: config?.maxProtocolFeeBps
+    })
+    let maxFee = plan.maxFee ?? 0n
+    if (plan.needsLiveQuote) {
+      try {
+        maxFee = await resolveMaxFee(plan.quoteParams)
+      } catch (e) {
+        toast.error(e.message || "Couldn't check delivery fees. Please try again.")
+        return
+      }
     }
 
     const txHash = await tx.run(

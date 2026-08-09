@@ -19,7 +19,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { useToast } from '../hooks/useToast.jsx'
-import { resolveMaxFee } from '../utils/cctpFee.js'
+import { resolveMaxFee, worstCaseRemainder } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
@@ -2230,6 +2230,60 @@ function settlementIsCrossChain(escrow, splits) {
   return Number(escrow.destinationDomain) !== ARC_DOMAIN
 }
 
+/* Round 18 Phase B. Decides what maxFee approveRelease / release should
+   submit, reusing settlementIsCrossChain — the SAME split-aware determination
+   the confirm descriptor above already uses — instead of the raw
+   escrow.destinationDomain the submission code used to read independently.
+   That gap meant an Arc-root escrow with a cross-chain split leg would be
+   quoted 0 by the raw check while _assertCrossChainFee
+   (TrancheProtocol.sol:1382) correctly saw the split leg and required a
+   floor-clearing value, so submission and descriptor could disagree in a way
+   that guarantees a revert.
+
+   approveRelease and release() always pass the FULL milestone.amount — no
+   bps scaling, so unlike resolveDispute there is no rounds-to-zero case to
+   gate on here.
+
+   Synchronous and pure on purpose, same reasoning as resolveDisputeMaxFeePlan
+   in ArbiterPanel.jsx: this test harness cannot execute real Solidity or
+   mock a live Circle fetch meaningfully, but it CAN verify this decision
+   independently of the component and the network call. Returns either a
+   maxFee ready to submit, or a signal that a live Circle quote is required
+   plus the exact params to fetch it with; the caller does that async step
+   itself. */
+export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps }) {
+  const crossChain = settlementIsCrossChain(escrow, splits)
+  if (!crossChain) return { maxFee: 0n }
+
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+
+  // Split legs always burn at the e.escrowCctpForwardFee snapshot regardless
+  // of what's submitted (settled decision #7, TrancheProtocol.sol:1324) — the
+  // caller's maxFee only has to clear _assertCrossChainFee's floor check, it
+  // is never the value Circle actually forwards against, so quoting Circle
+  // live here would fetch a number the contract never uses.
+  if (splits?.length > 0) return { maxFee: floor }
+
+  // The one case where the submitted maxFee genuinely governs a burn
+  // (approveRelease, TrancheProtocol.sol:647 → :1298) — it must clear
+  // Circle's live forwarding fee or the mint can fail with INSUFFICIENT_FEE
+  // even though this transaction itself succeeds. worstCaseRemainder uses the
+  // immutable protocol-fee ceiling instead of the live global rate, so the
+  // estimated remainder can never come in ABOVE the real snapshotted one —
+  // closing the MaxFeeExceedsBurnAmount revert rather than narrowing it.
+  // release() ignores whatever is submitted here and substitutes the
+  // snapshot regardless (:674), so this branch is harmless (if unnecessary)
+  // on that path — it only ever affects approveRelease.
+  return {
+    needsLiveQuote: true,
+    quoteParams: {
+      destinationDomain: escrow.destinationDomain,
+      escrowCctpForwardFee: floor,
+      burnAmount: worstCaseRemainder(milestoneAmount, maxProtocolFeeBps)
+    }
+  }
+}
+
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
@@ -3260,25 +3314,29 @@ function MilestoneAction({
     // actually govern an approveRelease burn.
     let quotedMaxFee
     if (action.needsForwardFee) {
-      // Whole milestone is released; burn amount is the milestone minus the
-      // protocol fee. Quote Circle's live forwarding fee for the band check.
-      // This runs before the wallet prompt, so useTx won't toast its failures.
-      try {
-        const feeBps = config?.protocolFeeBps ?? 0n
-        const protocolFee = (milestone.amount * BigInt(feeBps)) / 10_000n
-        const maxFee = await resolveMaxFee({
-          destinationDomain: escrow.destinationDomain,
-          escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-          burnAmount: milestone.amount - protocolFee
-        })
-        args = [...action.args, maxFee]
-        quotedMaxFee = maxFee
-      } catch (err) {
-        clearOpt(`milestone_${milestone.index}`)
-        setActiveKey(null)
-        toast.error(err.message || "Couldn't check delivery fees. Please try again.")
-        return
+      // Round 18 Phase B: see releaseMaxFeePlan for why this reuses
+      // settlementIsCrossChain instead of reading escrow.destinationDomain
+      // directly, and why the split case skips Circle entirely. Only the
+      // genuine no-split cross-chain burn (approveRelease only — release()
+      // ignores this value regardless) needs the network. This runs before
+      // the wallet prompt, so useTx won't toast its failures.
+      const plan = releaseMaxFeePlan({
+        escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps
+      })
+      let maxFee = plan.maxFee ?? 0n
+      if (plan.needsLiveQuote) {
+        try {
+          maxFee = await resolveMaxFee(plan.quoteParams)
+        } catch (err) {
+          clearOpt(`milestone_${milestone.index}`)
+          setActiveKey(null)
+          toast.error(err.message || "Couldn't check delivery fees. Please try again.")
+          return
+        }
       }
+
+      args = [...action.args, maxFee]
+      quotedMaxFee = maxFee
     }
 
     try {
