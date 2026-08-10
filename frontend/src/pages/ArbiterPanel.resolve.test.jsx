@@ -258,7 +258,10 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
     // Round 18 Phase A #2: "a given split leg" implied every leg in the
     // configuration faces this floor check. An Arc leg never does
     // (TrancheProtocol.sol:1343, direct transfer) — scoped to cross-chain legs.
-    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+    // Round 19 Phase A: also scoped to a NONZERO share — Solidity skips a
+    // zero-share leg entirely (TrancheProtocol.sol:1310), so it is never
+    // credited, let alone credited on Arc.
+    expect(t).toContain("If a given cross-chain split leg's nonzero share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If that nonzero share does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
     // The old two-line shape (a fee line, then a separate divert caveat) is
     // gone — this is now one statement, not two adjacent ones.
     expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
@@ -280,7 +283,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+    expect(t).toContain("If a given cross-chain split leg's nonzero share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If that nonzero share does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
     // Never singles out one cross-chain domain, or "the split" as one unit —
     // the hedge has to hold for both cross-chain legs (BASE and Ethereum
     // Sepolia) simultaneously, regardless of what the Arc leg does.
@@ -298,7 +301,10 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
-    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
+    // Round 19 Phase A #1: scoped to "with a nonzero share" — Solidity skips
+    // a zero-share leg entirely (TrancheProtocol.sol:1310), it is never
+    // transferred, burned, or credited.
+    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
   })
 
@@ -312,8 +318,46 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
-    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+  })
+
+  /* Round 19 Phase A #3: a single-entry, all-cross-chain split has NO Arc leg
+     configured at all — the Arc-leg clause must not appear when there is
+     nothing for it to describe. */
+  it('omits the Arc-leg clause entirely for an all-cross-chain split with no Arc leg configured', () => {
+    const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
+    const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
+    expect(t).toContain('For any split leg with a nonzero share: a cross-chain leg leaves Arc on this transaction but only arrives once Circle\'s cross-chain delivery completes, which is not instant.')
+    expect(t).not.toContain('an Arc leg transfers immediately')
+    expect(t).not.toContain('Split legs on Arc')
+  })
+
+  /* Round 19 Phase A #1: a genuinely skewed split (1 bps / 9,999 bps) that
+     produces a real per-leg ZERO share on a small enough milestone, not the
+     50/50 or 50/30/20 splits Round 18's tests used (which never exercised
+     this). The tiny leg vanishes from Solidity's accounting entirely
+     (TrancheProtocol.sol:1310's `if (share > 0)` guard skips its whole
+     if/else) — it is not transferred, not burned, and not credited on Arc —
+     so the timing copy's "each"/"every"/"any" framing must not include it. */
+  it('does not claim a timing outcome for a leg whose share genuinely rounds to zero', () => {
+    // bps=10_000 (full release) makes recipientAmount == milestone.amount ==
+    // 9999. floor(9999 * 1 / 10_000) = 0 — the 1-bps leg's share genuinely
+    // rounds to zero, not merely a small nonzero number.
+    const tinyMilestone = { index: 1, amount: 9_999n, state: 2 }
+    const splits = [
+      { bps: 1n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }, // rounds to 0
+      { bps: 9_999n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(build({
+      escrow: escrowOn(BASE), milestone: tinyMilestone, splits, bps: 10_000, maxFee: 450000n
+    }))
+    // The nonzero cross-chain leg's timing is still stated correctly.
+    expect(t).toContain("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    // Nothing on screen claims the zero-share Arc leg is "transferred" —
+    // the "with a nonzero share" qualifier is exactly what prevents this
+    // from reading as a blanket claim about every configured leg.
+    expect(t).toContain('with a nonzero share')
   })
 
   /* With splits configured e.destinationDomain is not what the burn uses, so
@@ -333,6 +377,18 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
     const t = paramText(build())
     expect(t).not.toMatch(/forwarding fee/i)
     expect(t).not.toContain('credited on Arc instead')
+  })
+
+  /* Round 19 Phase A #1: an all-Arc split can have a zero-share leg too — the
+     "nonzero share" scoping applies here the same as the mixed-split
+     branches. No prior test pinned this exact branch's wording. */
+  it('scopes the all-Arc-split timing line to a nonzero share', () => {
+    const splits = [
+      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(build({ splits }))
+    expect(t).toContain('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
   })
 })
 

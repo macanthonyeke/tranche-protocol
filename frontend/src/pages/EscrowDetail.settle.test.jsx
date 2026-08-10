@@ -210,12 +210,15 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     const t = paramText(cross(5000, splits))
     // Round 18 Phase A #1: scoped to cross-chain legs — an Arc leg
     // (destinationDomain: ARC in this very fixture) never faces this floor
-    // check at all.
-    expect(t).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+    // check at all. Round 19 Phase A #2: also scoped to a NONZERO share —
+    // Solidity skips a zero-share leg entirely (TrancheProtocol.sol:1310),
+    // so it is never credited at all.
+    expect(t).toContain('Any cross-chain split leg whose nonzero share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
     // Round 18 Phase A #3: timing is per-leg-type for a split escrow, not one
     // outcome for the whole settlement — this fixture's Arc leg settles
-    // immediately regardless of what the cross-chain leg does.
-    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
+    // immediately regardless of what the cross-chain leg does. Round 19
+    // Phase A #1: scoped to "with a nonzero share" for the same reason.
+    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     // Round 18 Phase A #5: each delivered cross-chain leg carries its own
     // independent fee cap (:1324) — a settlement with more than one such leg
@@ -240,7 +243,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
       escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
     }))
     expect(t).toContain("Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of 0.20 USDC, deducted from that leg's own share. Legs that do not clear the floor are not charged.")
-    expect(t).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc')
+    expect(t).toContain('Any cross-chain split leg whose nonzero share falls to 0.20 USDC or less is credited on Arc')
   })
 
   /* Round 18 Phase A #4: a FULL (100%) split settlement can never reach the
@@ -255,13 +258,47 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     const t = paramText(mutualSettleConfirm({
       escrow: escrowOn(BASE), milestone, splits, bps: 10_000, theirs: agreed(10_000)
     }))
-    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     // Round 18 Phase A #5: each cross-chain split leg carries its own
     // independent fee cap (:1324) even on a full, non-divertable payout — not
     // one combined figure for the whole settlement.
     expect(t).toContain("Each cross-chain split leg costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and deducted from that leg's own share on arrival.")
     expect(t).not.toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+  })
+
+  /* Round 19 Phase A #3: a single-entry, all-cross-chain split has NO Arc leg
+     configured at all — the Arc-leg clause must not appear when there is
+     nothing for it to describe. */
+  it('omits the Arc-leg clause entirely for an all-cross-chain split with no Arc leg configured', () => {
+    const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
+    const t = paramText(mutualSettleConfirm({
+      escrow: escrowOn(BASE), milestone, splits, bps: 10_000, theirs: agreed(10_000)
+    }))
+    expect(t).toContain("For any split leg with a nonzero share: a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).not.toContain('an Arc leg transfers immediately')
+    expect(t).not.toContain('Split legs on Arc')
+  })
+
+  /* Round 19 Phase A #1: a genuinely skewed split (1 bps / 9,999 bps) that
+     produces a real per-leg ZERO share on a small enough milestone, not the
+     50/50 or 50/30/20 splits Round 18's tests used (which never exercised
+     this). floor(9999 * 1 / 10_000) = 0 — the 1-bps leg's share genuinely
+     rounds to zero. Solidity's `if (share > 0)` guard (TrancheProtocol.sol:
+     1310) skips its whole if/else — it is not transferred, not burned, and
+     not credited on Arc — so the timing copy's "any"/"a leg" framing must
+     not read as a claim about every configured leg. */
+  it('does not claim a timing outcome for a leg whose share genuinely rounds to zero', () => {
+    const tinyMilestone = { index: 1, amount: 9_999n, state: 2 }
+    const splits = [
+      { bps: 1n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }, // rounds to 0
+      { bps: 9_999n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+    ]
+    const t = paramText(mutualSettleConfirm({
+      escrow: escrowOn(BASE), milestone: tinyMilestone, splits, bps: 10_000, theirs: agreed(10_000)
+    }))
+    expect(t).toContain("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).toContain('with a nonzero share')
   })
 
   /* _assertCrossChainFee treats an escrow as cross-chain if ANY leg is, so an
@@ -276,6 +313,9 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
     }))
     expect(t).not.toContain('forwarding fee')
     expect(t).not.toContain('credited on Arc instead')
+    // Round 19 Phase A #1: scoped to "with a nonzero share" — same reason as
+    // the mixed-split branches, an all-Arc split can have a zero-share leg too.
+    expect(t).toContain('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
   })
 
   it('says nothing about the divert on a same-chain Arc escrow', () => {

@@ -2384,16 +2384,45 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
     // — this states timing per leg-type instead of one outcome for the whole
     // settlement whenever splits are configured.
     if (splits?.length > 0) {
+      // Round 19 Phase A #1/#3: two more gaps in the same fan-out reasoning.
+      // (a) Solidity's `if (share > 0)` guard (TrancheProtocol.sol:1310) skips
+      // a zero-share leg's whole if/else — it is never transferred, never
+      // burned, and never credited, so "each"/"every" here contradicted the
+      // rounds-to-zero disclosure already on screen (from payoutLines above,
+      // or the split leading line below). Scoped every clause to nonzero
+      // shares. (b) The Arc-leg clause was unconditional even for a split
+      // with NO Arc leg configured at all (e.g. a single-entry cross-chain
+      // split) — gated on hasArcLeg so it doesn't reference legs that don't
+      // exist in this escrow's configuration.
       if (!crossChain) {
-        params.push('Each split leg is transferred on Arc as this transaction executes.')
-      } else if (divertReachable) {
-        params.push(
-          "Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)."
-        )
+        params.push('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
       } else {
-        params.push(
-          "Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant."
-        )
+        // Round 19 Phase A follow-up: deliberately scoped to a CONFIGURED Arc
+        // leg, not one with a computed nonzero share. Computing the latter
+        // would mean replicating the contract's order-dependent per-leg split
+        // loop (TrancheProtocol.sol:1301-1312) against a remainder that
+        // depends on the per-escrow protocol-fee snapshot, which has no
+        // getter — any such check could only use a live-rate estimate, and
+        // could therefore FALSELY OMIT this clause for a leg that will
+        // actually receive a nonzero share. That failure mode (silently
+        // dropping true information) is worse than this honest-but-loosely-
+        // scoped statement, which stays true (if vacuously, for a leg that
+        // happens to round to zero) regardless of the real fee rate. Gating
+        // on the leg's configured bps > 0 instead was considered too, but
+        // rejected — it doesn't cover a leg with nonzero bps whose computed
+        // share still rounds to zero (the exact case the tests below exercise).
+        const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
+        const legClauses = []
+        if (hasArcLeg) legClauses.push('an Arc leg transfers immediately as part of this transaction')
+        if (divertReachable) {
+          legClauses.push(
+            "a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant",
+            'a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)'
+          )
+        } else {
+          legClauses.push("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant")
+        }
+        params.push(`For any split leg with a nonzero share: ${legClauses.join('; ')}.`)
       }
     } else if (divertReachable) {
       params.push(
@@ -3079,8 +3108,15 @@ export function payoutLines(escrow, splits, { partial = false, crossChain = fals
     // check at all, so wording it as if every leg risks the divert misstates
     // the Arc legs in the same configuration. Scoped to the legs that
     // actually face the check.
+    //
+    // Round 19 Phase A #2: "falls to X or less" still included a share that
+    // falls all the way to exactly zero — but Solidity's `if (share > 0)`
+    // guard (TrancheProtocol.sol:1310) skips a zero-share leg's whole
+    // if/else entirely, so it is never credited at all, let alone credited
+    // on Arc. That case is the rounds-to-zero line above's job, not this
+    // one's — scoped to nonzero so the two caveats describe disjoint cases.
     if (partial && crossChain) {
-      lines.push(`Any cross-chain split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
+      lines.push(`Any cross-chain split leg whose nonzero share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
     }
     return lines
   }

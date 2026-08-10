@@ -87,7 +87,11 @@ describe('payoutLines', () => {
     it('is present, and distinct from the rounds-to-zero caveat, for a reachable split payout', () => {
       const lines = payoutLines(escrow, SPLITS, { partial: true, crossChain: true, floor: 200000n })
       expect(lines).toContain('A recipient whose share rounds down to zero is paid nothing.')
-      expect(lines).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+      // Round 19 Phase A #2: scoped to a NONZERO share — Solidity's
+      // `if (share > 0)` guard (TrancheProtocol.sol:1310) skips a zero-share
+      // leg's whole if/else, so it is never credited at all. That case is
+      // the rounds-to-zero line's job, not this one's.
+      expect(lines).toContain('Any cross-chain split leg whose nonzero share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
     })
 
     it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
