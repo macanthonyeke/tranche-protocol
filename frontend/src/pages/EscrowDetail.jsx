@@ -1482,6 +1482,9 @@ function MilestoneRow({
   )
   const releaseTxs = useMilestoneReleaseTxs(escrow.id)
   const cctpTxHash = cctpTrack?.txHash || releaseTxs[milestone.index] || null
+  // Round 19 Phase C: split-aware, same as settlementIsCrossChain above — not
+  // the raw escrow.destinationDomain this used to read independently.
+  const trackingDomain = settlementTrackingDomain(escrow, splits)
 
   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
   // device, they write to localStorage and call onCrossChainRelease so we re-read.
@@ -1633,10 +1636,10 @@ function MilestoneRow({
                 (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
                   <TimeoutOutcomeCard milestone={milestone} role={role} />
                 )}
-              {milestone.state === 3 && cctpTxHash && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
+              {milestone.state === 3 && cctpTxHash && trackingDomain != null && (
                 <CrossChainDelivery
                   txHash={cctpTxHash}
-                  destinationDomain={escrow.destinationDomain}
+                  destinationDomain={trackingDomain}
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
                 />
@@ -2230,6 +2233,23 @@ function settlementIsCrossChain(escrow, splits) {
   return Number(escrow.destinationDomain) !== ARC_DOMAIN
 }
 
+/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
+   tracking — null when settlementIsCrossChain says there's nothing to track.
+   Reading the root escrow.destinationDomain here (the bug this replaces)
+   silently disagreed with settlementIsCrossChain whenever an Arc-root
+   escrow's cross-chain-ness came from a split leg instead: tracking would
+   never start even though the burn genuinely leaves Arc. Picking the first
+   non-Arc split leg when one exists keeps the domain passed down consistent
+   with why settlementIsCrossChain said this is cross-chain in the first
+   place. */
+export function settlementTrackingDomain(escrow, splits) {
+  if (!settlementIsCrossChain(escrow, splits)) return null
+  if (splits?.length > 0) {
+    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
+  }
+  return escrow.destinationDomain
+}
+
 /* Round 18 Phase B. Decides what maxFee approveRelease / release should
    submit, reusing settlementIsCrossChain — the SAME split-aware determination
    the confirm descriptor above already uses — instead of the raw
@@ -2535,10 +2555,13 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
       }
     )
-    if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+    // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
+    // not the raw escrow.destinationDomain this used to read independently.
+    const trackingDomain = settlementTrackingDomain(escrow, splits)
+    if (txHash && trackingDomain != null) {
       localStorage.setItem(
         cctpTrackKey(escrow.id, milestone.index),
-        JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
+        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
       )
       onCrossChainRelease?.()
     }
@@ -3358,10 +3381,14 @@ function MilestoneAction({
         loadingMessage: 'Check your wallet.',
         confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
       })
-      if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+      // Round 19 Phase C: split-aware, same as releaseMaxFeePlan/
+      // settlementIsCrossChain above — not the raw escrow.destinationDomain
+      // this used to read independently.
+      const trackingDomain = settlementTrackingDomain(escrow, splits)
+      if (txHash && trackingDomain != null) {
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
+          JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
         )
         onCrossChainRelease?.()
       }

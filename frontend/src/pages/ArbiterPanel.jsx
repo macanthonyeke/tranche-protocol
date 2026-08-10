@@ -204,6 +204,11 @@ function DisputeBlock({ detail, index, refetch }) {
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
   const [resolveTxHash, setResolveTxHash] = useState(null)
 
+  // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
+  // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
+  // used to read independently.
+  const trackingDomain = resolveTrackingDomain(e, detail.splits)
+
   // Single ARBITER_WINDOW read from the contract rather than hardcoding 14d.
   const windowSecs = arbiterWindow
   const timeoutAt = Number(d.raisedAt) + Number(windowSecs)
@@ -215,16 +220,16 @@ function DisputeBlock({ detail, index, refetch }) {
   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
 
   const handleResolve = useCallback((txHash) => {
-    if (txHash && Number(e.destinationDomain) !== ARC_DOMAIN) {
+    if (txHash && trackingDomain != null) {
       setResolveTxHash(txHash)
       // Also persist to localStorage so EscrowDetail picks it up on other devices.
       localStorage.setItem(
         cctpTrackKey(detail.id, index),
-        JSON.stringify({ txHash, domain: e.destinationDomain, ts: Date.now() })
+        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
       )
     }
     refetch()
-  }, [e.destinationDomain, detail.id, index, refetch])
+  }, [trackingDomain, detail.id, index, refetch])
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -289,10 +294,10 @@ function DisputeBlock({ detail, index, refetch }) {
         timeoutOutcome={timeoutOutcome}
       />
 
-      {resolveTxHash && Number(e.destinationDomain) !== ARC_DOMAIN && (
+      {resolveTxHash && trackingDomain != null && (
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
-          destinationDomain={e.destinationDomain}
+          destinationDomain={trackingDomain}
         />
       )}
     </li>
@@ -539,6 +544,22 @@ function payoutAddress(escrow) {
 function resolveIsCrossChain(escrow, splits) {
   if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
   return Number(escrow.destinationDomain) !== ARC_DOMAIN
+}
+
+/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
+   tracking — null when resolveIsCrossChain says there's nothing to track.
+   Reading the root escrow.destinationDomain here (the bug this replaces)
+   silently disagreed with resolveIsCrossChain whenever an Arc-root escrow's
+   cross-chain-ness came from a split leg instead: tracking would never start
+   even though the burn genuinely leaves Arc. Picking the first non-Arc split
+   leg when one exists keeps the domain passed down consistent with why
+   resolveIsCrossChain said this is cross-chain in the first place. */
+export function resolveTrackingDomain(escrow, splits) {
+  if (!resolveIsCrossChain(escrow, splits)) return null
+  if (splits?.length > 0) {
+    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
+  }
+  return escrow.destinationDomain
 }
 
 /* Round 18 Phase B. Decides what maxFee resolveDispute should submit, reusing
