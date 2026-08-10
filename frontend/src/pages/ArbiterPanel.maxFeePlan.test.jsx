@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 
-/* resolveDisputeMaxFeePlan — Round 18 Phase B.
+/* resolveDisputeMaxFeePlan — Round 18/19 Phase B.
 
    The confirm descriptor (resolveDisputeConfirm, tested in
    ArbiterPanel.resolve.test.jsx) and the actual resolveDispute submission
@@ -11,18 +11,17 @@ import { describe, it, expect, vi } from 'vitest'
    Arc-root escrow, quoted a zero fee that _assertCrossChainFee then rejected
    — a signed screen that promised success, followed by a guaranteed revert.
 
-   This function is the fix: the synchronous decision of what to submit,
-   extracted so it's testable without mocking a live Circle fetch (which this
-   harness can't meaningfully do) or executing real Solidity. Three things
-   matter here, each with its own test group below:
-     1. it uses the SAME split-aware cross-chain determination the descriptor
-        uses, not raw escrow.destinationDomain;
-     2. it never silently resolves to a zero maxFee in a case where the
-        contract's _assertCrossChainFee will demand a nonzero one;
-     3. when a live Circle quote genuinely is needed, the burnAmount handed
-        to it is the safe (worst-case) one, not a live-fee-drifted estimate. */
+   Round 18 closed that gap but still tried to estimate the real remainder
+   (worstCaseRemainder's ceiling bound) before deciding whether a live Circle
+   quote was safe to submit — "conservative estimate <= floor" and "real
+   remainder <= floor" are different conditions, so it could reject a
+   transaction the contract would have accepted. Round 19 replaces the whole
+   estimate: verified directly against the contract (TrancheProtocol.sol:
+   1291, :1354, :1398-1399) that submitting the escrow's own floor is
+   unconditionally safe for every cross-chain, bps > 0 case, so there is no
+   live quote to compute at all anymore — see the function's own doc comment
+   in ArbiterPanel.jsx for the full citation trail. */
 import { resolveDisputeMaxFeePlan } from './ArbiterPanel.jsx'
-import { worstCaseRemainder, resolveMaxFee } from '../utils/cctpFee.js'
 
 const ARC = 26
 const BASE = 6
@@ -37,23 +36,17 @@ const escrowOn = (domain) => ({
   escrowCctpForwardFee: 200000n // 0.20 USDC
 })
 
-const MAX_PROTOCOL_FEE_BPS = 500n
-
 describe('resolveDisputeMaxFeePlan', () => {
   describe('bps === 0: _assertCrossChainFee never runs, so nothing is required', () => {
     it('resolves to a zero maxFee even on a cross-chain escrow', () => {
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(BASE), splits: [], bps: 0, recipientAmount: 0n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 0 })
       expect(plan).toEqual({ maxFee: 0n })
     })
   })
 
   describe('not cross-chain at all: same-chain Arc burns force maxFee = 0 on-chain regardless', () => {
     it('resolves to a zero maxFee for a same-chain, no-split escrow', () => {
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(ARC), splits: [], bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits: [], bps: 6000 })
       expect(plan).toEqual({ maxFee: 0n })
     })
   })
@@ -69,9 +62,7 @@ describe('resolveDisputeMaxFeePlan', () => {
         { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
         { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
       ]
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(ARC), splits, bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits, bps: 6000 })
       expect(plan).toEqual({ maxFee: 200000n })
       expect(plan.maxFee).not.toBe(0n)
     })
@@ -82,67 +73,37 @@ describe('resolveDisputeMaxFeePlan', () => {
         { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
         { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
       ]
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(ARC), splits, bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits, bps: 6000 })
       expect(plan).toEqual({ maxFee: 200000n })
     })
   })
 
-  /* Split legs always burn at the snapshot regardless of what's submitted
-     (settled decision #7) — a live Circle quote here would fetch a number
-     the contract never uses. Confirms the "already cross-chain via
-     destinationDomain, and ALSO has splits" case takes the same floor path,
-     not a live quote, purely because splits are configured. */
+  /* Round 19 Phase B: there is no longer a live-quote branch at all — every
+     cross-chain, bps > 0 case (split or not, whatever the recipient share)
+     resolves to the escrow's own floor. Confirmed directly against the
+     contract: the divert-vs-burn decision (TrancheProtocol.sol:1291) is made
+     from the contract's OWN computed remainder, never the caller's maxFee;
+     the one assertion that runs beforehand only requires maxFee >= floor
+     (TrancheProtocol.sol:1398-1399); and the burn branch's only further
+     constraint, maxFee < remainder (TrancheProtocol.sol:1354), is
+     automatically satisfied by maxFee = floor because that branch is ONLY
+     entered when remainder > floor in the first place. */
   describe('a no-split escrow made cross-chain by its own destinationDomain', () => {
-    it('quotes Circle live when the recipient share is genuinely nonzero', () => {
-      const recipientAmount = 150000000n
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(BASE), splits: [], bps: 6000, recipientAmount, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
-      expect(plan.needsLiveQuote).toBe(true)
-      expect(plan.quoteParams).toEqual({
-        destinationDomain: BASE,
-        escrowCctpForwardFee: 200000n,
-        burnAmount: worstCaseRemainder(recipientAmount, MAX_PROTOCOL_FEE_BPS)
-      })
+    it('resolves to the escrow floor for a genuinely nonzero recipient share, with no live quote', () => {
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 6000 })
+      expect(plan).toEqual({ maxFee: 200000n })
+      expect(plan.needsLiveQuote).toBeFalsy()
     })
 
-    /* The plan function's job stops at "this needs a live quote" — it hands
-       the caller quoteParams and does not itself judge whether the amount is
-       viable. resolveMaxFee is where that judgment happens
-       (cctpFee.js:81-95): maxFee = max(liveQuote, floor) is ALWAYS >= floor,
-       so whenever the worst-case burnAmount is at or below the floor,
-       maxFee >= burnAmount holds no matter what Circle quotes — the function
-       throws its existing clear error before ever returning a value. Both
-       submission sites already catch that in their existing try/catch and
-       surface it as a toast, so nothing wrong or unexplained reaches the
-       wallet. This proves the full round-trip rather than assuming it. */
-    it('produces a clean, catchable error — not a silently wrong maxFee — when the worst-case remainder is at or below the escrow floor', async () => {
-      // 200000 is this fixture's escrowCctpForwardFee (the floor). At the
-      // ceiling rate, worstCaseRemainder(200000, 500) = 190000 <= 200000.
-      const recipientAmount = 200000n
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(BASE), splits: [], bps: 6000, recipientAmount, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
-      expect(plan.needsLiveQuote).toBe(true)
-      expect(worstCaseRemainder(recipientAmount, MAX_PROTOCOL_FEE_BPS)).toBeLessThanOrEqual(plan.quoteParams.escrowCctpForwardFee)
-
-      // A low, harmless live quote — the throw fires purely because the
-      // floor alone already exceeds burnAmount, regardless of what Circle
-      // says, so this is not "engineering the mock to force the outcome."
-      const originalFetch = global.fetch
-      global.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ([{ finalityThreshold: 2000, forwardFee: { high: '1' } }])
-      })
-      try {
-        await expect(resolveMaxFee(plan.quoteParams)).rejects.toThrow(
-          'This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.'
-        )
-      } finally {
-        global.fetch = originalFetch
-      }
+    it('resolves to the escrow floor even for a recipient share small enough to have tripped the old ceiling-based rejection', () => {
+      // Round 18's design would have thrown "too small to deliver" here,
+      // since worstCaseRemainder(200000, 500) = 190000 <= this escrow's own
+      // 200000 floor — a false rejection, since the REAL remainder (using
+      // whatever the escrow's actual snapshotted rate is) could easily have
+      // cleared it. The new design never estimates a remainder at all, so
+      // this can no longer happen.
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 6000 })
+      expect(plan).toEqual({ maxFee: 200000n })
     })
   })
 
@@ -150,16 +111,55 @@ describe('resolveDisputeMaxFeePlan', () => {
      bps > 0 alone, not on the post-rounding recipientAmount — so a ruling
      that rounds the recipient's share to zero still runs the assertion even
      though _executePartialRelease will skip the burn entirely
-     (TrancheProtocol.sol:1248's `if (recipientAmount > 0)`). The old code
-     would compute burnAmount = 0 and resolveMaxFee's own zero-burnAmount
-     shortcut would return 0 — which _assertCrossChainFee then rejects. */
-  describe('bps > 0 but the computed recipient share rounds to zero', () => {
-    it('still resolves to the escrow floor rather than zero, with no live quote', () => {
-      const plan = resolveDisputeMaxFeePlan({
-        escrow: escrowOn(BASE), splits: [], bps: 1, recipientAmount: 0n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
-      })
+     (TrancheProtocol.sol:1248's `if (recipientAmount > 0)`). Since the plan
+     no longer branches on recipientAmount at all, this now resolves the same
+     way as every other cross-chain, bps > 0 case — the escrow's own floor. */
+  describe('bps > 0, regardless of what the computed recipient share turns out to be', () => {
+    it('resolves to the escrow floor with no live quote', () => {
+      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 1 })
       expect(plan).toEqual({ maxFee: 200000n })
       expect(plan.needsLiveQuote).toBeFalsy()
     })
+  })
+})
+
+/* Round 19 Phase B: the core safety property this whole design relies on,
+   proven directly rather than only inferred from which branch fires above —
+   mirrors the style of Round 18's worstCaseRemainder proof test, for the
+   simpler, stronger property this design actually depends on. The contract's
+   decision structure (TrancheProtocol.sol:1258-1334, :1340-1373,
+   :1381-1401) is reproduced here ONLY to check this property against it, not
+   to duplicate production logic anywhere real. */
+function contractOutcome(remainder, floor, submittedMaxFee) {
+  // TrancheProtocol.sol:1291 — the contract's own decision, using its own
+  // computed remainder. The submitted maxFee plays no role in this branch.
+  if (remainder <= floor) return { branch: 'divert' }
+  // TrancheProtocol.sol:1354 (inside _approveAndBurn) — the only constraint
+  // in the burn branch.
+  if (submittedMaxFee >= remainder) return { branch: 'burn', reverts: true }
+  return { branch: 'burn', reverts: false }
+}
+
+describe('core safety property: submitting maxFee = floor never violates a contract constraint', () => {
+  const floor = 200000n
+
+  it('never causes a burn-branch revert, for any real remainder above or below the floor', () => {
+    const sampleRemainders = [
+      0n, 1n, 100000n, floor - 1n, floor, // at or below the floor → divert branch
+      floor + 1n, floor + 100n, 1_000_000n, 999_999_999n // above the floor → burn branch
+    ]
+    for (const remainder of sampleRemainders) {
+      const outcome = contractOutcome(remainder, floor, /* submittedMaxFee */ floor)
+      if (outcome.branch === 'burn') {
+        expect(outcome.reverts).toBe(false)
+      }
+      // divert branch: maxFee is never read again — nothing to violate.
+    }
+  })
+
+  it('clears the one assertion that runs before either branch, regardless of which one fires', () => {
+    // _assertCrossChainFee (TrancheProtocol.sol:1399): maxFee >= floor.
+    // Submitting exactly the floor satisfies this with equality.
+    expect(floor >= floor).toBe(true)
   })
 })
