@@ -30,19 +30,20 @@ const paramText = (d) => (d.parameters || []).join('\n')
 const confirm = (key, { escrow = escrowOn(BASE), splits = [], maxFee } = {}) =>
   milestoneConfirm({ key, fn: key === 'approve' ? 'approveRelease' : 'release' }, escrow, milestone, splits, maxFee)
 
-/* #6. approveRelease passes the caller's quoted maxFee straight to the burn
-   (:647 → :1298). release() discards it and substitutes the escrow snapshot
-   (:674, :682), precisely because it is permissionless. Split legs always burn
-   at the snapshot (:1329). One shared line cannot be true for all three. */
+/* #6. approveRelease passes the caller's submitted maxFee straight to the
+   burn (:647 → :1298). release() discards it and substitutes the escrow
+   snapshot (:674, :682), precisely because it is permissionless. Split legs
+   always burn at the snapshot (:1329). One shared line cannot be true for
+   all three. */
 describe('#6 — the two release paths do not pay the same forwarding fee', () => {
-  it('names the live quote when approving a no-split cross-chain release', () => {
+  it('names the caller-submitted maxFee when approving a no-split cross-chain release', () => {
     expect(paramText(confirm('approve', { maxFee: 450000n })))
-      .toContain('Delivery costs up to 0.45 USDC in Circle forwarding fees, quoted now and deducted from the payout on arrival.')
+      .toContain('Delivery costs up to 0.45 USDC in Circle forwarding fees, deducted from the payout on arrival.')
   })
 
-  /* The permissionless path ignores whatever the caller quoted, so showing
-     that figure would name a number the burn never uses. */
-  it('names the escrow snapshot for a permissionless release, never the quote', () => {
+  /* The permissionless path ignores whatever the caller submitted, so
+     showing that figure would name a number the burn never uses. */
+  it('names the escrow snapshot for a permissionless release, never the caller-submitted figure', () => {
     const t = paramText(confirm('release', { maxFee: 450000n }))
     expect(t).toContain("Delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, deducted from the payout on arrival.")
     expect(t).not.toContain('0.45 USDC')

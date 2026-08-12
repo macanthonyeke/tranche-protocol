@@ -304,7 +304,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
     // Round 19 Phase A #1: scoped to "with a nonzero share" — Solidity skips
     // a zero-share leg entirely (TrancheProtocol.sol:1310), it is never
     // transferred, burned, or credited.
-    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
+    expect(t).toContain("Any Arc split leg with a nonzero share transfers immediately as part of this transaction. Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
   })
 
@@ -318,7 +318,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
-    expect(t).toContain("For any split leg with a nonzero share: an Arc leg transfers immediately as part of this transaction; a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).toContain("Any Arc split leg with a nonzero share transfers immediately as part of this transaction. Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
   })
 
@@ -328,8 +328,8 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
   it('omits the Arc-leg clause entirely for an all-cross-chain split with no Arc leg configured', () => {
     const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
     const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
-    expect(t).toContain('For any split leg with a nonzero share: a cross-chain leg leaves Arc on this transaction but only arrives once Circle\'s cross-chain delivery completes, which is not instant.')
-    expect(t).not.toContain('an Arc leg transfers immediately')
+    expect(t).toContain('Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle\'s cross-chain delivery completes, which is not instant.')
+    expect(t).not.toContain('transfers immediately as part of this transaction')
     expect(t).not.toContain('Split legs on Arc')
   })
 
@@ -353,7 +353,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
       escrow: escrowOn(BASE), milestone: tinyMilestone, splits, bps: 10_000, maxFee: 450000n
     }))
     // The nonzero cross-chain leg's timing is still stated correctly.
-    expect(t).toContain("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+    expect(t).toContain("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
     // Nothing on screen claims the zero-share Arc leg is "transferred" —
     // the "with a nonzero share" qualifier is exactly what prevents this
     // from reading as a blanket claim about every configured leg.

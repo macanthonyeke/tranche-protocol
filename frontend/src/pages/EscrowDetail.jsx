@@ -631,7 +631,7 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, 
             <span className="text-sm text-ink">Assigned protocol arbiter</span>
           </ParamRow>
           <ParamRow label="Payout chain">
-            <span className="text-sm text-ink">{getDomainName(escrow.destinationDomain)}</span>
+            <span className="text-sm text-ink">{payoutChainLabel(escrow, splits)}</span>
           </ParamRow>
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
@@ -2250,6 +2250,20 @@ export function settlementTrackingDomain(escrow, splits) {
   return escrow.destinationDomain
 }
 
+/* Round 20 Phase A #3. The Ledger's "Payout chain" row used to print
+   escrow.destinationDomain unconditionally — accurate for a no-split escrow,
+   but false the moment splits are configured: the contract pays out per split
+   leg's own destinationDomain (TrancheProtocol.sol:1298 vs :1329), never the
+   escrow-level field, so a mixed split can pay out to several different
+   chains in one settlement. Rather than pick one (any single choice would be
+   wrong for the others) or duplicate SplitRecipients' per-leg list here, this
+   row defers to that list, which is rendered immediately below it whenever
+   splits exist. */
+export function payoutChainLabel(escrow, splits) {
+  if (splits?.length > 0) return 'Per split leg — see below'
+  return getDomainName(escrow.destinationDomain)
+}
+
 /* Round 18 Phase B. Decides what maxFee approveRelease / release should
    submit, reusing settlementIsCrossChain — the SAME split-aware determination
    the confirm descriptor above already uses — instead of the raw
@@ -2429,16 +2443,16 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
         // share still rounds to zero (the exact case the tests below exercise).
         const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
         const legClauses = []
-        if (hasArcLeg) legClauses.push('an Arc leg transfers immediately as part of this transaction')
+        if (hasArcLeg) legClauses.push('Any Arc split leg with a nonzero share transfers immediately as part of this transaction.')
         if (divertReachable) {
           legClauses.push(
-            "a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant",
-            'a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)'
+            "Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.",
+            'Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).'
           )
         } else {
-          legClauses.push("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant")
+          legClauses.push("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
         }
-        params.push(`For any split leg with a nonzero share: ${legClauses.join('; ')}.`)
+        params.push(legClauses.join(' '))
       }
     } else if (divertReachable) {
       params.push(
@@ -3258,26 +3272,29 @@ export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
   /* The two release paths do NOT pay the same forwarding fee, so they cannot
      share one line about it.
 
-     approveRelease hands the caller's quoted maxFee straight through (:647),
-     and the no-split burn uses it (:1298) — the depositor is opting into a
-     live figure. release() throws that argument away and substitutes
-     e.escrowCctpForwardFee (:674, :682) precisely because it is permissionless
-     and a griefer could otherwise authorise Circle to consume almost the whole
-     payout. Split legs always burn at the snapshot (:1329) whichever path ran.
+     approveRelease hands the caller's submitted maxFee straight through
+     (:647), and the no-split burn uses it (:1298) — but since Round 19 Phase
+     B that submission is always the escrow's own snapshotted floor (see
+     releaseMaxFeePlan above), never a live Circle quote. release() throws
+     the argument away regardless and substitutes e.escrowCctpForwardFee
+     (:674, :682) precisely because it is permissionless and a griefer could
+     otherwise authorise Circle to consume almost the whole payout. Split
+     legs always burn at the snapshot (:1329) whichever path ran.
 
-     So: caller's quote only when approving a no-split escrow; the escrow's
-     fixed floor in every other cross-chain case; nothing at all on Arc, where
-     _approveAndBurn forces maxFee = 0 (:1343-1346). */
+     So: the no-split approve path names the figure the contract actually
+     reads from the caller (currently pinned to the floor); every other
+     cross-chain case names the contract's own snapshot instead, since
+     nothing the frontend submits there is read at all; nothing at all on
+     Arc, where _approveAndBurn forces maxFee = 0 (:1343-1346). */
   const releaseFeeLines = (key) => {
-    const crossChain = splits?.length > 0
-      ? splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
-      : Number(escrow.destinationDomain) !== ARC_DOMAIN
+    const crossChain = settlementIsCrossChain(escrow, splits)
     if (!crossChain) return []
 
-    // A quote governs only the no-split approve path; everywhere else the
-    // snapshot does.
+    // The no-split approve path names the caller-submitted maxFee
+    // explicitly; every other cross-chain path names the contract's own
+    // snapshot instead, since nothing else the frontend submits is read.
     if (key === 'approve' && splits?.length === 0 && maxFee !== undefined && maxFee !== null) {
-      return [`Delivery costs up to ${formatUSDC(maxFee)} in Circle forwarding fees, quoted now and deducted from the payout on arrival.`]
+      return [`Delivery costs up to ${formatUSDC(maxFee)} in Circle forwarding fees, deducted from the payout on arrival.`]
     }
 
     // No quote to fall back on: an absent or zero snapshot means the figure is

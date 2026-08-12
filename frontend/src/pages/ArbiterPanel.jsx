@@ -752,16 +752,16 @@ export function resolveDisputeConfirm({
         // share still rounds to zero (the exact case the tests below exercise).
         const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
         const legClauses = []
-        if (hasArcLeg) legClauses.push('an Arc leg transfers immediately as part of this transaction')
+        if (hasArcLeg) legClauses.push('Any Arc split leg with a nonzero share transfers immediately as part of this transaction.')
         if (divertReachable) {
           legClauses.push(
-            "a cross-chain leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant",
-            'a cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)'
+            "Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.",
+            'Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).'
           )
         } else {
-          legClauses.push("a cross-chain leg leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant")
+          legClauses.push("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
         }
-        params.push(`For any split leg with a nonzero share: ${legClauses.join('; ')}.`)
+        params.push(legClauses.join(' '))
       }
     } else if (divertReachable) {
       params.push(
@@ -787,8 +787,8 @@ export function resolveDisputeConfirm({
 
   if (crossChain && recipientGetsPaid) {
     // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
-    // at the snapshot floor regardless of what was quoted. Name the one that
-    // actually applies rather than both.
+    // at the snapshot floor regardless of what maxFee was submitted for them.
+    // Name the one that actually applies rather than both.
     if (divertReachable) {
       // Round 17 Phase A: this used to be an unconditional fee line
       // immediately followed by a separate caveat correcting the
