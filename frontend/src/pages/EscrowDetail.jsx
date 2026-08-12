@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useReadContract } from 'wagmi'
+import { decodeEventLog } from 'viem'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
@@ -2398,6 +2399,41 @@ export function mutualSettleExecutes(theirs, bps) {
   return theirBps !== null && theirBps === bps
 }
 
+/* Round 21 Phase D. Ground truth for whether a CONFIRMED mutualSettle call
+   actually executed the settlement — answers a different question than
+   mutualSettleExecutes above, which stays exactly as it was: that one
+   predicts from a PRE-SUBMISSION `theirs` snapshot, correctly used for the
+   confirm descriptor's copy, since no receipt exists yet at signing time.
+
+   SettlementPanel.propose used to reuse that same stale snapshot AFTER
+   submission to decide whether to start delivery tracking — but useTx's
+   run() resolves as soon as the wallet broadcasts, not once the transaction
+   is mined (see useTx.js: the receipt arrives later via a separate
+   useWaitForTransactionReceipt effect). The other party can change their
+   proposal anywhere in that window, so the stale snapshot could disagree
+   with what the chain actually did in either direction: predict no
+   execution while the real tx executes (missing a genuine cross-chain burn
+   that needs tracking/recovery — the more dangerous direction), or predict
+   execution while the real tx doesn't (reintroducing the exact stale-tracker
+   bug Round 20 Phase B already closed, via a different path).
+
+   The confirmed receipt is authoritative — decode its logs for a real
+   MutualSettlementExecuted event, the same way CreateEscrow.jsx's
+   depositTx.onConfirmed reads EscrowCreated out of receipt.logs to get the
+   new escrow id: filtered to this contract's own address, one try/catch per
+   log since some logs (e.g. the USDC precompile's Transfer) won't decode
+   against this ABI at all. */
+export function mutualSettlementExecuted(receipt) {
+  for (const log of receipt.logs) {
+    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+    try {
+      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
+      if (dec.eventName === 'MutualSettlementExecuted') return true
+    } catch {}
+  }
+  return false
+}
+
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
@@ -2617,7 +2653,33 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   const theirs = role === 'payer' ? recipientProposal : depositorProposal
 
   const [pct, setPct] = useState('50')
-  const tx = useTx({ onConfirmed: () => { setPct('50'); refetch(); onChange?.() } })
+  const tx = useTx({
+    onConfirmed: (receipt) => {
+      setPct('50'); refetch(); onChange?.()
+      // Round 21 Phase D: ground truth from the CONFIRMED receipt, not a
+      // pre-submission `theirs` snapshot — see mutualSettlementExecuted's
+      // own doc comment for why the snapshot this used to reuse here (still
+      // correctly used by mutualSettleConfirm below, for a different
+      // question) can go stale in the window before this transaction lands.
+      const executed = mutualSettlementExecuted(receipt)
+      // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
+      // not the raw escrow.destinationDomain this used to read independently.
+      const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
+      if (trackingDomain != null) {
+        // Round 20 Phase D: no `domain` field — no reader ever consumed it
+        // (both MilestoneRow and DisputeBlock recompute the domain live from
+        // escrow/splits rather than trusting a persisted value), and a single
+        // stored domain couldn't represent a mixed split's several real
+        // per-message domains anyway. useCctpDelivery gets its per-message
+        // domains from Iris directly once it has the txHash.
+        localStorage.setItem(
+          cctpTrackKey(escrow.id, milestone.index),
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now() })
+        )
+        onCrossChainRelease?.()
+      }
+    }
+  })
 
   useEffect(() => {
     if (mine.exists) setPct(String(bpsToPct(mine.bps)))
@@ -2639,38 +2701,13 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   // either way.
   const propose = async (bps) => {
     const maxFee = escrow.escrowCctpForwardFee ?? 0n
-    const txHash = await tx.run(
+    await tx.run(
       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
       {
         loadingMessage: 'Check your wallet.',
         confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
       }
     )
-    // Round 20 Phase B #6: a proposal call can succeed on-chain without the
-    // settlement actually executing — dep.bps == rec.bps (TrancheProtocol.
-    // sol:549) may not hold yet if the two sides haven't proposed the same
-    // percentage. Recording a tracker entry for a non-executing proposal
-    // would leave a stale hash the detail page polls forever, since no burn
-    // or credit ever happened for it. mutualSettleExecutes mirrors exactly
-    // the same "would settle" vs. "settles now" check the confirm descriptor
-    // above already made before this was signed.
-    const executed = mutualSettleExecutes(theirs, bps)
-    // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
-    // not the raw escrow.destinationDomain this used to read independently.
-    const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
-    if (txHash && trackingDomain != null) {
-      // Round 20 Phase D: no `domain` field — no reader ever consumed it
-      // (both MilestoneRow and DisputeBlock recompute the domain live from
-      // escrow/splits rather than trusting a persisted value), and a single
-      // stored domain couldn't represent a mixed split's several real
-      // per-message domains anyway. useCctpDelivery gets its per-message
-      // domains from Iris directly once it has the txHash.
-      localStorage.setItem(
-        cctpTrackKey(escrow.id, milestone.index),
-        JSON.stringify({ txHash, ts: Date.now() })
-      )
-      onCrossChainRelease?.()
-    }
   }
 
   const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
