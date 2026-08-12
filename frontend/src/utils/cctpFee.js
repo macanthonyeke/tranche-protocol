@@ -35,38 +35,6 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
 }
 
 /**
- * Resolve the `maxFee` to pass to a cross-chain release / settlement / dispute
- * call. Same-chain (Arc) burns force maxFee = 0 inside the contract. Cross-chain
- * burns must cover Circle's live forwarding fee, clamped into the band the
- * contract accepts: [escrowCctpForwardFee snapshot floor, burnAmount).
- *
- * @param {object}  p
- * @param {number}  p.destinationDomain
- * @param {bigint}  [p.escrowCctpForwardFee]  Per-escrow snapshotted floor.
- * @param {bigint}  [p.burnAmount]            USDC actually burned for the recipient
- *                                            (after protocol fee); used to keep
- *                                            maxFee < burnAmount. Pass 0n / omit
- *                                            when no recipient burn occurs.
- * @param {'low'|'med'|'high'} [p.level]
- * @returns {Promise<bigint>}
- */
-export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, burnAmount, level = 'high' }) {
-  if (Number(destinationDomain) === ARC_DOMAIN) return 0n
-  // A pure refund / 0% recipient share triggers no recipient burn, so the
-  // contract skips the cross-chain fee floor — any maxFee (incl. 0) is fine.
-  if (burnAmount != null && BigInt(burnAmount) === 0n) return 0n
-
-  const live = await fetchForwardFee(ARC_DOMAIN, Number(destinationDomain), level)
-  const floor = BigInt(escrowCctpForwardFee ?? 0n)
-  const maxFee = live > floor ? live : floor
-
-  if (burnAmount != null && maxFee >= BigInt(burnAmount)) {
-    throw new Error('This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.')
-  }
-  return maxFee
-}
-
-/**
  * A lower bound on what the contract will actually remainder after its
  * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
  * (escrowFeeBps has no getter — see TrancheProtocol.sol:117). Every escrow's
@@ -77,9 +45,10 @@ export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, b
  * remainder is always >= what this returns.
  *
  * Round 20 Phase C: re-added in a different role than Round 18 gave it.
- * Round 18 fed this straight into {resolveMaxFee}'s `burnAmount` to REJECT a
- * transaction outright when the estimate looked unsafe — but "conservative
- * estimate <= floor" and "real remainder <= floor" are different conditions,
+ * Round 18 fed this straight into the (Round 20 Phase D removed) resolveMaxFee
+ * helper's `burnAmount` to REJECT a transaction outright when the estimate
+ * looked unsafe — but "conservative estimate <= floor" and "real remainder
+ * <= floor" are different conditions,
  * so it could reject transactions the contract would have accepted (Round 19
  * removed it for exactly this reason). Here it is a pure SAFETY GATE inside
  * {resolveDominantMaxFee}, deciding whether a live quote is trustworthy

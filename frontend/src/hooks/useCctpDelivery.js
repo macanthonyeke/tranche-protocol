@@ -1,26 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchIrisMessages } from '../utils/irisDelivery'
-import { ARC_DOMAIN } from '../config/chains'
 
 const POLL_MS = 15_000
 
 // Poll Circle's Iris API for cross-chain delivery status of a burn tx.
-// Only activates for non-Arc destinations. Stops polling on success or failure.
+// Only activates when the settlement is cross-chain at all. Stops polling
+// once every message has reached a terminal forwardState.
 //
 // Returns:
 //   phase: 'idle' | 'polling' | 'delivered' | 'failed' | 'unavailable'
 //   deliveries: parsed message objects with destinationTxHash, message,
-//               attestation, errorCode, forwardState per CCTP message
-//               (one per milestone for plain releases; one per split recipient
-//               for split milestones).
-export function useCctpDelivery(txHash, destinationDomain) {
+//               attestation, errorCode, forwardState, destinationDomain per
+//               CCTP message (one per milestone for plain releases; one per
+//               split recipient for split milestones) — each carrying its
+//               OWN real domain from Iris, never a caller-supplied guess.
+//
+// Round 20 Phase D: `destinationDomain` replaced with a plain `isCrossChain`
+// boolean. The old single-domain parameter did two things — gated whether to
+// poll at all, and silently filled in any message Iris didn't label with a
+// domain — but a mixed split settlement can burn to several DIFFERENT chains
+// in one transaction (bounded by MAX_SPLITS = 10, TrancheProtocol.sol:31),
+// so "the caller's one domain" was never a safe stand-in for a message's own
+// domain. The gate only ever needed a boolean; the fallback risked
+// mislabeling a message as a chain it was never actually sent to. Iris
+// reliably reports each message's own domain in practice — if it ever
+// doesn't, `destinationDomain` now comes through as `null` (rendered as an
+// unknown chain downstream) rather than a wrong guess.
+export function useCctpDelivery(txHash, isCrossChain) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
   const intervalRef = useRef(null)
   const doneRef     = useRef(false)
 
   const poll = useCallback(async () => {
-    if (!txHash || Number(destinationDomain) === ARC_DOMAIN || doneRef.current) return
+    if (!txHash || !isCrossChain || doneRef.current) return
     try {
       const messages = await fetchIrisMessages(txHash)
 
@@ -41,7 +54,7 @@ export function useCctpDelivery(txHash, destinationDomain) {
       const parsed = messages.map((m) => ({
         message:          m.message,
         attestation:      m.attestation,
-        destinationDomain: m.destinationDomain ?? Number(destinationDomain),
+        destinationDomain: m.destinationDomain ?? null,
         destinationTxHash: m.forward?.destinationTxHash ?? null,
         forwardState:      m.forward?.forwardState ?? null,
         errorCode:         m.forward?.forwardErrorCode ?? null,
@@ -70,10 +83,10 @@ export function useCctpDelivery(txHash, destinationDomain) {
       // so a transient outage doesn't permanently block status.
       setPhase('unavailable')
     }
-  }, [txHash, destinationDomain])
+  }, [txHash, isCrossChain])
 
   useEffect(() => {
-    if (!txHash || Number(destinationDomain) === ARC_DOMAIN) {
+    if (!txHash || !isCrossChain) {
       setPhase('idle')
       return
     }
@@ -83,7 +96,7 @@ export function useCctpDelivery(txHash, destinationDomain) {
     poll()
     intervalRef.current = setInterval(poll, POLL_MS)
     return () => clearInterval(intervalRef.current)
-  }, [txHash, destinationDomain, poll])
+  }, [txHash, isCrossChain, poll])
 
   return { phase, deliveries }
 }

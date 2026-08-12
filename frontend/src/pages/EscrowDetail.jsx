@@ -1638,7 +1638,7 @@ function MilestoneRow({
               {milestone.state === 3 && cctpTxHash && trackingDomain != null && (
                 <CrossChainDelivery
                   txHash={cctpTxHash}
-                  destinationDomain={trackingDomain}
+                  isCrossChain={trackingDomain != null}
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
                 />
@@ -2616,9 +2616,15 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
     // not the raw escrow.destinationDomain this used to read independently.
     const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
     if (txHash && trackingDomain != null) {
+      // Round 20 Phase D: no `domain` field — no reader ever consumed it
+      // (both MilestoneRow and DisputeBlock recompute the domain live from
+      // escrow/splits rather than trusting a persisted value), and a single
+      // stored domain couldn't represent a mixed split's several real
+      // per-message domains anyway. useCctpDelivery gets its per-message
+      // domains from Iris directly once it has the txHash.
       localStorage.setItem(
         cctpTrackKey(escrow.id, milestone.index),
-        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+        JSON.stringify({ txHash, ts: Date.now() })
       )
       onCrossChainRelease?.()
     }
@@ -2733,52 +2739,98 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   )
 }
 
+const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
+
+/* Round 20 Phase D. Whether the shared cctpTrackKey entry should be cleared:
+   only once every CCTP message Iris knows about for this tx has actually
+   reached COMPLETE. Extracted as its own pure function so the property is
+   directly testable — a message that stays FAILED (even one the user has
+   since self-relayed; Iris's own bookkeeping never learns about an
+   out-of-band relay) must NOT cause this to return true, since the tracker
+   is the only thing keeping that still-failed message's recovery card
+   reachable on a later visit. */
+export function shouldClearCctpTrack(deliveries) {
+  return deliveries.length > 0 && deliveries.every((d) => d.forwardState === 'COMPLETE')
+}
+
 /* Cross-chain delivery tracker. Shown on a RELEASED cross-chain milestone when
-   we have a tracked burn tx hash from this device. Polls Iris every 15s. */
-function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneIndex }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
-  const chainName = getDomainName(destinationDomain)
+   we have a tracked burn tx hash from this device. Polls Iris every 15s.
+
+   Round 20 Phase D: renders each CCTP message in `deliveries` independently
+   by its OWN forwardState/destinationDomain, instead of gating the whole
+   block on one aggregate `phase` string. A split settlement can burn
+   multiple messages to DIFFERENT chains in one transaction (bounded by
+   MAX_SPLITS = 10, TrancheProtocol.sol:31) — the old single-branch render
+   meant one leg failing made a DIFFERENT, already-delivered leg's
+   confirmation disappear entirely (phase collapsed to 'failed' globally, so
+   the 'delivered' branch never rendered at all), and only ever offered a
+   recovery card for one of potentially several simultaneously-failed legs.
+   Exported for direct testing — the same reasoning EscrowDetail exports its
+   other confirm-descriptor and decision functions for. */
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
   const [copied, setCopied] = useState(false)
+
+  // Once every message Iris knows about for this tx has actually completed,
+  // there is nothing left to track — clear the shared entry so it doesn't
+  // resurface on a later visit. A message that stays FAILED (even one the
+  // user has since self-relayed — Iris's own bookkeeping never learns about
+  // an out-of-band relay) intentionally keeps the tracker alive; "already
+  // relayed" lives in that message's own SelfRelayCard instance below, not
+  // here, so handling one failed leg never tears down tracking for another.
+  useEffect(() => {
+    if (shouldClearCctpTrack(deliveries)) {
+      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+    }
+  }, [deliveries, escrowId, milestoneIndex])
 
   if (phase === 'idle') return null
 
   return (
     <div className="mt-3 pt-3 border-t border-rule flex flex-col gap-2">
-      {phase === 'polling' && (
+      {phase === 'polling' && deliveries.length === 0 && (
         <div className="flex items-center gap-2 text-[12.5px] text-ink-2">
           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
-          Delivering to {chainName}…
+          Delivering…
           <span className="text-[11px] text-ink-3">(checking every 15s)</span>
         </div>
       )}
 
-      {phase === 'delivered' && deliveries.map((d, i) => {
-        const explorerUrl = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+      {deliveries.map((d, i) => {
+        const chainName = domainLabel(d.destinationDomain)
+        if (d.forwardState === 'COMPLETE') {
+          const explorerUrl = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
+          return (
+            <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Delivered to {chainName}
+              {explorerUrl && (
+                <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
+                  View tx <ExternalLinkIcon size={11} />
+                </a>
+              )}
+            </div>
+          )
+        }
+        if (d.forwardState === 'FAILED') {
+          return (
+            <SelfRelayCard
+              key={i}
+              delivery={d}
+              copied={copied}
+              onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+            />
+          )
+        }
         return (
-          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
-              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-            Delivered to {chainName}
-            {explorerUrl && (
-              <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
-                View tx <ExternalLinkIcon size={11} />
-              </a>
-            )}
+          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ink-2">
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+            Delivering to {chainName}…
           </div>
         )
       })}
-
-      {phase === 'failed' && (
-        <SelfRelayCard
-          deliveries={deliveries}
-          destinationDomain={destinationDomain}
-          escrowId={escrowId}
-          milestoneIndex={milestoneIndex}
-          copied={copied}
-          onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-        />
-      )}
 
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
@@ -2787,27 +2839,37 @@ function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneInde
   )
 }
 
-/* Recovery card shown when Iris reports forwardState: FAILED.
-   Explains what happened in plain English and walks the user through relaying
-   the CCTP message on the destination chain to complete the transfer. */
-function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex, copied, onCopied }) {
+/* Recovery card shown when Iris reports forwardState: FAILED for one CCTP
+   message. Explains what happened in plain English and walks the user
+   through relaying that SPECIFIC message on ITS OWN destination chain.
+
+   Round 20 Phase D: takes exactly ONE `delivery` object instead of the whole
+   `deliveries` array plus an outer `destinationDomain` prop. A mixed split
+   settlement can burn to several different chains in one transaction — under
+   the old design, picking "the first failed message" (or worse, an outer
+   collapsed domain unrelated to which message actually failed) meant a
+   failed message on chain A could prompt the user to switch to chain B and
+   call chain B's MessageTransmitterV2 — a broken recovery action, not just
+   inaccurate copy. Every lookup here reads `delivery.destinationDomain`, the
+   real domain Iris reported for THIS message, so there is no longer an
+   "outer" value to wrongly prefer. CrossChainDelivery renders one instance
+   of this per failed message, so a settlement with multiple simultaneous
+   failures gets a recovery card for each, not just one. */
+function SelfRelayCard({ delivery, copied, onCopied }) {
   const { address } = useAuth()
   const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
   const [relayTxHash, setRelayTxHash] = useState(null)
   const [relayError, setRelayError] = useState(null)
   const [calldataOpen, setCalldataOpen] = useState(false)
-  const chainName = getDomainName(destinationDomain)
+  const destinationDomain = delivery.destinationDomain
+  const chainName = domainLabel(destinationDomain)
 
-  // Use the first failed delivery (or all of them for multi-split)
-  const primary = deliveries.find((d) => d.forwardState === 'FAILED') ?? deliveries[0]
-  if (!primary) return null
-
-  const transmitter = MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null
-  const chainParams = EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null
+  const transmitter = destinationDomain != null ? (MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null) : null
+  const chainParams = destinationDomain != null ? (EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null) : null
   const canRelayInApp = !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
 
-  const calldata = primary.message && primary.attestation
-    ? encodeReceiveMessage(primary.message, primary.attestation)
+  const calldata = delivery.message && delivery.attestation
+    ? encodeReceiveMessage(delivery.message, delivery.attestation)
     : null
 
   const copyText = async (text) => {
@@ -2839,15 +2901,20 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
       const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params })
       setRelayTxHash(txHash)
       setRelayPhase('done')
-      // Clean up localStorage so the tracker doesn't restart next visit
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      // Round 20 Phase D: no longer clears the shared tracker here — Iris
+      // keeps reporting this message as FAILED forever (an out-of-band relay
+      // isn't something its own bookkeeping learns about), and other
+      // messages under the same txHash may still be genuinely in flight.
+      // "Done" lives in this card's own relayPhase state instead;
+      // CrossChainDelivery clears the shared entry once every message is
+      // actually COMPLETE per Iris.
     } catch (err) {
       setRelayPhase('error')
       setRelayError(err.message || 'Relay failed. Try again.')
     }
   }
 
-  const errorIsInsufficientFee = primary.errorCode === 'INSUFFICIENT_FEE'
+  const errorIsInsufficientFee = delivery.errorCode === 'INSUFFICIENT_FEE'
 
   return (
     <div className="rounded-xl border border-warn/30 bg-warn/[0.04] px-4 py-4 flex flex-col gap-4">
@@ -2932,8 +2999,8 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
         </button>
         {calldataOpen && (
           <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-2">
-            <CallDataRow label="Message"     value={primary.message}     onCopy={copyText} copied={copied} />
-            <CallDataRow label="Attestation" value={primary.attestation} onCopy={copyText} copied={copied} />
+            <CallDataRow label="Message"     value={delivery.message}     onCopy={copyText} copied={copied} />
+            <CallDataRow label="Attestation" value={delivery.attestation} onCopy={copyText} copied={copied} />
             {calldata && <CallDataRow label="Calldata"    value={calldata}           onCopy={copyText} copied={copied} />}
             <p className="text-[11px] text-ink-3 leading-relaxed pt-1">
               Call <span className="font-mono">receiveMessage(message, attestation)</span> on {chainName}'s MessageTransmitterV2 to complete the transfer.
@@ -3447,9 +3514,11 @@ function MilestoneAction({
       // this used to read independently.
       const trackingDomain = settlementTrackingDomain(escrow, splits)
       if (txHash && trackingDomain != null) {
+        // Round 20 Phase D: no `domain` field — see the same note in
+        // SettlementPanel.propose above.
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+          JSON.stringify({ txHash, ts: Date.now() })
         )
         onCrossChainRelease?.()
       }

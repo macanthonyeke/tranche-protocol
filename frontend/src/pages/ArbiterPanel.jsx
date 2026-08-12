@@ -224,10 +224,16 @@ function DisputeBlock({ detail, index, refetch }) {
   const handleResolve = useCallback((txHash) => {
     if (txHash && trackingDomain != null) {
       setResolveTxHash(txHash)
-      // Also persist to localStorage so EscrowDetail picks it up on other devices.
+      // Also persist to localStorage so EscrowDetail picks it up on other
+      // devices. Round 20 Phase D: no `domain` field — no reader ever
+      // consumed it (both this component and EscrowDetail's MilestoneRow
+      // recompute the domain live from escrow/splits), and a single stored
+      // domain couldn't represent a mixed split's several real per-message
+      // domains anyway. useCctpDelivery gets its per-message domains from
+      // Iris directly once it has the txHash.
       localStorage.setItem(
         cctpTrackKey(detail.id, index),
-        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+        JSON.stringify({ txHash, ts: Date.now() })
       )
     }
     refetch()
@@ -299,7 +305,7 @@ function DisputeBlock({ detail, index, refetch }) {
       {resolveTxHash && trackingDomain != null && (
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
-          destinationDomain={trackingDomain}
+          isCrossChain={trackingDomain != null}
         />
       )}
     </li>
@@ -324,36 +330,55 @@ function Side({ label, who, when, reason, uri }) {
   )
 }
 
+const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
+
 /* Shown in the arbiter's DisputeBlock after resolveDispute confirms cross-chain.
-   Polls Iris so the arbiter can confirm the payment was forwarded. */
-function ArbiterDeliveryStatus({ txHash, destinationDomain }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
-  const chainName = getDomainName(destinationDomain)
+   Polls Iris so the arbiter can confirm the payment was forwarded.
+
+   Round 20 Phase D: renders each CCTP message in `deliveries` independently
+   by its OWN forwardState/destinationDomain, instead of gating the whole
+   block on one aggregate `phase` string — see EscrowDetail.jsx's
+   CrossChainDelivery for the full citation trail on why a single collapsed
+   phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+   leg in the same mixed split failed. */
+function ArbiterDeliveryStatus({ txHash, isCrossChain }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
 
   if (phase === 'idle') return null
 
   return (
     <div className="flex flex-col gap-1.5 pt-2 border-t border-rule mt-1">
-      {phase === 'polling' && (
+      {phase === 'polling' && deliveries.length === 0 && (
         <div className="flex items-center gap-2 text-[12px] text-ink-2">
           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
-          Delivering to {chainName}…
+          Delivering…
         </div>
       )}
-      {phase === 'delivered' && deliveries.map((d, i) => {
-        const url = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+      {deliveries.map((d, i) => {
+        const chainName = domainLabel(d.destinationDomain)
+        if (d.forwardState === 'COMPLETE') {
+          const url = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
+          return (
+            <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
+              <span>✓ Delivered to {chainName}</span>
+              {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
+            </div>
+          )
+        }
+        if (d.forwardState === 'FAILED') {
+          return (
+            <p key={i} className="text-[12px] text-warn">
+              Delivery to {chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
+            </p>
+          )
+        }
         return (
-          <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
-            <span>✓ Delivered to {chainName}</span>
-            {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
+          <div key={i} className="flex items-center gap-2 text-[12px] text-ink-2">
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+            Delivering to {chainName}…
           </div>
         )
       })}
-      {phase === 'failed' && (
-        <p className="text-[12px] text-warn">
-          Delivery failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
-        </p>
-      )}
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable.</p>
       )}
