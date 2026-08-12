@@ -219,4 +219,42 @@ describe('fetchForwardFee — timeout', () => {
       expect(opts.signal).toBeInstanceOf(AbortSignal)
     })
   })
+
+  /* Round 22 Phase B: fetch() resolves once HEADERS arrive — well before the
+     body is read. The old code cleared the timeout in a `finally` right
+     after that `await fetch(...)` line, so a server that sent headers and
+     then stalled the body was completely unprotected: res.json() had no
+     timeout left to race against and could hang forever. This is
+     deliberately a DIFFERENT failure mode than the hanging-fetch tests
+     above — here `fetch()` itself resolves immediately (`ok: true` synchronously
+     available); only the body-read promise stalls, which is exactly the gap
+     those tests don't exercise. The mock's json() only settles once the
+     same AbortSignal fires, so this can only pass if the timeout is still
+     alive across the res.json() call. */
+  it('keeps the timeout alive through res.json() — a stalled body must time out, not hang forever', async () => {
+    vi.useFakeTimers()
+    const hangingBodyFetch = vi.fn((url, opts) => Promise.resolve({
+      ok: true,
+      json: () => new Promise((resolve, reject) => {
+        opts.signal.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted')
+          err.name = 'AbortError'
+          reject(err)
+        })
+      })
+    }))
+    vi.stubGlobal('fetch', hangingBodyFetch)
+
+    const resultPromise = fetchForwardFee(26, 6)
+    let settled = false
+    resultPromise.catch(() => {}).finally(() => { settled = true })
+
+    // fetch() has already resolved (headers) at this point — only the body
+    // read is stalled. Well before the timeout: still hanging.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(3_001)
+    await expect(resultPromise).rejects.toThrow(/timed out/i)
+  })
 })

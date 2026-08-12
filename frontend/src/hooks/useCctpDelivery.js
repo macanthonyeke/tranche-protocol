@@ -37,6 +37,19 @@ const POLL_MS = 15_000
 // the submitting device has this number; a subgraph-sourced txHash from a
 // different device has no persisted count and falls back to the
 // messages.length === 0 heuristic below, same as before this existed.
+//
+// Round 22 Phase B: terminality used to be inferred as "no message is
+// PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
+// treated as done. Circle's forwardState is not a small closed enum; it is
+// an open string field, and CONFIRMED is a real, directly observed,
+// NON-terminal value (a live Arc-testnet tx was seen transitioning
+// CONFIRMED -> COMPLETE between two Iris polls). A mixed FAILED + CONFIRMED
+// response used to satisfy the old check (no PENDING present) and stop
+// polling with phase 'failed', even though the CONFIRMED message could
+// still resolve to COMPLETE. Terminality now requires every message to be
+// EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
+// any value Circle adds later) keeps polling, which is the safe default for
+// an open-ended field.
 export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
@@ -82,17 +95,17 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
       }))
       setDeliveries(parsed)
 
-      const anyFailed   = parsed.some((m) => m.forwardState === 'FAILED')
       const allDelivered = parsed.every((m) => m.forwardState === 'COMPLETE')
-      const anyPending   = parsed.some(
-        (m) => !m.forwardState || m.forwardState === 'PENDING'
+      const allTerminal  = parsed.every(
+        (m) => m.forwardState === 'COMPLETE' || m.forwardState === 'FAILED'
       )
+      const anyFailed    = parsed.some((m) => m.forwardState === 'FAILED')
 
       if (allDelivered) {
         setPhase('delivered')
         doneRef.current = true
         clearInterval(intervalRef.current)
-      } else if (anyFailed && !anyPending) {
+      } else if (allTerminal && anyFailed) {
         setPhase('failed')
         doneRef.current = true
         clearInterval(intervalRef.current)

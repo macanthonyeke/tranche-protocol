@@ -35,17 +35,24 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), FEE_QUOTE_TIMEOUT_MS)
-  let res
+  let data
   try {
-    res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
+    // Round 22 Phase B: fetch() resolves once HEADERS arrive, before the
+    // body is read — clearing the timeout here (as this used to) leaves
+    // res.json() completely unprotected. A server that sends headers and
+    // then stalls the body can block past FEE_QUOTE_TIMEOUT_MS indefinitely.
+    // The same AbortController/signal governs the whole request, including
+    // an in-flight body read, so keeping it live through res.json() aborts
+    // a stalled body exactly the same way it aborts a stalled connect.
+    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
+    if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
+    data = await res.json()
   } catch (err) {
     if (err.name === 'AbortError') throw new Error("Delivery fee request timed out. Please try again.")
     throw err
   } finally {
     clearTimeout(timeoutId)
   }
-  if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
-  const data = await res.json()
   if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
   const tier = data.find((t) => Number(t.finalityThreshold) === STANDARD_FINALITY) ?? data[0]
   const fwd = tier?.forwardFee

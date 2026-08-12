@@ -20,7 +20,7 @@
 // and the bug agreed with each other, not with Circle's actual API.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { renderHook, waitFor, act } from '@testing-library/react'
 
 const fetchIrisMessages = vi.hoisted(() => vi.fn())
 vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages }))
@@ -153,5 +153,64 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not 
     expect(result.current.deliveries).toHaveLength(2)
     expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
     expect(result.current.deliveries.every((d) => d.forwardState === 'FAILED')).toBe(true)
+  })
+})
+
+/* Round 22 Phase B — terminality regression guard.
+   CONFIRMED is a real, directly observed forwardState (a live Arc-testnet tx
+   was seen transitioning CONFIRMED -> COMPLETE between two real Iris polls),
+   and it is NOT terminal. The old check inferred "done" from "no PENDING and
+   no missing forwardState" — a mixed FAILED + CONFIRMED response satisfied
+   that (no PENDING present) and stopped polling with phase 'failed', even
+   though the CONFIRMED leg could still resolve to COMPLETE. This exercises
+   exactly that combination, not the COMPLETE + FAILED one the older tests
+   above already cover. */
+describe('useCctpDelivery — terminality requires every message to be explicitly COMPLETE or FAILED', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps polling on a FAILED + CONFIRMED mix — CONFIRMED is not terminal', async () => {
+    vi.useFakeTimers()
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(1)
+    expect(result.current.phase).toBe('polling')
+
+    // A second poll with the SAME mixed response must not have latched a
+    // terminal phase — the hook should still be actively polling.
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
+    expect(result.current.phase).toBe('polling')
+  })
+
+  it('settles to failed only once the CONFIRMED leg itself reaches an explicit terminal state', async () => {
+    vi.useFakeTimers()
+    fetchIrisMessages
+      .mockResolvedValueOnce([
+        irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+        irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
+      ])
+      .mockResolvedValueOnce([
+        irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+        irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null })
+      ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(result.current.phase).toBe('polling')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
+    expect(result.current.phase).toBe('failed')
+
+    // Terminal now — a third tick must not fire another fetch.
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
   })
 })

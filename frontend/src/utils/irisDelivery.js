@@ -20,6 +20,27 @@ const RECEIVE_MESSAGE_ABI = [
 export const cctpTrackKey = (escrowId, milestoneIndex) =>
   `cctp-track-${escrowId}-${milestoneIndex}`
 
+// Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
+// fixed interval regardless of whether the previous call has resolved yet,
+// and Codex directly observed real calls sometimes taking over a minute
+// from their environment — several polling ticks' worth. Unlike
+// fetchForwardFee's FEE_QUOTE_TIMEOUT_MS (8s), this isn't gating a
+// pre-signature UI where a slow response blocks the user from signing; it's
+// a background status poll, so there's no tight UX budget to protect. The
+// risk here is the opposite one: a timeout too close to the fee endpoint's
+// 8s would abort genuinely slow-but-succeeding responses routinely, given
+// they're observed running past a minute. 90s gives real responses ample
+// margin above the observed worst case while still bounding a truly-dead
+// request so it can't hold the in-flight guard below open forever.
+const IRIS_MESSAGES_TIMEOUT_MS = 90_000
+
+// In-flight guard, keyed by the exact request identity (sourceDomain +
+// txHash). Without this, a slow response (see above) doesn't stop the next
+// 15s timer tick from firing a second, overlapping request for the SAME
+// tracked tx — a poll for one escrow's tx never blocks a concurrent poll
+// for a different one, only a re-poll of itself while still pending.
+const inFlightRequests = new Map()
+
 // Fetch all CCTP messages emitted in a source transaction.
 // Returns [] if not yet indexed (404 → empty, not an error).
 //
@@ -32,11 +53,36 @@ export const cctpTrackKey = (escrowId, milestoneIndex) =>
 // including a genuine depositForBurnWithHook call (hookData decodes to
 // "cctp-forward", the same hook this contract uses). Every tracked burn in
 // this app originates from Arc, so sourceDomain defaults to ARC_DOMAIN.
-export async function fetchIrisMessages(txHash, sourceDomain = ARC_DOMAIN) {
-  const res = await fetch(`${IRIS_BASE}/v2/messages/${sourceDomain}?transactionHash=${txHash}`)
-  if (res.status === 404) return []
-  if (!res.ok) throw new Error(`Iris HTTP ${res.status}`)
-  const json = await res.json()
+export function fetchIrisMessages(txHash, sourceDomain = ARC_DOMAIN) {
+  const key = `${sourceDomain}:${txHash}`
+  const existing = inFlightRequests.get(key)
+  if (existing) return existing
+
+  const request = fetchIrisMessagesNow(txHash, sourceDomain).finally(() => {
+    inFlightRequests.delete(key)
+  })
+  inFlightRequests.set(key, request)
+  return request
+}
+
+async function fetchIrisMessagesNow(txHash, sourceDomain) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), IRIS_MESSAGES_TIMEOUT_MS)
+  let json
+  try {
+    const res = await fetch(
+      `${IRIS_BASE}/v2/messages/${sourceDomain}?transactionHash=${txHash}`,
+      { signal: controller.signal }
+    )
+    if (res.status === 404) return []
+    if (!res.ok) throw new Error(`Iris HTTP ${res.status}`)
+    json = await res.json()
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Iris delivery status request timed out. Please try again.')
+    throw err
+  } finally {
+    clearTimeout(timeoutId)
+  }
   return json?.messages || []
 }
 

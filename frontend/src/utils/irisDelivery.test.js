@@ -84,6 +84,119 @@ describe('fetchIrisMessages', () => {
   })
 })
 
+/* fetchIrisMessages — timeout, Round 22 Phase B.
+
+   Unlike fetchForwardFee (which gained a timeout in Round 21 Phase B), this
+   endpoint previously had none at all — an unprotected await here never
+   resolves and never rejects on a hang, same failure mode Round 21 Phase B
+   closed for the fee quote. Codex's own live observation of real Iris calls
+   sometimes taking over a minute is why this uses a longer budget (90s) than
+   the fee endpoint's 8s — see fetchIrisMessages's own doc comment in
+   irisDelivery.js for the full reasoning. This mock respects AbortSignal the
+   way real fetch does, so it can only resolve this test if the timeout
+   actually aborts it. */
+describe('fetchIrisMessages — timeout', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('throws a clean, catchable error once the request hangs past the timeout, rather than never resolving', async () => {
+    vi.useFakeTimers()
+    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => {
+        const err = new Error('The operation was aborted')
+        err.name = 'AbortError'
+        reject(err)
+      })
+    }))
+    vi.stubGlobal('fetch', hangingFetch)
+
+    const resultPromise = fetchIrisMessages('0xhang1')
+    let settled = false
+    resultPromise.catch(() => {}).finally(() => { settled = true })
+
+    // Well before the 90s timeout: still hanging.
+    await vi.advanceTimersByTimeAsync(89_000)
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_001)
+    await expect(resultPromise).rejects.toThrow(/timed out/i)
+  })
+
+  it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchIrisMessages('0xabc999').then(() => {
+      const [, opts] = fetchMock.mock.calls[0]
+      expect(opts.signal).toBeInstanceOf(AbortSignal)
+    })
+  })
+})
+
+/* fetchIrisMessages — in-flight guard, Round 22 Phase B.
+
+   useCctpDelivery polls this on a fixed 15s interval regardless of whether
+   the previous call has resolved yet. Given real calls can take over a
+   minute (see the timeout tests above), an unguarded poll would let requests
+   for the SAME tracked tx pile up across several ticks. Keyed by the exact
+   request identity (sourceDomain + txHash), so a slow poll for one escrow's
+   tx never blocks a concurrent poll for a genuinely different one — only a
+   re-poll of itself while the first is still pending. */
+describe('fetchIrisMessages — in-flight guard', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reuses the in-flight request for the SAME txHash instead of issuing a second fetch', async () => {
+    let resolveFetch
+    const fetchMock = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const p1 = fetchIrisMessages('0xsame')
+    const p2 = fetchIrisMessages('0xsame')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    resolveFetch(mockOk({ messages: [{ message: '0xshared' }] }))
+    await expect(p1).resolves.toEqual([{ message: '0xshared' }])
+    await expect(p2).resolves.toEqual([{ message: '0xshared' }])
+  })
+
+  it('does NOT dedup a concurrent request for a genuinely different txHash', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await Promise.all([fetchIrisMessages('0xone'), fetchIrisMessages('0xtwo')])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT dedup requests for the same txHash on different sourceDomains', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await Promise.all([fetchIrisMessages('0xsametx', 26), fetchIrisMessages('0xsametx', 6)])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows a fresh request for the same txHash once the prior one has settled — the guard is not permanent', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchIrisMessages('0xsequential')
+    await fetchIrisMessages('0xsequential')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the in-flight slot even when the request throws, so the next poll is not permanently blocked', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 500 })))
+    await expect(fetchIrisMessages('0xerrors')).rejects.toThrow('Iris HTTP 500')
+
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [] }))))
+    await expect(fetchIrisMessages('0xerrors')).resolves.toEqual([])
+  })
+})
+
 /* receiptEmittedCctpMessage — Round 22 Phase A.
 
    Every prior fix to delivery tracking (Round 20 Phase B/D, Round 21 Phase
