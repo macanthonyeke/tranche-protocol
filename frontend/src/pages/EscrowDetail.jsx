@@ -16,10 +16,7 @@ import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } fr
 // permissionless one added here must not drift.
 import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
-import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { useToast } from '../hooks/useToast.jsx'
-import { resolveMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
@@ -2198,10 +2195,15 @@ function DisputeDetails({ dispute }) {
  * 1. The caller's `maxFee` is dead. It is in the signature and never read in
  *    the body — the executing branch burns at e.escrowCctpForwardFee, the
  *    per-escrow snapshot, precisely so one party cannot pick a fee that
- *    strands the other's payout (:552-556; settled decision #7). The panel
- *    still quotes Circle live before submitting and passes it, so the number
- *    the app fetched is not the number the burn uses. Nothing on this screen
- *    may present it as a cost.
+ *    strands the other's payout (:552-556; settled decision #7). Round 20
+ *    Phase B removed the live Circle quote this used to fetch before
+ *    submitting — a quote the contract was always going to discard could
+ *    still block a valid proposal on a transient fee-API failure, and it was
+ *    computed from the raw escrow.destinationDomain rather than
+ *    settlementIsCrossChain, so it could also misjudge cross-chain status for
+ *    a non-Arc-root escrow with an all-Arc split. The panel now submits a
+ *    fixed floor value with no network call. Nothing on this screen may
+ *    present it as a cost.
  *
  * 2. The protocol fee is escrowFeeBps, snapshotted at deposit, an internal
  *    mapping with no getter. The only bps the frontend can read is the live
@@ -2314,6 +2316,19 @@ export function releaseMaxFeePlan({ escrow, splits }) {
   return { maxFee: escrow.escrowCctpForwardFee ?? 0n }
 }
 
+/* Round 20 Phase B #6. Whether a mutualSettle call proposing `bps` will
+   actually execute the settlement (TrancheProtocol.sol:549's
+   dep.bps == rec.bps condition), from this signer's perspective. The
+   signer's own proposal is about to become `bps` — the only unknown is
+   whether the other side's already-loaded proposal already agrees. Shared
+   between the confirm descriptor's "would settle" vs. "settles now" branch
+   and SettlementPanel.propose's decision to start post-submission delivery
+   tracking, so the two can't drift the way the tracker write used to. */
+export function mutualSettleExecutes(theirs, bps) {
+  const theirBps = theirs?.exists ? Number(theirs.bps) : null
+  return theirBps !== null && theirBps === bps
+}
+
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
@@ -2329,7 +2344,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) 
   }
 
   const theirBps = theirs?.exists ? Number(theirs.bps) : null
-  const matches = theirBps !== null && theirBps === bps
+  const matches = mutualSettleExecutes(theirs, bps)
 
   if (!matches) {
     // Nothing executes. No `amount` — the figures below are what WOULD happen,
@@ -2528,8 +2543,6 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   const { depositorProposal, recipientProposal, isLoading: proposalsLoading, refetch } = useSettlementProposals(
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
-  const { config } = useProtocolConfig()
-  const toast = useToast()
 
   const mine = role === 'payer' ? depositorProposal : recipientProposal
   const theirs = role === 'payer' ? recipientProposal : depositorProposal
@@ -2545,23 +2558,18 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
   const canSubmit = pctValid && !tx.isBusy && !proposalsLoading
 
-  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
-  // Circle's live forwarding fee on the recipient's share, quoted at submit time.
+  // Round 20 Phase B #5: the contract never reads this argument at all
+  // (mutualSettleConfirm's VALUE-MOVING comment #1) — the executing branch
+  // always burns at e.escrowCctpForwardFee regardless of what's submitted.
+  // A live Circle quote here was therefore pure risk with no corresponding
+  // benefit: it could block a valid proposal on a transient fee-API failure,
+  // and it was computed from the raw escrow.destinationDomain rather than
+  // settlementIsCrossChain, so it could also misjudge cross-chain status for
+  // a non-Arc-root escrow with an all-Arc split. Submitting the escrow's own
+  // floor is simplest and exactly as safe, since the value is discarded
+  // either way.
   const propose = async (bps) => {
-    let maxFee
-    try {
-      const recipientAmount = (milestone.amount * BigInt(bps)) / 10_000n
-      const feeBps = config?.protocolFeeBps ?? 0n
-      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
-      maxFee = await resolveMaxFee({
-        destinationDomain: escrow.destinationDomain,
-        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-        burnAmount: recipientAmount - protocolFee
-      })
-    } catch (err) {
-      toast.error(err.message || "Couldn't check delivery fees. Please try again.")
-      return
-    }
+    const maxFee = escrow.escrowCctpForwardFee ?? 0n
     const txHash = await tx.run(
       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
       {
@@ -2569,9 +2577,18 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
       }
     )
+    // Round 20 Phase B #6: a proposal call can succeed on-chain without the
+    // settlement actually executing — dep.bps == rec.bps (TrancheProtocol.
+    // sol:549) may not hold yet if the two sides haven't proposed the same
+    // percentage. Recording a tracker entry for a non-executing proposal
+    // would leave a stale hash the detail page polls forever, since no burn
+    // or credit ever happened for it. mutualSettleExecutes mirrors exactly
+    // the same "would settle" vs. "settles now" check the confirm descriptor
+    // above already made before this was signed.
+    const executed = mutualSettleExecutes(theirs, bps)
     // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
     // not the raw escrow.destinationDomain this used to read independently.
-    const trackingDomain = settlementTrackingDomain(escrow, splits)
+    const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
     if (txHash && trackingDomain != null) {
       localStorage.setItem(
         cctpTrackKey(escrow.id, milestone.index),
