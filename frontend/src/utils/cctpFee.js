@@ -13,6 +13,17 @@ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbo
 // pick this tier's forwardFee from the API response.
 const STANDARD_FINALITY = 2000
 
+// Round 21 Phase B: a request that simply hangs (a stalled connection,
+// unusually slow response — no explicit timeout at all before this) never
+// resolves and never rejects, so an unprotected `await` here never
+// completes. That breaks resolveDominantMaxFee's "never blocks the
+// transaction" guarantee just as surely as an outright failure would, since
+// its try/catch can only catch a REJECTION, not a hang. 8s: long enough to
+// tolerate a slow/mobile connection to Circle's API for a single small GET,
+// short enough that a genuine hang doesn't leave the pre-signature UI
+// (before the wallet prompt even appears) stalled for an unreasonable time.
+const FEE_QUOTE_TIMEOUT_MS = 8_000
+
 /**
  * Fetch Circle's live Forwarding-Service fee for an Arc→destination burn.
  * @param {number} srcDomain   CCTP source domain (Arc = 26).
@@ -22,7 +33,17 @@ const STANDARD_FINALITY = 2000
  */
 export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
-  const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } })
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), FEE_QUOTE_TIMEOUT_MS)
+  let res
+  try {
+    res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error("Delivery fee request timed out. Please try again.")
+    throw err
+  } finally {
+    clearTimeout(timeoutId)
+  }
   if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
   const data = await res.json()
   if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
@@ -79,10 +100,14 @@ export function worstCaseRemainder(amount, maxProtocolFeeBps) {
  * PROVABLY safe against the contract's real, unknowable-in-advance remainder
  * — strictly below {worstCaseRemainder}'s lower bound on that remainder.
  * Falls back to `floor` — Round 19's unconditionally-safe submission — in
- * every other case: the quote fetch throws, the response is malformed, or
- * the quote resolves but isn't provably safe. NEVER throws itself, so a
- * transient Circle fee-API outage degrades to exactly Round 19's behaviour
- * instead of blocking the caller's transaction.
+ * every other case: the quote fetch throws, the response is malformed, the
+ * request times out (fetchForwardFee's own FEE_QUOTE_TIMEOUT_MS — Round 21
+ * Phase B; a hang neither resolves nor rejects, so this guarantee needed a
+ * timeout somewhere underneath it regardless of this function's own
+ * try/catch), or the quote resolves but isn't provably safe. NEVER throws
+ * itself, so a transient Circle fee-API outage — slow, erroring, or hung —
+ * degrades to exactly Round 19's behaviour instead of blocking the caller's
+ * transaction.
  *
  * Scope: only meaningful for a no-split cross-chain burn where the submitted
  * maxFee genuinely governs the burn (approveRelease, resolveDispute with

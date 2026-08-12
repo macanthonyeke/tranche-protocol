@@ -23,7 +23,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
    resolveDominantMaxFee, deciding whether a live quote is trustworthy
    enough to prefer over the floor — see that function's own tests below for
    how the new role is exercised. */
-import { worstCaseRemainder, resolveDominantMaxFee } from './cctpFee.js'
+import { worstCaseRemainder, resolveDominantMaxFee, fetchForwardFee } from './cctpFee.js'
 
 const MAX_PROTOCOL_FEE_BPS = 500n // mirrors TrancheProtocol.sol:23
 
@@ -147,5 +147,76 @@ describe('resolveDominantMaxFee', () => {
         destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
       })
     ).resolves.toBe(200000n)
+  })
+
+  /* Round 21 Phase B: a request that simply hangs never resolves and never
+     rejects on its own — an unprotected fetch here would make
+     resolveDominantMaxFee's "never blocks the transaction" guarantee false
+     for a network partial-connection or unusually slow response, not just an
+     outright failure. This mock respects AbortSignal the way real fetch does
+     (rejects with an AbortError once the signal fires), so it can only
+     resolve this test if fetchForwardFee's own timeout actually aborts it. */
+  it('falls back to the floor, without throwing, when the quote request hangs past its timeout', async () => {
+    vi.useFakeTimers()
+    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => {
+        const err = new Error('The operation was aborted')
+        err.name = 'AbortError'
+        reject(err)
+      })
+    }))
+    vi.stubGlobal('fetch', hangingFetch)
+
+    const resultPromise = resolveDominantMaxFee({
+      destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+    })
+    await vi.advanceTimersByTimeAsync(8_000)
+    const maxFee = await resultPromise
+
+    expect(maxFee).toBe(200000n)
+    vi.useRealTimers()
+  })
+})
+
+describe('fetchForwardFee — timeout', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('throws a clean, catchable error once the request hangs past FEE_QUOTE_TIMEOUT_MS, rather than never resolving', async () => {
+    vi.useFakeTimers()
+    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
+      opts.signal.addEventListener('abort', () => {
+        const err = new Error('The operation was aborted')
+        err.name = 'AbortError'
+        reject(err)
+      })
+    }))
+    vi.stubGlobal('fetch', hangingFetch)
+
+    const resultPromise = fetchForwardFee(26, 6)
+    let settled = false
+    resultPromise.catch(() => {}).finally(() => { settled = true })
+
+    // Well before the timeout: still hanging, exactly the failure mode a
+    // missing timeout would leave forever.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(3_001)
+    await expect(resultPromise).rejects.toThrow(/timed out/i)
+  })
+
+  it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
+    const fetchMock = vi.fn(() => Promise.resolve({
+      ok: true,
+      json: async () => [{ finalityThreshold: 2000, forwardFee: { high: '150000' } }]
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchForwardFee(26, 6).then(() => {
+      const [, opts] = fetchMock.mock.calls[0]
+      expect(opts.signal).toBeInstanceOf(AbortSignal)
+    })
   })
 })

@@ -2315,26 +2315,33 @@ export function payoutChainLabel(escrow, splits) {
    fee < the real remainder, a floor-only submission still dispatches
    successfully on-chain and then fails delivery with INSUFFICIENT_FEE,
    forcing a self-relay recovery that a correctly-fee'd burn never would have
-   needed. So the no-split, cross-chain case now signals `needsLiveQuote`
-   instead of returning a floor immediately; the caller resolves it through
-   {resolveDominantMaxFee} in utils/cctpFee.js, which uses the live quote
-   ONLY when it is provably below worstCaseRemainder's bound on the real
-   remainder — never as a rejection trigger, and never blocking the
-   transaction if the fetch fails. release() ignores whatever is submitted
-   here and substitutes the snapshot regardless (:674), so resolving a live
-   quote for it is harmless (if unnecessary) — same as before.
+   needed. So the no-split, cross-chain, approveRelease case now signals
+   `needsLiveQuote` instead of returning a floor immediately; the caller
+   resolves it through {resolveDominantMaxFee} in utils/cctpFee.js, which
+   uses the live quote ONLY when it is provably below worstCaseRemainder's
+   bound on the real remainder — never as a rejection trigger, and never
+   blocking the transaction if the fetch fails.
+
+   Round 21 Phase B: release() ignores whatever is submitted here and
+   substitutes the snapshot regardless (:674) — Round 20 Phase C still
+   resolved a live quote for it anyway ("harmless if unnecessary"), the same
+   class of pointless request already removed from mutualSettle
+   (Round 20 Phase B). Now gated on `actionKey === 'approve'`, matching how
+   the caller (MilestoneAction.run) already distinguishes the two — release()
+   goes straight to the floor with no network call, same as split legs.
 
    Synchronous and pure on purpose: this test harness cannot execute real
    Solidity, but it CAN verify this decision independently of the component. */
-export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps }) {
+export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps, actionKey }) {
   const crossChain = settlementIsCrossChain(escrow, splits)
   if (!crossChain) return { maxFee: 0n }
   const floor = escrow.escrowCctpForwardFee ?? 0n
 
   // Split legs always burn at the snapshot regardless of what's submitted
   // (settled decision #7) — a live quote would fetch a number the contract
-  // never uses.
-  if (splits?.length > 0) return { maxFee: floor }
+  // never uses. Same for release(): it substitutes its own snapshot and
+  // never reads the submitted value at all.
+  if (splits?.length > 0 || actionKey !== 'approve') return { maxFee: floor }
 
   return {
     needsLiveQuote: true,
@@ -3493,12 +3500,13 @@ function MilestoneAction({
     // actually govern an approveRelease burn.
     let quotedMaxFee
     if (action.needsForwardFee) {
-      // Round 18/19/20 Phase B/C: see releaseMaxFeePlan for why this reuses
-      // settlementIsCrossChain instead of reading escrow.destinationDomain
-      // directly, why split legs skip the network entirely, and why the
-      // one case that needs it resolves through resolveDominantMaxFee
+      // Round 18/19/20/21 Phase B/C/B: see releaseMaxFeePlan for why this
+      // reuses settlementIsCrossChain instead of reading
+      // escrow.destinationDomain directly, why split legs and release()
+      // (actionKey !== 'approve') both skip the network entirely, and why
+      // the one case that needs it resolves through resolveDominantMaxFee
       // rather than rejecting on a bad quote.
-      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps })
+      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps, actionKey: action.key })
       const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
       args = [...action.args, maxFee]
       quotedMaxFee = maxFee

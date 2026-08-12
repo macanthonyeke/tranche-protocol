@@ -31,14 +31,21 @@ import { describe, it, expect } from 'vitest'
    but says nothing about Circle's SEPARATE off-chain forwarding requirement
    — a floor-only submission can still fail delivery with INSUFFICIENT_FEE
    when Circle's live fee exceeds the floor, forcing an unnecessary
-   self-relay. So the no-split cross-chain case now signals `needsLiveQuote`;
-   the caller resolves that through resolveDominantMaxFee (utils/cctpFee.js),
-   which uses the live quote ONLY when it is provably below
-   worstCaseRemainder's bound on the real remainder — never a rejection
+   self-relay. So the no-split cross-chain, approveRelease case now signals
+   `needsLiveQuote`; the caller resolves that through resolveDominantMaxFee
+   (utils/cctpFee.js), which uses the live quote ONLY when it is provably
+   below worstCaseRemainder's bound on the real remainder — never a rejection
    trigger, never blocking the transaction on a failed fetch. Split legs
    still skip the network entirely and resolve straight to the floor, exactly
-   as Round 19 left them — see releaseMaxFeePlan's own doc comment in
-   EscrowDetail.jsx for the full citation trail. */
+   as Round 19 left them.
+
+   Round 21 Phase B: release() ignores whatever is submitted and substitutes
+   its own snapshot regardless (:674) — Round 20 still resolved a live quote
+   for it anyway, the same pointless-request class already removed from
+   mutualSettle. Now gated on `actionKey === 'approve'`, matching how the
+   caller (MilestoneAction.run) already distinguishes the two keys — release()
+   goes straight to the floor with no network call — see releaseMaxFeePlan's
+   own doc comment in EscrowDetail.jsx for the full citation trail. */
 import { releaseMaxFeePlan } from './EscrowDetail.jsx'
 
 const ARC = 26
@@ -64,13 +71,13 @@ describe('releaseMaxFeePlan', () => {
      _assertCrossChainFee's own rule (TrancheProtocol.sol:1382). Split legs
      always burn at the snapshot regardless of what's submitted (settled
      decision #7), so this resolves straight to the floor — no live quote is
-     ever attempted for a split escrow. */
+     ever attempted for a split escrow, even on the approve path. */
   it('treats an Arc-root escrow with a cross-chain split leg as cross-chain, and resolves to the escrow floor with no live quote', () => {
     const splits = [
       { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
-    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits, milestoneAmount: 150_000_000n })
+    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits, milestoneAmount: 150_000_000n, actionKey: 'approve' })
     expect(plan).toEqual({ maxFee: 200000n })
     expect(plan.maxFee).not.toBe(0n)
     expect(plan.needsLiveQuote).toBeFalsy()
@@ -79,27 +86,27 @@ describe('releaseMaxFeePlan', () => {
   /* Split legs always burn at the snapshot regardless of what's submitted
      (settled decision #7) — a live Circle quote here would fetch a number
      the contract never uses, even when the escrow's OWN domain already
-     makes it cross-chain (not just via a split leg). */
+     makes it cross-chain (not just via a split leg), and even on the
+     approve path. */
   it('resolves to the escrow floor for any cross-chain split, with no live quote', () => {
     const splits = [
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
     ]
-    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits, milestoneAmount: 150_000_000n })
+    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits, milestoneAmount: 150_000_000n, actionKey: 'approve' })
     expect(plan).toEqual({ maxFee: 200000n })
     expect(plan.needsLiveQuote).toBeFalsy()
   })
 
   /* The one case that genuinely needs a live quote: no split legs, a
-     cross-chain destination. The plan signals the caller to resolve it via
+     cross-chain destination, AND the caller is approveRelease specifically
+     — the only path where the submitted maxFee is actually read by the
+     contract (:647 → :1298). The plan signals the caller to resolve it via
      resolveDominantMaxFee rather than resolving a value itself — this
-     function stays synchronous and pure. release() ignores whatever is
-     ultimately submitted here and substitutes the snapshot regardless
-     (:674), so resolving a quote is harmless (if unnecessary) on that path
-     too — the plan doesn't distinguish approve from release. */
-  it('signals needsLiveQuote for a no-split cross-chain release, with the exact params resolveDominantMaxFee needs', () => {
+     function stays synchronous and pure. */
+  it('signals needsLiveQuote for a no-split cross-chain approveRelease, with the exact params resolveDominantMaxFee needs', () => {
     const plan = releaseMaxFeePlan({
-      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n
+      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n, actionKey: 'approve'
     })
     expect(plan.maxFee).toBeUndefined()
     expect(plan.needsLiveQuote).toBe(true)
@@ -109,6 +116,21 @@ describe('releaseMaxFeePlan', () => {
       recipientAmount: 150_000_000n,
       maxProtocolFeeBps: 500n
     })
+  })
+
+  /* Round 21 Phase B: release() ignores whatever is submitted and
+     substitutes its own snapshot regardless (:674) — a live quote for it
+     would fetch a number the contract never reads, the same class of
+     pointless request already removed from mutualSettle. Gated on
+     actionKey !== 'approve' rather than a release-specific check, so any
+     future action key that isn't 'approve' defaults to the safe, no-network
+     floor path too. */
+  it('resolves to the escrow floor for a no-split cross-chain release() with no live quote, unlike the identical approveRelease shape above', () => {
+    const plan = releaseMaxFeePlan({
+      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n, actionKey: 'release'
+    })
+    expect(plan).toEqual({ maxFee: 200000n })
+    expect(plan.needsLiveQuote).toBeFalsy()
   })
 })
 
