@@ -51,13 +51,18 @@ export function useCctpDelivery(txHash, isCrossChain) {
         return
       }
 
+      // Round 21 Phase A: the real Iris response nests destinationDomain
+      // under decodedMessage (as a string) and puts forwardState/
+      // forwardTxHash/forwardErrorCode flat on the message itself — there is
+      // no `forward` wrapper object at all. Verified against real captured
+      // responses for actual Arc-testnet burns (see fetchIrisMessages).
       const parsed = messages.map((m) => ({
         message:          m.message,
         attestation:      m.attestation,
-        destinationDomain: m.destinationDomain ?? null,
-        destinationTxHash: m.forward?.destinationTxHash ?? null,
-        forwardState:      m.forward?.forwardState ?? null,
-        errorCode:         m.forward?.forwardErrorCode ?? null,
+        destinationDomain: m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null,
+        destinationTxHash: m.forwardTxHash ?? null,
+        forwardState:      m.forwardState ?? null,
+        errorCode:         m.forwardErrorCode ?? null,
       }))
       setDeliveries(parsed)
 
