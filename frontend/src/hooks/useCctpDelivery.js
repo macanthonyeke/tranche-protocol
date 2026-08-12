@@ -26,7 +26,18 @@ const POLL_MS = 15_000
 // reliably reports each message's own domain in practice — if it ever
 // doesn't, `destinationDomain` now comes through as `null` (rendered as an
 // unknown chain downstream) rather than a wrong guess.
-export function useCctpDelivery(txHash, isCrossChain) {
+//
+// Round 22 Phase A: `expectedMessageCount`, optional — the number of real
+// MessageSent events the confirming receipt proved should exist for this
+// tx (see receiptEmittedCctpMessage), persisted by the submitting device
+// alongside the tracked txHash. A mixed split can burn several legs to
+// different chains in one transaction, and Iris indexes each message
+// independently — a partial response (fewer messages than the receipt
+// proved) is "not fully indexed yet", not "this is the complete set". Only
+// the submitting device has this number; a subgraph-sourced txHash from a
+// different device has no persisted count and falls back to the
+// messages.length === 0 heuristic below, same as before this existed.
+export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
   const intervalRef = useRef(null)
@@ -36,6 +47,11 @@ export function useCctpDelivery(txHash, isCrossChain) {
     if (!txHash || !isCrossChain || doneRef.current) return
     try {
       const messages = await fetchIrisMessages(txHash)
+
+      if (expectedMessageCount != null && messages.length < expectedMessageCount) {
+        setPhase('polling')
+        return
+      }
 
       if (messages.length === 0) {
         setPhase('polling')
@@ -88,7 +104,7 @@ export function useCctpDelivery(txHash, isCrossChain) {
       // so a transient outage doesn't permanently block status.
       setPhase('unavailable')
     }
-  }, [txHash, isCrossChain])
+  }, [txHash, isCrossChain, expectedMessageCount])
 
   useEffect(() => {
     if (!txHash || !isCrossChain) {

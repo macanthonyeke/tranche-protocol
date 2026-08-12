@@ -15,9 +15,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
    yet" — so it always surfaced as `phase: 'unavailable'`, never correctly
    polling for real status. These tests pin the URL shape directly so this
    can't silently regress back to the never-real one. */
+import { encodeEventTopics, encodeAbiParameters } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
+import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
-const { fetchIrisMessages } = await import('./irisDelivery.js')
+const { fetchIrisMessages, receiptEmittedCctpMessage } = await import('./irisDelivery.js')
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -79,5 +81,125 @@ describe('fetchIrisMessages', () => {
     }
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: '0xabc123' }))))
     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
+  })
+})
+
+/* receiptEmittedCctpMessage — Round 22 Phase A.
+
+   Every prior fix to delivery tracking (Round 20 Phase B/D, Round 21 Phase
+   C/D) taught the frontend to correctly check "did the intended
+   business-logic action succeed" — did the ruling actually pay someone, did
+   settlement proposals actually match. A correct answer to that question is
+   still not the same question as "did a CCTP message actually get created":
+   claimDelivery succeeding is real, it's just not a cross-chain delivery;
+   MutualSettlementExecuted firing is real, it's just not proof a burn
+   happened, since the contract emits it even when every leg rounds to zero
+   or diverts to an Arc credit. This is the one shared ground-truth check —
+   a real MessageSent log in the confirmed receipt — that answers the actual
+   question, replacing three separately-reasoned-about "did this execute"
+   checks (MilestoneAction, DisputeBlock, SettlementPanel).
+
+   MESSAGE_TRANSMITTER, the topic0, and the exact "message" field decode
+   were all verified live against a real Arc-testnet depositForBurnWithHook
+   transaction (see receiptEmittedCctpMessage's own doc comment in
+   irisDelivery.js) — these fixtures build the SAME real event shape via
+   viem's encodeEventTopics/encodeAbiParameters, not hand-rolled objects, so
+   a fixture only passes if it would actually decode against the real ABI. */
+const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275' // Arc's own (source-side) MessageTransmitterV2, verified live
+const MESSAGE_SENT_ABI = [
+  { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+]
+
+const messageSentLog = (messageHex = '0x1234', address = MESSAGE_TRANSMITTER) => ({
+  address,
+  topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
+})
+
+const escrowLog = (eventName, args, address = CONTRACT_ADDRESS) => {
+  const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
+  const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
+  const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
+  const data = nonIndexed.length > 0
+    ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
+    : '0x'
+  return { address, topics, data }
+}
+
+describe('receiptEmittedCctpMessage', () => {
+  it('is false for a real claimDelivery receipt — no funds move, no CCTP message, regardless of the escrow\'s configured domain', () => {
+    // claimDelivery's own confirm descriptor states this outright: "No
+    // funds move on this transaction." A real receipt for it contains only
+    // DeliveryClaimed, never anything from the MessageTransmitter.
+    const receipt = {
+      transactionHash: '0xtx1',
+      logs: [escrowLog('DeliveryClaimed', { escrowId: 7n, milestoneIndex: 1n, reviewDeadline: 123n })]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+  })
+
+  it('is false for a real refundAfterDeadline receipt — credits an Arc refund balance only, never cross-chain', () => {
+    // TrancheProtocol.sol:715: refundBalances[e.refundTo] on Arc, no
+    // transfer, no CCTP burn — true regardless of destinationDomain.
+    const receipt = {
+      transactionHash: '0xtx2',
+      logs: [escrowLog('RefundedAfterDeadline', { escrowId: 7n, milestoneIndex: 1n, amount: 250_000_000n })]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+  })
+
+  it('is false for a resolveDispute ruling that executes but rounds to zero or diverts every cross-chain leg to Arc', () => {
+    // DisputeResolved fires unconditionally on a successful resolveDispute
+    // call — it does not by itself mean a burn happened. A ruling whose
+    // recipient share rounds to zero, or whose every cross-chain leg
+    // diverts to an Arc credit (sub-floor), settles with no MessageSent at
+    // all despite genuinely executing.
+    const receipt = {
+      transactionHash: '0xtx3',
+      logs: [escrowLog('DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 6000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' })]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+  })
+
+  it('is true, count 1, for a genuine no-split cross-chain approveRelease burn', () => {
+    const receipt = {
+      transactionHash: '0xtx4',
+      logs: [
+        escrowLog('MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n }),
+        messageSentLog('0xdeadbeef')
+      ]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
+  })
+
+  it('is true, count matching the real number, for a mixed split settling multiple cross-chain legs in one transaction', () => {
+    // A mixed split can burn several legs to different chains in a single
+    // call (bounded by MAX_SPLITS = 10) — each is its own MessageSent.
+    const receipt = {
+      transactionHash: '0xtx5',
+      logs: [
+        escrowLog('MutualSettlementProposed', { escrowId: 7n, milestoneIndex: 1n, proposer: '0x179cc4c8f23d257b7f4acb785464025570e3af86', bps: 6000n }),
+        escrowLog('MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n }),
+        messageSentLog('0x0001'),
+        messageSentLog('0x0002'),
+        messageSentLog('0x0003')
+      ]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 3 })
+  })
+
+  it('does not mistake a log from a different contract for MessageSent, and does not crash on one', () => {
+    const receipt = {
+      transactionHash: '0xtx6',
+      logs: [
+        { address: '0x3600000000000000000000000000000000000000', topics: ['0xdeadbeef'], data: '0x' }, // USDC precompile, unrelated topic
+        messageSentLog('0xcafe')
+      ]
+    }
+    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
+  })
+
+  it('returns false, count 0, not throws, for an empty logs array', () => {
+    expect(receiptEmittedCctpMessage({ transactionHash: '0xtx7', logs: [] })).toEqual({ emitted: false, count: 0 })
   })
 })

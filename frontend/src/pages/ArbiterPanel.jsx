@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
@@ -205,6 +205,7 @@ function DisputeBlock({ detail, index, refetch }) {
   const e = detail.escrow
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
   const [resolveTxHash, setResolveTxHash] = useState(null)
+  const [resolveMessageCount, setResolveMessageCount] = useState(null)
 
   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
@@ -221,23 +222,38 @@ function DisputeBlock({ detail, index, refetch }) {
   // so the contract's timeout fallback settles it as a fixed 50/50 split.
   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
 
-  const handleResolve = useCallback((txHash) => {
-    if (txHash && trackingDomain != null) {
-      setResolveTxHash(txHash)
-      // Also persist to localStorage so EscrowDetail picks it up on other
-      // devices. Round 20 Phase D: no `domain` field — no reader ever
-      // consumed it (both this component and EscrowDetail's MilestoneRow
-      // recompute the domain live from escrow/splits), and a single stored
-      // domain couldn't represent a mixed split's several real per-message
-      // domains anyway. useCctpDelivery gets its per-message domains from
-      // Iris directly once it has the txHash.
-      localStorage.setItem(
-        cctpTrackKey(detail.id, index),
-        JSON.stringify({ txHash, ts: Date.now() })
-      )
+  // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
+  // "was this escrow/split CONFIGURED for cross-chain" — a resolveDispute
+  // ruling can execute while rounding every share to zero or diverting
+  // every cross-chain leg to an Arc credit, with no CCTP message ever
+  // created. Receives the full confirmed receipt now (see ResolveForm's own
+  // tx below), not a broadcast-time txHash string — the same
+  // broadcast-vs-mined gap Round 21 Phase D already closed for mutualSettle.
+  // resolveDisputeByTimeout's own onConfirmed still calls this with `null`
+  // (it never goes cross-chain at all, TrancheProtocol.sol:596/:614 —
+  // both halves always become Arc refund credits), which correctly no-ops
+  // here without needing a receipt to prove that.
+  const handleResolve = useCallback((receipt) => {
+    if (receipt) {
+      const { emitted, count } = receiptEmittedCctpMessage(receipt)
+      if (emitted) {
+        setResolveTxHash(receipt.transactionHash)
+        setResolveMessageCount(count)
+        // Also persist to localStorage so EscrowDetail picks it up on other
+        // devices. Round 20 Phase D: no `domain` field — no reader ever
+        // consumed it (both this component and EscrowDetail's MilestoneRow
+        // recompute the domain live from escrow/splits), and a single stored
+        // domain couldn't represent a mixed split's several real per-message
+        // domains anyway. useCctpDelivery gets its per-message domains from
+        // Iris directly once it has the txHash.
+        localStorage.setItem(
+          cctpTrackKey(detail.id, index),
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+        )
+      }
     }
     refetch()
-  }, [trackingDomain, detail.id, index, refetch])
+  }, [detail.id, index, refetch])
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -306,6 +322,7 @@ function DisputeBlock({ detail, index, refetch }) {
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
           isCrossChain={trackingDomain != null}
+          expectedMessageCount={resolveMessageCount}
         />
       )}
     </li>
@@ -341,8 +358,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
    CrossChainDelivery for the full citation trail on why a single collapsed
    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
    leg in the same mixed split failed. */
-function ArbiterDeliveryStatus({ txHash, isCrossChain }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
+function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessageCount }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
 
   if (phase === 'idle') return null
 
@@ -909,8 +926,16 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
   const [resolutionUri, setResolutionUri] = useState('')
   const [resolutionHash, setResolutionHash] = useState('')
   const [err, setErr] = useState('')
+  // Round 22 Phase A: onResolved now receives the CONFIRMED receipt, not a
+  // broadcast-time txHash string — DisputeBlock.handleResolve needs the
+  // receipt to check receiptEmittedCctpMessage. Moving this into
+  // onConfirmed closes the same broadcast-vs-mined gap Round 21 Phase D
+  // already closed for mutualSettle.
   const tx = useTx({
-    onConfirmed: () => { setPct('50'); setResolutionUri(''); setResolutionHash('') }
+    onConfirmed: (receipt) => {
+      setPct('50'); setResolutionUri(''); setResolutionHash('')
+      onResolved?.(receipt)
+    }
   })
   const timeoutTx = useTx({ onConfirmed: () => onResolved?.(null) })
   const { config } = useProtocolConfig()
@@ -955,7 +980,7 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
     })
     const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
 
-    const txHash = await tx.run(
+    await tx.run(
       escrowWrite('resolveDispute', [
         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
       ]),
@@ -967,7 +992,6 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
         })
       }
     )
-    onResolved?.(txHash ?? null)
   }
 
   return (

@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
@@ -1647,6 +1647,7 @@ function MilestoneRow({
                   isCrossChain={isHistoricallyCrossChain}
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
+                  expectedMessageCount={cctpTrack?.expectedMessages}
                 />
               )}
 
@@ -2434,6 +2435,21 @@ export function mutualSettlementExecuted(receipt) {
   return false
 }
 
+/* Round 22 Phase A. mutualSettlementExecuted proves the SETTLEMENT
+   happened, not that it happened cross-chain — a partial settlement can
+   round every leg's share to zero, or divert every cross-chain leg to an
+   Arc credit, and still fire MutualSettlementExecuted with no CCTP message
+   ever created. Both facts matter for different reasons and neither implies
+   the other, so SettlementPanel's tracker write requires both: this wraps
+   them into one composite ground-truth check, kept separate from the two
+   simpler write sites (MilestoneAction, DisputeBlock) whose actions either
+   revert or fully execute with no two-sided-match ambiguity, so
+   receiptEmittedCctpMessage alone is already their complete answer. */
+export function mutualSettlementCreatedCctpMessage(receipt) {
+  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0 }
+  return receiptEmittedCctpMessage(receipt)
+}
+
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
@@ -2661,11 +2677,16 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
       // own doc comment for why the snapshot this used to reuse here (still
       // correctly used by mutualSettleConfirm below, for a different
       // question) can go stale in the window before this transaction lands.
-      const executed = mutualSettlementExecuted(receipt)
-      // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
-      // not the raw escrow.destinationDomain this used to read independently.
-      const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
-      if (trackingDomain != null) {
+      //
+      // Round 22 Phase A: mutualSettlementExecuted alone proves the
+      // SETTLEMENT happened, not that it happened cross-chain — a partial
+      // settlement can round every leg's share to zero or divert every
+      // cross-chain leg to an Arc credit and still fire
+      // MutualSettlementExecuted, with no CCTP message ever created.
+      // mutualSettlementCreatedCctpMessage requires both: settlement
+      // executed AND the receipt proves a real message was sent.
+      const { emitted, count } = mutualSettlementCreatedCctpMessage(receipt)
+      if (emitted) {
         // Round 20 Phase D: no `domain` field — no reader ever consumed it
         // (both MilestoneRow and DisputeBlock recompute the domain live from
         // escrow/splits rather than trusting a persisted value), and a single
@@ -2674,7 +2695,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         // domains from Iris directly once it has the txHash.
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now() })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
         )
         onCrossChainRelease?.()
       }
@@ -2847,8 +2868,8 @@ export function shouldClearCctpTrack(deliveries) {
    recovery card for one of potentially several simultaneously-failed legs.
    Exported for direct testing — the same reasoning EscrowDetail exports its
    other confirm-descriptor and decision functions for. */
-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessageCount }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
   const [copied, setCopied] = useState(false)
 
   // Once every message Iris knows about for this tx has actually completed,
@@ -3550,7 +3571,29 @@ function MilestoneAction({
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
-    onConfirmed: () => { onChange?.(); setActiveKey(null) },
+    // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
+    // "was this escrow/split CONFIGURED for cross-chain" — MilestoneAction
+    // shares this one run() across all four milestone actions, and two of
+    // them (claim, refund) never touch CCTP at all regardless of the
+    // escrow's domain: claimDelivery moves no funds
+    // (milestoneConfirm: "No funds move on this transaction"),
+    // refundAfterDeadline only ever credits an Arc refund balance
+    // (TrancheProtocol.sol:715). The old gate tracked both anyway whenever
+    // the escrow happened to be cross-chain-configured. Also moved from
+    // right after tx.run() (broadcast time) into onConfirmed (confirmation
+    // time) — the same broadcast-vs-mined gap Round 21 Phase D already
+    // closed for mutualSettle specifically.
+    onConfirmed: (receipt) => {
+      onChange?.(); setActiveKey(null)
+      const { emitted, count } = receiptEmittedCctpMessage(receipt)
+      if (emitted) {
+        localStorage.setItem(
+          cctpTrackKey(escrow.id, milestone.index),
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+        )
+        onCrossChainRelease?.()
+      }
+    },
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
   const { config } = useProtocolConfig()
@@ -3586,23 +3629,10 @@ function MilestoneAction({
     }
 
     try {
-      const txHash = await tx.run(escrowWrite(action.fn, args), {
+      await tx.run(escrowWrite(action.fn, args), {
         loadingMessage: 'Check your wallet.',
         confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
       })
-      // Round 19 Phase C: split-aware, same as releaseMaxFeePlan/
-      // settlementIsCrossChain above — not the raw escrow.destinationDomain
-      // this used to read independently.
-      const trackingDomain = settlementTrackingDomain(escrow, splits)
-      if (txHash && trackingDomain != null) {
-        // Round 20 Phase D: no `domain` field — see the same note in
-        // SettlementPanel.propose above.
-        localStorage.setItem(
-          cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash, ts: Date.now() })
-        )
-        onCrossChainRelease?.()
-      }
     } catch {
       clearOpt(`milestone_${milestone.index}`)
     }

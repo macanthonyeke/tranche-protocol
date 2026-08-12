@@ -25,7 +25,7 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
    "proposed but not executed" receipt (just the Proposed log) and an
    "executed" receipt (both logs) are the two real shapes this function has
    to tell apart. */
-import { mutualSettlementExecuted, mutualSettleExecutes } from './EscrowDetail.jsx'
+import { mutualSettlementExecuted, mutualSettleExecutes, mutualSettlementCreatedCctpMessage } from './EscrowDetail.jsx'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
 const ESCROW_ID = 7n
@@ -48,6 +48,18 @@ const proposedLog = (bps) => buildLog('MutualSettlementProposed', {
 })
 const executedLog = (bps) => buildLog('MutualSettlementExecuted', {
   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, bps: BigInt(bps)
+})
+
+// Arc's own (source-side) MessageTransmitterV2 — verified live, see
+// receiptEmittedCctpMessage's own doc comment in utils/irisDelivery.js.
+const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+const MESSAGE_SENT_ABI = [
+  { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+]
+const messageSentLog = (messageHex = '0x1234') => ({
+  address: MESSAGE_TRANSMITTER,
+  topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
 })
 
 describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
@@ -124,5 +136,73 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
 
     expect(mutualSettleExecutes(theirs, bps)).toBe(true)
     expect(mutualSettlementExecuted(receiptShowingNoExecution)).toBe(false)
+  })
+})
+
+/* mutualSettlementCreatedCctpMessage — Round 22 Phase A.
+
+   mutualSettlementExecuted alone proves the SETTLEMENT happened, not that
+   it happened cross-chain — a partial settlement can round every leg's
+   share to zero, or divert every cross-chain leg to an Arc credit, and
+   still fire MutualSettlementExecuted with no CCTP message ever created.
+   SettlementPanel's tracker write requires BOTH facts, wrapped into this
+   one composite check — kept separate from receiptEmittedCctpMessage itself
+   (used directly, unwrapped, by MilestoneAction and DisputeBlock, whose
+   actions either revert or fully execute with no two-sided-match ambiguity)
+   so a regression in EITHER site's gate is caught by tests specific to that
+   site, not a shared one that can't tell them apart. */
+describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just one', () => {
+  /* The one test that guards the property the component actually branches
+     on: SettlementPanel's write is gated purely on `emitted`
+     (`if (emitted) { ...write tracker... }`) — a mutation that drops the
+     message-check and derives `emitted` from mutualSettlementExecuted alone
+     flips this specific assertion's `emitted` from false to true, verified
+     directly (not assumed) by running exactly that mutation in isolation. */
+  it('is false when the settlement executed but every leg rounded to zero or diverted to Arc — no MessageSent at all', () => {
+    // MutualSettlementExecuted fires unconditionally on a matching
+    // settlement — it does not by itself mean a burn happened.
+    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(6000), executedLog(6000)] }
+    expect(mutualSettlementExecuted(receipt)).toBe(true)
+    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+  })
+
+  /* Verified independently of the test above: a mutation that drops ONLY
+     the executed short-circuit (leaving the message-detection and emitted
+     derivation otherwise correct) still matches this test's `emitted`
+     expectation exactly (false either way, since no execution ever
+     happened) — it only diverges on `count` (a leaked 1 instead of the
+     correct 0, since the real function never even attempts to count once
+     it knows nothing executed). That divergence has NO production
+     consequence — SettlementPanel never reads `count` when `emitted` is
+     false, the write is skipped entirely — so this test documents a real
+     internal-correctness property (don't compute or leak a count for a
+     call that didn't execute), not a second independent guard against the
+     same regression the test above already covers. */
+  it('is false when a real MessageSent-shaped log is present but the settlement never executed (proposals never matched)', () => {
+    // Should never happen in a real receipt (mutualSettle can't burn without
+    // executing), but proves the executed check is genuinely required, not
+    // redundant with the message check.
+    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(6000), messageSentLog('0xdeadbeef')] }
+    expect(mutualSettlementExecuted(receipt)).toBe(false)
+    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+  })
+
+  /* Independently verified to catch a real bug the two tests above cannot
+     reach: a mutation that keeps the executed-gate and emitted-derivation
+     completely correct, but hardcodes `count` to 1 whenever `emitted` is
+     true (instead of the real message count), is caught by THIS test alone
+     — run in isolation against that exact mutation, 1 of 10 tests failed,
+     and it was this one. Neither test above can catch it: the first has no
+     real message at all (count stays 0 either way), the second short-
+     circuits to count 0 before any counting happens. Only a fixture with
+     `emitted: true` AND more than one real message (this one has two)
+     exercises count propagation through the true branch at all — this is
+     that fixture, not a restatement of "requires both facts". */
+  it('is true, with the real count, only when the settlement executed AND a real message was sent', () => {
+    const receipt = {
+      transactionHash: '0xtx10',
+      logs: [proposedLog(6000), executedLog(6000), messageSentLog('0x0001'), messageSentLog('0x0002')]
+    }
+    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: true, count: 2 })
   })
 })
