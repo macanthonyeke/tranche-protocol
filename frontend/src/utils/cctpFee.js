@@ -65,3 +65,84 @@ export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, b
   }
   return maxFee
 }
+
+/**
+ * A lower bound on what the contract will actually remainder after its
+ * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
+ * (escrowFeeBps has no getter — see TrancheProtocol.sol:117). Every escrow's
+ * snapshot was checked against `maxProtocolFeeBps` (TrancheProtocol.sol:191,
+ * MAX_PROTOCOL_FEE) at the moment `setProtocolFee` set it, and that ceiling
+ * itself never changes — so the real per-escrow rate is always <= this
+ * ceiling, meaning the real fee is always <= worstCaseFee and the real
+ * remainder is always >= what this returns.
+ *
+ * Round 20 Phase C: re-added in a different role than Round 18 gave it.
+ * Round 18 fed this straight into {resolveMaxFee}'s `burnAmount` to REJECT a
+ * transaction outright when the estimate looked unsafe — but "conservative
+ * estimate <= floor" and "real remainder <= floor" are different conditions,
+ * so it could reject transactions the contract would have accepted (Round 19
+ * removed it for exactly this reason). Here it is a pure SAFETY GATE inside
+ * {resolveDominantMaxFee}, deciding whether a live quote is trustworthy
+ * enough to prefer over the floor — never deciding whether to submit at all.
+ * A live quote strictly below this bound is guaranteed strictly below the
+ * REAL remainder too (this bound <= real remainder), so using it satisfies
+ * the burn branch's `maxFee < remainder` constraint with certainty, not an
+ * estimate. When the quote is NOT provably below this bound, the caller
+ * falls back to the floor — which Round 19 already proved unconditionally
+ * safe on its own, independent of any estimate.
+ * @param {bigint} amount             Gross amount the protocol fee is cut from.
+ * @param {bigint} [maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
+ *   Defaults to 500 (TrancheProtocol.sol:23's hardcoded MAX_PROTOCOL_FEE,
+ *   this contract's actual ceiling) for the brief window before
+ *   getProtocolConfig() resolves — NOT to 0, which would assume no fee at
+ *   all and overestimate the remainder, reproducing the exact bug this
+ *   function exists to close.
+ * @returns {bigint}
+ */
+export function worstCaseRemainder(amount, maxProtocolFeeBps) {
+  const ceiling = maxProtocolFeeBps ?? 500n
+  const worstCaseFee = (BigInt(amount) * BigInt(ceiling)) / 10_000n
+  return BigInt(amount) - worstCaseFee
+}
+
+/**
+ * Round 20 Phase C. Attempts a live Circle quote and uses it only when
+ * PROVABLY safe against the contract's real, unknowable-in-advance remainder
+ * — strictly below {worstCaseRemainder}'s lower bound on that remainder.
+ * Falls back to `floor` — Round 19's unconditionally-safe submission — in
+ * every other case: the quote fetch throws, the response is malformed, or
+ * the quote resolves but isn't provably safe. NEVER throws itself, so a
+ * transient Circle fee-API outage degrades to exactly Round 19's behaviour
+ * instead of blocking the caller's transaction.
+ *
+ * Scope: only meaningful for a no-split cross-chain burn where the submitted
+ * maxFee genuinely governs the burn (approveRelease, resolveDispute with
+ * bps > 0 and a nonzero recipient share). Split legs, release()'s
+ * permissionless path, and mutualSettle all ignore whatever maxFee is
+ * submitted regardless (settled decision #7) — a live quote there would be
+ * exactly as pointless as it was before this function existed, so callers
+ * should keep submitting `floor` directly on those paths rather than routing
+ * them through here.
+ *
+ * @param {object}  p
+ * @param {number}  p.destinationDomain
+ * @param {bigint}  p.floor              Escrow's own snapshotted forwarding-fee floor.
+ * @param {bigint}  p.recipientAmount    USDC amount the protocol fee is cut from.
+ * @param {bigint}  [p.maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
+ * @param {'low'|'med'|'high'} [p.level]
+ * @returns {Promise<bigint>}
+ */
+export async function resolveDominantMaxFee({ destinationDomain, floor, recipientAmount, maxProtocolFeeBps, level = 'high' }) {
+  const safeFloor = BigInt(floor ?? 0n)
+  try {
+    const liveQuote = await fetchForwardFee(ARC_DOMAIN, Number(destinationDomain), level)
+    const safeThreshold = worstCaseRemainder(recipientAmount, maxProtocolFeeBps)
+    if (liveQuote < safeThreshold) {
+      return liveQuote > safeFloor ? liveQuote : safeFloor
+    }
+  } catch {
+    // Quote failed, errored, or came back malformed — fall through to the
+    // floor rather than propagating. Never blocks the caller's transaction.
+  }
+  return safeFloor
+}

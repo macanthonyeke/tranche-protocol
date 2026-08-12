@@ -12,11 +12,13 @@ import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
 import EditableRow from '../components/EditableRow.jsx'
 import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
+import { useProtocolConfig } from '../hooks/useArbiter.js'
 // One source of truth for the fixed-50/50 copy: ArbiterPanel's trigger and the
 // permissionless one added here must not drift.
 import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
+import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
 import {
@@ -2280,15 +2282,16 @@ export function payoutChainLabel(escrow, splits) {
    bps scaling, so unlike resolveDispute there is no rounds-to-zero case to
    gate on here.
 
-   Round 19 Phase B: Round 18's version still tried to estimate the real
-   remainder (via worstCaseRemainder's ceiling bound) to decide whether a live
-   Circle quote could safely be submitted — but "conservative estimate <=
-   floor" and "real remainder <= floor" are different conditions, so it could
-   reject a transaction the contract would have accepted. Verified directly
-   against the contract instead of estimating around it (see
-   resolveDisputeMaxFeePlan in ArbiterPanel.jsx for the full citation trail —
-   both functions share the exact same _executeCCTPReleaseAmount execution
-   path, TrancheProtocol.sol:1258-1334):
+   Round 19 Phase B: Round 18's version tried to estimate the real remainder
+   (via worstCaseRemainder's ceiling bound) to decide whether a live Circle
+   quote could safely be submitted, and REJECTED the transaction outright
+   when the estimate looked unsafe — but "conservative estimate <= floor" and
+   "real remainder <= floor" are different conditions, so it could reject a
+   transaction the contract would have accepted. Verified directly against
+   the contract instead (see resolveDisputeMaxFeePlan in ArbiterPanel.jsx for
+   the full citation trail — both functions share the exact same
+   _executeCCTPReleaseAmount execution path, TrancheProtocol.sol:1258-1334):
+   submitting exactly the escrow's own floor is unconditionally safe.
      - The divert-vs-burn decision (TrancheProtocol.sol:1291) is made by the
        contract from its OWN computed real remainder — the submitted maxFee
        plays no role in that decision at all.
@@ -2304,16 +2307,39 @@ export function payoutChainLabel(escrow, splits) {
    a full release always releases at least that much, at the maximum possible
    share (no bps scaling below 100%). So a full release's remainder is
    guaranteed > floor by construction, meaning it always lands in the burn
-   branch, where floor-submission is trivially safe. release() ignores
-   whatever is submitted here and substitutes the snapshot regardless (:674),
-   so this is harmless (if unnecessary) on that path too.
+   branch, where floor-submission is trivially safe.
+
+   Round 20 Phase C: floor-only is always safe against the CONTRACT's own
+   check, but says nothing about Circle's separate, off-chain forwarding
+   requirement — for a no-split cross-chain burn where floor < Circle's live
+   fee < the real remainder, a floor-only submission still dispatches
+   successfully on-chain and then fails delivery with INSUFFICIENT_FEE,
+   forcing a self-relay recovery that a correctly-fee'd burn never would have
+   needed. So the no-split, cross-chain case now signals `needsLiveQuote`
+   instead of returning a floor immediately; the caller resolves it through
+   {resolveDominantMaxFee} in utils/cctpFee.js, which uses the live quote
+   ONLY when it is provably below worstCaseRemainder's bound on the real
+   remainder — never as a rejection trigger, and never blocking the
+   transaction if the fetch fails. release() ignores whatever is submitted
+   here and substitutes the snapshot regardless (:674), so resolving a live
+   quote for it is harmless (if unnecessary) — same as before.
 
    Synchronous and pure on purpose: this test harness cannot execute real
    Solidity, but it CAN verify this decision independently of the component. */
-export function releaseMaxFeePlan({ escrow, splits }) {
+export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps }) {
   const crossChain = settlementIsCrossChain(escrow, splits)
   if (!crossChain) return { maxFee: 0n }
-  return { maxFee: escrow.escrowCctpForwardFee ?? 0n }
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+
+  // Split legs always burn at the snapshot regardless of what's submitted
+  // (settled decision #7) — a live quote would fetch a number the contract
+  // never uses.
+  if (splits?.length > 0) return { maxFee: floor }
+
+  return {
+    needsLiveQuote: true,
+    quoteParams: { destinationDomain: escrow.destinationDomain, floor, recipientAmount: milestoneAmount, maxProtocolFeeBps }
+  }
 }
 
 /* Round 20 Phase B #6. Whether a mutualSettle call proposing `bps` will
@@ -3380,6 +3406,7 @@ function MilestoneAction({
     onConfirmed: () => { onChange?.(); setActiveKey(null) },
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
+  const { config } = useProtocolConfig()
 
   // Cross-chain burns must carry a maxFee that clears the escrow's own
   // snapshotted floor (see {releaseMaxFeePlan}) — approveRelease honours the
@@ -3399,13 +3426,13 @@ function MilestoneAction({
     // actually govern an approveRelease burn.
     let quotedMaxFee
     if (action.needsForwardFee) {
-      // Round 18/19 Phase B: see releaseMaxFeePlan for why this reuses
+      // Round 18/19/20 Phase B/C: see releaseMaxFeePlan for why this reuses
       // settlementIsCrossChain instead of reading escrow.destinationDomain
-      // directly, and why the escrow's own floor is always what gets
-      // submitted — no live Circle quote, no estimate, verified safe against
-      // the contract's actual maxFee constraints rather than guessed around
-      // them.
-      const { maxFee } = releaseMaxFeePlan({ escrow, splits })
+      // directly, why split legs skip the network entirely, and why the
+      // one case that needs it resolves through resolveDominantMaxFee
+      // rather than rejecting on a bad quote.
+      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps })
+      const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
       args = [...action.args, maxFee]
       quotedMaxFee = maxFee
     }

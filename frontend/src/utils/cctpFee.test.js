@@ -1,0 +1,151 @@
+import { describe, it, expect, vi, afterEach } from 'vitest'
+
+/* worstCaseRemainder — the arithmetic Round 20 Phase C's dominating-fee
+   design depends on for fund safety, so it gets tested directly rather than
+   only inferred from which code path fires.
+
+   escrowFeeBps (the per-escrow snapshot the contract actually deducts,
+   TrancheProtocol.sol:1268) has no getter, so the frontend cannot read the
+   real rate for a given escrow. What it CAN read is maxProtocolFeeBps
+   (getProtocolConfig().maxProtocolFeeBps, mirroring the contract's hardcoded
+   MAX_PROTOCOL_FEE = 500 at TrancheProtocol.sol:23) — an immutable ceiling
+   every escrow's snapshot was checked against at set time
+   (TrancheProtocol.sol:191's `if (_newFeeBps > MAX_PROTOCOL_FEE) revert`).
+   Because the real rate can never exceed the ceiling, the real fee can never
+   exceed the ceiling-based fee, so this function's output is a proven lower
+   bound on the real remainder — never an upper bound, never a guess.
+
+   The MATH is unchanged from Round 18's original version. What changed is
+   the ROLE: Round 18 fed this straight into a reject-on-unsafe-estimate
+   check; Round 19 deleted it because that role was unsound (a conservative
+   estimate landing below the floor doesn't mean the real remainder does).
+   Round 20 Phase C re-adds it purely as a safety gate inside
+   resolveDominantMaxFee, deciding whether a live quote is trustworthy
+   enough to prefer over the floor — see that function's own tests below for
+   how the new role is exercised. */
+import { worstCaseRemainder, resolveDominantMaxFee } from './cctpFee.js'
+
+const MAX_PROTOCOL_FEE_BPS = 500n // mirrors TrancheProtocol.sol:23
+
+// What the contract itself computes for a given (real) snapshotted rate —
+// TrancheProtocol.sol:1268-1271's `fee`/`remainder` arithmetic, reproduced
+// here only to check worstCaseRemainder against it, not to duplicate
+// production logic.
+const actualRemainder = (amount, feeBps) => {
+  const fee = (amount * feeBps) / 10_000n
+  return amount - fee
+}
+
+describe('worstCaseRemainder', () => {
+  it('is a proven lower bound on the actual remainder for every legal snapshot rate', () => {
+    const sampleRates = [0n, 1n, 100n, 199n, 300n, 499n, 500n]
+    const sampleAmounts = [1n, 999n, 1_000_000n, 250_000_000n, 999_999_999n]
+
+    for (const amount of sampleAmounts) {
+      for (const realBps of sampleRates) {
+        const worstCase = worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS)
+        const actual = actualRemainder(amount, realBps)
+        expect(worstCase).toBeLessThanOrEqual(actual)
+      }
+    }
+  })
+
+  it('is exactly equal to the actual remainder at the ceiling rate itself', () => {
+    const amount = 250_000_000n
+    expect(worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS)).toBe(actualRemainder(amount, MAX_PROTOCOL_FEE_BPS))
+  })
+
+  it('is strictly less than the gross amount whenever the ceiling is nonzero', () => {
+    expect(worstCaseRemainder(250_000_000n, MAX_PROTOCOL_FEE_BPS)).toBeLessThan(250_000_000n)
+  })
+
+  it('defaults to the contract ceiling (500 bps), not zero, when maxProtocolFeeBps is unavailable', () => {
+    const amount = 250_000_000n
+    expect(worstCaseRemainder(amount, undefined)).toBe(worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS))
+    expect(worstCaseRemainder(amount, undefined)).toBeLessThanOrEqual(actualRemainder(amount, 0n))
+  })
+
+  it('returns the full amount when the ceiling itself is zero', () => {
+    expect(worstCaseRemainder(250_000_000n, 0n)).toBe(250_000_000n)
+  })
+})
+
+/* resolveDominantMaxFee — Round 20 Phase C's live-quote-when-safe,
+   floor-fallback-otherwise design. Mocks the global fetch fetchForwardFee
+   reads from, the same pattern InvoiceCard.test.jsx already uses for
+   network-dependent components. */
+const mockFeeResponse = (feeBaseUnits) => ({
+  ok: true,
+  json: async () => [{ finalityThreshold: 2000, forwardFee: { high: String(feeBaseUnits) } }]
+})
+
+describe('resolveDominantMaxFee', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('attempts the live quote (and clamps it up to the floor via max()) when the quote is provably below worstCaseRemainder but below the floor itself', () => {
+    // recipientAmount 250_000_000 (250 USDC) → worstCaseRemainder at the
+    // default 500bps ceiling = 237_500_000. A live quote of 150000 is far
+    // below that, so it's provably safe — but also below the floor, so
+    // max(liveQuote, floor) clamps up to the floor. The returned value alone
+    // can't distinguish this from a pure floor-only fallback (see the next
+    // test for that), so this also asserts the quote was actually fetched.
+    const fetchMock = vi.fn(() => Promise.resolve(mockFeeResponse(150000)))
+    vi.stubGlobal('fetch', fetchMock)
+    return resolveDominantMaxFee({
+      destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+    }).then((maxFee) => {
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(maxFee).toBe(200000n) // max(150000, floor 200000) = floor
+    })
+  })
+
+  it('uses the live quote itself when it exceeds the floor but is still provably safe', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockFeeResponse(300000))))
+    return resolveDominantMaxFee({
+      destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+    }).then((maxFee) => {
+      expect(maxFee).toBe(300000n) // max(300000, floor 200000) = live quote
+    })
+  })
+
+  it('falls back to the floor when the quote is NOT provably below worstCaseRemainder, without rejecting', () => {
+    // worstCaseRemainder(1000, 500) = 950. A "live" quote at or above that
+    // is not provably safe, even though it might be safe in reality — the
+    // design falls back rather than gambling on an unproven value.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockFeeResponse(950))))
+    return resolveDominantMaxFee({
+      destinationDomain: 6, floor: 200000n, recipientAmount: 1000n, maxProtocolFeeBps: 500n
+    }).then((maxFee) => {
+      expect(maxFee).toBe(200000n)
+    })
+  })
+
+  it('falls back to the floor, without throwing, when the quote fetch fails', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('network down'))))
+    return expect(
+      resolveDominantMaxFee({
+        destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+      })
+    ).resolves.toBe(200000n)
+  })
+
+  it('falls back to the floor, without throwing, when the response is malformed', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => ({ not: 'an array' }) })))
+    return expect(
+      resolveDominantMaxFee({
+        destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+      })
+    ).resolves.toBe(200000n)
+  })
+
+  it('falls back to the floor, without throwing, when the HTTP response is not ok', () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false })))
+    return expect(
+      resolveDominantMaxFee({
+        destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
+      })
+    ).resolves.toBe(200000n)
+  })
+})
