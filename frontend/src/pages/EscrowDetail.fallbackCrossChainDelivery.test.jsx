@@ -54,9 +54,16 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
 const receiptMock = vi.hoisted(() => ({ current: { data: undefined, isPending: true, isError: false } }))
+// A spy wrapper, not just a return-value stub — Round 24 Phase B's fix lives
+// entirely in the CONFIG passed into this hook (retry: false), which a test
+// that only inspects rendered output can never exercise.
+const useWaitForTransactionReceiptSpy = vi.hoisted(() => vi.fn())
 vi.mock('wagmi', async (importOriginal) => ({
   ...(await importOriginal()),
-  useWaitForTransactionReceipt: () => receiptMock.current
+  useWaitForTransactionReceipt: (...args) => {
+    useWaitForTransactionReceiptSpy(...args)
+    return receiptMock.current
+  }
 }))
 
 const fetchIrisMessages = vi.hoisted(() => vi.fn())
@@ -115,6 +122,7 @@ const renderFallback = (props = {}) => render(
 
 beforeEach(() => {
   fetchIrisMessages.mockReset()
+  useWaitForTransactionReceiptSpy.mockReset()
   setReceipt({ data: undefined, isPending: true, isError: false })
 })
 
@@ -138,6 +146,18 @@ describe('when the receipt fetch fails or the RPC endpoint cannot serve it', () 
     expect(screen.getByText(/Delivery status unavailable/)).toBeInTheDocument()
     expect(screen.queryByText(/Delivering/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Checking delivery status/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Round 24 Phase B: retry configuration', () => {
+  it('passes retry: false so the QueryClient\'s app-wide default (retry: 3, exponential backoff) cannot silently multiply FALLBACK_RECEIPT_TIMEOUT_MS into a ~87s worst case', () => {
+    renderFallback()
+    expect(useWaitForTransactionReceiptSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hash: '0xreleasetx',
+        query: expect.objectContaining({ retry: false })
+      })
+    )
   })
 })
 

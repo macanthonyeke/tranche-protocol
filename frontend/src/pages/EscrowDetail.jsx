@@ -3054,6 +3054,25 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
 // an already-mined tx that single round trip is the whole story, so this
 // bound only matters for the "can't serve it" case, where it decides how
 // long a background milestone row shows a spinner before giving up.
+//
+// Round 24 Phase B: this bound only holds if the query attempts exactly
+// once. The app's QueryClient (main.jsx: `new QueryClient()`) takes
+// TanStack's untouched default of retry: 3 with exponential backoff — and
+// each retry re-runs useWaitForTransactionReceipt's queryFn from scratch,
+// getting its OWN fresh FALLBACK_RECEIPT_TIMEOUT_MS-bounded attempt rather
+// than counting against one shared deadline. Left alone, the real worst
+// case to reach isError is 4 attempts x 20s + (1s + 2s + 4s) backoff = ~87s,
+// silently multiplying the number in this constant's name by four. Retrying
+// is also the wrong instinct for what this query actually is: a receipt an
+// RPC genuinely can't produce for an old/pruned tx is exactly as absent on
+// attempt 4 as attempt 1 (the underlying fact — this tx is already
+// terminal, immutable, on-chain — cannot become newly true from waiting),
+// unlike a typical flaky-network read where a retry against a different
+// backend might succeed. So `retry: false` below isn't a workaround, it's
+// what makes FALLBACK_RECEIPT_TIMEOUT_MS an honest bound instead of a
+// per-attempt figure silently inflated by the QueryClient's app-wide
+// default — re-opening the milestone row (which remounts the query) is
+// already a natural retry path if the RPC issue was transient.
 const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
 
 /* Round 23. MilestoneRow's fallback path — a milestone whose cross-chain
@@ -3111,7 +3130,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
   const { data: receipt, isPending, isError } = useWaitForTransactionReceipt({
     hash: txHash,
     timeout: FALLBACK_RECEIPT_TIMEOUT_MS,
-    query: { enabled: !!txHash }
+    query: { enabled: !!txHash, retry: false }
   })
 
   if (receipt) {
