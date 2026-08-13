@@ -139,29 +139,35 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
   return { address, logIndex, topics, data }
 }
 
-// Round 27: `message` no longer needs to match the receipt's own bytes at
-// all — useCctpDelivery selects Iris entries by ORDINAL POSITION now (see
-// its own doc comment for why content can never match a real message:
-// CCTP V2 mutates several fields between burn-time and attestation). The
-// default still happens to reuse buildCctpMessage() for convenience, but
-// nothing below depends on it matching.
+// Round 27: useCctpDelivery selects Iris entries by ORDINAL POSITION, not by
+// content equality — CCTP V2 mutates several fields (nonce,
+// finalityThresholdExecuted, feeExecuted, expirationBlock) between burn-time
+// and attestation, so a real Iris `message` is never byte-equal to the
+// source-side receipt bytes. None of those mutable fields live in the
+// 0-280 byte range this file's buildCctpMessage models (they sit past
+// messageSender, at absolute offsets 312+ per irisDelivery.js's own byte
+// map), so this fixture can't literally exercise a byte-for-byte difference
+// in them — but the point survives structurally: cctpMessageFingerprint
+// never reads those offsets at all, so they could differ in a real response
+// without affecting anything below.
 //
-// Round 29: decodedMessage.decodedMessageBody is now real and derived
-// separately from `message` (via a fresh, canonical buildCctpMessage call
-// using the SAME destinationDomain/bodySender this fixture was asked to
-// represent) rather than left absent or decoded from a possibly-arbitrary
-// `message` override — realistic to how Circle's real Iris response works:
-// `message` (raw hex) can legitimately differ from the source-side receipt
-// bytes in the four MUTABLE fields (Round 27's own finding), but
-// `decodedMessage`'s IMMUTABLE fields are Circle's own decode of the
-// attested message and match the real burn's real fields. Every call site
-// in this file that wants a genuinely-matching fingerprint must pass the
-// receipt's own messageSentLog the SAME destinationDomain/bodySender.
+// Round 30 (fixing the Round 29 review's Medium finding on the nullable
+// decodedMessage/decodedMessageBody dependency): `message` DOES now have to
+// be genuine, parseable CCTP V2 bytes — irisMessageMatchesFingerprint no
+// longer trusts decodedMessage/decodedMessageBody (both explicitly nullable
+// per Circle's real schema) and instead derives the Iris-side fingerprint
+// directly from these raw bytes, the same way the receipt-side fingerprint
+// is derived. The default reuses buildCctpMessage() with the SAME
+// destinationDomain/bodySender this fixture represents so a genuinely
+// matching burn decodes to a genuinely matching fingerprint; decodedMessage/
+// decodedMessageBody are kept below only because useCctpDelivery's parsed
+// `destinationDomain` display field still reads decodedMessage.destinationDomain
+// separately (cosmetic, not part of the identity check).
 const irisMessage = ({
   destinationDomain = 6,
   forwardState = 'COMPLETE',
-  message = buildCctpMessage({ destinationDomain }),
-  bodySender = CONTRACT_ADDRESS
+  bodySender = CONTRACT_ADDRESS,
+  message = buildCctpMessage({ destinationDomain, bodySender })
 } = {}) => {
   const fp = cctpMessageFingerprint(buildCctpMessage({ destinationDomain, bodySender }))
   return {
@@ -464,12 +470,15 @@ describe('Round 27: ordinal-position selection end to end', () => {
       isPending: false,
       isError: false
     })
-    // Deliberately NOT buildCctpMessage() — this represents Iris's real
-    // attested form (nonce/finalityThresholdExecuted/feeExecuted/
-    // expirationBlock filled in), which is never byte-equal to the zeroed
-    // source-side form. Under Round 26's content-matching design this would
-    // never have attributed — messages.length would stay 0 forever.
-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, message: '0xattested-form-differs-from-source' })])
+    // Round 30: `message` must be genuine, parseable CCTP V2 bytes (see the
+    // irisMessage() fixture's own doc comment for why) — the default already
+    // builds one matching this destinationDomain, so no override is needed
+    // here at all. Under Round 26's now-removed content-matching design this
+    // would never have attributed (messages.length would stay 0 forever)
+    // because the mutable fields genuinely differ in a real response; under
+    // ordinal-position selection (Round 27) plus the immutable-field-only
+    // identity check (Round 30), it correctly does.
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6 })])
 
     renderFallback({ txHash: '0xmutabletx' })
 
@@ -492,10 +501,14 @@ describe('Round 27: ordinal-position selection end to end', () => {
     // Iris has no concept of "our" authenticity checks — it indexes both
     // real MessageSent logs, forged one first (ordinal 0, FAILED so a
     // wrong selection would be visibly distinguishable), genuine one second
-    // (ordinal 1, COMPLETE).
+    // (ordinal 1, COMPLETE). Round 30: both need genuine, parseable bytes
+    // now (the defaults already provide that) — the ordinal-0 "forged" entry
+    // is never fingerprint-checked anyway (expectedOrdinals is [1], only the
+    // ordinal-1 entry is selected and checked), but real bytes here avoid
+    // depending on that to not blow up if it were ever touched.
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforged' }),
-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xgenuine' })
+      irisMessage({ destinationDomain: 0, forwardState: 'FAILED' }),
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })
     ])
 
     renderFallback({ txHash: '0xforgedearliertx' })

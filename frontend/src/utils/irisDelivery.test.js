@@ -99,51 +99,72 @@ describe('fetchIrisMessages', () => {
   })
 })
 
-/* fetchIrisMessages — sourceTxHash membership check, Round 29 (fixing the
-   Round 29 review's Medium finding: "equal cardinality doesn't prove equal
-   membership"). useCctpDelivery's completeness gate only checks
-   allMessages.length === expectedTotalMessages — a response missing one
-   real message but padded with one unrelated foreign entry has the same
-   length and would previously sail through untouched, then get
-   ordinal-selected as if it were this transaction's own verified set. Each
-   message's own sourceTxHash — when Iris includes it — is checked against
-   the transaction actually requested. */
-describe('fetchIrisMessages — sourceTxHash membership', () => {
-  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
+/* fetchIrisMessages — envelope-level sourceTxHash check, Round 30 (fixing
+   the Round 29 review's own Medium finding: "sourceTxHash checked at the
+   wrong response level"). Confirmed against Circle's real GET /v2/messages
+   API reference: sourceTxHash is a required, non-nullable field on the
+   response ENVELOPE ("the source burn transaction hash, shared by all
+   messages in the response"), never duplicated on each message object — so
+   these fixtures put it only at that level, matching Circle's actual
+   response shape rather than fabricating a per-message field that doesn't
+   exist in reality (the mistake the Round 29 fixtures made). */
+describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
+  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', ...overrides })
 
-  it('keeps a message whose sourceTxHash matches the requested tx', async () => {
+  it('resolves normally when the envelope sourceTxHash matches the requested tx', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xabc123' }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+  })
+
+  it('matches the envelope sourceTxHash case-insensitively', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xABC123' }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+  })
+
+  it('resolves normally when the envelope has no sourceTxHash field at all — permissive when structurally absent, same convention as fingerprint == null / expectedOrdinals == null elsewhere in this app', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
   })
 
-  it('matches sourceTxHash case-insensitively', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own({ sourceTxHash: '0xABC123' })] }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own({ sourceTxHash: '0xABC123' })])
+  it('throws when the envelope sourceTxHash belongs to a DIFFERENT transaction, rather than silently returning the wrong transaction\'s messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xdeadbeef' }))))
+    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
   })
 
-  it('keeps a message with no sourceTxHash field at all — a defensive check, not a new hard requirement on every response shape', async () => {
+  it('regression: right length, wrong transaction — a same-length response for an entirely different burn is rejected wholesale, not silently ordinal-selected as if it were this transaction\'s own verified set', async () => {
+    // Two entries — the same count a caller expecting expectedTotalMessages
+    // === 2 would require — but the whole envelope belongs to a different
+    // tx. Without the envelope check, this would previously have passed the
+    // completeness gate untouched and been ordinal-selected as this
+    // milestone's own messages.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({
+      messages: [own({ message: '0xforeign1' }), own({ message: '0xforeign2' })],
+      sourceTxHash: '0xnottherequestedtx'
+    }))))
+    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
+  })
+})
+
+/* fetchIrisMessages — per-message sourceTxHash field, Round 29/30. Kept only
+   as coverage for the harmless defensive-extra filter still in
+   fetchIrisMessagesNow — NOT the real check (see the envelope-level describe
+   block above, which is). Per Circle's real schema, individual messages
+   never actually carry their own sourceTxHash, so this filter is a no-op
+   against any genuine response; these fixtures fabricate the field only to
+   confirm the dead-but-harmless code path still behaves as written. */
+describe('fetchIrisMessages — per-message sourceTxHash (defensive no-op)', () => {
+  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
+
+  it('keeps a message with no per-message sourceTxHash field at all — the normal case for a real response', async () => {
     const noField = { message: '0xown', attestation: '0xatt' }
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField] }))))
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: '0xabc123' }))))
     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
   })
 
-  it('drops a message whose sourceTxHash belongs to a DIFFERENT transaction', async () => {
+  it('would drop a message whose fabricated per-message sourceTxHash mismatches, if a response ever carried that field — envelope sourceTxHash still matches, so only the (dead-in-practice) per-message filter is exercised here', async () => {
     const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign] }))))
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: '0xabc123' }))))
     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
-  })
-
-  it('regression: right length, wrong membership — one real message present plus one foreign substitute at the same count Iris "should" have returned, and the foreign entry is dropped rather than selected', async () => {
-    const real = own({ message: '0xreal' })
-    const foreign = own({ sourceTxHash: '0xnottherequestedtx', message: '0xforeign' })
-    // Same length (2) as a caller expecting expectedTotalMessages === 2 would
-    // require — without the sourceTxHash check, both would previously have
-    // passed the completeness gate and the foreign entry could be selected
-    // by ordinal as if it were this milestone's own second message.
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [real, foreign] }))))
-    const result = await fetchIrisMessages('0xabc123')
-    expect(result).toEqual([real])
-    expect(result).toHaveLength(1)
   })
 })
 
@@ -771,47 +792,38 @@ describe('cctpMessageFingerprint', () => {
   })
 })
 
-/* irisMessageMatchesFingerprint — Round 29. Checks a fingerprint against the
-   decoded shape Circle's own V2 messages API actually returns:
-   decodedMessage.destinationDomain + decodedMessage.decodedMessageBody.
-   {burnToken,mintRecipient,amount,messageSender} — verified against
-   developers.circle.com/cctp/migration-from-v1-to-v2's own V2 response
-   example, not assumed. */
+/* irisMessageMatchesFingerprint — Round 30 (fixing the Round 29 review's
+   Medium finding: "fingerprint check depends on a nullable Iris field").
+   Circle's real schema marks decodedMessage/decodedMessageBody explicitly
+   nullable (decode failure), so this now derives the Iris-side fingerprint
+   directly from irisMessage.message (raw hex) via cctpMessageFingerprint —
+   the same byte-offset parser the receipt-side fingerprint uses — instead
+   of depending on Iris's optional decoded convenience object at all. */
 describe('irisMessageMatchesFingerprint', () => {
-  const fp = fingerprintFor({
-    destinationDomain: 6,
-    burnToken: '0x1111111111111111111111111111111111111111',
-    mintRecipient: '0x2222222222222222222222222222222222222222',
-    amount: 5000n,
-    bodySender: '0x3333333333333333333333333333333333333333'
-  })
+  const destinationDomain = 6
+  const burnToken = '0x1111111111111111111111111111111111111111'
+  const mintRecipient = '0x2222222222222222222222222222222222222222'
+  const amount = 5000n
+  const bodySender = '0x3333333333333333333333333333333333333333'
+
+  const fp = fingerprintFor({ destinationDomain, burnToken, mintRecipient, amount, bodySender })
+  const realMessage = buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender })
 
   const irisEntry = (overrides = {}) => ({
-    message: '0xmsg',
+    message: realMessage,
     attestation: '0xatt',
-    decodedMessage: {
-      destinationDomain: '6',
-      decodedMessageBody: {
-        burnToken: '0x1111111111111111111111111111111111111111',
-        mintRecipient: '0x2222222222222222222222222222222222222222',
-        amount: '5000',
-        messageSender: '0x3333333333333333333333333333333333333333'
-      }
-    },
     ...overrides
   })
 
   it('returns true when every immutable field matches, even with different address casing from Iris', () => {
     const shouted = irisEntry({
-      decodedMessage: {
-        destinationDomain: '6',
-        decodedMessageBody: {
-          burnToken: '0x1111111111111111111111111111111111111111'.toUpperCase().replace('0X', '0x'),
-          mintRecipient: '0x2222222222222222222222222222222222222222',
-          amount: '5000',
-          messageSender: '0x3333333333333333333333333333333333333333'
-        }
-      }
+      message: buildCctpMessage({
+        destinationDomain,
+        burnToken: burnToken.toUpperCase().replace('0X', '0x'),
+        mintRecipient,
+        amount,
+        bodySender
+      })
     })
     expect(irisMessageMatchesFingerprint(shouted, fp)).toBe(true)
   })
@@ -822,35 +834,43 @@ describe('irisMessageMatchesFingerprint', () => {
   })
 
   it('rejects a mismatched destinationDomain', () => {
-    expect(irisMessageMatchesFingerprint(irisEntry({ decodedMessage: { ...irisEntry().decodedMessage, destinationDomain: '0' } }), fp)).toBe(false)
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: buildCctpMessage({ destinationDomain: 0, burnToken, mintRecipient, amount, bodySender }) }), fp)).toBe(false)
   })
 
   it('rejects a mismatched burnToken', () => {
-    const wrong = irisEntry()
-    wrong.decodedMessage.decodedMessageBody.burnToken = '0x9999999999999999999999999999999999999999'
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken: '0x9999999999999999999999999999999999999999', mintRecipient, amount, bodySender }) })
     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
   })
 
   it('rejects a mismatched mintRecipient', () => {
-    const wrong = irisEntry()
-    wrong.decodedMessage.decodedMessageBody.mintRecipient = '0x9999999999999999999999999999999999999999'
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient: '0x9999999999999999999999999999999999999999', amount, bodySender }) })
     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
   })
 
   it('rejects a mismatched amount', () => {
-    const wrong = irisEntry()
-    wrong.decodedMessage.decodedMessageBody.amount = '1'
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount: 1n, bodySender }) })
     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
   })
 
   it('rejects a mismatched messageSender', () => {
-    const wrong = irisEntry()
-    wrong.decodedMessage.decodedMessageBody.messageSender = '0x9999999999999999999999999999999999999999'
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender: '0x9999999999999999999999999999999999999999' }) })
     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
   })
 
-  it('rejects an entry missing decodedMessage or decodedMessageBody entirely, rather than throwing', () => {
-    expect(irisMessageMatchesFingerprint({ message: '0xmsg' }, fp)).toBe(false)
-    expect(irisMessageMatchesFingerprint({ message: '0xmsg', decodedMessage: {} }, fp)).toBe(false)
+  it('regression (Round 29 review Medium finding): succeeds when decodedMessage is null but the raw message field is present and genuinely matches — Iris\'s convenience decode failing must not misclassify a real, correct message as a mismatch', () => {
+    const noDecode = irisEntry({ decodedMessage: null })
+    expect(irisMessageMatchesFingerprint(noDecode, fp)).toBe(true)
+  })
+
+  it('treats a missing raw message as unattested/incomplete (matches, permissively) rather than an identity failure — useCctpDelivery\'s own attestation gate is what correctly keeps polling for this case', () => {
+    expect(irisMessageMatchesFingerprint({ attestation: 'PENDING' }, fp)).toBe(true)
+  })
+
+  it('treats a raw message of "0x" (Circle\'s own pre-attestation sentinel) the same way — matches, permissively, not a mismatch', () => {
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: 'PENDING' }), fp)).toBe(true)
+  })
+
+  it('fails closed on a raw message that is present, non-"0x", but not valid CCTP V2 bytes — a genuinely different, more anomalous case than "not ready yet", so it must not be treated as a permissive match', () => {
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0xdead' }), fp)).toBe(false)
   })
 })

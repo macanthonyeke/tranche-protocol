@@ -515,4 +515,39 @@ describe('useCctpDelivery — stale phase (persistent-overflow / stuck detection
     await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
     expect(result.current.phase).toBe('delivered')
   })
+
+  /* Round 30 (Low finding): the catch/exception path previously left
+     staleCountRef/lastSignatureRef untouched, so an outage sitting between
+     two otherwise-identical unresolved outcomes didn't break the streak at
+     all — the count kept accumulating across it as if nothing had
+     interrupted. */
+  it('resets the stale counter on the exception/catch path — an outage does not silently continue an unresolved streak from before it', async () => {
+    vi.useFakeTimers()
+    const overflow = () => [
+      irisMessage({ destinationDomain: 6 }), irisMessage({ destinationDomain: 0 }), irisMessage({ destinationDomain: 7 })
+    ]
+    fetchIrisMessages.mockResolvedValue(overflow())
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+
+    // 8 identical-overflow polls — one short of the stale threshold (mirrors
+    // the "stays polling" test above: internal streak count is 7, not yet 8).
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    for (let i = 0; i < 7; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    }
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(8)
+    expect(result.current.phase).toBe('polling')
+
+    // One poll that throws — this must reset the streak, not just skip a beat.
+    fetchIrisMessages.mockRejectedValueOnce(new Error('network error'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(result.current.phase).toBe('unavailable')
+
+    // Resume the exact same identical-overflow signature. Without the reset,
+    // the pre-exception streak count (7) plus this one call would cross the
+    // threshold and go stale immediately here. With the reset, this is only
+    // the FIRST poll of a fresh streak, so it must stay in polling.
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(result.current.phase).toBe('polling')
+  })
 })

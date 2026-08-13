@@ -101,22 +101,44 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
   } finally {
     clearTimeout(timeoutId)
   }
+  // Round 30 (fixing the Round 29 review's Medium finding: "sourceTxHash
+  // checked at the wrong response level"). Confirmed against Circle's real
+  // GET /v2/messages API reference: sourceTxHash is a REQUIRED, non-nullable
+  // field on the response ENVELOPE — "the source burn transaction hash,
+  // shared by all messages in the response" — never duplicated on each
+  // individual message object. Round 29's per-message filter below was
+  // built against a shape that doesn't exist in a real response, so its
+  // `typeof m.sourceTxHash !== 'string'` branch always took the permissive
+  // "keep" path in production and never actually verified anything — the
+  // exact substitution it was meant to catch (equal cardinality, wrong
+  // membership) would have sailed through untouched. The real check has to
+  // run once, against the envelope, before `messages` is trusted at all.
+  //
+  // An absent envelope field (should be unreachable per Circle's schema,
+  // which marks it required) is treated as nothing to check — the same
+  // permissive-when-structurally-absent convention already used elsewhere
+  // in this codebase (irisMessageMatchesFingerprint's `fingerprint == null`,
+  // useCctpDelivery's `expectedOrdinals == null`). A PRESENT mismatch
+  // throws rather than silently returning [] — an empty array already means
+  // something specific in this function ("not yet indexed", the 404 branch
+  // above), and a wrong-transaction envelope is a categorically different,
+  // more anomalous condition that deserves its own signal rather than
+  // looking identical to "still indexing". useCctpDelivery's poll() already
+  // catches any thrown error here, sets phase 'unavailable', and keeps
+  // polling on the next tick — the same fail-closed, keep-retrying behavior
+  // a mismatch here should get.
+  if (typeof json?.sourceTxHash === 'string' && json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()) {
+    throw new Error('Iris response envelope sourceTxHash does not match the requested transaction')
+  }
+
   const messages = json?.messages || []
-  // Round 29 (fixing the Round 29 review's Medium finding): equal cardinality
-  // doesn't prove equal membership. useCctpDelivery's completeness gate
-  // (allMessages.length === expectedTotalMessages) only checks the COUNT —
-  // a response missing one real message but containing one unrelated extra
-  // entry would have the same length and still get ordinal-selected as
-  // though it were this transaction's own verified set. Circle's Iris
-  // response carries each message's own sourceTxHash; filtering out any
-  // entry whose sourceTxHash is present and does NOT match the transaction
-  // actually requested catches exactly that substitution — cheaply, before
-  // the entry ever reaches ordinal selection. Filters out only a POSITIVE
-  // mismatch, not entries missing the field entirely: this endpoint is
-  // already scoped by `transactionHash` in the request URL above, so
-  // sourceTxHash should be redundant on every real entry, but requiring its
-  // presence would silently break every poll if some response shape omits
-  // it — this stays a defensive check, not a new hard dependency.
+  // Round 29: kept as a harmless, no-cost defensive extra, NOT the real
+  // check (see the envelope-level check above, which is). Per Circle's real
+  // schema confirmed above, individual messages never actually carry their
+  // own sourceTxHash — so against a genuine response this filter's
+  // `typeof m.sourceTxHash !== 'string'` branch always takes the "keep"
+  // path and this loop is a no-op today. Left in only in case Circle ever
+  // adds the field at this level too.
   return messages.filter(
     (m) => typeof m.sourceTxHash !== 'string' || m.sourceTxHash.toLowerCase() === txHash.toLowerCase()
   )
@@ -230,25 +252,64 @@ export function cctpMessageFingerprint(message) {
 }
 
 /* Round 29. Checks a fingerprint (from cctpMessageFingerprint, above)
-   against the Iris entry selected by ordinal, using the SAME decoded shape
-   Circle's own V2 messages response documents: decodedMessage.destinationDomain
-   and decodedMessage.decodedMessageBody.{burnToken,mintRecipient,messageSender,amount}
-   (developers.circle.com/cctp/migration-from-v1-to-v2 — the V2 messages
-   response example shows exactly this nesting). `fingerprint == null` is
-   treated as "nothing to check against" (matches), not a failure — the same
-   permissive default useCctpDelivery already uses for expectedOrdinals ==
-   null, since every real call site provides both together. */
+   against the Iris entry selected by ordinal.
+
+   Round 30 (fixing the Round 29 review's Medium finding: "fingerprint check
+   depends on a nullable Iris field"). The original design compared against
+   irisMessage.decodedMessage.decodedMessageBody — but Circle's real schema
+   marks BOTH decodedMessage and decodedMessageBody explicitly nullable
+   (decodedMessage is null "if decoding fails" on Circle's side;
+   decodedMessageBody nullable the same way inside it), confirmed against
+   Circle's own GET /v2/messages API reference, not just the migration
+   guide's one non-null example. A genuine, fully real, correctly-attested,
+   terminal-state message could have Iris's own convenience decode come back
+   empty for reasons entirely outside this app's control — the old
+   `if (!decoded || !body) return false` treated that as a hard identity
+   mismatch, permanently misclassifying an honest message.
+
+   Fixed by never depending on Iris's decoded convenience object at all:
+   this derives the Iris-side fingerprint directly from irisMessage.message
+   (the raw hex bytes Iris returns) using cctpMessageFingerprint — the EXACT
+   SAME byte-offset parser already used for the receipt-side fingerprint —
+   instead of trusting a second, independently-nullable representation of
+   the same data. Symmetric parsing on both sides is strictly more robust
+   than comparing two different shapes, not just an equally-valid
+   alternative.
+
+   Per Circle's schema, `message` itself reads literally "0x" until an
+   attestation exists — a raw message that is missing or "0x" is a
+   genuinely different situation from a content mismatch: there is nothing
+   to compare yet, not a failed comparison. That's treated as "nothing to
+   check against" (matches, permissively) here, the same as `fingerprint ==
+   null` below — useCctpDelivery's own attestation gate, which runs
+   immediately after this check, is what correctly keeps polling for this
+   exact pre-attestation state (`m.attestation && m.attestation !==
+   'PENDING'`), so there is no need for this function to also detect it.
+   A non-"0x" message that fails to parse as valid CCTP V2 bytes (malformed,
+   truncated) is a different, more anomalous case and fails closed (treated
+   as a mismatch) rather than being let through.
+
+   `fingerprint == null` is treated as "nothing to check against" (matches),
+   not a failure — the same permissive default useCctpDelivery already uses
+   for expectedOrdinals == null, since every real call site provides both
+   together. */
 export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
   if (fingerprint == null) return true
-  const decoded = irisMessage?.decodedMessage
-  const body = decoded?.decodedMessageBody
-  if (!decoded || !body) return false
-  if (Number(decoded.destinationDomain) !== fingerprint.destinationDomain) return false
-  if (typeof body.burnToken !== 'string' || body.burnToken.toLowerCase() !== fingerprint.burnToken) return false
-  if (typeof body.mintRecipient !== 'string' || body.mintRecipient.toLowerCase() !== fingerprint.mintRecipient) return false
-  if (typeof body.messageSender !== 'string' || body.messageSender.toLowerCase() !== fingerprint.messageSender) return false
-  if (String(body.amount) !== fingerprint.amount) return false
-  return true
+  const message = irisMessage?.message
+  if (typeof message !== 'string' || message === '0x') return true
+  let actual
+  try {
+    actual = cctpMessageFingerprint(message)
+  } catch {
+    return false
+  }
+  return (
+    actual.destinationDomain === fingerprint.destinationDomain &&
+    actual.burnToken === fingerprint.burnToken &&
+    actual.mintRecipient === fingerprint.mintRecipient &&
+    actual.amount === fingerprint.amount &&
+    actual.messageSender === fingerprint.messageSender
+  )
 }
 
 // Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract

@@ -173,10 +173,16 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
         return
       }
 
-      const messages = expectedOrdinals.map((ord) => allMessages[ord]).filter(Boolean)
+      const selectedByOrdinal = expectedOrdinals.map((ord) => allMessages[ord])
+      const messages = selectedByOrdinal.filter(Boolean)
 
       if (messages.length < expectedOrdinals.length) {
-        markUnresolved(`selected:${messages.length}`)
+        // Round 30 (Low finding): signature includes WHICH expected ordinals
+        // came back empty, not just how many — two different missing
+        // ordinals at the same count would otherwise produce an identical
+        // signature and be indistinguishable from each other going stale.
+        const missingOrdinals = expectedOrdinals.filter((_, i) => selectedByOrdinal[i] == null)
+        markUnresolved(`selected:${messages.length}:${missingOrdinals.join(',')}`)
         return
       }
 
@@ -193,21 +199,28 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       // bypassed at once) and there is no safe alternative message to fall
       // back to selecting instead.
       if (expectedFingerprints != null) {
-        const allMatch = messages.every(
-          (m, i) => irisMessageMatchesFingerprint(m, expectedFingerprints[i])
-        )
-        if (!allMatch) {
-          markUnresolved('fingerprint-mismatch')
+        // Round 30 (Low finding): signature includes WHICH selected index
+        // mismatched, not just that one did — a mismatch moving between
+        // ordinals poll to poll would otherwise look identical to the same
+        // ordinal being stuck.
+        const mismatchedIndexes = messages
+          .map((m, i) => (irisMessageMatchesFingerprint(m, expectedFingerprints[i]) ? null : i))
+          .filter((i) => i !== null)
+        if (mismatchedIndexes.length > 0) {
+          markUnresolved(`fingerprint-mismatch:${mismatchedIndexes.join(',')}`)
           return
         }
       }
 
       // Circle returns attestation: "PENDING" (string) while still confirming.
-      const allAttested = messages.every(
-        (m) => m.attestation && m.attestation !== 'PENDING'
-      )
-      if (!allAttested) {
-        markUnresolved('unattested')
+      // Round 30 (Low finding): signature includes WHICH selected index is
+      // still unattested, not just that one is — same reasoning as the
+      // fingerprint-mismatch signature above.
+      const notAttestedIndexes = messages
+        .map((m, i) => (m.attestation && m.attestation !== 'PENDING' ? null : i))
+        .filter((i) => i !== null)
+      if (notAttestedIndexes.length > 0) {
+        markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)
         return
       }
 
@@ -252,6 +265,17 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
     } catch {
       // Network error or unexpected shape — show unavailable but keep polling
       // so a transient outage doesn't permanently block status.
+      //
+      // Round 30 (Low finding): reset the stale-signature tracking here too.
+      // Previously only the mount effect did this, so an exception sitting
+      // between two otherwise-identical unresolved signatures didn't break
+      // the "unchanged" streak at all — the count would silently keep
+      // accumulating across the outage as though nothing had interrupted it.
+      // A transient failure is itself a distinct, genuinely different event
+      // from "the same ambiguous outcome repeating"; it shouldn't be
+      // invisible to the mechanism that exists to detect exactly that.
+      staleCountRef.current = 0
+      lastSignatureRef.current = null
       setPhase('unavailable')
     }
     // Round 27: depends on expectedOrdinalsKey (a stable string), not
