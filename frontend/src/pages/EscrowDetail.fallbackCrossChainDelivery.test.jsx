@@ -85,11 +85,21 @@ const MESSAGE_SENT_ABI = [
 // logIndex is a real field on every viem log — milestoneCctpLogRange orders
 // and partitions on it, so every fixture below sets it explicitly rather
 // than relying on array position, matching what a real receipt provides.
-const messageSentLog = (logIndex, messageHex = '0x1234') => ({
+//
+// Round 25: `sender` builds a real, offset-correct CCTP V2 message —
+// receiptEmittedOwnCctpMessage now decodes messageSender out of this exact
+// byte range (see its own doc comment in utils/irisDelivery.js), so a
+// fixture only passes if it would actually decode to the right address.
+// Defaults to CONTRACT_ADDRESS since every test below except the Round 25
+// gap-(a) ones is exercising this contract's own genuine burns.
+const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
+  '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+
+const messageSentLog = (logIndex, sender = CONTRACT_ADDRESS) => ({
   address: MESSAGE_TRANSMITTER,
   logIndex,
   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
-  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
+  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
 })
 
 // Builds a real TrancheProtocol event log (e.g. MilestoneReleased,
@@ -191,8 +201,8 @@ describe('failure mode (b): a receipt proving 2 CCTP messages, Iris initially in
   const twoMessageReceipt = () => ({
     transactionHash: '0xreleasetx',
     logs: [
-      messageSentLog(0, '0x0001'),
-      messageSentLog(1, '0x0002'),
+      messageSentLog(0),
+      messageSentLog(1),
       escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
     ]
   })
@@ -236,7 +246,7 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
   const batchedReceiptNoMessageForTarget = () => ({
     transactionHash: '0xbatchtx',
     logs: [
-      messageSentLog(0, '0xdeadbeef01'),
+      messageSentLog(0),
       escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
       escrowLog(2, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
     ]
@@ -263,10 +273,10 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
       data: {
         transactionHash: '0xbatchtx2',
         logs: [
-          messageSentLog(0, '0xdead0000'),
+          messageSentLog(0),
           escrowLog(1, 'MilestoneApproved', { escrowId: 3n, milestoneIndex: 0n }),
-          messageSentLog(2, '0xcafe0001'),
-          messageSentLog(3, '0xcafe0002'),
+          messageSentLog(2),
+          messageSentLog(3),
           escrowLog(4, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://y' })
         ]
       },
@@ -293,7 +303,7 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
       data: {
         transactionHash: '0xplaintx',
         logs: [
-          messageSentLog(0, '0xf00d0000'),
+          messageSentLog(0),
           escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
         ]
       },
@@ -305,5 +315,44 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
     renderFallback({ txHash: '0xplaintx' })
 
     await waitFor(() => expect(screen.getByText(/Delivered to/)).toBeInTheDocument())
+  })
+})
+
+describe('Round 25 gap (a): a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
+  it('does not attribute a foreign TrancheProtocol instance\'s (or a direct Circle depositForBurn\'s) MessageSent to this instance\'s Arc-only release', async () => {
+    setReceipt({
+      data: {
+        transactionHash: '0xforeigntx',
+        logs: [
+          messageSentLog(0, '0x1234567890123456789012345678901234567890'),   // foreign burn — no boundary around it
+          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // this instance's own release, Arc-only, no burn
+        ]
+      },
+      isPending: false,
+      isError: false
+    })
+    const { container } = renderFallback({ txHash: '0xforeigntx' })
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+    expect(fetchIrisMessages).not.toHaveBeenCalled()
+  })
+})
+
+describe('Round 25 gap (b): a same-contract withdrawRefund burn shares this receipt with an unrelated Arc-only release', () => {
+  it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release', async () => {
+    setReceipt({
+      data: {
+        transactionHash: '0xrefundtx',
+        logs: [
+          messageSentLog(0),   // withdrawRefund's own genuine burn
+          escrowLog(1, 'RefundWithdrawn', { depositor: '0x179cc4c8f23d257b7f4acb785464025570e3af86', amount: 100_000_000n }),
+          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
+        ]
+      },
+      isPending: false,
+      isError: false
+    })
+    const { container } = renderFallback({ txHash: '0xrefundtx' })
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+    expect(fetchIrisMessages).not.toHaveBeenCalled()
   })
 })

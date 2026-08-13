@@ -19,7 +19,7 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
-const { fetchIrisMessages, receiptEmittedCctpMessage } = await import('./irisDelivery.js')
+const { fetchIrisMessages, receiptEmittedCctpMessage, messageSenderOf, receiptEmittedOwnCctpMessage } = await import('./irisDelivery.js')
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -314,5 +314,71 @@ describe('receiptEmittedCctpMessage', () => {
 
   it('returns false, count 0, not throws, for an empty logs array', () => {
     expect(receiptEmittedCctpMessage({ transactionHash: '0xtx7', logs: [] })).toEqual({ emitted: false, count: 0 })
+  })
+})
+
+/* messageSenderOf / receiptEmittedOwnCctpMessage — Round 25.
+
+   Round 22's receiptEmittedCctpMessage deliberately matches on the
+   MessageSent event signature alone, regardless of emitting application —
+   correct for that round's purpose (robust to a MessageTransmitterV2 proxy
+   redeploy) and for the three original write sites (always this device's
+   own single-purpose tx). Not correct for FallbackCrossChainDelivery,
+   where release()'s permissionlessness lets a batching contract compose a
+   foreign application's burn into the same transaction. messageSenderOf
+   answers the narrower, ownership question these fixtures build a REAL,
+   offset-correct message for — verified against Circle's own CCTP V2
+   technical guide (developers.circle.com/cctp/references/technical-guide):
+   messageBody starts at absolute byte offset 148; BurnMessageV2's
+   messageSender sits at relative offset 100 within it (absolute 248), a
+   32-byte word. */
+describe('messageSenderOf', () => {
+  const buildCctpMessage = (sender) =>
+    '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+
+  it('decodes the real messageSender word at the documented byte offset (248-280)', () => {
+    expect(messageSenderOf(buildCctpMessage(CONTRACT_ADDRESS)).toLowerCase()).toBe(CONTRACT_ADDRESS.toLowerCase())
+  })
+
+  it('decodes a different sender correctly — not a fixed/hardcoded expectation', () => {
+    const foreign = '0x1234567890123456789012345678901234567890'
+    expect(messageSenderOf(buildCctpMessage(foreign)).toLowerCase()).toBe(foreign.toLowerCase())
+  })
+})
+
+describe('receiptEmittedOwnCctpMessage', () => {
+  const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
+    '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+  const ownMessageSentLog = (sender = CONTRACT_ADDRESS) => ({
+    address: MESSAGE_TRANSMITTER,
+    topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+    data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
+  })
+
+  it('counts a message whose own decoded messageSender matches the given ownAddress', () => {
+    const receipt = { logs: [ownMessageSentLog(CONTRACT_ADDRESS)] }
+    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: true, count: 1 })
+  })
+
+  it('excludes a real, well-formed MessageSent log whose messageSender is a DIFFERENT address', () => {
+    const receipt = { logs: [ownMessageSentLog('0x1234567890123456789012345678901234567890')] }
+    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: false, count: 0 })
+  })
+
+  it('counts only the matching-sender messages out of a mix', () => {
+    const receipt = {
+      logs: [
+        ownMessageSentLog(CONTRACT_ADDRESS),
+        ownMessageSentLog('0x1234567890123456789012345678901234567890'),
+        ownMessageSentLog(CONTRACT_ADDRESS)
+      ]
+    }
+    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: true, count: 2 })
+  })
+
+  it('is case-insensitive on the address comparison — an ownAddress argument in a different case than the decoded (lowercase) messageSender still matches', () => {
+    const receipt = { logs: [ownMessageSentLog(CONTRACT_ADDRESS)] }
+    const shoutedOwnAddress = '0x' + CONTRACT_ADDRESS.slice(2).toUpperCase()
+    expect(receiptEmittedOwnCctpMessage(receipt, shoutedOwnAddress)).toEqual({ emitted: true, count: 1 })
   })
 })

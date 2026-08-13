@@ -1,5 +1,6 @@
-import { encodeFunctionData, decodeEventLog } from 'viem'
+import { encodeFunctionData, decodeEventLog, slice } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
+import { bytes32ToAddress } from './encode.js'
 
 const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
 
@@ -147,4 +148,53 @@ export function receiptEmittedCctpMessage(receipt) {
     } catch {}
   }
   return { emitted: count > 0, count }
+}
+
+/* Round 25. Decodes the `messageSender` field out of a raw CCTP message —
+   the address that called depositForBurn (or, per Circle's own CCTP V2
+   technical guide's naming, depositForBurnWithCaller/depositForBurnWithHook
+   family) on the source domain. Verified against Circle's documented V2
+   message format (developers.circle.com/cctp/references/technical-guide):
+   the top-level message header's `messageBody` field starts at absolute
+   byte offset 148; BurnMessageV2's own `messageSender` field sits at
+   relative offset 100 within that body (absolute 248), a 32-byte word —
+   confirmed identically via two independent fetches of Circle's docs.
+   TrancheProtocol.sol calls tokenMessenger.depositForBurnWithHook(...)
+   directly from _approveAndBurn — no intermediary contract — so for every
+   burn THIS contract makes, msg.sender to TokenMessenger (and therefore
+   messageSender in the resulting message) is always this contract's own
+   address. */
+export function messageSenderOf(message) {
+  return bytes32ToAddress(slice(message, 248, 280))
+}
+
+/* Round 25. receiptEmittedCctpMessage answers "did a CCTP message get
+   created anywhere in this receipt" — deliberately unscoped by contract
+   address (see that function's own doc comment: robust to a future
+   MessageTransmitterV2 redeploy). Correct for the three original write
+   sites (MilestoneAction/DisputeBlock/SettlementPanel): each receipt there
+   is this device's own tx.run(escrowWrite(...)) call — a single top-level
+   call to OUR contract's own function, so nothing else could have burned
+   inside it. NOT correct for FallbackCrossChainDelivery: release() is
+   fully permissionless, so a batching/multicall contract can compose
+   several calls — potentially to a DIFFERENT TrancheProtocol instance, or
+   a direct Circle depositForBurn call entirely outside this app — into one
+   transaction sharing a tx hash this app's own indexer may still see.
+   milestoneCctpLogRange's log-index boundaries (EscrowDetail.jsx) only
+   answer "which of THIS contract's own calls", never "is this message even
+   from this contract's burn at all" — a foreign burn with no recognized
+   boundary around it would fall inside whatever range it happens to land
+   in. This is the second, orthogonal filter: only count a MessageSent
+   log whose OWN decoded messageSender is this contract's address. */
+export function receiptEmittedOwnCctpMessage(receipt, ownAddress) {
+  const own = ownAddress.toLowerCase()
+  const ownLogs = receipt.logs.filter((log) => {
+    try {
+      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
+      return dec.eventName === 'MessageSent' && messageSenderOf(dec.args.message).toLowerCase() === own
+    } catch {
+      return false
+    }
+  })
+  return receiptEmittedCctpMessage({ ...receipt, logs: ownLogs })
 }

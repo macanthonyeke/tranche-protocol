@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage, receiptEmittedOwnCctpMessage } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
@@ -2434,11 +2434,11 @@ export function mutualSettlementCreatedCctpMessage(receipt) {
    is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
    emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
    credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
-   withdrawRefund's _approveAndBurn call site (:877) is the only other burn
-   path, but its RefundWithdrawn event carries no escrow/milestone id and,
-   per CLAUDE.md, Milestone.releaseTx is stamped only by the 5 release-type
-   handlers — RefundWithdrawn isn't one — so a withdrawRefund tx hash can
-   never reach here in the first place.
+   Re-verified exhaustively against every _approveAndBurn/
+   _executeCCTPReleaseAmount call site in TrancheProtocol.sol: these four
+   plus withdrawRefund (:877) are the only five burn-capable paths that
+   exist — see CCTP_BOUNDARY_ONLY_EVENTS below for why withdrawRefund needs
+   separate handling rather than joining this list.
 
    EVM logs within one transaction are strictly ordered by real execution
    order: one external call runs to completion (emitting every one of its
@@ -2453,8 +2453,36 @@ export function mutualSettlementCreatedCctpMessage(receipt) {
    can belong to a caller other than this device — the three write sites
    are always this device's own single-purpose tx.run() call, never a
    batch) would attribute every MessageSent in a batched tx's receipt to
-   every milestone that shares the tx hash. */
+   every milestone that shares the tx hash.
+
+   This boundary set only answers "which of THIS CONTRACT's own calls" —
+   see receiptEmittedOwnCctpMessage (utils/irisDelivery.js) for the
+   separate, orthogonal question of whether a MessageSent log in the scoped
+   range is even from this contract's own burn at all (a batch could
+   contain a foreign TrancheProtocol instance's, or a direct Circle
+   depositForBurn call's, burn with no recognized boundary around it). */
 const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
+
+/* Round 25. withdrawRefund's RefundWithdrawn(address indexed depositor,
+   uint256 amount) — verified against ITrancheProtocol.sol — carries no
+   escrowId or milestoneIndex at all (a refund is wallet-balance-level, not
+   tied to any single milestone), so it can never be a valid MATCH target
+   for the (escrowId, milestoneIndex) lookup below, unlike
+   CCTP_TERMINAL_EVENTS. It still needs to DELIMIT ranges: withdrawRefund's
+   own tx hash never reaches FallbackCrossChainDelivery as an entry point
+   (Milestone.releaseTx is stamped only by the 5 release-type handlers,
+   confirmed in CLAUDE.md — RefundWithdrawn isn't one), but its logs can
+   still appear INSIDE a batched receipt entered via a different
+   milestone's own terminal event. Without a boundary here, a batched
+   withdrawRefund burn immediately before an unrelated Arc-only milestone
+   release would fall inside that milestone's computed range with nothing
+   to stop it. Pushed into the same `boundaries` array as
+   CCTP_TERMINAL_EVENTS but with escrowId/milestoneIndex left null — since
+   neither can ever equal a real BigInt target, the existing `.find()`
+   match logic below naturally never selects it as anyone's own terminal
+   event, while the range computation (which only reads logIndex) still
+   uses it correctly. */
+const CCTP_BOUNDARY_ONLY_EVENTS = ['RefundWithdrawn']
 
 /* Exported for direct testing. Returns the [start, end] log-index range
    (start exclusive, end inclusive) this milestone's own logs occupy within
@@ -2473,6 +2501,8 @@ export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
       const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
       if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
         boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
+      } else if (CCTP_BOUNDARY_ONLY_EVENTS.includes(dec.eventName)) {
+        boundaries.push({ logIndex: log.logIndex, escrowId: null, milestoneIndex: null })
       }
     } catch {}
   }
@@ -2489,20 +2519,23 @@ export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
   return { start, end: match.logIndex }
 }
 
-/* Round 24 Phase A. The milestone-scoped counterpart to
+/* Round 24 Phase A / Round 25. The milestone-scoped counterpart to
    receiptEmittedCctpMessage — used only by FallbackCrossChainDelivery,
    where the receipt can belong to a batched, multi-milestone transaction
    this device never submitted. Scopes the receipt to just this milestone's
-   own log range (see milestoneCctpLogRange) before running the exact same
-   MessageSent decode. No match found (should be unreachable in practice —
-   see milestoneCctpLogRange's own doc comment) fails the same way as
+   own log range (see milestoneCctpLogRange) AND to messages whose own
+   decoded messageSender is this contract's address (see
+   receiptEmittedOwnCctpMessage's doc comment for why the log-index
+   scoping alone isn't sufficient) before running the shared MessageSent
+   count. No match found (should be unreachable in practice — see
+   milestoneCctpLogRange's own doc comment) fails the same way as
    "genuinely no CCTP message": nothing reliable to attribute either way,
    so there is no meaningful difference in what the UI should show. */
 export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
   const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
   if (!range) return { emitted: false, count: 0 }
   const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
-  return receiptEmittedCctpMessage({ ...receipt, logs: scopedLogs })
+  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
 }
 
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
