@@ -302,6 +302,7 @@ Every wallet-signing site in the frontend carries a `confirm` descriptor (the ob
 
 - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."
 - SE-6 (remaining piece): `EscrowDetail.jsx`'s `AckBanner` should block "Accept terms" when `InvoiceViewer`'s SHA-256 check fails. Verification itself now exists (see "Frontend: invoice attachment pinning (IPFS)" above) — this is only the missing gate on acknowledgement.
+- Round 29 finding 5 — `useAuth.jsx`'s `readStoredSession` (`useAuth.jsx:86`) has the same class of timestamp-coherence gap Round 29 closed for cctpTrack's `ts` field (`EscrowDetail.jsx`'s `isValidCctpTrackRecord` — see git history for the fix): `s.issuedAt` is only checked for truthiness (`if (!s.issuedAt) return null`), never for being finite or non-future. A non-finite `issuedAt` makes `Date.now() - s.issuedAt > SESSION_TTL_MS` evaluate to `false` (NaN comparisons are always false), and a future `issuedAt` makes the same subtraction negative — either way the session's own expiry check silently never fires. `readActivityAt` already guards its own value with `Number.isFinite`, but neither it nor `readStoredSession` reject a future timestamp, so the same defeat applies to the inactivity-ceiling check at `useAuth.jsx:104`. Out of scope for this PR (different subsystem: session auth, not confirm-descriptors or delivery-tracking); not fixed here.
 
 Deferred from Round 13 Phase D — investigated, scoped, deliberately not built:
 
