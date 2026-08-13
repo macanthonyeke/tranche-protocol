@@ -214,3 +214,39 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
     expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
   })
 })
+
+/* Round 23 — expectedMessageCount guard, direct coverage.
+   Introduced in Round 22 Phase A for the three write sites (a receipt-
+   verified local track always knows its own real MessageSent count), and
+   now also fed by MilestoneRow's fallback path once it has a receipt in
+   hand (Round 23). The guard itself — `messages.length < expectedMessageCount`
+   keeps polling before ANY completeness check runs — had no direct test
+   until now; it was only ever exercised incidentally through fixtures where
+   messages.length already matched. This isolates it: a burn that emitted 2
+   real MessageSent events but Iris has only indexed 1 of must not be treated
+   as "fully known" just because the one message it does have is COMPLETE. */
+describe('useCctpDelivery — expectedMessageCount guard', () => {
+  it('keeps polling when Iris has indexed fewer messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toEqual([])
+  })
+
+  it('proceeds to delivered once Iris catches up to the full expected count', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(result.current.deliveries).toHaveLength(2)
+  })
+
+  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessageCount is not provided', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+  })
+})

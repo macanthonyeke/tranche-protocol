@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useReadContract } from 'wagmi'
+import { useReadContract, useWaitForTransactionReceipt } from 'wagmi'
 import { decodeEventLog } from 'viem'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useQuery } from '@tanstack/react-query'
@@ -1481,15 +1481,27 @@ function MilestoneRow({
     readCctpTrack(escrow.id, milestone.index)
   )
   const releaseTxs = useMilestoneReleaseTxs(escrow.id)
-  const cctpTxHash = cctpTrack?.txHash || releaseTxs[milestone.index] || null
-  // Round 19 Phase C: split-aware, same as settlementIsCrossChain above — not
-  // the raw escrow.destinationDomain this used to read independently.
-  const trackingDomain = settlementTrackingDomain(escrow, splits)
-  // Round 21 Phase C: read/display purposes use historicallyCrossChain, not
-  // trackingDomain directly — see that function's own doc comment for why
-  // (a later redirect on this active escrow must not hide an already-tracked
-  // historical release).
-  const isHistoricallyCrossChain = historicallyCrossChain(cctpTrack, trackingDomain)
+  // Round 23: the two txHash sources no longer merge into one. A local
+  // cctpTrack record is already receipt-verified at write time (Round 22
+  // Phase A gates every write on receiptEmittedCctpMessage(receipt).emitted)
+  // — its mere presence is trustworthy, same as before. A subgraph-sourced
+  // releaseTx carries no such guarantee: the indexer stamps releaseTx on
+  // every successful DisputeResolved/MutualSettlementExecuted/etc regardless
+  // of whether a CCTP message actually fired (a partial award where every
+  // leg rounds to zero, or a divert-to-Arc credit, settle with no burn at
+  // all), so it gets its own receipt check in FallbackCrossChainDelivery
+  // below instead of reusing this same trusted path. Deliberately gated on
+  // releaseTxs alone, not on trackingDomain (today's current-config-derived
+  // signal, still used elsewhere for FORWARD-looking decisions) — the
+  // receipt is ground truth for a terminal milestone, so there is no longer
+  // a reason to pre-filter on a signal that can be wrong in both directions
+  // (see settlementTrackingDomain / historicallyCrossChain's own doc
+  // comments). This also closes the open CLAUDE.md "Round 21 Phase C
+  // remaining piece" gap as a side effect: a milestone redirected to Arc
+  // AFTER a historical cross-chain release used to hide the tracker for any
+  // device without a local record; the receipt doesn't care what today's
+  // config says.
+  const fallbackTxHash = !cctpTrack ? (releaseTxs[milestone.index] || null) : null
 
   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
   // device, they write to localStorage and call onCrossChainRelease so we re-read.
@@ -1641,13 +1653,20 @@ function MilestoneRow({
                 (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
                   <TimeoutOutcomeCard milestone={milestone} role={role} />
                 )}
-              {milestone.state === 3 && cctpTxHash && isHistoricallyCrossChain && (
+              {milestone.state === 3 && cctpTrack?.txHash && (
                 <CrossChainDelivery
-                  txHash={cctpTxHash}
-                  isCrossChain={isHistoricallyCrossChain}
+                  txHash={cctpTrack.txHash}
+                  isCrossChain
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
-                  expectedMessageCount={cctpTrack?.expectedMessages}
+                  expectedMessageCount={cctpTrack.expectedMessages}
+                />
+              )}
+              {milestone.state === 3 && fallbackTxHash && (
+                <FallbackCrossChainDelivery
+                  txHash={fallbackTxHash}
+                  escrowId={escrow.id}
+                  milestoneIndex={milestone.index}
                 />
               )}
 
@@ -2938,6 +2957,111 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
       )}
     </div>
   )
+}
+
+// Round 23: single-shot, generous-but-bounded read of an already-mined
+// receipt. useWaitForTransactionReceipt's 180s default timeout exists for
+// "wait for MY just-submitted tx to get mined" — the polling loop that
+// budget protects. That doesn't apply here: this hash belongs to a
+// milestone already in a terminal state (state === 3), so the receipt
+// either exists right now or an RPC endpoint genuinely can't/won't serve it
+// (pruned history, hash too old). viem's waitForTransactionReceipt checks
+// getTransactionReceipt ONCE, immediately, before any polling begins — for
+// an already-mined tx that single round trip is the whole story, so this
+// bound only matters for the "can't serve it" case, where it decides how
+// long a background milestone row shows a spinner before giving up.
+const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
+
+/* Round 23. MilestoneRow's fallback path — a milestone whose cross-chain
+   release this device never submitted itself, known about only via the
+   subgraph's Milestone.releaseTx. The two gaps the 11th confirm-descriptor
+   review pass found, both traced to the same root cause (this path had no
+   receipt to run receiptEmittedCctpMessage against, unlike the three
+   Phase A/B write sites — MilestoneAction.run, DisputeBlock.handleResolve,
+   SettlementPanel's onConfirmed):
+
+     (a) The indexer stamps releaseTx for every successful
+         DisputeResolved/MutualSettlementExecuted/etc regardless of whether
+         a CCTP message actually fired — a partial award where every leg
+         rounds to zero, or a divert-to-Arc credit, settles with no burn at
+         all. The old fallback activated the tracker on the mere presence
+         of releaseTx + current cross-chain config, and since no Iris
+         message will ever appear for a tx that never burned anything, the
+         UI showed "Delivering…" permanently.
+     (b) This path had no persisted expected-message-count — that only
+         exists in the submitting device's OWN localStorage record — so
+         useCctpDelivery's completeness guard was silently skipped. A burn
+         that emitted 2 messages but Iris had only indexed 1 of could be
+         marked fully delivered before the second leg's status was known.
+
+   Fixed by fetching the receipt directly (useWaitForTransactionReceipt is
+   the same provider-read hook useTx.js already uses to turn a hash into a
+   receipt) and reusing receiptEmittedCctpMessage — the exact same
+   ground-truth check the three write sites run, just read after the fact
+   instead of at confirmation time. Its own decoded count becomes
+   expectedMessageCount, closing (b) the same way a local cctpTrack record
+   already does. A receipt that emits zero messages renders nothing (same
+   as any other non-cross-chain milestone), closing (a).
+
+   Introduces an async fetch on a path that used to render synchronously
+   from local/subgraph data alone, so there are three states to cover
+   beyond "verified cross-chain, delegate to CrossChainDelivery":
+     - pending: shows a distinct "Checking delivery status…" line rather
+       than reusing CrossChainDelivery's "Delivering…" copy — that copy
+       specifically means "a cross-chain transfer is in progress", which is
+       not yet known to be true here; and rather than rendering nothing,
+       which would make a milestone that just settled look inexplicably
+       frozen for however long the fetch takes.
+     - error (RPC couldn't serve the receipt — see FALLBACK_RECEIPT_TIMEOUT_MS
+       above): reuses CrossChainDelivery's own "unavailable" copy, since the
+       honest answer really is "can't tell right now", not a false negative
+       (silently rendering nothing here would look identical to a milestone
+       that was never cross-chain, wrongly implying certainty about a burn
+       that may still be worth checking manually) or a false positive
+       (rendering "Delivering…" for a tx that may never have burned
+       anything, reintroducing failure mode (a) via a different door).
+     - verified cross-chain: delegates the actual delivery UI to
+       CrossChainDelivery so the two paths share one rendering
+       implementation once a receipt is in hand, local or fallback. */
+export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex }) {
+  const { data: receipt, isPending, isError } = useWaitForTransactionReceipt({
+    hash: txHash,
+    timeout: FALLBACK_RECEIPT_TIMEOUT_MS,
+    query: { enabled: !!txHash }
+  })
+
+  if (receipt) {
+    const { emitted, count } = receiptEmittedCctpMessage(receipt)
+    if (!emitted) return null
+    return (
+      <CrossChainDelivery
+        txHash={txHash}
+        isCrossChain
+        escrowId={escrowId}
+        milestoneIndex={milestoneIndex}
+        expectedMessageCount={count}
+      />
+    )
+  }
+
+  if (isError) {
+    return (
+      <div className="mt-3 pt-3 border-t border-rule">
+        <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+      </div>
+    )
+  }
+
+  if (isPending) {
+    return (
+      <div className="mt-3 pt-3 border-t border-rule flex items-center gap-2 text-[12.5px] text-ink-2">
+        <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+        Checking delivery status…
+      </div>
+    )
+  }
+
+  return null
 }
 
 /* Recovery card shown when Iris reports forwardState: FAILED for one CCTP
