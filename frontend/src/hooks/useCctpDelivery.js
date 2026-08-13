@@ -27,16 +27,33 @@ const POLL_MS = 15_000
 // doesn't, `destinationDomain` now comes through as `null` (rendered as an
 // unknown chain downstream) rather than a wrong guess.
 //
-// Round 22 Phase A: `expectedMessageCount`, optional — the number of real
-// MessageSent events the confirming receipt proved should exist for this
-// tx (see receiptEmittedCctpMessage), persisted by the submitting device
-// alongside the tracked txHash. A mixed split can burn several legs to
-// different chains in one transaction, and Iris indexes each message
-// independently — a partial response (fewer messages than the receipt
-// proved) is "not fully indexed yet", not "this is the complete set". Only
-// the submitting device has this number; a subgraph-sourced txHash from a
-// different device has no persisted count and falls back to the
-// messages.length === 0 heuristic below, same as before this existed.
+// Round 22 Phase A: `expectedMessages`, optional — originally a bare count
+// of real MessageSent events the confirming receipt proved should exist
+// for this tx, now (Round 26) the actual verified message identities
+// themselves (see receiptEmittedCctpMessageForMilestone /
+// verifiedOwnCctpMessage), persisted by the submitting device alongside
+// the tracked txHash. A mixed split can burn several legs to different
+// chains in one transaction, and Iris indexes each message independently —
+// a partial response (fewer messages than the receipt proved) is "not
+// fully indexed yet", not "this is the complete set". Only the submitting
+// device has this; a subgraph-sourced txHash from a different device falls
+// back to the messages.length === 0 heuristic below, same as before this
+// existed.
+//
+// Round 26 finding 2: a bare count was never enough once Iris's response
+// can contain messages belonging to a DIFFERENT milestone under the same
+// tx hash — Iris has no concept of "milestone", only tx hash. A batch with
+// 2 total messages where only 1 is genuinely this milestone's own used to
+// pass `messages.length(2) >= expectedMessageCount(1)` and then render
+// BOTH — a foreign message's failure could make this milestone look
+// failed, or its success could look like this milestone's own delivery.
+// expectedMessages is now the exact set of raw message hex strings this
+// milestone's own receipt verified (see verifiedOwnCctpMessage's full
+// authenticity chain) — Iris's response is filtered to ONLY the entries
+// whose own `message` field byte-matches one of them (case-insensitive
+// string equality; these are short, few-per-receipt hex strings, so a
+// hash comparison would add a step for no real benefit) before anything
+// else in this function ever looks at it.
 //
 // Round 22 Phase B: terminality used to be inferred as "no message is
 // PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
@@ -50,18 +67,26 @@ const POLL_MS = 15_000
 // EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
 // any value Circle adds later) keeps polling, which is the safe default for
 // an open-ended field.
-export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
+export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
   const intervalRef = useRef(null)
   const doneRef     = useRef(false)
+  const expectedMessagesKey = expectedMessages == null ? null : expectedMessages.join(',')
 
   const poll = useCallback(async () => {
     if (!txHash || !isCrossChain || doneRef.current) return
     try {
-      const messages = await fetchIrisMessages(txHash)
+      const allMessages = await fetchIrisMessages(txHash)
 
-      if (expectedMessageCount != null && messages.length < expectedMessageCount) {
+      // Identity-based, not count-based (Round 26 finding 2) — see the
+      // doc comment above for why a bare length check let a foreign
+      // milestone's own genuine Iris message through undetected.
+      const messages = expectedMessages != null
+        ? allMessages.filter((m) => expectedMessages.some((em) => em.toLowerCase() === m.message?.toLowerCase()))
+        : allMessages
+
+      if (expectedMessages != null && messages.length < expectedMessages.length) {
         setPhase('polling')
         return
       }
@@ -117,7 +142,15 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
       // so a transient outage doesn't permanently block status.
       setPhase('unavailable')
     }
-  }, [txHash, isCrossChain, expectedMessageCount])
+    // Round 26: depends on expectedMessagesKey (a stable string), not
+    // expectedMessages itself. FallbackCrossChainDelivery recomputes its
+    // verified message array fresh on every render (a new array reference
+    // each time, even when the content is identical) — depending on the
+    // array directly would recreate `poll` every render, which would then
+    // retrigger the effect below and reset phase/deliveries in a loop. The
+    // joined hex strings can never contain a comma, so this is an
+    // unambiguous equality key for otherwise-identical content.
+  }, [txHash, isCrossChain, expectedMessagesKey])
 
   useEffect(() => {
     if (!txHash || !isCrossChain) {

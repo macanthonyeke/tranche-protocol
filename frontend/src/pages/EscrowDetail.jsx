@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage, receiptEmittedOwnCctpMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
 import {
   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
@@ -1659,7 +1659,14 @@ function MilestoneRow({
                   isCrossChain
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
-                  expectedMessageCount={cctpTrack.expectedMessages}
+                  // Round 26: defensive against a pre-Round-26 localStorage
+                  // entry still inside its 24h window, where
+                  // expectedMessages was a bare count (number), not an
+                  // array — Array.isArray falls back to undefined exactly
+                  // like a missing value (see useCctpDelivery's own
+                  // expectedMessages == null branch), never crashes on
+                  // .join/.some over a number.
+                  expectedMessages={Array.isArray(cctpTrack.expectedMessages) ? cctpTrack.expectedMessages : undefined}
                 />
               )}
               {milestone.state === 3 && fallbackTxHash && (
@@ -2412,130 +2419,22 @@ export function mutualSettlementExecuted(receipt) {
    Arc credit, and still fire MutualSettlementExecuted with no CCTP message
    ever created. Both facts matter for different reasons and neither implies
    the other, so SettlementPanel's tracker write requires both: this wraps
-   them into one composite ground-truth check, kept separate from the two
-   simpler write sites (MilestoneAction, DisputeBlock) whose actions either
-   revert or fully execute with no two-sided-match ambiguity, so
-   receiptEmittedCctpMessage alone is already their complete answer. */
-export function mutualSettlementCreatedCctpMessage(receipt) {
-  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0 }
-  return receiptEmittedCctpMessage(receipt)
-}
+   them into one composite ground-truth check.
 
-/* Round 24 Phase A. The four terminal, escrowId+milestoneIndex-carrying
-   events that can each be preceded by a CCTP burn in the SAME top-level
-   call — TrancheProtocol.sol verified directly, not assumed:
-     approveRelease        -> MilestoneApproved       (:647/:649)
-     release                -> MilestoneReleased       (:682/:684)
-     resolveDispute          -> DisputeResolved         (via _executePartialRelease, :516/:518)
-     mutualSettle (matched)  -> MutualSettlementExecuted (via _executePartialRelease, :556/:557)
-   In every one of the four, the burn (if any) happens strictly BEFORE the
-   terminal event — CEI ordering, confirmed at each call site and in
-   _executeCCTPReleaseAmount/_executePartialRelease underneath, and nothing
-   is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
-   emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
-   credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
-   Re-verified exhaustively against every _approveAndBurn/
-   _executeCCTPReleaseAmount call site in TrancheProtocol.sol: these four
-   plus withdrawRefund (:877) are the only five burn-capable paths that
-   exist — see CCTP_BOUNDARY_ONLY_EVENTS below for why withdrawRefund needs
-   separate handling rather than joining this list.
-
-   EVM logs within one transaction are strictly ordered by real execution
-   order: one external call runs to completion (emitting every one of its
-   own logs) before the next begins, true regardless of whether a batching
-   / multicall contract composed several release()-family calls (release()
-   is fully permissionless) into one transaction. That makes each
-   milestone's own terminal event a hard boundary, not a heuristic: the
-   MessageSent logs that genuinely belong to THIS milestone are exactly
-   those strictly after the nearest PRECEDING terminal event (any
-   milestone) and up to and including this milestone's own terminal event.
-   Without this, FallbackCrossChainDelivery (the only site whose receipt
-   can belong to a caller other than this device — the three write sites
-   are always this device's own single-purpose tx.run() call, never a
-   batch) would attribute every MessageSent in a batched tx's receipt to
-   every milestone that shares the tx hash.
-
-   This boundary set only answers "which of THIS CONTRACT's own calls" —
-   see receiptEmittedOwnCctpMessage (utils/irisDelivery.js) for the
-   separate, orthogonal question of whether a MessageSent log in the scoped
-   range is even from this contract's own burn at all (a batch could
-   contain a foreign TrancheProtocol instance's, or a direct Circle
-   depositForBurn call's, burn with no recognized boundary around it). */
-const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
-
-/* Round 25. withdrawRefund's RefundWithdrawn(address indexed depositor,
-   uint256 amount) — verified against ITrancheProtocol.sol — carries no
-   escrowId or milestoneIndex at all (a refund is wallet-balance-level, not
-   tied to any single milestone), so it can never be a valid MATCH target
-   for the (escrowId, milestoneIndex) lookup below, unlike
-   CCTP_TERMINAL_EVENTS. It still needs to DELIMIT ranges: withdrawRefund's
-   own tx hash never reaches FallbackCrossChainDelivery as an entry point
-   (Milestone.releaseTx is stamped only by the 5 release-type handlers,
-   confirmed in CLAUDE.md — RefundWithdrawn isn't one), but its logs can
-   still appear INSIDE a batched receipt entered via a different
-   milestone's own terminal event. Without a boundary here, a batched
-   withdrawRefund burn immediately before an unrelated Arc-only milestone
-   release would fall inside that milestone's computed range with nothing
-   to stop it. Pushed into the same `boundaries` array as
-   CCTP_TERMINAL_EVENTS but with escrowId/milestoneIndex left null — since
-   neither can ever equal a real BigInt target, the existing `.find()`
-   match logic below naturally never selects it as anyone's own terminal
-   event, while the range computation (which only reads logIndex) still
-   uses it correctly. */
-const CCTP_BOUNDARY_ONLY_EVENTS = ['RefundWithdrawn']
-
-/* Exported for direct testing. Returns the [start, end] log-index range
-   (start exclusive, end inclusive) this milestone's own logs occupy within
-   `receipt`, or null if this milestone's own terminal event isn't found —
-   defensive only, since the subgraph can only have stamped this txHash as
-   THIS milestone's releaseTx by having decoded one of CCTP_TERMINAL_EVENTS
-   for this exact (escrowId, milestoneIndex) out of this exact receipt. */
-export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
-  const targetEscrowId = BigInt(escrowId)
-  const targetMilestoneIndex = BigInt(milestoneIndex)
-  const boundaries = []
-
-  for (const log of receipt.logs) {
-    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
-    try {
-      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
-      if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
-        boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
-      } else if (CCTP_BOUNDARY_ONLY_EVENTS.includes(dec.eventName)) {
-        boundaries.push({ logIndex: log.logIndex, escrowId: null, milestoneIndex: null })
-      }
-    } catch {}
-  }
-
-  const match = boundaries.find(
-    (b) => b.escrowId === targetEscrowId && b.milestoneIndex === targetMilestoneIndex
-  )
-  if (!match) return null
-
-  const start = boundaries
-    .filter((b) => b.logIndex < match.logIndex)
-    .reduce((max, b) => Math.max(max, b.logIndex), -1)
-
-  return { start, end: match.logIndex }
-}
-
-/* Round 24 Phase A / Round 25. The milestone-scoped counterpart to
-   receiptEmittedCctpMessage — used only by FallbackCrossChainDelivery,
-   where the receipt can belong to a batched, multi-milestone transaction
-   this device never submitted. Scopes the receipt to just this milestone's
-   own log range (see milestoneCctpLogRange) AND to messages whose own
-   decoded messageSender is this contract's address (see
-   receiptEmittedOwnCctpMessage's doc comment for why the log-index
-   scoping alone isn't sufficient) before running the shared MessageSent
-   count. No match found (should be unreachable in practice — see
-   milestoneCctpLogRange's own doc comment) fails the same way as
-   "genuinely no CCTP message": nothing reliable to attribute either way,
-   so there is no meaningful difference in what the UI should show. */
-export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
-  const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
-  if (!range) return { emitted: false, count: 0 }
-  const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
-  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
+   Round 26 finding 3: now takes escrowId/milestoneIndex and delegates to
+   receiptEmittedCctpMessageForMilestone (the same authenticity- and
+   milestone-scoped check FallbackCrossChainDelivery uses), not the bare
+   receiptEmittedCctpMessage this used to call directly — Circle-managed
+   wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack a
+   foreign UserOperation's logs into the same receipt even for a tx this
+   device itself submitted, so "this device's own single-purpose call"
+   never actually guaranteed a single-purpose RECEIPT. SettlementPanel
+   already has escrow.id/milestone.index in scope at the call site — it
+   isn't discovering them from the subgraph the way the fallback path has
+   to, so no new plumbing was needed to make this call. */
+export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
+  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [] }
+  return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
 }
 
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
@@ -2772,8 +2671,10 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
       // cross-chain leg to an Arc credit and still fire
       // MutualSettlementExecuted, with no CCTP message ever created.
       // mutualSettlementCreatedCctpMessage requires both: settlement
-      // executed AND the receipt proves a real message was sent.
-      const { emitted, count } = mutualSettlementCreatedCctpMessage(receipt)
+      // executed AND the receipt proves a real message genuinely THIS
+      // milestone's own was sent (Round 26: authenticity- and
+      // milestone-scoped, not just "a message exists somewhere").
+      const { emitted, messages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
       if (emitted) {
         // Round 20 Phase D: no `domain` field — no reader ever consumed it
         // (both MilestoneRow and DisputeBlock recompute the domain live from
@@ -2783,7 +2684,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         // domains from Iris directly once it has the txHash.
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
         )
         onCrossChainRelease?.()
       }
@@ -2956,8 +2857,8 @@ export function shouldClearCctpTrack(deliveries) {
    recovery card for one of potentially several simultaneously-failed legs.
    Exported for direct testing — the same reasoning EscrowDetail exports its
    other confirm-descriptor and decision functions for. */
-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessageCount }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessages }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
   const [copied, setCopied] = useState(false)
 
   // Once every message Iris knows about for this tx has actually completed,
@@ -3084,12 +2985,13 @@ const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
 
    Fixed by fetching the receipt directly (useWaitForTransactionReceipt is
    the same provider-read hook useTx.js already uses to turn a hash into a
-   receipt) and reusing receiptEmittedCctpMessage — the exact same
-   ground-truth check the three write sites run, just read after the fact
-   instead of at confirmation time. Its own decoded count becomes
-   expectedMessageCount, closing (b) the same way a local cctpTrack record
-   already does. A receipt that emits zero messages renders nothing (same
-   as any other non-cross-chain milestone), closing (a).
+   receipt) and reusing the shared ground-truth check the write sites run
+   (as of Round 26, receiptEmittedCctpMessageForMilestone — see its own doc
+   comment), just read after the fact instead of at confirmation time. Its
+   own verified messages become expectedMessages, closing (b) the same way
+   a local cctpTrack record already does. A receipt that emits zero
+   messages renders nothing (same as any other non-cross-chain milestone),
+   closing (a).
 
    Introduces an async fetch on a path that used to render synchronously
    from local/subgraph data alone, so there are three states to cover
@@ -3119,13 +3021,15 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
   })
 
   if (receipt) {
-    // Round 24 Phase A: scoped to this milestone's own log range, not
-    // receiptEmittedCctpMessage(receipt) unscoped — this receipt can belong
-    // to a batched, multi-milestone transaction release()'s permissionless
-    // callers can compose (see receiptEmittedCctpMessageForMilestone's own
-    // doc comment), unlike the three write sites where the receipt is
-    // always this device's own single-purpose call.
-    const { emitted, count } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+    // Round 24 Phase A / Round 26: scoped to this milestone's own log
+    // range AND authenticity-verified (see receiptEmittedCctpMessageForMilestone's
+    // own doc comment) — this receipt can belong to a batched,
+    // multi-milestone transaction release()'s permissionless callers can
+    // compose, the same class of risk Round 26 finding 3 found the three
+    // write sites share too (Circle-managed wallets are ERC-4337 smart
+    // accounts; a bundler can pack a foreign UserOperation's logs into any
+    // receipt, not just this permissionless path's).
+    const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
     if (!emitted) return null
     return (
       <CrossChainDelivery
@@ -3133,7 +3037,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
         isCrossChain
         escrowId={escrowId}
         milestoneIndex={milestoneIndex}
-        expectedMessageCount={count}
+        expectedMessages={messages}
       />
     )
   }
@@ -3789,25 +3693,33 @@ function MilestoneAction({
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
-    // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
-    // "was this escrow/split CONFIGURED for cross-chain" — MilestoneAction
-    // shares this one run() across all four milestone actions, and two of
-    // them (claim, refund) never touch CCTP at all regardless of the
-    // escrow's domain: claimDelivery moves no funds
-    // (milestoneConfirm: "No funds move on this transaction"),
-    // refundAfterDeadline only ever credits an Arc refund balance
-    // (TrancheProtocol.sol:715). The old gate tracked both anyway whenever
-    // the escrow happened to be cross-chain-configured. Also moved from
-    // right after tx.run() (broadcast time) into onConfirmed (confirmation
-    // time) — the same broadcast-vs-mined gap Round 21 Phase D already
-    // closed for mutualSettle specifically.
+    // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
+    // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
+    // escrow/split CONFIGURED for cross-chain" — MilestoneAction shares
+    // this one run() across all four milestone actions, and two of them
+    // (claim, refund) never touch CCTP at all regardless of the escrow's
+    // domain: claimDelivery moves no funds (milestoneConfirm: "No funds
+    // move on this transaction"), refundAfterDeadline only ever credits an
+    // Arc refund balance (TrancheProtocol.sol:715). The old gate tracked
+    // both anyway whenever the escrow happened to be cross-chain-configured.
+    // Also moved from right after tx.run() (broadcast time) into
+    // onConfirmed (confirmation time) — the same broadcast-vs-mined gap
+    // Round 21 Phase D already closed for mutualSettle specifically.
+    //
+    // Round 26 finding 3: milestone-scoped and authenticity-verified, not
+    // just "a real MessageSent exists somewhere in this receipt" — Circle
+    // wallets are ERC-4337 smart accounts, and a bundler's handleOps can
+    // pack a foreign UserOperation's logs into the same receipt this
+    // device's own submission produced, even though this device only ever
+    // submitted one call. escrow.id/milestone.index are already in scope
+    // here — no discovery needed, unlike the fallback path.
     onConfirmed: (receipt) => {
       onChange?.(); setActiveKey(null)
-      const { emitted, count } = receiptEmittedCctpMessage(receipt)
+      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
       if (emitted) {
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
         )
         onCrossChainRelease?.()
       }

@@ -33,43 +33,58 @@ const MILESTONE_INDEX = 1n
 const PROPOSER = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
 const OTHER_CONTRACT = '0x3600000000000000000000000000000000000000' // USDC precompile, a real different address
 
-const buildLog = (eventName, args, address = CONTRACT_ADDRESS) => {
+const buildLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
   const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
   const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
   const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
   const data = nonIndexed.length > 0
     ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
     : '0x'
-  return { address, topics, data }
+  return { address, logIndex, topics, data }
 }
 
-const proposedLog = (bps) => buildLog('MutualSettlementProposed', {
+const proposedLog = (logIndex, bps) => buildLog(logIndex, 'MutualSettlementProposed', {
   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, proposer: PROPOSER, bps: BigInt(bps)
 })
-const executedLog = (bps) => buildLog('MutualSettlementExecuted', {
+const executedLog = (logIndex, bps) => buildLog(logIndex, 'MutualSettlementExecuted', {
   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, bps: BigInt(bps)
 })
 
-// Arc's own (source-side) MessageTransmitterV2 — verified live, see
-// receiptEmittedCctpMessage's own doc comment in utils/irisDelivery.js.
-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+// Round 26: a real, offset-correct, fully-authentic CCTP V2 message —
+// receiptEmittedCctpMessageForMilestone now requires the full chain
+// (verifiedOwnCctpMessage in utils/irisDelivery.js), not just a
+// well-formed MessageSent log, so these fixtures build genuine header
+// (TOKEN_MESSENGER_V2_ARC sender, version 1) and body (CONTRACT_ADDRESS
+// sender, version 1) fields, not just the body sender Round 25 checked.
+const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
 const MESSAGE_SENT_ABI = [
   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
 ]
-const messageSentLog = (messageHex = '0x1234') => ({
-  address: MESSAGE_TRANSMITTER,
+const buildCctpMessage = () =>
+  '0x' +
+  '00000001' +                                                          // header version 1
+  '00'.repeat(4 + 4 + 32) +                                              // sourceDomain, destinationDomain, nonce
+  TOKEN_MESSENGER_V2_ARC.slice(2).toLowerCase().padStart(64, '0') +      // header sender
+  '00'.repeat(32 + 32 + 4 + 4) +                                         // recipient, destinationCaller, finality fields
+  '00000001' +                                                          // body version 1
+  '00'.repeat(32 + 32 + 32) +                                            // burnToken, mintRecipient, amount
+  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0')              // body messageSender
+const messageSentLog = (logIndex) => ({
+  address: MESSAGE_TRANSMITTER_V2_ARC,
+  logIndex,
   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
-  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
+  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage()])
 })
 
 describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {
-    const receipt = { transactionHash: '0xtx1', logs: [proposedLog(6000)] }
+    const receipt = { transactionHash: '0xtx1', logs: [proposedLog(0, 6000)] }
     expect(mutualSettlementExecuted(receipt)).toBe(false)
   })
 
   it('is true for a receipt whose logs include a real MutualSettlementExecuted event', () => {
-    const receipt = { transactionHash: '0xtx2', logs: [proposedLog(6000), executedLog(6000)] }
+    const receipt = { transactionHash: '0xtx2', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
     expect(mutualSettlementExecuted(receipt)).toBe(true)
   })
 
@@ -77,8 +92,8 @@ describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot'
     // A real mutualSettle-that-executes receipt also contains USDC Transfer
     // logs from the burn/credit — a log from a different address must not
     // be mistaken for (or crash while checking) MutualSettlementExecuted.
-    const foreignLog = { address: OTHER_CONTRACT, topics: ['0xdeadbeef'], data: '0x' }
-    const receipt = { transactionHash: '0xtx3', logs: [foreignLog, executedLog(6000)] }
+    const foreignLog = { address: OTHER_CONTRACT, logIndex: 0, topics: ['0xdeadbeef'], data: '0x' }
+    const receipt = { transactionHash: '0xtx3', logs: [foreignLog, executedLog(1, 6000)] }
     expect(mutualSettlementExecuted(receipt)).toBe(true)
   })
 
@@ -102,7 +117,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
 
     // But the other side updated their proposal to 60% in the window before
     // this transaction landed — the REAL on-chain outcome executed.
-    const receipt = { transactionHash: '0xtx5', logs: [proposedLog(bps), executedLog(bps)] }
+    const receipt = { transactionHash: '0xtx5', logs: [proposedLog(0, bps), executedLog(1, bps)] }
     expect(mutualSettlementExecuted(receipt)).toBe(true)
   })
 
@@ -114,7 +129,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
     // But the other side changed their proposal away from 60% before this
     // transaction landed — the REAL on-chain call only recorded a proposal,
     // dep.bps != rec.bps, no execution.
-    const receipt = { transactionHash: '0xtx6', logs: [proposedLog(bps)] }
+    const receipt = { transactionHash: '0xtx6', logs: [proposedLog(0, bps)] }
     expect(mutualSettlementExecuted(receipt)).toBe(false)
   })
 
@@ -132,7 +147,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
   it('the two functions can disagree on the exact same settlement, proving they are not interchangeable', () => {
     const theirs = { exists: true, bps: 5000n }
     const bps = 5000
-    const receiptShowingNoExecution = { transactionHash: '0xtx7', logs: [proposedLog(bps)] }
+    const receiptShowingNoExecution = { transactionHash: '0xtx7', logs: [proposedLog(0, bps)] }
 
     expect(mutualSettleExecutes(theirs, bps)).toBe(true)
     expect(mutualSettlementExecuted(receiptShowingNoExecution)).toBe(false)
@@ -161,9 +176,9 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
   it('is false when the settlement executed but every leg rounded to zero or diverted to Arc — no MessageSent at all', () => {
     // MutualSettlementExecuted fires unconditionally on a matching
     // settlement — it does not by itself mean a burn happened.
-    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(6000), executedLog(6000)] }
+    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
     expect(mutualSettlementExecuted(receipt)).toBe(true)
-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
   })
 
   /* Verified independently of the test above: a mutation that drops ONLY
@@ -182,9 +197,9 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
     // Should never happen in a real receipt (mutualSettle can't burn without
     // executing), but proves the executed check is genuinely required, not
     // redundant with the message check.
-    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(6000), messageSentLog('0xdeadbeef')] }
+    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(0, 6000), messageSentLog(1)] }
     expect(mutualSettlementExecuted(receipt)).toBe(false)
-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
   })
 
   /* Independently verified to catch a real bug the two tests above cannot
@@ -199,10 +214,46 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
      exercises count propagation through the true branch at all — this is
      that fixture, not a restatement of "requires both facts". */
   it('is true, with the real count, only when the settlement executed AND a real message was sent', () => {
+    // Real on-chain ordering (Round 24): the burn(s) happen strictly BEFORE
+    // the terminal MutualSettlementExecuted event, not after — so the two
+    // MessageSent logs sit at indices 1-2, executedLog last at index 3.
     const receipt = {
       transactionHash: '0xtx10',
-      logs: [proposedLog(6000), executedLog(6000), messageSentLog('0x0001'), messageSentLog('0x0002')]
+      logs: [proposedLog(0, 6000), messageSentLog(1), messageSentLog(2), executedLog(3, 6000)]
     }
-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: true, count: 2 })
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
+      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()]
+    })
+  })
+
+  /* Round 26 finding 3: this device's own submitted transaction is not
+     guaranteed to be a single-purpose receipt. Circle-managed wallets are
+     ERC-4337 smart accounts, and a bundler's handleOps can pack a foreign
+     UserOperation's logs into the SAME receipt this device's own mutualSettle
+     call produced — a burn from an entirely different application, or a
+     different user's TrancheProtocol call, batched adjacent to this
+     settlement with no relationship to it at all. SettlementPanel used to
+     call the bare, unscoped receiptEmittedCctpMessage here (Round 22),
+     trusting that "this device only submitted one call" meant "this receipt
+     only contains one call's logs" — which a bundler breaks. */
+  it('finding 3: does not attribute a foreign UserOperation\'s burn (no relationship to this escrow/milestone, present earlier in the same bundled receipt) to this settlement', () => {
+    const foreignBurn = {
+      address: MESSAGE_TRANSMITTER_V2_ARC,
+      logIndex: 0,
+      topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+      data: encodeAbiParameters([{ type: 'bytes' }], [
+        '0x00000001' + '00'.repeat(4 + 4 + 32) +
+        TOKEN_MESSENGER_V2_ARC.slice(2).toLowerCase().padStart(64, '0') +
+        '00'.repeat(32 + 32 + 4 + 4) + '00000001' + '00'.repeat(32 + 32 + 32) +
+        '9999999999999999999999999999999999999999'.padStart(64, '0') // a different app's own address, not CONTRACT_ADDRESS
+      ])
+    }
+    const receipt = {
+      transactionHash: '0xtx11',
+      logs: [foreignBurn, proposedLog(1, 6000), messageSentLog(2), executedLog(3, 6000)]
+    }
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
+      emitted: true, count: 1, messages: [buildCctpMessage()]
+    })
   })
 })

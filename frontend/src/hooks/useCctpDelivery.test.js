@@ -35,8 +35,8 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null } = {}) => ({
-  message: '0xmessage',
+const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null, message = '0xmessage' } = {}) => ({
+  message,
   attestation: '0xattestation',
   status: 'complete',
   decodedMessage: destinationDomain != null ? { destinationDomain: String(destinationDomain) } : {},
@@ -215,36 +215,57 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
   })
 })
 
-/* Round 23 — expectedMessageCount guard, direct coverage.
-   Introduced in Round 22 Phase A for the three write sites (a receipt-
-   verified local track always knows its own real MessageSent count), and
-   now also fed by MilestoneRow's fallback path once it has a receipt in
-   hand (Round 23). The guard itself — `messages.length < expectedMessageCount`
-   keeps polling before ANY completeness check runs — had no direct test
-   until now; it was only ever exercised incidentally through fixtures where
-   messages.length already matched. This isolates it: a burn that emitted 2
-   real MessageSent events but Iris has only indexed 1 of must not be treated
-   as "fully known" just because the one message it does have is COMPLETE. */
-describe('useCctpDelivery — expectedMessageCount guard', () => {
-  it('keeps polling when Iris has indexed fewer messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
+/* Round 23 / Round 26 finding 2 — expectedMessages guard, direct coverage.
+   Introduced in Round 22 Phase A as a bare count (a receipt-verified local
+   track always knows its own real MessageSent count), fed by MilestoneRow's
+   fallback path once it has a receipt in hand (Round 23), then replaced
+   with actual message IDENTITIES in Round 26: a bare count let a message
+   genuinely belonging to a DIFFERENT milestone in the same batched tx pass
+   `messages.length >= expectedMessageCount` and get rendered as though it
+   were this milestone's own. expectedMessages is now the exact set of raw
+   message hex strings receiptEmittedCctpMessageForMilestone verified as
+   this milestone's own — Iris's response is filtered to only entries whose
+   own `message` field matches one of them before anything else runs. */
+describe('useCctpDelivery — expectedMessages guard', () => {
+  it('keeps polling when Iris has indexed fewer of the expected messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
     expect(result.current.phase).toBe('polling')
     expect(result.current.deliveries).toEqual([])
   })
 
-  it('proceeds to delivered once Iris catches up to the full expected count', async () => {
+  it('proceeds to delivered once Iris catches up to the full expected set', async () => {
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
-      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', message: '0xmsg2' })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries).toHaveLength(2)
   })
 
-  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessageCount is not provided', async () => {
+  it('finding 2: excludes an Iris message that is NOT one of the expected identities, even though messages.length alone would satisfy the old count-based guard — a foreign milestone\'s genuine message under the same tx hash must never be rendered as this milestone\'s own', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmine' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforeign' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmine']))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    // The foreign message's FAILED state must not leak in — if it had, phase
+    // would be 'failed' (anyFailed), not 'delivered', and deliveries would
+    // have length 2, not 1.
+    expect(result.current.deliveries).toHaveLength(1)
+    expect(result.current.deliveries[0].message).toBe('0xmine')
+  })
+
+  it('is case-insensitive when matching expectedMessages against Iris\'s own message field', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xABCDEF' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xabcdef']))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+  })
+
+  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessages is not provided', async () => {
     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))

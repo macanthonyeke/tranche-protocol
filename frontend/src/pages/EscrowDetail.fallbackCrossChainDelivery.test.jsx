@@ -1,4 +1,4 @@
-// FallbackCrossChainDelivery — Round 23 / Round 24 Phase A.
+// FallbackCrossChainDelivery — Round 23 / Round 24 Phase A / Round 26.
 //
 // MilestoneRow's fallback path (a milestone whose cross-chain release this
 // device never submitted itself — known only via the subgraph's
@@ -19,34 +19,31 @@
 //       that emitted 2 messages but Iris had only indexed 1 of could be
 //       marked fully delivered early.
 //
-// Round 24 Phase A: a THIRD bug in the same fallback path, found by the 12th
-// Codex review pass — release() is fully permissionless, so a batching /
-// multicall contract can bundle release-family calls for several milestones
-// (possibly across different escrows) into ONE transaction. The indexer
-// stamps that same tx hash as releaseTx on every milestone the batch
-// touched, and Circle's Iris API returns every MessageSent in the tx with no
-// per-application scoping — so receiptEmittedCctpMessage(receipt) (Round 22
-// Phase A, correct for the three write sites, where the receipt is always
-// this device's own single-purpose call) would attribute EVERY message in
-// the batch to EVERY milestone that shares the hash. Fixed with
-// receiptEmittedCctpMessageForMilestone, which scopes to the log-index range
-// between the nearest preceding terminal event (any milestone) and this
-// milestone's own terminal event — see that function's and
-// milestoneCctpLogRange's own doc comments in EscrowDetail.jsx for the proof
-// this is a hard boundary, not a heuristic.
+// Round 24 Phase A: a THIRD bug in the same fallback path — release() is
+// fully permissionless, so a batching/multicall contract can bundle
+// release-family calls for several milestones (possibly across different
+// escrows) into ONE transaction, sharing one tx hash. Fixed with
+// receiptEmittedCctpMessageForMilestone, scoping to the log-index range
+// between the nearest preceding terminal event and this milestone's own.
+//
+// Round 25 / Round 26: log-index scoping alone only answers "which of THIS
+// CONTRACT's own calls" — not "is this message even from this contract's
+// own burn at all", nor (Round 26 finding 1) "is this message even
+// GENUINE, or a forged MessageTransmitterV2.sendMessage call an attacker
+// made directly, bypassing TokenMessengerV2 entirely". Every fixture below
+// that's meant to represent a genuine burn builds the FULL authenticity
+// chain (see buildCctpMessage) — real header sender (TokenMessengerV2),
+// real body sender (this contract), both fields' version tags set to CCTP
+// V2 — not just a body messageSender, so a fixture only passes if it would
+// actually decode and authenticate the way a real receipt does.
 //
 // These tests render FallbackCrossChainDelivery directly, mocking wagmi's
-// useWaitForTransactionReceipt (the same provider-read hook useTx.js already
-// uses) to control what receipt comes back. receiptEmittedCctpMessage /
-// receiptEmittedCctpMessageForMilestone are left REAL — fixtures build
-// genuine MessageSent and TrancheProtocol event logs via viem's
-// encodeEventTopics/encodeAbiParameters (same approach as
-// irisDelivery.test.js), including real logIndex values, so a fixture only
-// passes if it would actually decode and order the way a real receipt does.
-// For (b), fetchIrisMessages is the only other mock — useCctpDelivery itself
-// runs for real, so the test proves the FULL wiring (receipt → decoded count
-// → expectedMessageCount → useCctpDelivery's guard), not just that the guard
-// function works in isolation.
+// useWaitForTransactionReceipt (the same provider-read hook useTx.js
+// already uses) to control what receipt comes back, and fetchIrisMessages
+// to control what Iris reports for it — useCctpDelivery itself runs for
+// real, so tests prove the FULL wiring (receipt → verified messages →
+// expectedMessages → useCctpDelivery's identity-based guard), not just that
+// any one piece works in isolation.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
@@ -78,28 +75,46 @@ vi.mock('../hooks/useAuth.jsx', () => ({
 
 const { FallbackCrossChainDelivery } = await import('./EscrowDetail.jsx')
 
-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
 const MESSAGE_SENT_ABI = [
   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
 ]
+const FOREIGN_ADDRESS = '0x1234567890123456789012345678901234567890'
+
+const hexZeros = (byteLen) => '00'.repeat(byteLen)
+const uint32Hex = (n) => n.toString(16).padStart(8, '0')
+const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
+
+// A real, offset-correct CCTP V2 message — every field a genuine message
+// would have up through messageSender (byte 280), not just the one field a
+// given test cares about (Round 26: header sender/version were added
+// alongside Round 25's body sender). Defaults describe a fully genuine
+// message this contract's own burn would produce; individual tests
+// override exactly the field they're exercising.
+const buildCctpMessage = ({
+  headerVersion = 1,
+  headerSender = TOKEN_MESSENGER_V2_ARC,
+  bodyVersion = 1,
+  bodySender = CONTRACT_ADDRESS
+} = {}) =>
+  '0x' +
+  uint32Hex(headerVersion) +
+  hexZeros(4 + 4 + 32) +
+  addressWordHex(headerSender) +
+  hexZeros(32 + 32 + 4 + 4) +
+  uint32Hex(bodyVersion) +
+  hexZeros(32 + 32 + 32) +
+  addressWordHex(bodySender)
+
 // logIndex is a real field on every viem log — milestoneCctpLogRange orders
 // and partitions on it, so every fixture below sets it explicitly rather
 // than relying on array position, matching what a real receipt provides.
-//
-// Round 25: `sender` builds a real, offset-correct CCTP V2 message —
-// receiptEmittedOwnCctpMessage now decodes messageSender out of this exact
-// byte range (see its own doc comment in utils/irisDelivery.js), so a
-// fixture only passes if it would actually decode to the right address.
-// Defaults to CONTRACT_ADDRESS since every test below except the Round 25
-// gap-(a) ones is exercising this contract's own genuine burns.
-const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
-  '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
-
-const messageSentLog = (logIndex, sender = CONTRACT_ADDRESS) => ({
-  address: MESSAGE_TRANSMITTER,
+const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
+  address,
   logIndex,
   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
-  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
+  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(overrides)])
 })
 
 // Builds a real TrancheProtocol event log (e.g. MilestoneReleased,
@@ -115,8 +130,13 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
   return { address, logIndex, topics, data }
 }
 
-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE' } = {}) => ({
-  message: '0xmessage',
+// Round 26 finding 2: `message` defaults to the SAME bytes a genuine
+// verified receipt log would carry — useCctpDelivery now matches Iris
+// entries against expectedMessages by real identity, not just a count, so
+// a fixture whose `message` doesn't match what the receipt actually proved
+// would never be attributed either, same as a real mismatch wouldn't be.
+const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', message = buildCctpMessage() } = {}) => ({
+  message,
   attestation: '0xattestation',
   decodedMessage: { destinationDomain: String(destinationDomain) },
   forwardState,
@@ -214,14 +234,14 @@ describe('failure mode (b): a receipt proving 2 CCTP messages, Iris initially in
     renderFallback()
 
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xreleasetx'))
-    // useCctpDelivery's expectedMessageCount guard (messages.length < 2) must
+    // useCctpDelivery's expectedMessages guard (messages.length < 2) must
     // keep this in the pre-deliveries "polling" state, not render a single
     // leg as though the settlement were complete.
     await waitFor(() => expect(screen.getByText(/Delivering…/)).toBeInTheDocument())
     expect(screen.queryByText(/Delivered to/)).not.toBeInTheDocument()
   })
 
-  it('reaches the delivered state once Iris reports both messages complete — proving the guard is the count from the receipt, not a permanent block', async () => {
+  it('reaches the delivered state once Iris reports both messages complete — proving the guard is the real message set from the receipt, not a permanent block', async () => {
     setReceipt({ data: twoMessageReceipt(), isPending: false, isError: false })
     fetchIrisMessages.mockResolvedValue([
       irisMessage({ destinationDomain: 6 }),
@@ -290,9 +310,9 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
 
     renderFallback({ txHash: '0xbatchtx2' })
 
-    // If the 3rd (unrelated) message were wrongly included, expectedMessageCount
-    // would be 3 and this would stay stuck polling forever instead of showing 2
-    // delivered legs.
+    // If the 3rd (unrelated) message were wrongly included, expectedMessages
+    // would have length 3 and this would stay stuck polling forever instead
+    // of showing 2 delivered legs.
     await waitFor(() => expect(screen.getAllByText(/Delivered to/)).toHaveLength(2))
   })
 })
@@ -318,13 +338,13 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
   })
 })
 
-describe('Round 25 gap (a): a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
+describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
   it('does not attribute a foreign TrancheProtocol instance\'s (or a direct Circle depositForBurn\'s) MessageSent to this instance\'s Arc-only release', async () => {
     setReceipt({
       data: {
         transactionHash: '0xforeigntx',
         logs: [
-          messageSentLog(0, '0x1234567890123456789012345678901234567890'),   // foreign burn — no boundary around it
+          messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),   // foreign burn — no boundary around it
           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // this instance's own release, Arc-only, no burn
         ]
       },
@@ -332,6 +352,23 @@ describe('Round 25 gap (a): a foreign application\'s burn shares this receipt wi
       isError: false
     })
     const { container } = renderFallback({ txHash: '0xforeigntx' })
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+    expect(fetchIrisMessages).not.toHaveBeenCalled()
+  })
+
+  it('finding 1: does not attribute a message forged via a direct MessageTransmitterV2.sendMessage call — real header sender is the attacker, not TokenMessengerV2, even though the body claims this contract as messageSender', async () => {
+    setReceipt({
+      data: {
+        transactionHash: '0xforgedtx',
+        logs: [
+          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),
+          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+        ]
+      },
+      isPending: false,
+      isError: false
+    })
+    const { container } = renderFallback({ txHash: '0xforgedtx' })
     await waitFor(() => expect(container).toBeEmptyDOMElement())
     expect(fetchIrisMessages).not.toHaveBeenCalled()
   })

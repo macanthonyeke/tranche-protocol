@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
@@ -205,7 +205,7 @@ function DisputeBlock({ detail, index, refetch }) {
   const e = detail.escrow
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
   const [resolveTxHash, setResolveTxHash] = useState(null)
-  const [resolveMessageCount, setResolveMessageCount] = useState(null)
+  const [resolveMessages, setResolveMessages] = useState(null)
 
   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
@@ -222,23 +222,30 @@ function DisputeBlock({ detail, index, refetch }) {
   // so the contract's timeout fallback settles it as a fixed 50/50 split.
   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
 
-  // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
-  // "was this escrow/split CONFIGURED for cross-chain" — a resolveDispute
-  // ruling can execute while rounding every share to zero or diverting
-  // every cross-chain leg to an Arc credit, with no CCTP message ever
-  // created. Receives the full confirmed receipt now (see ResolveForm's own
-  // tx below), not a broadcast-time txHash string — the same
+  // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
+  // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
+  // escrow/split CONFIGURED for cross-chain" — a resolveDispute ruling can
+  // execute while rounding every share to zero or diverting every
+  // cross-chain leg to an Arc credit, with no CCTP message ever created.
+  // Receives the full confirmed receipt now (see ResolveForm's own tx
+  // below), not a broadcast-time txHash string — the same
   // broadcast-vs-mined gap Round 21 Phase D already closed for mutualSettle.
   // resolveDisputeByTimeout's own onConfirmed still calls this with `null`
   // (it never goes cross-chain at all, TrancheProtocol.sol:596/:614 —
   // both halves always become Arc refund credits), which correctly no-ops
   // here without needing a receipt to prove that.
+  //
+  // Round 26 finding 3: milestone-scoped and authenticity-verified, not
+  // just "a real MessageSent exists somewhere in this receipt" — Circle
+  // wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack
+  // a foreign UserOperation's logs into the same receipt. detail.id/index
+  // are already in scope — no discovery needed, unlike the fallback path.
   const handleResolve = useCallback((receipt) => {
     if (receipt) {
-      const { emitted, count } = receiptEmittedCctpMessage(receipt)
+      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
       if (emitted) {
         setResolveTxHash(receipt.transactionHash)
-        setResolveMessageCount(count)
+        setResolveMessages(messages)
         // Also persist to localStorage so EscrowDetail picks it up on other
         // devices. Round 20 Phase D: no `domain` field — no reader ever
         // consumed it (both this component and EscrowDetail's MilestoneRow
@@ -248,7 +255,7 @@ function DisputeBlock({ detail, index, refetch }) {
         // Iris directly once it has the txHash.
         localStorage.setItem(
           cctpTrackKey(detail.id, index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
         )
       }
     }
@@ -322,7 +329,7 @@ function DisputeBlock({ detail, index, refetch }) {
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
           isCrossChain={trackingDomain != null}
-          expectedMessageCount={resolveMessageCount}
+          expectedMessages={resolveMessages}
         />
       )}
     </li>
@@ -358,8 +365,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
    CrossChainDelivery for the full citation trail on why a single collapsed
    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
    leg in the same mixed split failed. */
-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessageCount }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
+function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessages }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
 
   if (phase === 'idle') return null
 

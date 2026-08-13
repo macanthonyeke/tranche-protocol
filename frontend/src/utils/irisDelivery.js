@@ -1,6 +1,7 @@
 import { encodeFunctionData, decodeEventLog, slice } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
 import { bytes32ToAddress } from './encode.js'
+import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
 const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
 
@@ -116,85 +117,279 @@ const MESSAGE_SENT_ABI = [
   }
 ]
 
-/* Round 22 Phase A. Ground truth for "did a CCTP message actually get
-   created", the question none of claimDelivery succeeding, refundAfterDeadline
-   succeeding, or MutualSettlementExecuted firing actually answers —
-   claimDelivery and refundAfterDeadline never touch CCTP at all regardless of
-   the escrow's configured domain, and a mutualSettle/resolveDispute call can
-   execute while every leg still rounds to zero or diverts to an Arc credit,
-   emitting no CCTP message despite genuinely executing.
+/* Round 25. Decodes the `messageSender` field out of a raw CCTP message
+   BODY — the address that called depositForBurn (or, per Circle's own CCTP
+   V2 technical guide's naming, depositForBurnWithCaller/
+   depositForBurnWithHook family) on the source domain. Verified against
+   Circle's documented V2 message format
+   (developers.circle.com/cctp/references/technical-guide): the top-level
+   message header's `messageBody` field starts at absolute byte offset 148;
+   BurnMessageV2's own `messageSender` field sits at relative offset 100
+   within that body (absolute 248), a 32-byte word — confirmed identically
+   via two independent fetches of Circle's docs. TrancheProtocol.sol calls
+   tokenMessenger.depositForBurnWithHook(...) directly from _approveAndBurn
+   — no intermediary contract — so for every burn THIS contract makes,
+   msg.sender to TokenMessenger (and therefore messageSender in the
+   resulting message) is always this contract's own address.
 
-   Decodes EVERY log in the confirmed receipt against MESSAGE_SENT_ABI rather
-   than filtering by a hardcoded contract address first — deliberately, since
-   a same-contract-address filter (the pattern mutualSettlementExecuted uses
-   for this contract's OWN events) doesn't apply to an event a DIFFERENT
-   contract emits, and MessageSent's topic0 is Circle's own canonical event
-   signature hash, unique enough that a false match from an unrelated log is
-   not a realistic risk — this also means it keeps working if Circle ever
-   redeploys the MessageTransmitterV2 proxy to a new address, the same
-   caution CLAUDE.md already documents for the TokenMessenger proxy.
-
-   A single call can emit MORE than one MessageSent — a mixed split can burn
-   several legs to different chains in one transaction (bounded by
-   MAX_SPLITS = 10) — so this returns the real count alongside the boolean,
-   for callers to persist as the expected message count (see
-   useCctpDelivery's own comment for why that matters). */
-export function receiptEmittedCctpMessage(receipt) {
-  let count = 0
-  for (const log of receipt.logs) {
-    try {
-      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
-      if (dec.eventName === 'MessageSent') count++
-    } catch {}
-  }
-  return { emitted: count > 0, count }
-}
-
-/* Round 25. Decodes the `messageSender` field out of a raw CCTP message —
-   the address that called depositForBurn (or, per Circle's own CCTP V2
-   technical guide's naming, depositForBurnWithCaller/depositForBurnWithHook
-   family) on the source domain. Verified against Circle's documented V2
-   message format (developers.circle.com/cctp/references/technical-guide):
-   the top-level message header's `messageBody` field starts at absolute
-   byte offset 148; BurnMessageV2's own `messageSender` field sits at
-   relative offset 100 within that body (absolute 248), a 32-byte word —
-   confirmed identically via two independent fetches of Circle's docs.
-   TrancheProtocol.sol calls tokenMessenger.depositForBurnWithHook(...)
-   directly from _approveAndBurn — no intermediary contract — so for every
-   burn THIS contract makes, msg.sender to TokenMessenger (and therefore
-   messageSender in the resulting message) is always this contract's own
-   address. */
+   Round 26: this field ALONE is forgeable and must never be trusted in
+   isolation — see verifiedOwnCctpMessage's own doc comment for the full
+   authenticity chain this is now only one link of. */
 export function messageSenderOf(message) {
   return bytes32ToAddress(slice(message, 248, 280))
 }
 
-/* Round 25. receiptEmittedCctpMessage answers "did a CCTP message get
-   created anywhere in this receipt" — deliberately unscoped by contract
-   address (see that function's own doc comment: robust to a future
-   MessageTransmitterV2 redeploy). Correct for the three original write
-   sites (MilestoneAction/DisputeBlock/SettlementPanel): each receipt there
-   is this device's own tx.run(escrowWrite(...)) call — a single top-level
-   call to OUR contract's own function, so nothing else could have burned
-   inside it. NOT correct for FallbackCrossChainDelivery: release() is
-   fully permissionless, so a batching/multicall contract can compose
-   several calls — potentially to a DIFFERENT TrancheProtocol instance, or
-   a direct Circle depositForBurn call entirely outside this app — into one
-   transaction sharing a tx hash this app's own indexer may still see.
-   milestoneCctpLogRange's log-index boundaries (EscrowDetail.jsx) only
-   answer "which of THIS contract's own calls", never "is this message even
-   from this contract's burn at all" — a foreign burn with no recognized
-   boundary around it would fall inside whatever range it happens to land
-   in. This is the second, orthogonal filter: only count a MessageSent
-   log whose OWN decoded messageSender is this contract's address. */
+// Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract
+// that actually emits MessageSent. Live-verified (Round 22): decoded a
+// real Arc-testnet depositForBurnWithHook receipt and found this event at
+// this exact address.
+export const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+
+// Round 26. Arc's TokenMessengerV2 proxy — verified against
+// deploy/deploy.js:37 (the literal constructor argument every deploy
+// passes as _tokenMessenger) and CLAUDE.md, not just documentation: this
+// is the exact address TrancheProtocol.sol's own `tokenMessenger` state
+// variable holds on the live contract. Verified against Circle's real V2
+// source (MessageTransmitterV2.sol, TokenMessengerV2.sol on GitHub, not
+// just the docs table): MessageTransmitterV2.sendMessage stamps the
+// message header's `sender` field from its own msg.sender
+// (`_messageSender = msg.sender.toBytes32()`), and TokenMessengerV2's
+// _depositForBurn calls that sendMessage directly with no intermediary —
+// so for a burn TokenMessengerV2 itself initiated, this is what the
+// header's sender field holds.
+export const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
+
+// CCTP V2's version tag, on both the top-level header and BurnMessageV2's
+// own body (verified against Circle's docs: V1 uses 0 for the same field).
+const CCTP_V2_VERSION = 1
+
+function readUint32(message, byteOffset) {
+  return Number(BigInt(slice(message, byteOffset, byteOffset + 4)))
+}
+
+// Round 26. The top-level message header's own `sender` field — offset 44,
+// 32 bytes — "Address of MessageTransmitterV2 caller on source domain" per
+// Circle's V2 technical guide. A DIFFERENT field from messageSenderOf's
+// body-level messageSender (which identifies who called TokenMessengerV2);
+// this one identifies who called MessageTransmitterV2 directly. V1's
+// header layout is not a subset of V2's — V1's own sender field sits at
+// byte 20, not 44 — confirming these offsets are only valid once the
+// version field (see messageHeaderVersionOf) has actually been checked.
+export function messageHeaderSenderOf(message) {
+  return bytes32ToAddress(slice(message, 44, 76))
+}
+
+export function messageHeaderVersionOf(message) {
+  return readUint32(message, 0)
+}
+
+// BurnMessageV2's OWN internal version field, at relative offset 0 within
+// the body (absolute 148, since messageBody starts there).
+export function messageBodyVersionOf(message) {
+  return readUint32(message, 148)
+}
+
+/* Round 26. The full authenticity chain for one MessageSent log — closing
+   the gap Round 25's messageSenderOf-only check left open (finding 1) and
+   generalized so every call site can share it (finding 3), not just
+   FallbackCrossChainDelivery.
+
+   MessageTransmitterV2.sendMessage is a public, permissionless function
+   that accepts an ARBITRARY messageBody and faithfully stamps the header's
+   own sender field from its real msg.sender — so anyone can call the REAL
+   MessageTransmitterV2 directly and get a real MessageSent event back
+   whose header.sender is honestly THEIR OWN address (never
+   TokenMessengerV2's), with a messageBody of their own choosing (including
+   one that plants an arbitrary address, e.g. this app's CONTRACT_ADDRESS,
+   at the body's messageSender offset). None of that requires ever calling
+   TokenMessengerV2 or burning anything.
+
+   Four checks, all required, none sufficient alone:
+     1. log.address must be Arc's REAL MessageTransmitterV2
+        (MESSAGE_TRANSMITTER_V2_ARC). Without this, nothing below means
+        anything at all — a self-deployed decoy contract can emit the
+        exact same MessageSent(bytes) topic with FULLY attacker-chosen
+        bytes, including a forged header.sender that would otherwise pass
+        check 2. Only the real contract's own sendMessage() has any
+        genuine relationship between msg.sender and the header it emits.
+     2. The message's own header.sender (see messageHeaderSenderOf) must be
+        Arc's real TokenMessengerV2 (TOKEN_MESSENGER_V2_ARC). This is what
+        proves TokenMessengerV2 itself — not some other permissionless
+        caller of the real MessageTransmitterV2 — constructed this
+        specific message, which is the only thing that makes check 3
+        trustworthy.
+     3. The body's messageSender (messageSenderOf) must equal `ownAddress`
+        — the actual identity callers care about, honestly stamped by
+        TokenMessengerV2's own _depositForBurn from ITS real msg.sender,
+        given check 2 already holds.
+     4. Both the header's and the body's own version fields must read as
+        CCTP V2 before ANY of the above offsets are trusted — V1's layout
+        is a different shape entirely (its header sender sits at byte 20,
+        not 44; its body has no messageSender field at byte 248 at all),
+        so skipping this could silently misread unrelated bytes as a
+        "sender" that happens to match by coincidence.
+   Returns the raw, verified `message` hex string on success (finding 2
+   needs the actual identity to match against Iris, not just a boolean) or
+   null. */
+export function verifiedOwnCctpMessage(log, ownAddress) {
+  if (log.address?.toLowerCase() !== MESSAGE_TRANSMITTER_V2_ARC.toLowerCase()) return null
+  try {
+    const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
+    if (dec.eventName !== 'MessageSent') return null
+    const message = dec.args.message
+    if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION) return null
+    if (messageBodyVersionOf(message) !== CCTP_V2_VERSION) return null
+    if (messageHeaderSenderOf(message).toLowerCase() !== TOKEN_MESSENGER_V2_ARC.toLowerCase()) return null
+    if (messageSenderOf(message).toLowerCase() !== ownAddress.toLowerCase()) return null
+    return message
+  } catch {
+    return null
+  }
+}
+
+/* Round 25 / Round 26. Answers "did a CCTP message genuinely THIS
+   contract's own burn get created in this receipt" — deliberately scoped
+   and authenticity-verified (see verifiedOwnCctpMessage above for the
+   full chain), unlike Round 22's original design (matching on the
+   MessageSent event signature alone, unscoped by address — robust to a
+   future MessageTransmitterV2 redeploy, correct against accidental topic0
+   collision, but not a defense against DELIBERATE forgery). Every call
+   site handling a receipt that could contain another party's activity
+   needs this: FallbackCrossChainDelivery (release() is permissionless)
+   and, per Round 26 finding 3, the three original write sites too —
+   Circle-managed wallets are ERC-4337 smart accounts, and a bundler's
+   handleOps can pack a foreign UserOperation's logs into the SAME receipt
+   this device's own submission produced. Returns the actual verified
+   messages (finding 2), not just a count — a bare count let a foreign,
+   log-index-adjacent message pass a messages.length-based guard
+   undetected once identity wasn't checked. */
 export function receiptEmittedOwnCctpMessage(receipt, ownAddress) {
-  const own = ownAddress.toLowerCase()
-  const ownLogs = receipt.logs.filter((log) => {
+  const messages = receipt.logs
+    .map((log) => verifiedOwnCctpMessage(log, ownAddress))
+    .filter((message) => message != null)
+  return { emitted: messages.length > 0, count: messages.length, messages }
+}
+
+/* Round 24 Phase A. The four terminal, escrowId+milestoneIndex-carrying
+   events that can each be preceded by a CCTP burn in the SAME top-level
+   call — TrancheProtocol.sol verified directly, not assumed:
+     approveRelease        -> MilestoneApproved       (:647/:649)
+     release                -> MilestoneReleased       (:682/:684)
+     resolveDispute          -> DisputeResolved         (via _executePartialRelease, :516/:518)
+     mutualSettle (matched)  -> MutualSettlementExecuted (via _executePartialRelease, :556/:557)
+   In every one of the four, the burn (if any) happens strictly BEFORE the
+   terminal event — CEI ordering, confirmed at each call site and in
+   _executeCCTPReleaseAmount/_executePartialRelease underneath, and nothing
+   is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
+   emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
+   credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
+   Re-verified exhaustively against every _approveAndBurn/
+   _executeCCTPReleaseAmount call site in TrancheProtocol.sol: these four
+   plus withdrawRefund (:877) are the only five burn-capable paths that
+   exist — see CCTP_BOUNDARY_ONLY_EVENTS below for why withdrawRefund needs
+   separate handling rather than joining this list.
+
+   EVM logs within one transaction are strictly ordered by real execution
+   order: one external call runs to completion (emitting every one of its
+   own logs) before the next begins, true regardless of whether a batching
+   / multicall contract composed several release()-family calls (release()
+   is fully permissionless) into one transaction, OR whether an ERC-4337
+   bundler's handleOps packed several UserOperations into one transaction
+   (Round 26 finding 3 — each UserOp's own execution, including every log
+   it emits, still completes before the next one begins; the same
+   invariant, one extra call-frame). That makes each milestone's own
+   terminal event a hard boundary, not a heuristic: the MessageSent logs
+   that genuinely belong to THIS milestone are exactly those strictly after
+   the nearest PRECEDING terminal event (any milestone) and up to and
+   including this milestone's own terminal event.
+
+   This boundary set only answers "which of THIS CONTRACT's own calls" —
+   see receiptEmittedOwnCctpMessage above for the separate, orthogonal
+   question of whether a MessageSent log in the scoped range is even from
+   this contract's own burn at all (a batch could contain a foreign
+   TrancheProtocol instance's, or a direct Circle depositForBurn call's,
+   burn with no recognized boundary around it).
+
+   Round 26: relocated here from EscrowDetail.jsx (Round 24) so
+   ArbiterPanel.jsx's DisputeBlock can import it too, alongside
+   EscrowDetail.jsx's own write sites and FallbackCrossChainDelivery —
+   EscrowDetail.jsx already imports FROM ArbiterPanel.jsx (timeoutSettlementConfirm),
+   so the reverse import would have been circular. */
+const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
+
+/* Round 25. withdrawRefund's RefundWithdrawn(address indexed depositor,
+   uint256 amount) — verified against ITrancheProtocol.sol — carries no
+   escrowId or milestoneIndex at all (a refund is wallet-balance-level, not
+   tied to any single milestone), so it can never be a valid MATCH target
+   for the (escrowId, milestoneIndex) lookup below, unlike
+   CCTP_TERMINAL_EVENTS. It still needs to DELIMIT ranges: withdrawRefund's
+   own tx hash never reaches FallbackCrossChainDelivery as an entry point
+   (Milestone.releaseTx is stamped only by the 5 release-type handlers,
+   confirmed in CLAUDE.md — RefundWithdrawn isn't one), but its logs can
+   still appear INSIDE a batched receipt entered via a different
+   milestone's own terminal event. Without a boundary here, a batched
+   withdrawRefund burn immediately before an unrelated Arc-only milestone
+   release would fall inside that milestone's computed range with nothing
+   to stop it. Pushed into the same `boundaries` array as
+   CCTP_TERMINAL_EVENTS but with escrowId/milestoneIndex left null — since
+   neither can ever equal a real BigInt target, the existing `.find()`
+   match logic below naturally never selects it as anyone's own terminal
+   event, while the range computation (which only reads logIndex) still
+   uses it correctly. */
+const CCTP_BOUNDARY_ONLY_EVENTS = ['RefundWithdrawn']
+
+/* Exported for direct testing. Returns the [start, end] log-index range
+   (start exclusive, end inclusive) this milestone's own logs occupy within
+   `receipt`, or null if this milestone's own terminal event isn't found —
+   defensive only, since the subgraph can only have stamped this txHash as
+   THIS milestone's releaseTx by having decoded one of CCTP_TERMINAL_EVENTS
+   for this exact (escrowId, milestoneIndex) out of this exact receipt. */
+export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
+  const targetEscrowId = BigInt(escrowId)
+  const targetMilestoneIndex = BigInt(milestoneIndex)
+  const boundaries = []
+
+  for (const log of receipt.logs) {
+    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
     try {
-      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
-      return dec.eventName === 'MessageSent' && messageSenderOf(dec.args.message).toLowerCase() === own
-    } catch {
-      return false
-    }
-  })
-  return receiptEmittedCctpMessage({ ...receipt, logs: ownLogs })
+      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
+      if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
+        boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
+      } else if (CCTP_BOUNDARY_ONLY_EVENTS.includes(dec.eventName)) {
+        boundaries.push({ logIndex: log.logIndex, escrowId: null, milestoneIndex: null })
+      }
+    } catch {}
+  }
+
+  const match = boundaries.find(
+    (b) => b.escrowId === targetEscrowId && b.milestoneIndex === targetMilestoneIndex
+  )
+  if (!match) return null
+
+  const start = boundaries
+    .filter((b) => b.logIndex < match.logIndex)
+    .reduce((max, b) => Math.max(max, b.logIndex), -1)
+
+  return { start, end: match.logIndex }
+}
+
+/* Round 24 Phase A / Round 25 / Round 26. The milestone-scoped, authenticity-
+   verified counterpart to receiptEmittedCctpMessage — used by every call
+   site that can receive a receipt containing another party's activity: the
+   three original write sites (Round 26 finding 3 — Circle-managed wallets
+   are ERC-4337 smart accounts, and a bundler's handleOps can pack a
+   foreign UserOperation's logs into even this device's own receipt) and
+   FallbackCrossChainDelivery (release() is permissionless). Scopes the
+   receipt to just this milestone's own log range (milestoneCctpLogRange)
+   AND to messages that pass the full authenticity chain
+   (receiptEmittedOwnCctpMessage / verifiedOwnCctpMessage) before running
+   the shared MessageSent count. No match found (should be unreachable in
+   practice — see milestoneCctpLogRange's own doc comment) fails the same
+   way as "genuinely no CCTP message": nothing reliable to attribute either
+   way, so there is no meaningful difference in what the UI should show. */
+export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
+  const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
+  if (!range) return { emitted: false, count: 0, messages: [] }
+  const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
+  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
 }
