@@ -30,6 +30,8 @@ const {
   milestoneCctpLogRange,
   receiptEmittedCctpMessageForMilestone,
   realMessageTransmitterLogIndexesAsc,
+  cctpMessageFingerprint,
+  irisMessageMatchesFingerprint,
   MESSAGE_TRANSMITTER_V2_ARC,
   TOKEN_MESSENGER_V2_ARC
 } = await import('./irisDelivery.js')
@@ -94,6 +96,54 @@ describe('fetchIrisMessages', () => {
     }
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: '0xabc123' }))))
     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
+  })
+})
+
+/* fetchIrisMessages — sourceTxHash membership check, Round 29 (fixing the
+   Round 29 review's Medium finding: "equal cardinality doesn't prove equal
+   membership"). useCctpDelivery's completeness gate only checks
+   allMessages.length === expectedTotalMessages — a response missing one
+   real message but padded with one unrelated foreign entry has the same
+   length and would previously sail through untouched, then get
+   ordinal-selected as if it were this transaction's own verified set. Each
+   message's own sourceTxHash — when Iris includes it — is checked against
+   the transaction actually requested. */
+describe('fetchIrisMessages — sourceTxHash membership', () => {
+  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
+
+  it('keeps a message whose sourceTxHash matches the requested tx', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+  })
+
+  it('matches sourceTxHash case-insensitively', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own({ sourceTxHash: '0xABC123' })] }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own({ sourceTxHash: '0xABC123' })])
+  })
+
+  it('keeps a message with no sourceTxHash field at all — a defensive check, not a new hard requirement on every response shape', async () => {
+    const noField = { message: '0xown', attestation: '0xatt' }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField] }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
+  })
+
+  it('drops a message whose sourceTxHash belongs to a DIFFERENT transaction', async () => {
+    const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign] }))))
+    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
+  })
+
+  it('regression: right length, wrong membership — one real message present plus one foreign substitute at the same count Iris "should" have returned, and the foreign entry is dropped rather than selected', async () => {
+    const real = own({ message: '0xreal' })
+    const foreign = own({ sourceTxHash: '0xnottherequestedtx', message: '0xforeign' })
+    // Same length (2) as a caller expecting expectedTotalMessages === 2 would
+    // require — without the sourceTxHash check, both would previously have
+    // passed the completeness gate and the foreign entry could be selected
+    // by ordinal as if it were this milestone's own second message.
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [real, foreign] }))))
+    const result = await fetchIrisMessages('0xabc123')
+    expect(result).toEqual([real])
+    expect(result).toHaveLength(1)
   })
 })
 
@@ -241,29 +291,55 @@ const DECOY_CONTRACT = '0x9999999999999999999999999999999999999999'
 
 const hexZeros = (byteLen) => '00'.repeat(byteLen)
 const uint32Hex = (n) => n.toString(16).padStart(8, '0')
+const uint256Hex = (n) => BigInt(n).toString(16).padStart(64, '0')
 const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
+// Round 29: destinationDomain/burnToken/mintRecipient/amount now overridable
+// (each defaulting to the same zero value every pre-Round-29 call site
+// already implicitly relied on) so cctpMessageFingerprint's actual field
+// extraction can be tested against non-default values, not just zeros.
 const buildCctpMessage = ({
   headerVersion = 1,
   headerSender = TOKEN_MESSENGER_V2_ARC,
+  destinationDomain = 0,
   bodyVersion = 1,
+  burnToken = ZERO_ADDRESS,
+  mintRecipient = ZERO_ADDRESS,
+  amount = 0n,
   bodySender = CONTRACT_ADDRESS
 } = {}) =>
   '0x' +
-  uint32Hex(headerVersion) +      // version            0-4
-  hexZeros(4) +                   // sourceDomain       4-8
-  hexZeros(4) +                   // destinationDomain  8-12
-  hexZeros(32) +                  // nonce              12-44
-  addressWordHex(headerSender) +  // sender             44-76
-  hexZeros(32) +                  // recipient          76-108
-  hexZeros(32) +                  // destinationCaller  108-140
-  hexZeros(4) +                   // minFinalityThreshold      140-144
-  hexZeros(4) +                   // finalityThresholdExecuted 144-148
-  uint32Hex(bodyVersion) +        // body version       148-152
-  hexZeros(32) +                  // burnToken          152-184
-  hexZeros(32) +                  // mintRecipient       184-216
-  hexZeros(32) +                  // amount             216-248
-  addressWordHex(bodySender)      // messageSender      248-280
+  uint32Hex(headerVersion) +          // version            0-4
+  hexZeros(4) +                       // sourceDomain       4-8
+  uint32Hex(destinationDomain) +      // destinationDomain  8-12
+  hexZeros(32) +                      // nonce              12-44
+  addressWordHex(headerSender) +      // sender             44-76
+  hexZeros(32) +                      // recipient          76-108
+  hexZeros(32) +                      // destinationCaller  108-140
+  hexZeros(4) +                       // minFinalityThreshold      140-144
+  hexZeros(4) +                       // finalityThresholdExecuted 144-148
+  uint32Hex(bodyVersion) +            // body version       148-152
+  addressWordHex(burnToken) +         // burnToken          152-184
+  addressWordHex(mintRecipient) +     // mintRecipient       184-216
+  uint256Hex(amount) +                // amount             216-248
+  addressWordHex(bodySender)          // messageSender      248-280
+
+// Round 29: the expected cctpMessageFingerprint for a message built by
+// buildCctpMessage above, mirroring the same overridable fields.
+const fingerprintFor = ({
+  bodySender = CONTRACT_ADDRESS,
+  destinationDomain = 0,
+  burnToken = ZERO_ADDRESS,
+  mintRecipient = ZERO_ADDRESS,
+  amount = 0n
+} = {}) => ({
+  destinationDomain,
+  burnToken: burnToken.toLowerCase(),
+  mintRecipient: mintRecipient.toLowerCase(),
+  amount: BigInt(amount).toString(),
+  messageSender: bodySender.toLowerCase()
+})
 
 const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
   address,
@@ -523,14 +599,15 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
     // since logIndex 0 belongs to escrow 3/milestone 0.
     expect(forMilestone1.ordinals).toEqual([1, 2])
     expect(forMilestone1.totalMessages).toBe(3)
+    expect(forMilestone1.fingerprints).toEqual([fingerprintFor(), fingerprintFor()])
 
     const forMilestone0 = receiptEmittedCctpMessageForMilestone(receipt, 3, 0)
-    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [0], totalMessages: 3 })
+    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [0], totalMessages: 3, fingerprints: [fingerprintFor()] })
   })
 
-  it('returns emitted:false, count:0, messages:[], ordinals:[], totalMessages:0 when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
+  it('returns emitted:false, count:0, messages:[], ordinals:[], totalMessages:0, fingerprints:[] when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
     const receipt = { logs: [messageSentLog(0)] }
-    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
+    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0, fingerprints: [] })
   })
 
   describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn, log-index-adjacent but not this contract\'s own', () => {
@@ -541,7 +618,7 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1, fingerprints: [] })
     })
 
     it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range — but still counts it toward totalMessages', () => {
@@ -551,7 +628,7 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1, fingerprints: [] })
     })
 
     it('counts only the real, own-sender message when a foreign-sender message shares the same computed range, but its ordinal position (1) correctly accounts for the foreign message occupying slot 0', () => {
@@ -563,7 +640,7 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
         ]
       }
       expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({
-        emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2
+        emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2, fingerprints: [fingerprintFor()]
       })
     })
   })
@@ -577,7 +654,7 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1, fingerprints: [] })
     })
   })
 
@@ -650,5 +727,130 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
       }
       expect(realMessageTransmitterLogIndexesAsc(receipt.logs)).toEqual([])
     })
+  })
+})
+
+/* cctpMessageFingerprint — Round 29.
+   Extracts exactly the four IMMUTABLE fields (destinationDomain, burnToken,
+   mintRecipient, amount) plus the already-verified messageSender — never
+   nonce, finalityThresholdExecuted, feeExecuted, or expirationBlock, the
+   four Round 27 established DO mutate between the source-side log and
+   Iris's attested response. */
+describe('cctpMessageFingerprint', () => {
+  it('extracts destinationDomain, burnToken, mintRecipient, amount, and messageSender at their documented offsets', () => {
+    const burnToken = '0x1111111111111111111111111111111111111111'
+    const mintRecipient = '0x2222222222222222222222222222222222222222'
+    const message = buildCctpMessage({
+      destinationDomain: 6,
+      burnToken,
+      mintRecipient,
+      amount: 123_456_789n,
+      bodySender: CONTRACT_ADDRESS
+    })
+    expect(cctpMessageFingerprint(message)).toEqual({
+      destinationDomain: 6,
+      burnToken: burnToken.toLowerCase(),
+      mintRecipient: mintRecipient.toLowerCase(),
+      amount: '123456789',
+      messageSender: CONTRACT_ADDRESS.toLowerCase()
+    })
+  })
+
+  it('lowercases address fields — case must not cause a spurious mismatch against Iris\'s own (differently-cased) decoded addresses', () => {
+    const shoutedBurnToken = '0xABCDEF0123456789ABCDEF0123456789ABCDEF01'
+    const message = buildCctpMessage({ burnToken: shoutedBurnToken })
+    expect(cctpMessageFingerprint(message).burnToken).toBe(shoutedBurnToken.toLowerCase())
+  })
+
+  it('is unaffected by the four fields Round 27 established mutate between source and attestation (nonce, finalityThresholdExecuted, feeExecuted, expirationBlock are not read at all)', () => {
+    const base = cctpMessageFingerprint(buildCctpMessage({ amount: 42n }))
+    // buildCctpMessage always zeroes nonce/finalityThresholdExecuted/
+    // feeExecuted/expirationBlock — there's no override for them at all,
+    // by construction, since a real fingerprint must never depend on them.
+    expect(base).toEqual(fingerprintFor({ amount: 42n }))
+  })
+})
+
+/* irisMessageMatchesFingerprint — Round 29. Checks a fingerprint against the
+   decoded shape Circle's own V2 messages API actually returns:
+   decodedMessage.destinationDomain + decodedMessage.decodedMessageBody.
+   {burnToken,mintRecipient,amount,messageSender} — verified against
+   developers.circle.com/cctp/migration-from-v1-to-v2's own V2 response
+   example, not assumed. */
+describe('irisMessageMatchesFingerprint', () => {
+  const fp = fingerprintFor({
+    destinationDomain: 6,
+    burnToken: '0x1111111111111111111111111111111111111111',
+    mintRecipient: '0x2222222222222222222222222222222222222222',
+    amount: 5000n,
+    bodySender: '0x3333333333333333333333333333333333333333'
+  })
+
+  const irisEntry = (overrides = {}) => ({
+    message: '0xmsg',
+    attestation: '0xatt',
+    decodedMessage: {
+      destinationDomain: '6',
+      decodedMessageBody: {
+        burnToken: '0x1111111111111111111111111111111111111111',
+        mintRecipient: '0x2222222222222222222222222222222222222222',
+        amount: '5000',
+        messageSender: '0x3333333333333333333333333333333333333333'
+      }
+    },
+    ...overrides
+  })
+
+  it('returns true when every immutable field matches, even with different address casing from Iris', () => {
+    const shouted = irisEntry({
+      decodedMessage: {
+        destinationDomain: '6',
+        decodedMessageBody: {
+          burnToken: '0x1111111111111111111111111111111111111111'.toUpperCase().replace('0X', '0x'),
+          mintRecipient: '0x2222222222222222222222222222222222222222',
+          amount: '5000',
+          messageSender: '0x3333333333333333333333333333333333333333'
+        }
+      }
+    })
+    expect(irisMessageMatchesFingerprint(shouted, fp)).toBe(true)
+  })
+
+  it('returns true when fingerprint is null — nothing to check against (legacy/absent record), matching the same permissive default expectedOrdinals == null already uses', () => {
+    expect(irisMessageMatchesFingerprint(irisEntry(), null)).toBe(true)
+    expect(irisMessageMatchesFingerprint(irisEntry(), undefined)).toBe(true)
+  })
+
+  it('rejects a mismatched destinationDomain', () => {
+    expect(irisMessageMatchesFingerprint(irisEntry({ decodedMessage: { ...irisEntry().decodedMessage, destinationDomain: '0' } }), fp)).toBe(false)
+  })
+
+  it('rejects a mismatched burnToken', () => {
+    const wrong = irisEntry()
+    wrong.decodedMessage.decodedMessageBody.burnToken = '0x9999999999999999999999999999999999999999'
+    expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+  })
+
+  it('rejects a mismatched mintRecipient', () => {
+    const wrong = irisEntry()
+    wrong.decodedMessage.decodedMessageBody.mintRecipient = '0x9999999999999999999999999999999999999999'
+    expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+  })
+
+  it('rejects a mismatched amount', () => {
+    const wrong = irisEntry()
+    wrong.decodedMessage.decodedMessageBody.amount = '1'
+    expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+  })
+
+  it('rejects a mismatched messageSender', () => {
+    const wrong = irisEntry()
+    wrong.decodedMessage.decodedMessageBody.messageSender = '0x9999999999999999999999999999999999999999'
+    expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+  })
+
+  it('rejects an entry missing decodedMessage or decodedMessageBody entirely, rather than throwing', () => {
+    expect(irisMessageMatchesFingerprint({ message: '0xmsg' }, fp)).toBe(false)
+    expect(irisMessageMatchesFingerprint({ message: '0xmsg', decodedMessage: {} }, fp)).toBe(false)
   })
 })

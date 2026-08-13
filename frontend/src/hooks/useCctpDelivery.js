@@ -1,14 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchIrisMessages } from '../utils/irisDelivery'
+import { fetchIrisMessages, irisMessageMatchesFingerprint } from '../utils/irisDelivery'
 
 const POLL_MS = 15_000
+
+// Round 29 (Low finding): distinguishes "still catching up" from "stuck".
+// Every non-terminal poll outcome below (count mismatch — including the
+// Round 28 overflow case, incomplete ordinal selection, a fingerprint
+// mismatch, or an in-flight-but-not-yet-terminal forwardState) is
+// legitimately transient on its own — Iris can take real time to index a
+// message, per this file's own IRIS_MESSAGES_TIMEOUT_MS doc comment,
+// sometimes over a minute for a single call. What distinguishes normal
+// catching-up from a stuck delivery isn't which branch fires, it's whether
+// the SAME outcome keeps repeating with no change: real indexing progress
+// changes the signature every poll (allMessages.length growing, a
+// forwardState advancing PENDING -> CONFIRMED, etc), while a permanent
+// overflow or a persistent fingerprint mismatch produces the identical
+// signature forever. 8 consecutive unchanged polls at POLL_MS=15s is 2
+// minutes — long enough that a handful of genuinely slow-but-progressing
+// polls (or one hung request retried past IRIS_MESSAGES_TIMEOUT_MS) won't
+// false-positive, short enough that a user watching "Delivering…" gets an
+// honest signal well before they'd give up and leave anyway.
+const STALE_POLL_THRESHOLD = 8
 
 // Poll Circle's Iris API for cross-chain delivery status of a burn tx.
 // Only activates when the settlement is cross-chain at all. Stops polling
 // once every message has reached a terminal forwardState.
 //
 // Returns:
-//   phase: 'idle' | 'polling' | 'delivered' | 'failed' | 'unavailable'
+//   phase: 'idle' | 'polling' | 'stale' | 'delivered' | 'failed' | 'unavailable'
 //   deliveries: parsed message objects with destinationTxHash, message,
 //               attestation, errorCode, forwardState, destinationDomain per
 //               CCTP message (one per milestone for plain releases; one per
@@ -90,12 +109,40 @@ const POLL_MS = 15_000
 // EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
 // any value Circle adds later) keeps polling, which is the safe default for
 // an open-ended field.
-export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages) {
+export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
   const intervalRef = useRef(null)
   const doneRef     = useRef(false)
+  // Round 29: staleCountRef counts CONSECUTIVE polls whose outcome signature
+  // is identical to the previous poll's — see STALE_POLL_THRESHOLD above.
+  // lastSignatureRef holds that previous signature to compare against.
+  const staleCountRef = useRef(0)
+  const lastSignatureRef = useRef(null)
   const expectedOrdinalsKey = expectedOrdinals == null ? null : expectedOrdinals.join(',')
+  // Round 29: same reasoning as expectedOrdinalsKey above — a stable string
+  // key, not the array/object references themselves, since
+  // FallbackCrossChainDelivery recomputes expectedFingerprints fresh on
+  // every render (new object references each time even when the content is
+  // identical), and depending on the objects directly would recreate `poll`
+  // every render and reset phase/deliveries in a loop.
+  const expectedFingerprintsKey = expectedFingerprints == null ? null : JSON.stringify(expectedFingerprints)
+
+  // Round 29: called from every non-terminal poll outcome in place of a bare
+  // setPhase('polling'). `signature` is a short string summarizing what THIS
+  // poll actually saw for that specific branch — genuine progress (a
+  // changing message count, an advancing forwardState) always changes it,
+  // so the counter only advances when the exact same ambiguous/anomalous
+  // outcome repeats with nothing new to show for it.
+  const markUnresolved = (signature) => {
+    if (signature === lastSignatureRef.current) {
+      staleCountRef.current += 1
+    } else {
+      staleCountRef.current = 0
+      lastSignatureRef.current = signature
+    }
+    setPhase(staleCountRef.current >= STALE_POLL_THRESHOLD ? 'stale' : 'polling')
+  }
 
   const poll = useCallback(async () => {
     if (!txHash || !isCrossChain || doneRef.current) return
@@ -116,15 +163,43 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       const allMessages = await fetchIrisMessages(txHash)
 
       if (allMessages.length !== expectedTotalMessages) {
-        setPhase('polling')
+        // Round 29: the signature includes the actual count, not just "not
+        // equal" — an UNDER-count that's genuinely growing poll to poll
+        // (Iris still indexing) keeps producing a new signature and never
+        // goes stale; an OVER-count (Round 28's overflow case) or an
+        // under-count stuck at the same number both repeat the identical
+        // signature and correctly go stale after the threshold.
+        markUnresolved(`count:${allMessages.length}`)
         return
       }
 
       const messages = expectedOrdinals.map((ord) => allMessages[ord]).filter(Boolean)
 
       if (messages.length < expectedOrdinals.length) {
-        setPhase('polling')
+        markUnresolved(`selected:${messages.length}`)
         return
+      }
+
+      // Round 29 (fixing the Round 29 review's Medium finding): ordinal
+      // position alone (Round 27) proves WHERE a message sits in Iris's
+      // response, not that its CONTENT is genuinely this milestone's own
+      // real burn. Verify each selected entry's immutable fields
+      // (irisMessageMatchesFingerprint) against the receipt-derived
+      // fingerprint before ever trusting the selection. A mismatch fails the
+      // same way an incomplete/ambiguous response already does — stays
+      // 'polling' — since a genuine mismatch should be exceedingly rare
+      // (Iris's own ordering guarantee, plus the count gate above, plus
+      // Phase C's sourceTxHash filter, would all have to be wrong or
+      // bypassed at once) and there is no safe alternative message to fall
+      // back to selecting instead.
+      if (expectedFingerprints != null) {
+        const allMatch = messages.every(
+          (m, i) => irisMessageMatchesFingerprint(m, expectedFingerprints[i])
+        )
+        if (!allMatch) {
+          markUnresolved('fingerprint-mismatch')
+          return
+        }
       }
 
       // Circle returns attestation: "PENDING" (string) while still confirming.
@@ -132,7 +207,7 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
         (m) => m.attestation && m.attestation !== 'PENDING'
       )
       if (!allAttested) {
-        setPhase('polling')
+        markUnresolved('unattested')
         return
       }
 
@@ -166,7 +241,13 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
         doneRef.current = true
         clearInterval(intervalRef.current)
       } else {
-        setPhase('polling')
+        // Round 29: signature includes each message's own forwardState — a
+        // real transition (e.g. PENDING -> CONFIRMED) changes it and resets
+        // the counter; forwardState stuck on the exact same value(s) poll
+        // after poll (e.g. Circle's forwarding service silently never
+        // advancing past PENDING) is precisely the "wrong for a while"
+        // scenario this mechanism exists to surface.
+        markUnresolved(`forward:${parsed.map((m) => m.forwardState).join(',')}`)
       }
     } catch {
       // Network error or unexpected shape — show unavailable but keep polling
@@ -181,8 +262,9 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
     // retrigger the effect below and reset phase/deliveries in a loop. The
     // joined integers can never collide across genuinely different ordinal
     // sets in a way that matters here (same array, same key), so this is an
-    // unambiguous equality key for otherwise-identical content.
-  }, [txHash, isCrossChain, expectedOrdinalsKey, expectedTotalMessages])
+    // unambiguous equality key for otherwise-identical content. Round 29:
+    // expectedFingerprintsKey follows the exact same reasoning.
+  }, [txHash, isCrossChain, expectedOrdinalsKey, expectedTotalMessages, expectedFingerprintsKey])
 
   useEffect(() => {
     if (!txHash || !isCrossChain) {
@@ -190,6 +272,8 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       return
     }
     doneRef.current = false
+    staleCountRef.current = 0
+    lastSignatureRef.current = null
     setPhase('polling')
     setDeliveries([])
     poll()

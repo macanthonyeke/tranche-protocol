@@ -49,6 +49,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, waitFor } from '@testing-library/react'
 import { encodeEventTopics, encodeAbiParameters } from 'viem'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+import { cctpMessageFingerprint } from '../utils/irisDelivery.js'
 
 const receiptMock = vi.hoisted(() => ({ current: { data: undefined, isPending: true, isError: false } }))
 // A spy wrapper, not just a return-value stub — Round 24 Phase B's fix lives
@@ -92,15 +93,23 @@ const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
 // alongside Round 25's body sender). Defaults describe a fully genuine
 // message this contract's own burn would produce; individual tests
 // override exactly the field they're exercising.
+// Round 29: destinationDomain now overridable (byte 8-12) so the fingerprint
+// check (cctpMessageFingerprint reads this field) can be exercised
+// end-to-end — previously always left at the zeroed default regardless of
+// what domain a paired irisMessage() fixture claimed, which mattered to
+// nothing before Round 29 introduced a check that actually compares them.
 const buildCctpMessage = ({
   headerVersion = 1,
   headerSender = TOKEN_MESSENGER_V2_ARC,
+  destinationDomain = 0,
   bodyVersion = 1,
   bodySender = CONTRACT_ADDRESS
 } = {}) =>
   '0x' +
   uint32Hex(headerVersion) +
-  hexZeros(4 + 4 + 32) +
+  hexZeros(4) +
+  uint32Hex(destinationDomain) +
+  hexZeros(32) +
   addressWordHex(headerSender) +
   hexZeros(32 + 32 + 4 + 4) +
   uint32Hex(bodyVersion) +
@@ -136,14 +145,42 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
 // CCTP V2 mutates several fields between burn-time and attestation). The
 // default still happens to reuse buildCctpMessage() for convenience, but
 // nothing below depends on it matching.
-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', message = buildCctpMessage() } = {}) => ({
-  message,
-  attestation: '0xattestation',
-  decodedMessage: { destinationDomain: String(destinationDomain) },
-  forwardState,
-  forwardTxHash: '0xdesttx',
-  forwardErrorCode: null
-})
+//
+// Round 29: decodedMessage.decodedMessageBody is now real and derived
+// separately from `message` (via a fresh, canonical buildCctpMessage call
+// using the SAME destinationDomain/bodySender this fixture was asked to
+// represent) rather than left absent or decoded from a possibly-arbitrary
+// `message` override — realistic to how Circle's real Iris response works:
+// `message` (raw hex) can legitimately differ from the source-side receipt
+// bytes in the four MUTABLE fields (Round 27's own finding), but
+// `decodedMessage`'s IMMUTABLE fields are Circle's own decode of the
+// attested message and match the real burn's real fields. Every call site
+// in this file that wants a genuinely-matching fingerprint must pass the
+// receipt's own messageSentLog the SAME destinationDomain/bodySender.
+const irisMessage = ({
+  destinationDomain = 6,
+  forwardState = 'COMPLETE',
+  message = buildCctpMessage({ destinationDomain }),
+  bodySender = CONTRACT_ADDRESS
+} = {}) => {
+  const fp = cctpMessageFingerprint(buildCctpMessage({ destinationDomain, bodySender }))
+  return {
+    message,
+    attestation: '0xattestation',
+    decodedMessage: {
+      destinationDomain: String(destinationDomain),
+      decodedMessageBody: {
+        burnToken: fp.burnToken,
+        mintRecipient: fp.mintRecipient,
+        amount: fp.amount,
+        messageSender: fp.messageSender
+      }
+    },
+    forwardState,
+    forwardTxHash: '0xdesttx',
+    forwardErrorCode: null
+  }
+}
 
 const setReceipt = (value) => { receiptMock.current = value }
 
@@ -222,8 +259,8 @@ describe('failure mode (b): a receipt proving 2 CCTP messages, Iris initially in
   const twoMessageReceipt = () => ({
     transactionHash: '0xreleasetx',
     logs: [
-      messageSentLog(0),
-      messageSentLog(1),
+      messageSentLog(0, { destinationDomain: 6 }),
+      messageSentLog(1, { destinationDomain: 0 }),
       escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
     ]
   })
@@ -267,7 +304,7 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
   const batchedReceiptNoMessageForTarget = () => ({
     transactionHash: '0xbatchtx',
     logs: [
-      messageSentLog(0),
+      messageSentLog(0, { destinationDomain: 6 }),
       escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
       escrowLog(2, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
     ]
@@ -294,10 +331,10 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
       data: {
         transactionHash: '0xbatchtx2',
         logs: [
-          messageSentLog(0),
+          messageSentLog(0, { destinationDomain: 7 }),
           escrowLog(1, 'MilestoneApproved', { escrowId: 3n, milestoneIndex: 0n }),
-          messageSentLog(2),
-          messageSentLog(3),
+          messageSentLog(2, { destinationDomain: 6 }),
+          messageSentLog(3, { destinationDomain: 0 }),
           escrowLog(4, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://y' })
         ]
       },
@@ -337,7 +374,7 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
       data: {
         transactionHash: '0xplaintx',
         logs: [
-          messageSentLog(0),
+          messageSentLog(0, { destinationDomain: 6 }),
           escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
         ]
       },
@@ -420,7 +457,7 @@ describe('Round 27: ordinal-position selection end to end', () => {
       data: {
         transactionHash: '0xmutabletx',
         logs: [
-          messageSentLog(0),
+          messageSentLog(0, { destinationDomain: 6 }),
           escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
         ]
       },
@@ -445,7 +482,7 @@ describe('Round 27: ordinal-position selection end to end', () => {
         transactionHash: '0xforgedearliertx',
         logs: [
           messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),   // forged — real contract, real topic, wrong header.sender: ordinal 0
-          messageSentLog(1),   // this milestone's own genuine burn: ordinal 1
+          messageSentLog(1, { destinationDomain: 6 }),   // this milestone's own genuine burn: ordinal 1
           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       },

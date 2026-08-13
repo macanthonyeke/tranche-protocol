@@ -22,6 +22,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
 import {
   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
@@ -1448,6 +1449,13 @@ function useMilestoneReleaseTxs(escrowId) {
 
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+// Round 29: a real transaction hash shape — 0x + 64 hex chars — not just
+// "some string". Round 28's `typeof === 'string'` check let an empty string,
+// a truncated hash, or any other non-hash string through as a "valid"
+// record, which readCctpTrack would then hand to CrossChainDelivery as a
+// txHash to poll Iris with.
+const CCTP_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+
 // Round 28: expectedOrdinals/expectedTotalMessages being the right TYPES
 // (array / number) doesn't mean they're COHERENT — an out-of-range, negative,
 // fractional, or duplicate ordinal, or a vacuous {ordinals: [], total: 0}
@@ -1455,8 +1463,36 @@ const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 // useCctpDelivery a broken selection key. Every field the record actually
 // needs gets checked here, once, so an incoherent record is discarded the
 // same way a malformed or aged-out one already is.
+//
+// Round 29: also rejects a non-finite ts (NaN/Infinity — `typeof === 'number'`
+// alone lets both through, since typeof NaN is 'number') and a FUTURE ts.
+// A future ts matters specifically because it defeats the aged-out check
+// above readCctpTrack's own call site: `Date.now() - parsed.ts` goes
+// negative for a future ts, which is never `> CCTP_TRACK_MAX_AGE_MS`, so
+// nothing else in readCctpTrack would ever catch it. No clock-skew
+// tolerance: this ts is always stamped with Date.now() on the same device
+// that later reads it, so a genuinely future value only ever means a
+// tampered/foreign record, not ordinary drift.
+const CCTP_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
+const CCTP_AMOUNT_RE = /^[0-9]+$/
+
+// Round 29: shape-checks one cctpMessageFingerprint entry (see
+// irisDelivery.js) the same way the rest of this function shape-checks the
+// record around it — every field a real fingerprint always has, nothing
+// more permissive.
+function isValidFingerprintShape(fp) {
+  if (fp == null || typeof fp !== 'object') return false
+  if (!Number.isInteger(fp.destinationDomain) || fp.destinationDomain < 0) return false
+  if (typeof fp.burnToken !== 'string' || !CCTP_ADDRESS_RE.test(fp.burnToken)) return false
+  if (typeof fp.mintRecipient !== 'string' || !CCTP_ADDRESS_RE.test(fp.mintRecipient)) return false
+  if (typeof fp.messageSender !== 'string' || !CCTP_ADDRESS_RE.test(fp.messageSender)) return false
+  if (typeof fp.amount !== 'string' || !CCTP_AMOUNT_RE.test(fp.amount)) return false
+  return true
+}
+
 function isValidCctpTrackRecord(parsed) {
-  if (typeof parsed.txHash !== 'string' || typeof parsed.ts !== 'number') return false
+  if (typeof parsed.txHash !== 'string' || !CCTP_TX_HASH_RE.test(parsed.txHash)) return false
+  if (!Number.isFinite(parsed.ts) || parsed.ts > Date.now()) return false
   if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
   if (!Array.isArray(parsed.expectedOrdinals) || parsed.expectedOrdinals.length === 0) return false
   const seen = new Set()
@@ -1465,17 +1501,53 @@ function isValidCctpTrackRecord(parsed) {
     if (seen.has(ord)) return false
     seen.add(ord)
   }
+  // Round 29: every real write site now persists a fingerprint alongside
+  // each ordinal (see irisDelivery.js's cctpMessageFingerprint and
+  // receiptEmittedCctpMessageForMilestone) — a record missing this, or with
+  // a length mismatch, is a PRE-Round-29 legacy shape and gets discarded the
+  // same way Round 27's own legacy-shape records are: readCctpTrack returns
+  // null, MilestoneRow's `!cctpTrack` fallback reverifies from the receipt
+  // instead of ever handing out a record with no fingerprint to check.
+  if (!Array.isArray(parsed.expectedFingerprints) || parsed.expectedFingerprints.length !== parsed.expectedOrdinals.length) return false
+  if (!parsed.expectedFingerprints.every(isValidFingerprintShape)) return false
   return true
 }
 
+// Round 29 — scope note on the reviewer's further suggestion (reconciling a
+// local record against the subgraph's own releaseTx once indexed, or
+// reverifying its receipt outright instead of trusting the persisted record
+// for its full 24h life): deliberately NOT done here. The hash-format check
+// and CONTRACT_ADDRESS namespacing above already close the concrete gap —
+// "coherent-looking garbage from a stale/foreign source" — that made a
+// persisted record risky to trust in the first place. What's left after
+// those fixes is trusting a record that (a) has a real tx hash shape, (b)
+// belongs to this exact deployment, (c) is at most 24h old, and (d) per
+// Round 22 Phase A, was ONLY ever written by this app's own
+// receipt-verified code paths (every write site gates on
+// receiptEmittedCctpMessageForMilestone(receipt, ...).emitted first) — not
+// arbitrary tamper-resistance. Reconciling against the subgraph on every
+// read would add a Goldsky round-trip (and its own failure/staleness modes)
+// to a value that's already provably correct at write time; reverifying the
+// receipt outright is exactly what FallbackCrossChainDelivery already does
+// as the fallback path when there's no local record — duplicating it here
+// would just run the expensive path unconditionally instead of only when
+// needed. If a live incident ever surfaces cross-deployment or stale-record
+// bugs in practice despite these fixes, that would justify revisiting this;
+// nothing in the current threat model does.
 export function readCctpTrack(escrowId, milestoneIndex) {
   const key = cctpTrackKey(escrowId, milestoneIndex)
+  // Round 29: getItem/removeItem go through safeStorage — storage itself can
+  // throw (privacy mode, denied origin), and an unguarded removeItem inside
+  // this function's own catch block used to be able to throw a SECOND time
+  // and escape entirely, breaking MilestoneRow's useState initializer during
+  // render. safeStorage swallows internally, so every branch below degrades
+  // to "no local record" the same way, never propagates.
+  const raw = safeGetItem(key)
+  if (!raw) return null
   try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return null
     const parsed = JSON.parse(raw)
     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
-      localStorage.removeItem(key)
+      safeRemoveItem(key)
       return null
     }
     // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
@@ -1493,7 +1565,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
     // reverifies straight from the receipt instead. Round 28: this check now
     // also covers coherence, not just shape — see isValidCctpTrackRecord.
     if (!isValidCctpTrackRecord(parsed)) {
-      localStorage.removeItem(key)
+      safeRemoveItem(key)
       return null
     }
     return parsed
@@ -1501,7 +1573,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
     // Round 28: unparseable JSON is exactly as unusable as a malformed
     // record — discard it the same way, instead of leaving a dead key that
     // getItem/JSON.parse will keep failing on for the rest of its 24h life.
-    localStorage.removeItem(key)
+    safeRemoveItem(key)
     return null
   }
 }
@@ -1706,9 +1778,11 @@ function MilestoneRow({
                   // whose expectedOrdinals/expectedTotalMessages shape isn't
                   // usable (legacy or malformed) — see its own doc comment —
                   // so cctpTrack.expectedOrdinals is guaranteed to be a real
-                  // array whenever cctpTrack is non-null here.
+                  // array whenever cctpTrack is non-null here. Round 29: the
+                  // same is now true of expectedFingerprints.
                   expectedOrdinals={cctpTrack.expectedOrdinals}
                   expectedTotalMessages={cctpTrack.expectedTotalMessages}
+                  expectedFingerprints={cctpTrack.expectedFingerprints}
                 />
               )}
               {milestone.state === 3 && fallbackTxHash && (
@@ -2475,7 +2549,7 @@ export function mutualSettlementExecuted(receipt) {
    isn't discovering them from the subgraph the way the fallback path has
    to, so no new plumbing was needed to make this call. */
 export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
-  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
+  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0, fingerprints: [] }
   return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
 }
 
@@ -2716,7 +2790,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
       // executed AND the receipt proves a real message genuinely THIS
       // milestone's own was sent (Round 26: authenticity- and
       // milestone-scoped, not just "a message exists somewhere").
-      const { emitted, ordinals, totalMessages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
+      const { emitted, ordinals, totalMessages, fingerprints } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
       if (emitted) {
         // Round 20 Phase D: no `domain` field — no reader ever consumed it
         // (both MilestoneRow and DisputeBlock recompute the domain live from
@@ -2729,9 +2803,9 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         // `messages` array Round 26 persisted here — see useCctpDelivery's
         // own doc comment for why content matching against Iris never
         // actually worked.
-        localStorage.setItem(
+        safeSetItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
         onCrossChainRelease?.()
       }
@@ -2904,8 +2978,8 @@ export function shouldClearCctpTrack(deliveries) {
    recovery card for one of potentially several simultaneously-failed legs.
    Exported for direct testing — the same reasoning EscrowDetail exports its
    other confirm-descriptor and decision functions for. */
-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedOrdinals, expectedTotalMessages }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
   const [copied, setCopied] = useState(false)
 
   // Once every message Iris knows about for this tx has actually completed,
@@ -2917,7 +2991,7 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
   // here, so handling one failed leg never tears down tracking for another.
   useEffect(() => {
     if (shouldClearCctpTrack(deliveries)) {
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      safeRemoveItem(cctpTrackKey(escrowId, milestoneIndex))
     }
   }, [deliveries, escrowId, milestoneIndex])
 
@@ -2971,6 +3045,21 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
 
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+      )}
+
+      {/* Round 29 (Low finding): distinct from the ordinary 'polling' spinner
+          above — this has been the SAME inconsistent state for 2+ minutes,
+          not a delivery that's merely taking a while. Modeled on the
+          'unavailable' treatment (a short, honest status line, no spinner)
+          since there's nothing actionable for the user to click — this is a
+          background reconciliation issue, not a stuck-message recovery case
+          (that's SelfRelayCard, for a message Iris has explicitly marked
+          FAILED). Still polling underneath, so it can still resolve on its
+          own; the message says so rather than implying the tracker gave up. */}
+      {phase === 'stale' && (
+        <p className="text-[12px] text-warn">
+          Delivery status hasn't changed in over 2 minutes — still checking, but this may be an indexing delay worth keeping an eye on.
+        </p>
       )}
     </div>
   )
@@ -3078,7 +3167,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
     // write sites share too (Circle-managed wallets are ERC-4337 smart
     // accounts; a bundler can pack a foreign UserOperation's logs into any
     // receipt, not just this permissionless path's).
-    const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+    const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
     if (!emitted) return null
     return (
       <CrossChainDelivery
@@ -3088,6 +3177,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
         milestoneIndex={milestoneIndex}
         expectedOrdinals={ordinals}
         expectedTotalMessages={totalMessages}
+        expectedFingerprints={fingerprints}
       />
     )
   }
@@ -3765,11 +3855,11 @@ function MilestoneAction({
     // here — no discovery needed, unlike the fallback path.
     onConfirmed: (receipt) => {
       onChange?.(); setActiveKey(null)
-      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+      const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
       if (emitted) {
-        localStorage.setItem(
+        safeSetItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
         onCrossChainRelease?.()
       }

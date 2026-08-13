@@ -18,6 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
+import { cctpTrackKey } from '../utils/irisDelivery.js'
 
 const cctpDeliveryMock = vi.hoisted(() => ({ current: { phase: 'idle', deliveries: [] } }))
 vi.mock('../hooks/useCctpDelivery.js', () => ({
@@ -131,7 +132,7 @@ describe('tracker cleanup: only clears the shared key once every message is genu
   it('clears the tracker once every leg has genuinely reached COMPLETE', () => {
     setDeliveries('delivered', [completeMsg(BASE, '0xdesttx1'), completeMsg(ETH, '0xdesttx2')])
     renderTracker()
-    expect(removeItemSpy).toHaveBeenCalledWith('cctp-track-7-1')
+    expect(removeItemSpy).toHaveBeenCalledWith(cctpTrackKey(7, 1))
   })
 })
 
@@ -140,5 +141,18 @@ describe('an Iris-omitted domain renders honestly instead of guessing a wrong ch
     setDeliveries('failed', [failedMsg(null)])
     renderTracker()
     expect(screen.getByText(/Switch your wallet to/).closest('p').textContent).toContain('an unknown chain')
+  })
+})
+
+/* Round 29 (Low finding): 'stale' is a distinct phase from 'polling' — the
+   same inconsistent state repeating for 2+ minutes, not ordinary polling
+   latency. Must render its own honest status line, not the "Delivering…"
+   spinner (which only shows for phase 'polling'). */
+describe('stale phase renders a distinct status line, not the ordinary polling spinner', () => {
+  it('renders the stale message and NOT the "Delivering…" spinner', () => {
+    setDeliveries('stale', [])
+    renderTracker()
+    expect(screen.getByText(/hasn't changed in over 2 minutes/)).toBeInTheDocument()
+    expect(screen.queryByText(/Delivering…/)).not.toBeInTheDocument()
   })
 })

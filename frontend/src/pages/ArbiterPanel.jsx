@@ -17,6 +17,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
 import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+import { safeSetItem } from '../utils/safeStorage.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
@@ -207,6 +208,7 @@ function DisputeBlock({ detail, index, refetch }) {
   const [resolveTxHash, setResolveTxHash] = useState(null)
   const [resolveOrdinals, setResolveOrdinals] = useState(null)
   const [resolveTotalMessages, setResolveTotalMessages] = useState(null)
+  const [resolveFingerprints, setResolveFingerprints] = useState(null)
 
   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
@@ -243,11 +245,12 @@ function DisputeBlock({ detail, index, refetch }) {
   // are already in scope — no discovery needed, unlike the fallback path.
   const handleResolve = useCallback((receipt) => {
     if (receipt) {
-      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
+      const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
       if (emitted) {
         setResolveTxHash(receipt.transactionHash)
         setResolveOrdinals(ordinals)
         setResolveTotalMessages(totalMessages)
+        setResolveFingerprints(fingerprints)
         // Also persist to localStorage so EscrowDetail picks it up on other
         // devices. Round 20 Phase D: no `domain` field — no reader ever
         // consumed it (both this component and EscrowDetail's MilestoneRow
@@ -260,9 +263,9 @@ function DisputeBlock({ detail, index, refetch }) {
         // `messages` array Round 26 persisted here — see useCctpDelivery's
         // own doc comment for why content matching against Iris never
         // actually worked.
-        localStorage.setItem(
+        safeSetItem(
           cctpTrackKey(detail.id, index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
       }
     }
@@ -338,6 +341,7 @@ function DisputeBlock({ detail, index, refetch }) {
           isCrossChain={trackingDomain != null}
           expectedOrdinals={resolveOrdinals}
           expectedTotalMessages={resolveTotalMessages}
+          expectedFingerprints={resolveFingerprints}
         />
       )}
     </li>
@@ -373,8 +377,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
    CrossChainDelivery for the full citation trail on why a single collapsed
    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
    leg in the same mixed split failed. */
-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
+function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
 
   if (phase === 'idle') return null
 
@@ -413,6 +417,12 @@ function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expecte
       })}
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable.</p>
+      )}
+      {/* Round 29 (Low finding) — same distinct treatment as
+          EscrowDetail.jsx's CrossChainDelivery: 2+ minutes of the identical
+          inconsistent state, not ordinary polling latency. */}
+      {phase === 'stale' && (
+        <p className="text-[12px] text-warn">Delivery status hasn't changed in over 2 minutes — still checking.</p>
       )}
     </div>
   )

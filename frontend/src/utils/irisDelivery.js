@@ -19,8 +19,24 @@ const RECEIVE_MESSAGE_ABI = [
 ]
 
 // localStorage key for a single cross-chain release tx.
+//
+// Round 29: namespaced by CONTRACT_ADDRESS, not just escrowId+milestoneIndex.
+// Without this, a coherent-looking record left over from a PREVIOUS
+// deployment (redeploys are routine in this repo — see CLAUDE.md's
+// deployment history) would collide on the same key under a new contract
+// whose escrow #7 milestone #1 is a completely unrelated escrow, and
+// readCctpTrack's shape/coherence checks alone can't tell the difference —
+// a garbage-but-well-shaped record would wrongly suppress
+// FallbackCrossChainDelivery's receipt-reverifying fallback path.
+// CONTRACT_ADDRESS alone is sufficient here, not CONTRACT_ADDRESS+chain: it
+// is a single build-time env value (config/wagmi.js) — exactly one
+// deployment is ever active per running app instance, and a redeploy always
+// changes it, so it already uniquely identifies "this build's own contract"
+// without a separate domain/chain component. The wallet's own connected
+// chain is orthogonal — this key is about which TrancheProtocol instance
+// the record belongs to, not which chain the signer happens to be on.
 export const cctpTrackKey = (escrowId, milestoneIndex) =>
-  `cctp-track-${escrowId}-${milestoneIndex}`
+  `cctp-track-${CONTRACT_ADDRESS.toLowerCase()}-${escrowId}-${milestoneIndex}`
 
 // Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
 // fixed interval regardless of whether the previous call has resolved yet,
@@ -85,7 +101,25 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
   } finally {
     clearTimeout(timeoutId)
   }
-  return json?.messages || []
+  const messages = json?.messages || []
+  // Round 29 (fixing the Round 29 review's Medium finding): equal cardinality
+  // doesn't prove equal membership. useCctpDelivery's completeness gate
+  // (allMessages.length === expectedTotalMessages) only checks the COUNT —
+  // a response missing one real message but containing one unrelated extra
+  // entry would have the same length and still get ordinal-selected as
+  // though it were this transaction's own verified set. Circle's Iris
+  // response carries each message's own sourceTxHash; filtering out any
+  // entry whose sourceTxHash is present and does NOT match the transaction
+  // actually requested catches exactly that substitution — cheaply, before
+  // the entry ever reaches ordinal selection. Filters out only a POSITIVE
+  // mismatch, not entries missing the field entirely: this endpoint is
+  // already scoped by `transactionHash` in the request URL above, so
+  // sourceTxHash should be redundant on every real entry, but requiring its
+  // presence would silently break every poll if some response shape omits
+  // it — this stays a defensive check, not a new hard dependency.
+  return messages.filter(
+    (m) => typeof m.sourceTxHash !== 'string' || m.sourceTxHash.toLowerCase() === txHash.toLowerCase()
+  )
 }
 
 // Encode `receiveMessage(message, attestation)` calldata for the destination
@@ -137,6 +171,84 @@ const MESSAGE_SENT_ABI = [
    authenticity chain this is now only one link of. */
 export function messageSenderOf(message) {
   return bytes32ToAddress(slice(message, 248, 280))
+}
+
+/* Round 29. Three more fields off the same raw message, all from the
+   IMMUTABLE half of CCTP V2's layout — none of nonce (header, byte 12-44),
+   finalityThresholdExecuted (header, byte 144-148), feeExecuted (body,
+   relative offset 164/absolute 312) or expirationBlock (body, relative
+   offset 196/absolute 344), the four fields Round 27's own doc comment
+   established DO mutate between the source-side log and Iris's attested
+   response. Offsets confirmed against the same Circle V2 technical guide
+   layout messageSenderOf and messageHeaderSenderOf already verify against:
+   header's destinationDomain is a 4-byte uint32 at absolute offset 8 (right
+   after the 4-byte version and 4-byte sourceDomain); BurnMessageV2's body
+   starts at absolute 148, so burnToken (32 bytes), mintRecipient (32
+   bytes), and amount (32 bytes) sit at 152, 184, and 216 respectively —
+   immediately before messageSender's own already-verified 248 offset,
+   which anchors this math to a value already confirmed correct. */
+function destinationDomainOf(message) {
+  return readUint32(message, 8)
+}
+
+function burnTokenOf(message) {
+  return bytes32ToAddress(slice(message, 152, 184))
+}
+
+function mintRecipientOf(message) {
+  return bytes32ToAddress(slice(message, 184, 216))
+}
+
+function amountOf(message) {
+  return BigInt(slice(message, 216, 248))
+}
+
+/* Round 29 (fixing the Round 29 review's Medium finding: "equal cardinality
+   doesn't prove equal membership"). Ordinal position alone (Round 27) proves
+   WHERE a message sits in Iris's response, not that its CONTENT is
+   genuinely this milestone's own real burn — an Iris bug, or a same-length
+   response that reorders same-transaction messages, could still misattribute
+   at the selected ordinal. This is real identity verification, not a return
+   to Round 26's mistake: Round 26 compared the whole raw message against
+   Iris's `message` field and always failed, because CCTP V2 mutates several
+   fields between burn and attestation. This instead fingerprints ONLY the
+   fields confirmed immutable (see the four decode helpers above) — a value
+   that stays byte-identical between the source-side log and Iris's own
+   attested response for the SAME real message, so genuine equality is
+   actually achievable here, unlike Round 26's attempt.
+   Stored as plain JSON-safe values (lowercased address strings, amount as a
+   decimal string — BigInt doesn't survive JSON.stringify) since this feeds
+   directly into the persisted cctpTrack record. */
+export function cctpMessageFingerprint(message) {
+  return {
+    destinationDomain: destinationDomainOf(message),
+    burnToken: burnTokenOf(message).toLowerCase(),
+    mintRecipient: mintRecipientOf(message).toLowerCase(),
+    amount: amountOf(message).toString(),
+    messageSender: messageSenderOf(message).toLowerCase()
+  }
+}
+
+/* Round 29. Checks a fingerprint (from cctpMessageFingerprint, above)
+   against the Iris entry selected by ordinal, using the SAME decoded shape
+   Circle's own V2 messages response documents: decodedMessage.destinationDomain
+   and decodedMessage.decodedMessageBody.{burnToken,mintRecipient,messageSender,amount}
+   (developers.circle.com/cctp/migration-from-v1-to-v2 — the V2 messages
+   response example shows exactly this nesting). `fingerprint == null` is
+   treated as "nothing to check against" (matches), not a failure — the same
+   permissive default useCctpDelivery already uses for expectedOrdinals ==
+   null, since every real call site provides both together. */
+export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
+  if (fingerprint == null) return true
+  const decoded = irisMessage?.decodedMessage
+  const body = decoded?.decodedMessageBody
+  if (!decoded || !body) return false
+  if (Number(decoded.destinationDomain) !== fingerprint.destinationDomain) return false
+  if (typeof body.burnToken !== 'string' || body.burnToken.toLowerCase() !== fingerprint.burnToken) return false
+  if (typeof body.mintRecipient !== 'string' || body.mintRecipient.toLowerCase() !== fingerprint.mintRecipient) return false
+  if (typeof body.messageSender !== 'string' || body.messageSender.toLowerCase() !== fingerprint.messageSender) return false
+  if (String(body.amount) !== fingerprint.amount) return false
+  return true
 }
 
 // Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract
@@ -449,7 +561,7 @@ export function realMessageTransmitterLogIndexesAsc(logs) {
 
 export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
   const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
-  if (!range) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
+  if (!range) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0, fingerprints: [] }
   const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
   const result = receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
   const universe = realMessageTransmitterLogIndexesAsc(receipt.logs)
@@ -457,5 +569,10 @@ export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milesto
     .filter((log) => verifiedOwnCctpMessage(log, CONTRACT_ADDRESS) != null)
     .map((log) => universe.indexOf(log.logIndex))
     .filter((ord) => ord !== -1)
-  return { ...result, ordinals, totalMessages: universe.length }
+  // Round 29: fingerprints built from result.messages — the SAME verified
+  // raw message bytes ordinals is derived from (both iterate scopedLogs
+  // filtered by the identical verifiedOwnCctpMessage != null predicate, in
+  // the same order), so fingerprints[i] genuinely corresponds to ordinals[i].
+  const fingerprints = result.messages.map(cctpMessageFingerprint)
+  return { ...result, ordinals, totalMessages: universe.length, fingerprints }
 }

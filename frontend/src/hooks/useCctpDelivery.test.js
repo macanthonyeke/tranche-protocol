@@ -33,12 +33,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 
 const fetchIrisMessages = vi.hoisted(() => vi.fn())
-vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages }))
+// Round 29: irisMessageMatchesFingerprint is mocked too, not left to the
+// real implementation — its own logic is exercised directly in
+// irisDelivery.test.js; here the point is only testing useCctpDelivery's
+// WIRING (does a mismatch stop it from selecting the message, does a match
+// let normal flow continue). Defaults to true so every pre-Round-29 test
+// below, which never passes expectedFingerprints, is unaffected.
+const irisMessageMatchesFingerprint = vi.hoisted(() => vi.fn(() => true))
+vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages, irisMessageMatchesFingerprint }))
 
 const { useCctpDelivery } = await import('./useCctpDelivery.js')
 
 beforeEach(() => {
   fetchIrisMessages.mockReset()
+  irisMessageMatchesFingerprint.mockReset()
+  irisMessageMatchesFingerprint.mockReturnValue(true)
 })
 
 afterEach(() => {
@@ -359,5 +368,151 @@ describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', (
     // without ordinals to select by.
     expect(fetchIrisMessages).not.toHaveBeenCalled()
     expect(result.current.deliveries).toEqual([])
+  })
+})
+
+/* expectedFingerprints — Round 29 (fixing the Round 29 review's Medium
+   finding: "equal cardinality doesn't prove equal membership"). Ordinal
+   position (Round 27) proves WHERE a message sits; it does not prove its
+   CONTENT is genuinely this milestone's own. irisMessageMatchesFingerprint
+   is the last check before an ordinal-selected entry gets trusted. */
+describe('useCctpDelivery — expectedFingerprints identity check', () => {
+  it('proceeds normally when every selected message matches its fingerprint', async () => {
+    irisMessageMatchesFingerprint.mockReturnValue(true)
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const fp = [{ destinationDomain: 6, burnToken: '0xa', mintRecipient: '0xb', amount: '1', messageSender: '0xc' }]
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1, fp))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(irisMessageMatchesFingerprint).toHaveBeenCalledWith(expect.objectContaining({ message: '0xmessage' }), fp[0])
+  })
+
+  it('regression: same length AND same ordinal position, but the selected entry\'s content does not match its fingerprint — stays polling, never selected. This is the layered defense ordinal-position matching alone cannot provide: Phase C\'s sourceTxHash check catches a foreign message from a DIFFERENT transaction; this catches misattribution WITHIN the same transaction/response', async () => {
+    irisMessageMatchesFingerprint.mockReturnValue(false)
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const fp = [{ destinationDomain: 0, burnToken: '0xwrong', mintRecipient: '0xwrong', amount: '999', messageSender: '0xwrong' }]
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1, fp))
+    await waitFor(() => expect(irisMessageMatchesFingerprint).toHaveBeenCalled())
+    // Give it a moment to settle — must never transition to 'delivered'.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toEqual([])
+  })
+
+  it('a partial mismatch — one of two messages fails its fingerprint — keeps the WHOLE selection untrusted, not just the mismatched one (there is no safe partial-trust state)', async () => {
+    irisMessageMatchesFingerprint.mockImplementation((_, fp) => fp.ok)
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
+    ])
+    const fp = [{ ok: true }, { ok: false }]
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2, fp))
+    await waitFor(() => expect(irisMessageMatchesFingerprint).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 10))
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toEqual([])
+  })
+
+  it('skips the fingerprint check entirely when expectedFingerprints is not provided — same permissive default as expectedOrdinals, so this never regresses pre-Round-29 call sites', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(irisMessageMatchesFingerprint).not.toHaveBeenCalled()
+  })
+})
+
+/* 'stale' phase — Round 29 (Low finding). A persistent overflow (Round 28's
+   fail-closed case) is indistinguishable in the UI from a genuinely
+   still-in-progress delivery — "Delivering…" forever with no diagnostic.
+   These tests drive the poll loop through real intervals with fake timers
+   (the same pattern the terminality tests above already use) to prove the
+   counting/reset logic end to end, not just call it directly. */
+describe('useCctpDelivery — stale phase (persistent-overflow / stuck detection)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stays in polling — never stale — for fewer than the threshold\'s worth of identical outcomes', async () => {
+    vi.useFakeTimers()
+    // Round 28 overflow scenario: 3 real Iris entries when the receipt only
+    // ever proved 2 exist. Static across every poll — the exact "same wrong
+    // answer forever" case this mechanism targets.
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6 }), irisMessage({ destinationDomain: 0 }), irisMessage({ destinationDomain: 7 })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    // 7 more identical polls (8 total) — still one short of the threshold.
+    for (let i = 0; i < 6; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    }
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(7)
+    expect(result.current.phase).toBe('polling')
+  })
+
+  it('transitions to stale once the SAME overflow repeats for 8 consecutive polls (Round 28\'s persistent-overflow scenario)', async () => {
+    vi.useFakeTimers()
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6 }), irisMessage({ destinationDomain: 0 }), irisMessage({ destinationDomain: 7 })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    for (let i = 0; i < 8; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    }
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(9)
+    expect(result.current.phase).toBe('stale')
+    // Still polling in the background, not a terminal state — the interval
+    // must not have been cleared (unlike 'delivered'/'failed', which do
+    // clearInterval). One more tick keeps calling fetchIrisMessages.
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(10)
+  })
+
+  it('never goes stale when the count is genuinely growing poll to poll — real indexing progress, not stuck', async () => {
+    vi.useFakeTimers()
+    // 9 polls of a STRICTLY INCREASING (but never reaching expectedTotalMessages
+    // until the very end) count would never repeat a signature — simulated
+    // here with 8 identical under-counts would go stale, so instead each
+    // poll returns one MORE message than the last, proving growth resets
+    // the counter every time.
+    for (let n = 1; n <= 9; n++) {
+      fetchIrisMessages.mockResolvedValueOnce(
+        Array.from({ length: n }, (_, i) => irisMessage({ destinationDomain: i }))
+      )
+    }
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 20))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    for (let i = 0; i < 8; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    }
+    expect(fetchIrisMessages).toHaveBeenCalledTimes(9)
+    // Every poll saw a different count than the last (1..9, never 20) — the
+    // signature changed every single time, so this must never go stale.
+    expect(result.current.phase).toBe('polling')
+  })
+
+  it('recovers out of stale once Iris\'s response actually resolves correctly', async () => {
+    vi.useFakeTimers()
+    const stuck = () => [
+      irisMessage({ destinationDomain: 6 }), irisMessage({ destinationDomain: 0 }), irisMessage({ destinationDomain: 7 })
+    ]
+    for (let i = 0; i < 9; i++) fetchIrisMessages.mockResolvedValueOnce(stuck())
+    fetchIrisMessages.mockResolvedValueOnce([
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    for (let i = 0; i < 8; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    }
+    expect(result.current.phase).toBe('stale')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(result.current.phase).toBe('delivered')
   })
 })
