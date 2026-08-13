@@ -1491,16 +1491,16 @@ function MilestoneRow({
   // leg rounds to zero, or a divert-to-Arc credit, settle with no burn at
   // all), so it gets its own receipt check in FallbackCrossChainDelivery
   // below instead of reusing this same trusted path. Deliberately gated on
-  // releaseTxs alone, not on trackingDomain (today's current-config-derived
-  // signal, still used elsewhere for FORWARD-looking decisions) — the
+  // releaseTxs alone, not on the escrow's CURRENT cross-chain config — the
   // receipt is ground truth for a terminal milestone, so there is no longer
   // a reason to pre-filter on a signal that can be wrong in both directions
-  // (see settlementTrackingDomain / historicallyCrossChain's own doc
-  // comments). This also closes the open CLAUDE.md "Round 21 Phase C
-  // remaining piece" gap as a side effect: a milestone redirected to Arc
-  // AFTER a historical cross-chain release used to hide the tracker for any
-  // device without a local record; the receipt doesn't care what today's
-  // config says.
+  // (a redirect can hide a real historical release, or a config that looks
+  // cross-chain today says nothing about whether THIS milestone's specific
+  // settlement actually burned anything). This closed the CLAUDE.md
+  // "Round 21 Phase C remaining piece" gap as a side effect: a milestone
+  // redirected to Arc AFTER a historical cross-chain release no longer
+  // hides the tracker for a device without a local record; the receipt
+  // doesn't care what today's config says.
   const fallbackTxHash = !cctpTrack ? (releaseTxs[milestone.index] || null) : null
 
   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
@@ -2261,54 +2261,6 @@ function settlementIsCrossChain(escrow, splits) {
   // Mirrors _assertCrossChainFee: with splits, any non-Arc leg counts.
   if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
   return Number(escrow.destinationDomain) !== ARC_DOMAIN
-}
-
-/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
-   tracking — null when settlementIsCrossChain says there's nothing to track.
-   Reading the root escrow.destinationDomain here (the bug this replaces)
-   silently disagreed with settlementIsCrossChain whenever an Arc-root
-   escrow's cross-chain-ness came from a split leg instead: tracking would
-   never start even though the burn genuinely leaves Arc. Picking the first
-   non-Arc split leg when one exists keeps the domain passed down consistent
-   with why settlementIsCrossChain said this is cross-chain in the first
-   place. */
-export function settlementTrackingDomain(escrow, splits) {
-  if (!settlementIsCrossChain(escrow, splits)) return null
-  if (splits?.length > 0) {
-    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
-  }
-  return escrow.destinationDomain
-}
-
-/* Round 21 Phase C. Whether a milestone's tracked release genuinely was
-   cross-chain, for READ/DISPLAY purposes — as opposed to settlementTrackingDomain
-   above, which stays correctly current-config-derived for the FORWARD-LOOKING
-   question of whether a NEW transaction about to be submitted will be
-   cross-chain (SettlementPanel.propose / MilestoneAction.run still call it
-   directly for exactly that; this function is not a replacement for it).
-
-   The contract allows redirecting an active escrow's destination to Arc
-   (updateReceivingAddress / updateSplitReceivingAddress) after a milestone
-   has already released cross-chain. Re-deriving "is this cross-chain" from
-   TODAY's escrow/splits for an ALREADY-released milestone would then hide
-   that milestone's real, still-possibly-unrecovered CCTP message — a
-   historical fact, not something today's config gets to overwrite.
-
-   cctpTrack (this device's own localStorage record) is written only when a
-   release was cross-chain at submission time (see the write sites' own
-   `if (txHash && trackingDomain != null)` gate), so its mere existence is
-   proof-positive of history, independent of what the config says now — no
-   persisted domain value needed (Round 20 Phase D already found nothing
-   ever read the old one). This only closes the gap for the submitting
-   device: a different device (or this one past the 24h localStorage
-   eviction) has no local record and falls back to trackingDomain, unchanged
-   — the subgraph carries no per-milestone, point-in-time cross-chain signal
-   today to fall back on instead (see the CLAUDE.md entry this round added
-   for why: Milestone.releaseTx is a bare hash, none of the 5 release-type
-   events carry domain data, and redirect events aren't indexed into any
-   history entity). That case remains open, not silently treated as closed. */
-export function historicallyCrossChain(cctpTrack, trackingDomain) {
-  return cctpTrack != null ? true : trackingDomain != null
 }
 
 /* Round 20 Phase A #3. The Ledger's "Payout chain" row used to print
