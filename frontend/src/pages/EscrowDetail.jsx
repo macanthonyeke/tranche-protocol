@@ -1448,13 +1448,34 @@ function useMilestoneReleaseTxs(escrowId) {
 
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+// Round 28: expectedOrdinals/expectedTotalMessages being the right TYPES
+// (array / number) doesn't mean they're COHERENT — an out-of-range, negative,
+// fractional, or duplicate ordinal, or a vacuous {ordinals: [], total: 0}
+// record, would still pass the Round 27 shape check and later feed
+// useCctpDelivery a broken selection key. Every field the record actually
+// needs gets checked here, once, so an incoherent record is discarded the
+// same way a malformed or aged-out one already is.
+function isValidCctpTrackRecord(parsed) {
+  if (typeof parsed.txHash !== 'string' || typeof parsed.ts !== 'number') return false
+  if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
+  if (!Array.isArray(parsed.expectedOrdinals) || parsed.expectedOrdinals.length === 0) return false
+  const seen = new Set()
+  for (const ord of parsed.expectedOrdinals) {
+    if (!Number.isInteger(ord) || ord < 0 || ord >= parsed.expectedTotalMessages) return false
+    if (seen.has(ord)) return false
+    seen.add(ord)
+  }
+  return true
+}
+
 export function readCctpTrack(escrowId, milestoneIndex) {
+  const key = cctpTrackKey(escrowId, milestoneIndex)
   try {
-    const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
+    const raw = localStorage.getItem(key)
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      localStorage.removeItem(key)
       return null
     }
     // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
@@ -1469,13 +1490,18 @@ export function readCctpTrack(escrowId, milestoneIndex) {
     // discarded just above — makes readCctpTrack return null exactly like
     // "no local record at all", so MilestoneRow's existing `!cctpTrack`
     // fallback to FallbackCrossChainDelivery naturally takes over and
-    // reverifies straight from the receipt instead.
-    if (!Array.isArray(parsed.expectedOrdinals) || typeof parsed.expectedTotalMessages !== 'number') {
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+    // reverifies straight from the receipt instead. Round 28: this check now
+    // also covers coherence, not just shape — see isValidCctpTrackRecord.
+    if (!isValidCctpTrackRecord(parsed)) {
+      localStorage.removeItem(key)
       return null
     }
     return parsed
   } catch {
+    // Round 28: unparseable JSON is exactly as unusable as a malformed
+    // record — discard it the same way, instead of leaving a dead key that
+    // getItem/JSON.parse will keep failing on for the rest of its 24h life.
+    localStorage.removeItem(key)
     return null
   }
 }

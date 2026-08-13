@@ -30,13 +30,14 @@ const POLL_MS = 15_000
 // Round 27 (fixing the Round 26 review's High finding): `expectedMessages`
 // (Round 22/26 — a raw hex identity to content-match against Iris's own
 // `message` field) is GONE. CCTP V2 mutates several message fields between
-// burn-time and attestation — nonce, finalityThresholdExecuted, feeExecuted
-// are all zero/empty in the source-side log and only filled in once Iris
-// attests the message — so a real message's source-side bytes and Iris's
-// returned bytes for the SAME delivery are simply never equal. Every real
-// poll under the old design had `messages.length === 0` forever; confirmed
-// live against a real Arc-testnet burn (byte-diff against a real captured
-// Iris response), not assumed from the docs alone.
+// burn-time and attestation — nonce, finalityThresholdExecuted, and
+// feeExecuted are all zero/empty in the source-side log and only filled in
+// once Iris attests the message, and expirationBlock can change too — so a
+// real message's source-side bytes and Iris's returned bytes for the SAME
+// delivery are simply never equal. Every real poll under the old design had
+// `messages.length === 0` forever; confirmed live against a real
+// Arc-testnet burn (byte-diff against a real captured Iris response), not
+// assumed from the docs alone.
 //
 // Replaced with `expectedOrdinals` (this milestone's own verified messages'
 // 0-indexed positions among every real MessageTransmitterV2 MessageSent log
@@ -48,7 +49,7 @@ const POLL_MS = 15_000
 // `allMessages[ordinal]` is guaranteed to be the same entry the receipt
 // proved belongs to this milestone, no content comparison needed.
 //
-// The "once" matters: `allMessages.length >= expectedTotalMessages` is the
+// The "once" matters: `allMessages.length === expectedTotalMessages` is the
 // completeness gate below, and it has to be checked against the FULL
 // universe size, not just "enough entries to cover this milestone's own
 // ordinals". Circle's ordering guarantee only says messages actually
@@ -60,6 +61,15 @@ const POLL_MS = 15_000
 // Waiting for the full count first means the two orderings (this app's
 // receipt-derived one, Iris's own) are provably the same set, sorted the
 // same way, before any position is ever trusted.
+//
+// Round 28: exact equality, not `>=`. Nothing in Circle's API reference
+// rules out Iris ever returning MORE entries than the receipt's real count,
+// and an overflow occurring anywhere before or between the ordinals being
+// selected would shift indexing and select the wrong message — the same
+// misattribution risk the ordinal scheme above exists to prevent. `!==`
+// fails closed (stays polling) on an overflow instead of silently risking a
+// wrong selection on the (unconfirmed) assumption that overflow can't
+// happen.
 //
 // Round 22 Phase A: expectedMessages/expectedOrdinals only exists for a
 // receipt-verified local track or fallback (see irisDelivery.js) — a
@@ -105,7 +115,7 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
 
       const allMessages = await fetchIrisMessages(txHash)
 
-      if (allMessages.length < expectedTotalMessages) {
+      if (allMessages.length !== expectedTotalMessages) {
         setPhase('polling')
         return
       }

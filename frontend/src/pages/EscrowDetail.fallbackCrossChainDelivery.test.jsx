@@ -428,10 +428,10 @@ describe('Round 27: ordinal-position selection end to end', () => {
       isError: false
     })
     // Deliberately NOT buildCctpMessage() — this represents Iris's real
-    // attested form (nonce/finalityThresholdExecuted/feeExecuted filled in),
-    // which is never byte-equal to the zeroed source-side form. Under
-    // Round 26's content-matching design this would never have attributed
-    // — messages.length would stay 0 forever.
+    // attested form (nonce/finalityThresholdExecuted/feeExecuted/
+    // expirationBlock filled in), which is never byte-equal to the zeroed
+    // source-side form. Under Round 26's content-matching design this would
+    // never have attributed — messages.length would stay 0 forever.
     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, message: '0xattested-form-differs-from-source' })])
 
     renderFallback({ txHash: '0xmutabletx' })

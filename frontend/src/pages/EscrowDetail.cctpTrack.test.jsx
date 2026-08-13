@@ -111,8 +111,49 @@ describe('readCctpTrack', () => {
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('returns null (not a throw) on unparseable JSON', () => {
+  // Round 28 — coherence, not just shape. A record can be the right TYPES
+  // (array, number) and still be nonsense: empty, out of range, negative,
+  // fractional, or duplicated. Any of these would previously pass through to
+  // useCctpDelivery, which has no way to detect an incoherent ordinal set on
+  // its own.
+  it('discards a vacuous record — expectedOrdinals empty, expectedTotalMessages zero', () => {
+    const vacuous = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
+    localStorage.setItem(KEY, JSON.stringify(vacuous))
+    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('discards a record with an out-of-range ordinal (ordinal 3 against a total of 2)', () => {
+    const outOfRange = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
+    localStorage.setItem(KEY, JSON.stringify(outOfRange))
+    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('discards a record with a negative ordinal', () => {
+    const negative = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
+    localStorage.setItem(KEY, JSON.stringify(negative))
+    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('discards a record with a fractional ordinal', () => {
+    const fractional = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
+    localStorage.setItem(KEY, JSON.stringify(fractional))
+    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('discards a record with a duplicate ordinal', () => {
+    const duplicate = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
+    localStorage.setItem(KEY, JSON.stringify(duplicate))
+    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
+  })
+
+  it('returns null and removes the entry on unparseable JSON — discarded the same way as any other invalid record, not left behind', () => {
     localStorage.setItem(KEY, 'not json')
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+    expect(localStorage.getItem(KEY)).toBeNull()
   })
 })

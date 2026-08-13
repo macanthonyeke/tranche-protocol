@@ -233,12 +233,12 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
    field) to fix a real cross-attribution bug (finding 2: a bare count let a
    message genuinely belonging to a DIFFERENT milestone in the same batched
    tx pass undetected). But content identity turned out to never work for a
-   REAL message at all: CCTP V2 assigns nonce off-chain and fills in
-   finalityThresholdExecuted/feeExecuted only once Iris attests, so a real
-   message's source-side bytes and Iris's returned bytes for the SAME
-   delivery are never byte-equal — confirmed live against a real Arc-testnet
-   burn. Every real poll under Round 26's design had messages.length === 0
-   forever.
+   REAL message at all: CCTP V2 assigns nonce off-chain, fills in
+   finalityThresholdExecuted/feeExecuted only once Iris attests, and can
+   change expirationBlock too, so a real message's source-side bytes and
+   Iris's returned bytes for the SAME delivery are never byte-equal —
+   confirmed live against a real Arc-testnet burn. Every real poll under
+   Round 26's design had messages.length === 0 forever.
 
    Round 27 replaces content matching with ORDINAL POSITION: Circle's own
    GET /v2/messages API reference states "Each message for a given
@@ -267,6 +267,24 @@ describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', (
     expect(result.current.deliveries).toHaveLength(2)
   })
 
+  // Round 28 — fail closed on overflow, not just undershoot. Nothing in
+  // Circle's API reference rules out Iris ever returning MORE entries than
+  // the receipt's real count, and an overflow occurring before or between
+  // the selected ordinals would shift indexing and select the wrong
+  // message. The old `<` check silently accepted this; `!==` keeps polling
+  // instead.
+  it('keeps polling — never selects — when Iris returns MORE entries than expectedTotalMessages', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 3, forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toEqual([])
+  })
+
   it('selects Iris entries by POSITION, not the milestone\'s own count — a foreign milestone\'s message occupying an earlier ordinal slot in the same tx must not be selected as this milestone\'s own', async () => {
     fetchIrisMessages.mockResolvedValue([
       irisMessage({ destinationDomain: 3, forwardState: 'FAILED' }),      // ordinal 0 — a DIFFERENT milestone's own message
@@ -285,18 +303,18 @@ describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', (
   /* The exact regression the High finding describes: a genuine message
      whose Iris-returned form differs from its receipt-derived source form
      in precisely the fields CCTP V2 treats as mutable (nonce,
-     finalityThresholdExecuted, feeExecuted) must still be correctly
-     attributed to the milestone. Under Round 26's content-matching design
-     this would have failed forever (messages.length stuck at 0); under
-     ordinal selection, content is never even inspected for matching. */
-  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted) — content is never compared', async () => {
+     finalityThresholdExecuted, feeExecuted, expirationBlock) must still be
+     correctly attributed to the milestone. Under Round 26's content-matching
+     design this would have failed forever (messages.length stuck at 0);
+     under ordinal selection, content is never even inspected for matching. */
+  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted, expirationBlock) — content is never compared', async () => {
     // The source-side receipt would have had nonce/finalityThresholdExecuted/
-    // feeExecuted all zero (pre-attestation); Iris's response here uses
-    // deliberately DIFFERENT, non-zero values in exactly those fields —
-    // real CCTP V2 behavior, confirmed live against an actual Arc-testnet
-    // burn. The fixture only needs a message string that would NEVER
-    // content-match a zeroed source message; the exact bytes don't matter
-    // since ordinal selection never reads them for matching.
+    // feeExecuted/expirationBlock all zero (pre-attestation); Iris's response
+    // here uses deliberately DIFFERENT, non-zero values in exactly those
+    // fields — real CCTP V2 behavior, confirmed live against an actual
+    // Arc-testnet burn. The fixture only needs a message string that would
+    // NEVER content-match a zeroed source message; the exact bytes don't
+    // matter since ordinal selection never reads them for matching.
     fetchIrisMessages.mockResolvedValue([
       irisMessage({
         destinationDomain: 6,
