@@ -1,4 +1,4 @@
-import { encodeFunctionData, decodeEventLog, slice } from 'viem'
+import { encodeFunctionData, decodeEventLog, slice, toEventSelector } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
 import { bytes32ToAddress } from './encode.js'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
@@ -386,10 +386,76 @@ export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
    the shared MessageSent count. No match found (should be unreachable in
    practice — see milestoneCctpLogRange's own doc comment) fails the same
    way as "genuinely no CCTP message": nothing reliable to attribute either
-   way, so there is no meaningful difference in what the UI should show. */
+   way, so there is no meaningful difference in what the UI should show.
+
+   Round 27 (fixing the Round 26 review's High finding). CCTP V2 mutates
+   several message fields between burn-time (this source receipt) and
+   attestation (Iris's response) — nonce (header, byte 12-44) is assigned
+   off-chain by Circle, finalityThresholdExecuted (header, byte 144-148) and
+   feeExecuted (body) are filled in once attested, expirationBlock can
+   change too. Content equality between the raw source-side message and
+   Iris's own `message` field therefore never holds for a real message —
+   confirmed live: a genuine Arc-testnet burn's source-side log and Iris's
+   returned message for the SAME delivery differ in exactly these fields,
+   nowhere else (verified byte-by-byte against a real captured Iris
+   response, not assumed). Round 26's `messages` (raw hex, still returned
+   below for callers that want the actual bytes) can therefore never be
+   used to find this milestone's own entries in Iris's response — every
+   real poll had `messages.length === 0` and the tracker never resolved.
+
+   Fixed by ordinal position instead of content: Circle's own GET
+   /v2/messages API reference states "Each message for a given transaction
+   hash is ordered by ascending log index" — so this milestone's own
+   verified message(s) can be identified by WHERE they sit (0-indexed)
+   among every real MessageTransmitterV2-emitted MessageSent log in the
+   WHOLE receipt (realMessageTransmitterLogIndexesAsc below), not just this
+   milestone's own scoped range — Iris's response covers the whole
+   transaction, so the ordinal has to be counted against the same universe
+   Iris counts against, confirmed by fetching Circle's own API reference
+   directly (not assumed from the migration guide's shorter example).
+
+   The ordinal universe is deliberately NOT authenticity-filtered.
+   MessageTransmitterV2.sendMessage is public and permissionless (see
+   verifiedOwnCctpMessage's own doc comment), so a forged message — real
+   contract, wrong header.sender, the exact finding 1 attack — still gets a
+   real MessageSent log at the real contract address and still consumes a
+   real ordinal slot in Iris's response, even though this app's own
+   authenticity chain correctly rejects it as not-ours. Excluding it from
+   the count here would shift every ordinal after it by one and
+   misattribute a later real message to the wrong slot. Trust that a given
+   ordinal is genuinely THIS milestone's own still comes entirely from
+   verifiedOwnCctpMessage's four-check chain, run first to find OUR OWN
+   scoped logs; the ordinal count is a separate question answered against
+   the unfiltered universe.
+
+   `ordinals` are this milestone's own verified messages' 0-indexed
+   positions in that universe (usually one entry; more for a mixed split
+   settling several legs in one call). `totalMessages` is the universe's
+   own size — useCctpDelivery needs it to gate on Iris having indexed EVERY
+   real message in the transaction before trusting any ordinal-based
+   selection (see its own doc comment for why a still-partial response
+   can't be trusted to be a stable prefix of the final ordering). */
+const MESSAGE_SENT_TOPIC0 = toEventSelector('MessageSent(bytes)')
+
+export function realMessageTransmitterLogIndexesAsc(logs) {
+  return logs
+    .filter((log) =>
+      log.address?.toLowerCase() === MESSAGE_TRANSMITTER_V2_ARC.toLowerCase() &&
+      log.topics?.[0] === MESSAGE_SENT_TOPIC0
+    )
+    .map((log) => log.logIndex)
+    .sort((a, b) => a - b)
+}
+
 export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
   const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
-  if (!range) return { emitted: false, count: 0, messages: [] }
+  if (!range) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
   const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
-  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
+  const result = receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
+  const universe = realMessageTransmitterLogIndexesAsc(receipt.logs)
+  const ordinals = scopedLogs
+    .filter((log) => verifiedOwnCctpMessage(log, CONTRACT_ADDRESS) != null)
+    .map((log) => universe.indexOf(log.logIndex))
+    .filter((ord) => ord !== -1)
+  return { ...result, ordinals, totalMessages: universe.length }
 }

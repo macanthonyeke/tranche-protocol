@@ -1,4 +1,4 @@
-// useCctpDelivery — Round 20 Phase D / Round 21 Phase A.
+// useCctpDelivery — Round 20 Phase D / Round 21 Phase A / Round 27.
 //
 // Two properties matter here: (1) the second argument is a plain
 // isCrossChain boolean, used only to gate polling — not a domain value the
@@ -18,6 +18,16 @@
 // version of this fixture used a shape that was never real, which is why the
 // integration itself was broken despite these tests passing — the fixture
 // and the bug agreed with each other, not with Circle's actual API.
+//
+// Round 27: every test below now passes expectedOrdinals/expectedTotalMessages
+// — the hook no longer has an "unfiltered, trust whatever Iris returns"
+// branch at all (see the hook's own doc comment for why: that branch was
+// the exact identity gap Round 26 built content-matching to close, and
+// Round 26's content-matching turned out to never work for a real message
+// in the first place, since CCTP V2 mutates several message fields between
+// burn-time and attestation). A real call site (a receipt-verified local
+// track, or FallbackCrossChainDelivery's live receipt refetch) always has
+// ordinals in hand before mounting a tracker at all.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
@@ -58,9 +68,9 @@ describe('useCctpDelivery — isCrossChain gate', () => {
     await waitFor(() => expect(fetchIrisMessages).not.toHaveBeenCalled())
   })
 
-  it('polls once isCrossChain is true and a txHash is present', async () => {
+  it('polls once isCrossChain is true, a txHash is present, and expectedOrdinals is provided', async () => {
     fetchIrisMessages.mockResolvedValue([irisMessage()])
-    renderHook(() => useCctpDelivery('0xtx', true))
+    renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xtx'))
   })
 })
@@ -71,7 +81,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
       irisMessage({ destinationDomain: 6 }),   // Base Sepolia
       irisMessage({ destinationDomain: 0 })    // Ethereum Sepolia — genuinely different chain
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
   })
@@ -81,7 +91,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
       irisMessage({ destinationDomain: 6 }),
       irisMessage({ destinationDomain: null })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries[0].destinationDomain).toBe(6)
     expect(result.current.deliveries[1].destinationDomain).toBeNull()
@@ -97,7 +107,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
       decodedMessage: { destinationDomain: '6' },
       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
     }])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries[0].destinationDomain).toBe(6)
   })
@@ -106,7 +116,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
 describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are flat, never nested under a `forward` wrapper', () => {
   it('reads a real completed message correctly with no `forward` object present anywhere', async () => {
     fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'COMPLETE', forwardTxHash: '0xrealdesttx' })])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries[0].forwardState).toBe('COMPLETE')
     expect(result.current.deliveries[0].destinationTxHash).toBe('0xrealdesttx')
@@ -114,7 +124,7 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
 
   it('reads a real failed message\'s errorCode correctly', async () => {
     fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('failed'))
     expect(result.current.deliveries[0].forwardState).toBe('FAILED')
     expect(result.current.deliveries[0].errorCode).toBe('INSUFFICIENT_FEE')
@@ -127,7 +137,7 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not 
       irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', forwardTxHash: '0xgood', forwardErrorCode: null }),
       irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
     await waitFor(() => expect(result.current.phase).toBe('failed'))
 
     // The aggregate phase says "failed", but the actually-delivered message's
@@ -148,7 +158,7 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not 
       irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
       irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
     await waitFor(() => expect(result.current.phase).toBe('failed'))
     expect(result.current.deliveries).toHaveLength(2)
     expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
@@ -176,7 +186,7 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
       irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
       irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(fetchIrisMessages).toHaveBeenCalledTimes(1)
@@ -200,7 +210,7 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
         irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
         irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null })
       ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(result.current.phase).toBe('polling')
@@ -215,21 +225,33 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
   })
 })
 
-/* Round 23 / Round 26 finding 2 — expectedMessages guard, direct coverage.
-   Introduced in Round 22 Phase A as a bare count (a receipt-verified local
-   track always knows its own real MessageSent count), fed by MilestoneRow's
-   fallback path once it has a receipt in hand (Round 23), then replaced
-   with actual message IDENTITIES in Round 26: a bare count let a message
-   genuinely belonging to a DIFFERENT milestone in the same batched tx pass
-   `messages.length >= expectedMessageCount` and get rendered as though it
-   were this milestone's own. expectedMessages is now the exact set of raw
-   message hex strings receiptEmittedCctpMessageForMilestone verified as
-   this milestone's own — Iris's response is filtered to only entries whose
-   own `message` field matches one of them before anything else runs. */
-describe('useCctpDelivery — expectedMessages guard', () => {
-  it('keeps polling when Iris has indexed fewer of the expected messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' })])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
+/* Round 27 (fixing the Round 26 review's High finding) — expectedOrdinals /
+   expectedTotalMessages guard, direct coverage.
+
+   Round 22 Phase A introduced a bare count. Round 26 replaced it with
+   content identity (raw message hex, matched against Iris's own `message`
+   field) to fix a real cross-attribution bug (finding 2: a bare count let a
+   message genuinely belonging to a DIFFERENT milestone in the same batched
+   tx pass undetected). But content identity turned out to never work for a
+   REAL message at all: CCTP V2 assigns nonce off-chain and fills in
+   finalityThresholdExecuted/feeExecuted only once Iris attests, so a real
+   message's source-side bytes and Iris's returned bytes for the SAME
+   delivery are never byte-equal — confirmed live against a real Arc-testnet
+   burn. Every real poll under Round 26's design had messages.length === 0
+   forever.
+
+   Round 27 replaces content matching with ORDINAL POSITION: Circle's own
+   GET /v2/messages API reference states "Each message for a given
+   transaction hash is ordered by ascending log index" — so
+   expectedOrdinals (this milestone's own verified messages' 0-indexed
+   positions among every real MessageTransmitterV2 log in the WHOLE
+   receipt) picks the right Iris entries without ever comparing content,
+   once expectedTotalMessages (the universe's own size) confirms Iris has
+   indexed the whole transaction. */
+describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', () => {
+  it('keeps polling when Iris has indexed fewer messages than the receipt proved should exist across the WHOLE transaction, even though the ones it has are already COMPLETE', async () => {
+    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 2))
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
     expect(result.current.phase).toBe('polling')
     expect(result.current.deliveries).toEqual([])
@@ -237,37 +259,87 @@ describe('useCctpDelivery — expectedMessages guard', () => {
 
   it('proceeds to delivered once Iris catches up to the full expected set', async () => {
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' }),
-      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', message: '0xmsg2' })
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(result.current.deliveries).toHaveLength(2)
   })
 
-  it('finding 2: excludes an Iris message that is NOT one of the expected identities, even though messages.length alone would satisfy the old count-based guard — a foreign milestone\'s genuine message under the same tx hash must never be rendered as this milestone\'s own', async () => {
+  it('selects Iris entries by POSITION, not the milestone\'s own count — a foreign milestone\'s message occupying an earlier ordinal slot in the same tx must not be selected as this milestone\'s own', async () => {
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmine' }),
-      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforeign' })
+      irisMessage({ destinationDomain: 3, forwardState: 'FAILED' }),      // ordinal 0 — a DIFFERENT milestone's own message
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })     // ordinal 1 — this milestone's own
     ])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmine']))
+    // This milestone's own verified message is ordinal 1 of 2 total.
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [1], 2))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
-    // The foreign message's FAILED state must not leak in — if it had, phase
-    // would be 'failed' (anyFailed), not 'delivered', and deliveries would
-    // have length 2, not 1.
+    // The foreign message at ordinal 0 (FAILED, domain 3) must never leak
+    // in — if it had, phase would be 'failed' and deliveries would have
+    // length 2, not 1.
     expect(result.current.deliveries).toHaveLength(1)
-    expect(result.current.deliveries[0].message).toBe('0xmine')
+    expect(result.current.deliveries[0].destinationDomain).toBe(6)
   })
 
-  it('is case-insensitive when matching expectedMessages against Iris\'s own message field', async () => {
-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xABCDEF' })])
-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xabcdef']))
+  /* The exact regression the High finding describes: a genuine message
+     whose Iris-returned form differs from its receipt-derived source form
+     in precisely the fields CCTP V2 treats as mutable (nonce,
+     finalityThresholdExecuted, feeExecuted) must still be correctly
+     attributed to the milestone. Under Round 26's content-matching design
+     this would have failed forever (messages.length stuck at 0); under
+     ordinal selection, content is never even inspected for matching. */
+  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted) — content is never compared', async () => {
+    // The source-side receipt would have had nonce/finalityThresholdExecuted/
+    // feeExecuted all zero (pre-attestation); Iris's response here uses
+    // deliberately DIFFERENT, non-zero values in exactly those fields —
+    // real CCTP V2 behavior, confirmed live against an actual Arc-testnet
+    // burn. The fixture only needs a message string that would NEVER
+    // content-match a zeroed source message; the exact bytes don't matter
+    // since ordinal selection never reads them for matching.
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({
+        destinationDomain: 6,
+        forwardState: 'COMPLETE',
+        message: '0xattested-form-with-real-nonce-and-finality-and-fee-filled-in'
+      })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(result.current.deliveries).toHaveLength(1)
+    expect(result.current.deliveries[0].destinationDomain).toBe(6)
   })
 
-  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessages is not provided', async () => {
+  /* The other scenario the High finding's own review explicitly asked for:
+     a batched transaction where a forged (finding-1-style) message —
+     real MessageTransmitterV2 contract, wrong header.sender, so it still
+     gets a real MessageSent log and a real ordinal slot in Iris's response
+     — occupies an EARLIER ordinal slot than this milestone's own genuine
+     message. The forged message must not shift or replace what gets
+     selected for the genuine one. */
+  it('selects the correct Iris entry despite a finding-1-style forged message occupying an earlier ordinal slot in the same transaction', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforged' }),     // ordinal 0 — the forged message
+      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xgenuine' })    // ordinal 1 — this milestone's own genuine message
+    ])
+    // receiptEmittedCctpMessageForMilestone would have computed ordinals: [1]
+    // here — verifiedOwnCctpMessage rejects the forged message (wrong
+    // header.sender), but it still occupies ordinal 0 of the 2-message
+    // universe, so the genuine message's own position is 1, not 0.
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [1], 2))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(result.current.deliveries).toHaveLength(1)
+    expect(result.current.deliveries[0].message).toBe('0xgenuine')
+    expect(result.current.deliveries[0].destinationDomain).toBe(6)
+  })
+
+  it('never trusts Iris unfiltered when expectedOrdinals is not provided — stays in polling forever rather than reopening the identity gap the ordinal/content guards exist to close', async () => {
     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
-    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    await waitFor(() => expect(result.current.phase).toBe('polling'))
+    // Never even calls Iris — there is nothing safe to do with the response
+    // without ordinals to select by.
+    expect(fetchIrisMessages).not.toHaveBeenCalled()
+    expect(result.current.deliveries).toEqual([])
   })
 })

@@ -27,33 +27,46 @@ const POLL_MS = 15_000
 // doesn't, `destinationDomain` now comes through as `null` (rendered as an
 // unknown chain downstream) rather than a wrong guess.
 //
-// Round 22 Phase A: `expectedMessages`, optional — originally a bare count
-// of real MessageSent events the confirming receipt proved should exist
-// for this tx, now (Round 26) the actual verified message identities
-// themselves (see receiptEmittedCctpMessageForMilestone /
-// verifiedOwnCctpMessage), persisted by the submitting device alongside
-// the tracked txHash. A mixed split can burn several legs to different
-// chains in one transaction, and Iris indexes each message independently —
-// a partial response (fewer messages than the receipt proved) is "not
-// fully indexed yet", not "this is the complete set". Only the submitting
-// device has this; a subgraph-sourced txHash from a different device falls
-// back to the messages.length === 0 heuristic below, same as before this
-// existed.
+// Round 27 (fixing the Round 26 review's High finding): `expectedMessages`
+// (Round 22/26 — a raw hex identity to content-match against Iris's own
+// `message` field) is GONE. CCTP V2 mutates several message fields between
+// burn-time and attestation — nonce, finalityThresholdExecuted, feeExecuted
+// are all zero/empty in the source-side log and only filled in once Iris
+// attests the message — so a real message's source-side bytes and Iris's
+// returned bytes for the SAME delivery are simply never equal. Every real
+// poll under the old design had `messages.length === 0` forever; confirmed
+// live against a real Arc-testnet burn (byte-diff against a real captured
+// Iris response), not assumed from the docs alone.
 //
-// Round 26 finding 2: a bare count was never enough once Iris's response
-// can contain messages belonging to a DIFFERENT milestone under the same
-// tx hash — Iris has no concept of "milestone", only tx hash. A batch with
-// 2 total messages where only 1 is genuinely this milestone's own used to
-// pass `messages.length(2) >= expectedMessageCount(1)` and then render
-// BOTH — a foreign message's failure could make this milestone look
-// failed, or its success could look like this milestone's own delivery.
-// expectedMessages is now the exact set of raw message hex strings this
-// milestone's own receipt verified (see verifiedOwnCctpMessage's full
-// authenticity chain) — Iris's response is filtered to ONLY the entries
-// whose own `message` field byte-matches one of them (case-insensitive
-// string equality; these are short, few-per-receipt hex strings, so a
-// hash comparison would add a step for no real benefit) before anything
-// else in this function ever looks at it.
+// Replaced with `expectedOrdinals` (this milestone's own verified messages'
+// 0-indexed positions among every real MessageTransmitterV2 MessageSent log
+// in the WHOLE receipt — see irisDelivery.js's
+// receiptEmittedCctpMessageForMilestone) and `expectedTotalMessages` (that
+// universe's own size). Circle's GET /v2/messages API reference states
+// "Each message for a given transaction hash is ordered by ascending log
+// index" — so once Iris has indexed EVERY real message in the transaction,
+// `allMessages[ordinal]` is guaranteed to be the same entry the receipt
+// proved belongs to this milestone, no content comparison needed.
+//
+// The "once" matters: `allMessages.length >= expectedTotalMessages` is the
+// completeness gate below, and it has to be checked against the FULL
+// universe size, not just "enough entries to cover this milestone's own
+// ordinals". Circle's ordering guarantee only says messages actually
+// PRESENT in a response are sorted by log index — it does not say a
+// still-partial response is a stable PREFIX of the final ordering (e.g. if
+// Iris indexes/exposes a later-log-index message before an earlier one,
+// a 1-entry partial response could be that later message sitting at
+// position 0, not the earlier one this milestone might actually need).
+// Waiting for the full count first means the two orderings (this app's
+// receipt-derived one, Iris's own) are provably the same set, sorted the
+// same way, before any position is ever trusted.
+//
+// Round 22 Phase A: expectedMessages/expectedOrdinals only exists for a
+// receipt-verified local track or fallback (see irisDelivery.js) — a
+// subgraph-sourced txHash from a different device without either falls
+// back to treating this as nothing to track (see the null-guard below),
+// same spirit as before this existed, but never the fully-unfiltered
+// "trust whatever Iris returns" branch Round 26's review found unsafe.
 //
 // Round 22 Phase B: terminality used to be inferred as "no message is
 // PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
@@ -67,31 +80,39 @@ const POLL_MS = 15_000
 // EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
 // any value Circle adds later) keeps polling, which is the safe default for
 // an open-ended field.
-export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
+export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages) {
   const [phase, setPhase]           = useState('idle')
   const [deliveries, setDeliveries] = useState([])
   const intervalRef = useRef(null)
   const doneRef     = useRef(false)
-  const expectedMessagesKey = expectedMessages == null ? null : expectedMessages.join(',')
+  const expectedOrdinalsKey = expectedOrdinals == null ? null : expectedOrdinals.join(',')
 
   const poll = useCallback(async () => {
     if (!txHash || !isCrossChain || doneRef.current) return
     try {
-      const allMessages = await fetchIrisMessages(txHash)
-
-      // Identity-based, not count-based (Round 26 finding 2) — see the
-      // doc comment above for why a bare length check let a foreign
-      // milestone's own genuine Iris message through undetected.
-      const messages = expectedMessages != null
-        ? allMessages.filter((m) => expectedMessages.some((em) => em.toLowerCase() === m.message?.toLowerCase()))
-        : allMessages
-
-      if (expectedMessages != null && messages.length < expectedMessages.length) {
+      // Round 27: no expectedOrdinals means nothing reliable to attribute —
+      // every real call site (a receipt-verified local track or
+      // FallbackCrossChainDelivery's live receipt refetch) always has this
+      // by the time it mounts a tracker at all, so this should be
+      // unreachable in practice. Staying in 'polling' forever here is the
+      // safe default: this used to fall through to trusting Iris's
+      // response unfiltered, which is the exact identity gap Round 26 was
+      // built to close — silently-forever is much safer than silently-wrong.
+      if (expectedOrdinals == null) {
         setPhase('polling')
         return
       }
 
-      if (messages.length === 0) {
+      const allMessages = await fetchIrisMessages(txHash)
+
+      if (allMessages.length < expectedTotalMessages) {
+        setPhase('polling')
+        return
+      }
+
+      const messages = expectedOrdinals.map((ord) => allMessages[ord]).filter(Boolean)
+
+      if (messages.length < expectedOrdinals.length) {
         setPhase('polling')
         return
       }
@@ -109,7 +130,7 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
       // under decodedMessage (as a string) and puts forwardState/
       // forwardTxHash/forwardErrorCode flat on the message itself — there is
       // no `forward` wrapper object at all. Verified against real captured
-      // responses for actual Arc-testnet burns (see fetchIrisMessages).
+      // responses for actual Arc-testnet burns.
       const parsed = messages.map((m) => ({
         message:          m.message,
         attestation:      m.attestation,
@@ -142,15 +163,16 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
       // so a transient outage doesn't permanently block status.
       setPhase('unavailable')
     }
-    // Round 26: depends on expectedMessagesKey (a stable string), not
-    // expectedMessages itself. FallbackCrossChainDelivery recomputes its
-    // verified message array fresh on every render (a new array reference
+    // Round 27: depends on expectedOrdinalsKey (a stable string), not
+    // expectedOrdinals itself. FallbackCrossChainDelivery recomputes its
+    // verified ordinals array fresh on every render (a new array reference
     // each time, even when the content is identical) — depending on the
     // array directly would recreate `poll` every render, which would then
     // retrigger the effect below and reset phase/deliveries in a loop. The
-    // joined hex strings can never contain a comma, so this is an
+    // joined integers can never collide across genuinely different ordinal
+    // sets in a way that matters here (same array, same key), so this is an
     // unambiguous equality key for otherwise-identical content.
-  }, [txHash, isCrossChain, expectedMessagesKey])
+  }, [txHash, isCrossChain, expectedOrdinalsKey, expectedTotalMessages])
 
   useEffect(() => {
     if (!txHash || !isCrossChain) {

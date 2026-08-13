@@ -1448,12 +1448,29 @@ function useMilestoneReleaseTxs(escrowId) {
 
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
-function readCctpTrack(escrowId, milestoneIndex) {
+export function readCctpTrack(escrowId, milestoneIndex) {
   try {
     const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
+      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      return null
+    }
+    // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
+    // array (dropped this round, see useCctpDelivery's own doc comment for
+    // why content matching never worked) or the earlier Round 22 bare
+    // numeric count — carries no usable ordinal data. MUST NOT be treated
+    // as "no constraint": the old design let a missing/malformed shape fall
+    // through to useCctpDelivery's fully-unfiltered branch for this
+    // record's remaining lifetime inside CCTP_TRACK_MAX_AGE_MS, silently
+    // reopening the exact identity gap Round 26 (and this round) exist to
+    // close. Discarding it here — the same way an aged-out record is
+    // discarded just above — makes readCctpTrack return null exactly like
+    // "no local record at all", so MilestoneRow's existing `!cctpTrack`
+    // fallback to FallbackCrossChainDelivery naturally takes over and
+    // reverifies straight from the receipt instead.
+    if (!Array.isArray(parsed.expectedOrdinals) || typeof parsed.expectedTotalMessages !== 'number') {
       localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
       return null
     }
@@ -1659,14 +1676,13 @@ function MilestoneRow({
                   isCrossChain
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
-                  // Round 26: defensive against a pre-Round-26 localStorage
-                  // entry still inside its 24h window, where
-                  // expectedMessages was a bare count (number), not an
-                  // array — Array.isArray falls back to undefined exactly
-                  // like a missing value (see useCctpDelivery's own
-                  // expectedMessages == null branch), never crashes on
-                  // .join/.some over a number.
-                  expectedMessages={Array.isArray(cctpTrack.expectedMessages) ? cctpTrack.expectedMessages : undefined}
+                  // Round 27: readCctpTrack itself now discards any record
+                  // whose expectedOrdinals/expectedTotalMessages shape isn't
+                  // usable (legacy or malformed) — see its own doc comment —
+                  // so cctpTrack.expectedOrdinals is guaranteed to be a real
+                  // array whenever cctpTrack is non-null here.
+                  expectedOrdinals={cctpTrack.expectedOrdinals}
+                  expectedTotalMessages={cctpTrack.expectedTotalMessages}
                 />
               )}
               {milestone.state === 3 && fallbackTxHash && (
@@ -2433,7 +2449,7 @@ export function mutualSettlementExecuted(receipt) {
    isn't discovering them from the subgraph the way the fallback path has
    to, so no new plumbing was needed to make this call. */
 export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
-  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [] }
+  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
   return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
 }
 
@@ -2674,7 +2690,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
       // executed AND the receipt proves a real message genuinely THIS
       // milestone's own was sent (Round 26: authenticity- and
       // milestone-scoped, not just "a message exists somewhere").
-      const { emitted, messages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
+      const { emitted, ordinals, totalMessages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
       if (emitted) {
         // Round 20 Phase D: no `domain` field — no reader ever consumed it
         // (both MilestoneRow and DisputeBlock recompute the domain live from
@@ -2682,9 +2698,14 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         // stored domain couldn't represent a mixed split's several real
         // per-message domains anyway. useCctpDelivery gets its per-message
         // domains from Iris directly once it has the txHash.
+        //
+        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
+        // `messages` array Round 26 persisted here — see useCctpDelivery's
+        // own doc comment for why content matching against Iris never
+        // actually worked.
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
         )
         onCrossChainRelease?.()
       }
@@ -2857,8 +2878,8 @@ export function shouldClearCctpTrack(deliveries) {
    recovery card for one of potentially several simultaneously-failed legs.
    Exported for direct testing — the same reasoning EscrowDetail exports its
    other confirm-descriptor and decision functions for. */
-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessages }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedOrdinals, expectedTotalMessages }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
   const [copied, setCopied] = useState(false)
 
   // Once every message Iris knows about for this tx has actually completed,
@@ -2988,8 +3009,10 @@ const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
    receipt) and reusing the shared ground-truth check the write sites run
    (as of Round 26, receiptEmittedCctpMessageForMilestone — see its own doc
    comment), just read after the fact instead of at confirmation time. Its
-   own verified messages become expectedMessages, closing (b) the same way
-   a local cctpTrack record already does. A receipt that emits zero
+   own verified messages become expectedOrdinals/expectedTotalMessages
+   (Round 27: ordinal position, not raw-hex identity — see
+   useCctpDelivery's own doc comment), closing (b) the same way a local
+   cctpTrack record already does. A receipt that emits zero
    messages renders nothing (same as any other non-cross-chain milestone),
    closing (a).
 
@@ -3029,7 +3052,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
     // write sites share too (Circle-managed wallets are ERC-4337 smart
     // accounts; a bundler can pack a foreign UserOperation's logs into any
     // receipt, not just this permissionless path's).
-    const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+    const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
     if (!emitted) return null
     return (
       <CrossChainDelivery
@@ -3037,7 +3060,8 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
         isCrossChain
         escrowId={escrowId}
         milestoneIndex={milestoneIndex}
-        expectedMessages={messages}
+        expectedOrdinals={ordinals}
+        expectedTotalMessages={totalMessages}
       />
     )
   }
@@ -3715,11 +3739,11 @@ function MilestoneAction({
     // here — no discovery needed, unlike the fallback path.
     onConfirmed: (receipt) => {
       onChange?.(); setActiveKey(null)
-      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
       if (emitted) {
         localStorage.setItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
         )
         onCrossChainRelease?.()
       }

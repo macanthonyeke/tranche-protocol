@@ -205,7 +205,8 @@ function DisputeBlock({ detail, index, refetch }) {
   const e = detail.escrow
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
   const [resolveTxHash, setResolveTxHash] = useState(null)
-  const [resolveMessages, setResolveMessages] = useState(null)
+  const [resolveOrdinals, setResolveOrdinals] = useState(null)
+  const [resolveTotalMessages, setResolveTotalMessages] = useState(null)
 
   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
@@ -242,10 +243,11 @@ function DisputeBlock({ detail, index, refetch }) {
   // are already in scope — no discovery needed, unlike the fallback path.
   const handleResolve = useCallback((receipt) => {
     if (receipt) {
-      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
+      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
       if (emitted) {
         setResolveTxHash(receipt.transactionHash)
-        setResolveMessages(messages)
+        setResolveOrdinals(ordinals)
+        setResolveTotalMessages(totalMessages)
         // Also persist to localStorage so EscrowDetail picks it up on other
         // devices. Round 20 Phase D: no `domain` field — no reader ever
         // consumed it (both this component and EscrowDetail's MilestoneRow
@@ -253,9 +255,14 @@ function DisputeBlock({ detail, index, refetch }) {
         // domain couldn't represent a mixed split's several real per-message
         // domains anyway. useCctpDelivery gets its per-message domains from
         // Iris directly once it has the txHash.
+        //
+        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
+        // `messages` array Round 26 persisted here — see useCctpDelivery's
+        // own doc comment for why content matching against Iris never
+        // actually worked.
         localStorage.setItem(
           cctpTrackKey(detail.id, index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
         )
       }
     }
@@ -329,7 +336,8 @@ function DisputeBlock({ detail, index, refetch }) {
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
           isCrossChain={trackingDomain != null}
-          expectedMessages={resolveMessages}
+          expectedOrdinals={resolveOrdinals}
+          expectedTotalMessages={resolveTotalMessages}
         />
       )}
     </li>
@@ -365,8 +373,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
    CrossChainDelivery for the full citation trail on why a single collapsed
    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
    leg in the same mixed split failed. */
-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessages }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
+function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
 
   if (phase === 'idle') return null
 

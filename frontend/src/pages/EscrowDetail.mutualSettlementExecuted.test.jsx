@@ -178,7 +178,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
     // settlement — it does not by itself mean a burn happened.
     const receipt = { transactionHash: '0xtx8', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
     expect(mutualSettlementExecuted(receipt)).toBe(true)
-    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
   })
 
   /* Verified independently of the test above: a mutation that drops ONLY
@@ -199,7 +199,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
     // redundant with the message check.
     const receipt = { transactionHash: '0xtx9', logs: [proposedLog(0, 6000), messageSentLog(1)] }
     expect(mutualSettlementExecuted(receipt)).toBe(false)
-    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
+    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
   })
 
   /* Independently verified to catch a real bug the two tests above cannot
@@ -222,7 +222,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
       logs: [proposedLog(0, 6000), messageSentLog(1), messageSentLog(2), executedLog(3, 6000)]
     }
     expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
-      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()]
+      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()], ordinals: [0, 1], totalMessages: 2
     })
   })
 
@@ -252,8 +252,12 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
       transactionHash: '0xtx11',
       logs: [foreignBurn, proposedLog(1, 6000), messageSentLog(2), executedLog(3, 6000)]
     }
+    // Round 27: the foreign UserOperation's burn still occupies ordinal 0 of
+    // the 2-message universe (it's a real MessageTransmitterV2 log, just not
+    // OUR message) — this milestone's own genuine message is correctly at
+    // ordinal 1, not 0.
     expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
-      emitted: true, count: 1, messages: [buildCctpMessage()]
+      emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2
     })
   })
 })

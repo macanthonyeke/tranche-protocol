@@ -29,6 +29,7 @@ const {
   receiptEmittedOwnCctpMessage,
   milestoneCctpLogRange,
   receiptEmittedCctpMessageForMilestone,
+  realMessageTransmitterLogIndexesAsc,
   MESSAGE_TRANSMITTER_V2_ARC,
   TOKEN_MESSENGER_V2_ARC
 } = await import('./irisDelivery.js')
@@ -503,7 +504,7 @@ describe('milestoneCctpLogRange', () => {
 })
 
 describe('receiptEmittedCctpMessageForMilestone', () => {
-  it('counts only the MessageSent logs within this milestone\'s own range, and returns their real message bytes', () => {
+  it('counts only the MessageSent logs within this milestone\'s own range, and returns their real message bytes plus their ordinal positions in the WHOLE receipt', () => {
     const receipt = {
       logs: [
         messageSentLog(0),
@@ -517,38 +518,43 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
     expect(forMilestone1.emitted).toBe(true)
     expect(forMilestone1.count).toBe(2)
     expect(forMilestone1.messages).toEqual([buildCctpMessage(), buildCctpMessage()])
+    // Round 27: 3 real MessageSent logs total in the receipt (logIndex 0, 2,
+    // 3) — this milestone's own two are the 2nd and 3rd (0-indexed: 1, 2),
+    // since logIndex 0 belongs to escrow 3/milestone 0.
+    expect(forMilestone1.ordinals).toEqual([1, 2])
+    expect(forMilestone1.totalMessages).toBe(3)
 
     const forMilestone0 = receiptEmittedCctpMessageForMilestone(receipt, 3, 0)
-    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
+    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [0], totalMessages: 3 })
   })
 
-  it('returns emitted:false, count:0, messages:[] when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
+  it('returns emitted:false, count:0, messages:[], ordinals:[], totalMessages:0 when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
     const receipt = { logs: [messageSentLog(0)] }
-    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
+    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
   })
 
   describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn, log-index-adjacent but not this contract\'s own', () => {
-    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range', () => {
+    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range — but still counts it toward totalMessages, since it is a real log in the ordinal universe', () => {
       const receipt = {
         logs: [
           messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),   // a foreign TrancheProtocol instance's own burn — no boundary of its own
           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
     })
 
-    it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range', () => {
+    it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range — but still counts it toward totalMessages', () => {
       const receipt = {
         logs: [
           messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),
           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
     })
 
-    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range', () => {
+    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range, but its ordinal position (1) correctly accounts for the foreign message occupying slot 0', () => {
       const receipt = {
         logs: [
           messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),
@@ -556,12 +562,14 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({
+        emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2
+      })
     })
   })
 
   describe('Round 25 gap (b): a same-contract withdrawRefund burn batched adjacent to an Arc-only milestone release', () => {
-    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release', () => {
+    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release, but still counts it toward totalMessages', () => {
       const receipt = {
         logs: [
           messageSentLog(0),   // withdrawRefund's own real burn
@@ -569,12 +577,12 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
         ]
       }
-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
+      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
     })
   })
 
   describe('Round 26 finding 2: identity, not just count, matters for downstream Iris filtering', () => {
-    it('returns DISTINCT message bytes for two genuinely different burns in the same milestone (a mixed split), so downstream identity matching can tell them apart', () => {
+    it('returns DISTINCT message bytes AND distinct ordinal positions for two genuinely different burns in the same milestone (a mixed split), so downstream ordinal selection can tell them apart', () => {
       const receipt = {
         logs: [
           messageSentLog(0, { bodySender: CONTRACT_ADDRESS }),
@@ -582,15 +590,65 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
           escrowLog(2, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
         ]
       }
-      const { messages } = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
+      const { messages, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
       // Both messages are byte-identical here (same sender, no other
       // differentiating field in this fixture) — the point of this test is
       // that the array has the real per-message bytes available at all
       // (length 2, not a collapsed count), not that THESE TWO specific
-      // fixtures differ; useCctpDelivery's identity filter only needs
-      // messages to be distinguishable when Iris's OWN response actually
-      // differs (different attestation/forwardState per real message).
+      // fixtures differ. Round 27: ordinals are what downstream selection
+      // actually uses now (content is no longer trusted at all, see
+      // useCctpDelivery's own doc comment), and these two ARE distinct
+      // (0 and 1) even though their bytes happen not to be.
       expect(messages).toHaveLength(2)
+      expect(ordinals).toEqual([0, 1])
+      expect(totalMessages).toBe(2)
+    })
+  })
+
+  describe('Round 27 (High finding fix): ordinal position, not content, is what Iris selection uses', () => {
+    it('a finding-1-style forged message (real contract, wrong header.sender) occupying an EARLIER ordinal slot does not shift this milestone\'s own message off its correct position', () => {
+      // The exact batched scenario the fix has to get right: an attacker's
+      // forged MessageTransmitterV2.sendMessage call (real contract, real
+      // MessageSent topic, so it consumes a real ordinal slot in Iris's
+      // response) lands BEFORE this milestone's own genuine burn in the
+      // same transaction. verifiedOwnCctpMessage correctly rejects the
+      // forged one as not-ours, but it must still count toward the ordinal
+      // universe, or the genuine message's ordinal would be off by one.
+      const receipt = {
+        logs: [
+          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),   // forged — occupies ordinal 0
+          messageSentLog(1),   // this milestone's own genuine burn — must resolve to ordinal 1, not 0
+          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+        ]
+      }
+      const result = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
+      expect(result.emitted).toBe(true)
+      expect(result.count).toBe(1)
+      expect(result.ordinals).toEqual([1])
+      expect(result.totalMessages).toBe(2)
+    })
+
+    it('realMessageTransmitterLogIndexesAsc includes every real-contract MessageSent log regardless of authenticity (check 1 only), sorted ascending by logIndex — the universe Iris\'s own ordering is counted against', () => {
+      const receipt = {
+        logs: [
+          messageSentLog(5, { headerSender: FOREIGN_ADDRESS }),   // forged, but still a real log at the real contract
+          messageSentLog(2, { bodySender: FOREIGN_ADDRESS }),     // a foreign application's own genuine burn
+          messageSentLog(9)                                       // this contract's own genuine burn
+        ]
+      }
+      // Deliberately out of logIndex order in the array — the function must
+      // sort by the real logIndex field, not array position.
+      expect(realMessageTransmitterLogIndexesAsc(receipt.logs)).toEqual([2, 5, 9])
+    })
+
+    it('realMessageTransmitterLogIndexesAsc excludes logs from a decoy contract address, and logs from the real contract that are not MessageSent at all', () => {
+      const receipt = {
+        logs: [
+          messageSentLog(0, {}, '0x9999999999999999999999999999999999999999'),   // decoy address, real MessageSent topic
+          { address: MESSAGE_TRANSMITTER_V2_ARC, logIndex: 1, topics: ['0xdeadbeef'], data: '0x' }   // real address, different event
+        ]
+      }
+      expect(realMessageTransmitterLogIndexesAsc(receipt.logs)).toEqual([])
     })
   })
 })
