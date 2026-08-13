@@ -290,12 +290,12 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
 
 ## Circle confirm-descriptor coverage
 
-Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory:
+Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory — two different, both-legitimate ways to count, so name which one you mean:
 
-- **26 lexical `escrowWrite(...)` call sites**, of which 2 take the function name from a variable — `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`.
-- **31 executable paths** once those two expand (24 static + 4 milestone actions + 3 evidence modes).
+- **Lexical call sites**: the literal `escrowWrite(...)` expressions in source, counted by grepping for them — **27**, of which 2 take the function name from a variable rather than a quoted string: `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`. (A prior revision of this count said 26 — an undercount from deduplicating `resolveDisputeByTimeout`'s two separate UI call sites, `EscrowDetail.jsx` and `ArbiterPanel.jsx`, into one; grepping the literal expressions directly gives 27.)
+- **Executable paths**: how many distinct contract functions those 27 sites can actually invoke once the 2 variable-function sites are expanded across every value they can resolve to — **32** (25 static/quoted + 4 milestone actions `action.fn` can resolve to + 3 evidence modes `meta.fn` can resolve to).
 
-`CreateEscrow.jsx`'s `deposit` is one of the 26; its descriptor predates the descriptor sweep and came from `feature/circle-ucw-wallets`. Any coverage claim quoting a smaller number (e.g. "24 of 24") is counting only quoted call sites, or only files changed in one PR — say which, or use the figures above.
+`CreateEscrow.jsx`'s `deposit` is one of the 27 lexical sites; its descriptor predates the descriptor sweep and came from `feature/circle-ucw-wallets`. Any coverage claim quoting a different number (e.g. "24 of 24", "26 of 26") is either counting only quoted/static call sites (25), deduplicating `resolveDisputeByTimeout`'s two sites (26), or counting only files changed in one PR — say which, or use the figures above.
 
 ## Open FRONTEND follow-ups (not contract, not blocking)
 
