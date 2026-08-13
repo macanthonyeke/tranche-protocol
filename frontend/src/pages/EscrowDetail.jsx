@@ -2469,6 +2469,90 @@ export function mutualSettlementCreatedCctpMessage(receipt) {
   return receiptEmittedCctpMessage(receipt)
 }
 
+/* Round 24 Phase A. The four terminal, escrowId+milestoneIndex-carrying
+   events that can each be preceded by a CCTP burn in the SAME top-level
+   call — TrancheProtocol.sol verified directly, not assumed:
+     approveRelease        -> MilestoneApproved       (:647/:649)
+     release                -> MilestoneReleased       (:682/:684)
+     resolveDispute          -> DisputeResolved         (via _executePartialRelease, :516/:518)
+     mutualSettle (matched)  -> MutualSettlementExecuted (via _executePartialRelease, :556/:557)
+   In every one of the four, the burn (if any) happens strictly BEFORE the
+   terminal event — CEI ordering, confirmed at each call site and in
+   _executeCCTPReleaseAmount/_executePartialRelease underneath, and nothing
+   is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
+   emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
+   credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
+   withdrawRefund's _approveAndBurn call site (:877) is the only other burn
+   path, but its RefundWithdrawn event carries no escrow/milestone id and,
+   per CLAUDE.md, Milestone.releaseTx is stamped only by the 5 release-type
+   handlers — RefundWithdrawn isn't one — so a withdrawRefund tx hash can
+   never reach here in the first place.
+
+   EVM logs within one transaction are strictly ordered by real execution
+   order: one external call runs to completion (emitting every one of its
+   own logs) before the next begins, true regardless of whether a batching
+   / multicall contract composed several release()-family calls (release()
+   is fully permissionless) into one transaction. That makes each
+   milestone's own terminal event a hard boundary, not a heuristic: the
+   MessageSent logs that genuinely belong to THIS milestone are exactly
+   those strictly after the nearest PRECEDING terminal event (any
+   milestone) and up to and including this milestone's own terminal event.
+   Without this, FallbackCrossChainDelivery (the only site whose receipt
+   can belong to a caller other than this device — the three write sites
+   are always this device's own single-purpose tx.run() call, never a
+   batch) would attribute every MessageSent in a batched tx's receipt to
+   every milestone that shares the tx hash. */
+const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
+
+/* Exported for direct testing. Returns the [start, end] log-index range
+   (start exclusive, end inclusive) this milestone's own logs occupy within
+   `receipt`, or null if this milestone's own terminal event isn't found —
+   defensive only, since the subgraph can only have stamped this txHash as
+   THIS milestone's releaseTx by having decoded one of CCTP_TERMINAL_EVENTS
+   for this exact (escrowId, milestoneIndex) out of this exact receipt. */
+export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
+  const targetEscrowId = BigInt(escrowId)
+  const targetMilestoneIndex = BigInt(milestoneIndex)
+  const boundaries = []
+
+  for (const log of receipt.logs) {
+    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+    try {
+      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
+      if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
+        boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
+      }
+    } catch {}
+  }
+
+  const match = boundaries.find(
+    (b) => b.escrowId === targetEscrowId && b.milestoneIndex === targetMilestoneIndex
+  )
+  if (!match) return null
+
+  const start = boundaries
+    .filter((b) => b.logIndex < match.logIndex)
+    .reduce((max, b) => Math.max(max, b.logIndex), -1)
+
+  return { start, end: match.logIndex }
+}
+
+/* Round 24 Phase A. The milestone-scoped counterpart to
+   receiptEmittedCctpMessage — used only by FallbackCrossChainDelivery,
+   where the receipt can belong to a batched, multi-milestone transaction
+   this device never submitted. Scopes the receipt to just this milestone's
+   own log range (see milestoneCctpLogRange) before running the exact same
+   MessageSent decode. No match found (should be unreachable in practice —
+   see milestoneCctpLogRange's own doc comment) fails the same way as
+   "genuinely no CCTP message": nothing reliable to attribute either way,
+   so there is no meaningful difference in what the UI should show. */
+export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
+  const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
+  if (!range) return { emitted: false, count: 0 }
+  const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
+  return receiptEmittedCctpMessage({ ...receipt, logs: scopedLogs })
+}
+
 export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
   const n = milestone.index + 1
   const of = Number(escrow.milestoneCount) || n
@@ -3031,7 +3115,13 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
   })
 
   if (receipt) {
-    const { emitted, count } = receiptEmittedCctpMessage(receipt)
+    // Round 24 Phase A: scoped to this milestone's own log range, not
+    // receiptEmittedCctpMessage(receipt) unscoped — this receipt can belong
+    // to a batched, multi-milestone transaction release()'s permissionless
+    // callers can compose (see receiptEmittedCctpMessageForMilestone's own
+    // doc comment), unlike the three write sites where the receipt is
+    // always this device's own single-purpose call.
+    const { emitted, count } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
     if (!emitted) return null
     return (
       <CrossChainDelivery
