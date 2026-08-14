@@ -1,4 +1,4 @@
-import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector } from 'viem'
+import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector, keccak256, hexToBytes, bytesToHex } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
 import { bytes32ToAddress } from './encode.js'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
@@ -42,6 +42,28 @@ const RECEIVE_MESSAGE_ABI = [
 // the record belongs to, not which chain the signer happens to be on.
 export const cctpTrackKey = (escrowId, milestoneIndex) =>
   `cctp-track-${CONTRACT_ADDRESS.toLowerCase()}-${escrowId}-${milestoneIndex}`
+
+// Round 33. A persisted cctpTrack record's own shape version — bumped every
+// time the record's shape changes, most recently by this round's
+// fingerprint redesign (a 7-field object to a single sanitized-message
+// hash). Exists because this exact class of bug has now recurred three
+// times: Round 26's raw-hex expectedMessages array outliving its own
+// removal, and Round 32 shipping a new 7-field fingerprint shape with no
+// matching update to EscrowDetail.jsx's isValidCctpTrackRecord/
+// isValidFingerprintShape at all — a record persisted before that round
+// kept being accepted as "valid" and then permanently failed the (now
+// different) comparison for the rest of its 24h life. A per-field shape
+// check has to be remembered to reject every SPECIFIC old shape it might
+// encounter; a version tag rejects all of them in one line regardless of
+// what else about the record looks plausible, and gives whoever next
+// changes the shape one obvious, hard-to-miss constant to bump — read by
+// EscrowDetail.jsx's isValidCctpTrackRecord (validation) and every write
+// site (EscrowDetail.jsx x2, ArbiterPanel.jsx) that persists a record.
+// Lives here rather than in EscrowDetail.jsx because ArbiterPanel.jsx
+// already imports cctpTrackKey from this file and cannot import from
+// EscrowDetail.jsx (EscrowDetail.jsx imports FROM ArbiterPanel.jsx per
+// Round 26 — the reverse would be circular).
+export const CCTP_TRACK_SHAPE_VERSION = 2
 
 // Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
 // fixed interval regardless of whether the previous call has resolved yet,
@@ -220,176 +242,148 @@ export function messageSenderOf(message) {
   return bytes32ToAddress(slice(message, 248, 280))
 }
 
-/* Round 29. Three more fields off the same raw message, all from the
-   IMMUTABLE half of CCTP V2's layout — none of nonce (header, byte 12-44),
-   finalityThresholdExecuted (header, byte 144-148), feeExecuted (body,
-   relative offset 164/absolute 312) or expirationBlock (body, relative
-   offset 196/absolute 344), the four fields Round 27's own doc comment
-   established DO mutate between the source-side log and Iris's attested
-   response. Offsets confirmed against the same Circle V2 technical guide
-   layout messageSenderOf and messageHeaderSenderOf already verify against:
-   header's destinationDomain is a 4-byte uint32 at absolute offset 8 (right
-   after the 4-byte version and 4-byte sourceDomain); BurnMessageV2's body
-   starts at absolute 148, so burnToken (32 bytes), mintRecipient (32
-   bytes), and amount (32 bytes) sit at 152, 184, and 216 respectively —
-   immediately before messageSender's own already-verified 248 offset,
-   which anchors this math to a value already confirmed correct. */
+/* Round 29. destinationDomain is a 4-byte uint32 at absolute offset 8
+   (right after the 4-byte version and 4-byte sourceDomain) -- confirmed
+   against the same Circle V2 technical guide layout messageSenderOf and
+   messageHeaderSenderOf already verify against. Kept as its own exported
+   helper (gated by assertWellFormedCctpV2Message, same as
+   cctpMessageFingerprint below) because useCctpDelivery needs a message's
+   destination for display independent of the fingerprint's own shape --
+   the two answer different questions and must not be coupled. */
 function destinationDomainOf(message) {
   return readUint32(message, 8)
 }
 
-function burnTokenOf(message) {
-  return bytes32ToAddress(slice(message, 152, 184))
+/* Round 33 (redesign, fixing the Round 32 review's Medium finding:
+   "allow-list fingerprint still omits fields -- sourceDomain, header sender,
+   recipient, destinationCaller, minFinalityThreshold -- three rounds running
+   (29/31/32) each closed one omission and missed the next"). Selecting
+   individual fields to compare is the actual defect: every round in that
+   history had to remember to add a newly-relevant field, and every round
+   missed at least one. There is no such thing as forgetting a field when
+   there is no allow-list -- everything not explicitly named here as mutable
+   is included in the comparison by default.
+
+   The four ranges below are the ONLY fields CCTP V2 mutates between
+   burn-time (this app's own source-side log) and Iris's attested response --
+   established across Round 27/29's own verification against a real
+   Arc-testnet burn's byte-diff, re-confirmed here against the same Circle
+   V2 technical guide layout every other offset in this file is checked
+   against:
+     - nonce                     header, absolute 12-44  (assigned by Circle off-chain)
+     - finalityThresholdExecuted header, absolute 144-148 (filled in once attested)
+     - feeExecuted               body,   absolute 312-344 (filled in once attested)
+     - expirationBlock           body,   absolute 344-376 (can change pre-attestation)
+   Every other byte in the message -- version, sourceDomain, destinationDomain,
+   header sender, recipient, destinationCaller, minFinalityThreshold, and the
+   entire BurnMessageV2 body (burnToken, mintRecipient, amount, messageSender,
+   maxFee) plus the dynamic hookData tail -- is immutable for a given message
+   and now covered by the hash below, whether or not this file has a named
+   reader for it. This is deliberately broader than what Round 32 covered
+   (destinationDomain/burnToken/mintRecipient/amount/messageSender/maxFee/
+   hookData): the header's own `recipient` field (absolute 76-108, the
+   address MessageTransmitterV2 delivers to -- a DIFFERENT field from the
+   body's mintRecipient, already covered) legitimately varies BETWEEN
+   messages to different destinationDomains (TokenMessengerV2 looks up a
+   per-domain registered remote address -- confirmed against
+   TrancheProtocol.sol:1363-1372's depositForBurnWithHook call, which passes
+   no explicit recipient at all, so it's entirely TokenMessengerV2's own
+   internal lookup), but is immutable WITHIN a single message's own
+   burn-to-attestation lifecycle, exactly like every other field this hash
+   covers -- legitimate cross-message variability is not the same thing as
+   mutation of one message over time, and is exactly the kind of
+   discriminating content a substituted message should disagree on. Likewise
+   destinationCaller (TrancheProtocol.sol:1368, always the literal
+   `bytes32(0)`) and minFinalityThreshold (TrancheProtocol.sol:1370, always
+   `CCTP_MIN_FINALITY_THRESHOLD` = 2000) are constant for every genuine burn
+   this contract makes -- Round 32 was right that they're constant, but
+   constant fields still belong in a whole-message hash: their whole point
+   is that a corrupted or substituted message that got them wrong would now
+   also fail the comparison, instead of the comparison silently not caring
+   about them because nobody chose to name them. */
+const MUTABLE_BYTE_RANGES = [
+  [12, 44],   // nonce (header)
+  [144, 148], // finalityThresholdExecuted (header)
+  [312, 344], // feeExecuted (body)
+  [344, 376]  // expirationBlock (body)
+]
+
+function sanitizeCctpMessage(message) {
+  const bytes = hexToBytes(message)
+  for (const [start, end] of MUTABLE_BYTE_RANGES) {
+    bytes.fill(0, start, end)
+  }
+  return bytesToHex(bytes)
 }
 
-function mintRecipientOf(message) {
-  return bytes32ToAddress(slice(message, 184, 216))
-}
-
-function amountOf(message) {
-  return BigInt(slice(message, 216, 248))
-}
-
-/* Round 32 (fixing the Round 31 review's Medium finding: "the complete
-   message check doesn't validate the whole message", part b). Two more
-   fields off BurnMessageV2's body, both confirmed IMMUTABLE — neither is
-   among the four fields established as mutating between burn-time and
-   attestation (nonce, finalityThresholdExecuted, feeExecuted,
-   expirationBlock; see the doc comment above destinationDomainOf). maxFee
-   sits at relative offset 132/absolute 280 (right after messageSender's own
-   already-verified 248-280 range), 32 bytes. hookData is the body's
-   dynamic tail starting at relative offset 228/absolute 376 — for a
-   hookless CCTP message this is legitimately empty ("0x"); TrancheProtocol.sol
-   never sends one (see hookDataOf's own doc comment). */
-function maxFeeOf(message) {
-  return BigInt(slice(message, 280, 312))
-}
-
-/* This app's own burns (TrancheProtocol.sol:1371,
-   `tokenMessenger.depositForBurnWithHook(..., abi.encodePacked(FORWARD_HOOK_DATA))`)
-   always attach hookData — confirmed directly against source, not assumed:
-   FORWARD_HOOK_DATA is declared `bytes32` (TrancheProtocol.sol:51), and
-   abi.encodePacked on a single bytes32 packs the full, fixed 32 bytes
-   verbatim (no length prefix, no trimming) — so a genuine message from THIS
-   contract's own burn is always exactly 408 bytes (376 + 32), never just
-   376. `slice(message, 376)` with no end offset returns everything from
-   byte 376 to the message's true end regardless of length, so this reads
-   correctly whether hookData is 32 bytes (this app's real burns) or empty
-   (a hypothetical hookless message some other CCTP caller produced). */
-function hookDataOf(message) {
-  return slice(message, 376).toLowerCase()
+/* Shared validation gate for both cctpMessageFingerprint and
+   cctpMessageDestinationDomain below -- extracted so the two can never drift
+   out of sync on what counts as "safe to read offsets from". A basic hex
+   well-formedness check (even length, valid hex characters throughout) runs
+   FIRST, before size() or any byte offset is trusted (Round 32's fix for
+   Codex's proof that a corrupted byte outside the old read boundary could
+   sail through with no throw at all) -- then the minimum-length floor
+   (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES), then both header and body version.
+   Throws on any failure; every real call site wraps this in try/catch and
+   fails closed. */
+function assertWellFormedCctpV2Message(message) {
+  if (typeof message !== 'string' || !CCTP_V2_HEX_RE.test(message)) {
+    throw new Error('assertWellFormedCctpV2Message: message is not well-formed hex')
+  }
+  if (size(message) < CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) {
+    throw new Error('assertWellFormedCctpV2Message: message is too short to be a complete CCTP V2 message')
+  }
+  if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION || messageBodyVersionOf(message) !== CCTP_V2_VERSION) {
+    throw new Error('assertWellFormedCctpV2Message: message header/body version is not CCTP V2')
+  }
 }
 
 /* Round 29 (fixing the Round 29 review's Medium finding: "equal cardinality
    doesn't prove equal membership"). Ordinal position alone (Round 27) proves
    WHERE a message sits in Iris's response, not that its CONTENT is
-   genuinely this milestone's own real burn — an Iris bug, or a same-length
-   response that reorders same-transaction messages, could still misattribute
-   at the selected ordinal. This is real identity verification, not a return
-   to Round 26's mistake: Round 26 compared the whole raw message against
-   Iris's `message` field and always failed, because CCTP V2 mutates several
-   fields between burn and attestation. This instead fingerprints ONLY the
-   fields confirmed immutable (see the four decode helpers above) — a value
-   that stays byte-identical between the source-side log and Iris's own
-   attested response for the SAME real message, so genuine equality is
-   actually achievable here, unlike Round 26's attempt.
-   Stored as plain JSON-safe values (lowercased address strings, amount as a
-   decimal string — BigInt doesn't survive JSON.stringify) since this feeds
-   directly into the persisted cctpTrack record.
+   genuinely this milestone's own real burn. Verify each selected entry's
+   fingerprint (irisMessageMatchesFingerprint) against the receipt-derived
+   one before ever trusting the selection. A mismatch fails the same way an
+   incomplete/ambiguous response already does -- stays 'polling' -- since a
+   genuine mismatch should be exceedingly rare (Iris's own ordering
+   guarantee, plus the count gate above, plus Phase C's sourceTxHash filter,
+   would all have to be wrong or bypassed at once) and there is no safe
+   alternative message to fall back to selecting instead.
 
-   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
-   fingerprint check is fail-open in two ways", part b). This previously
-   read straight through byte 280 with no minimum-length or version-field
-   check at all — unlike verifiedOwnCctpMessage on the receipt side, which
-   checks both header and body version before ever trusting its offsets.
-   The receipt-side caller (receiptEmittedCctpMessageForMilestone) only ever
-   passes messages that already passed verifiedOwnCctpMessage's own version
-   checks, so this was latent there — but irisMessageMatchesFingerprint
-   passes this UNTRUSTED bytes straight from Iris's API response, never
-   independently checked before now. A short or non-V2 value could have its
-   arbitrary bytes silently misread as real fingerprint fields (e.g. a
-   truncated or malformed response reading zero/garbage where amount or
-   mintRecipient should be) instead of being rejected outright. Fixed by
-   reusing the SAME header/body version-check functions already built for
-   the receipt side (messageHeaderVersionOf / messageBodyVersionOf) rather
-   than rebuilding them, plus a minimum-length floor against the real
-   complete-message size (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) before any
-   offset is read. Throws on either failure — every real call site already
-   wraps this in try/catch and fails closed (irisMessageMatchesFingerprint
-   explicitly; the receipt-side caller can't reach either failure in
-   practice, since verifiedOwnCctpMessage already guarantees both).
+   Round 33 (redesign -- see MUTABLE_BYTE_RANGES's own doc comment for the
+   full "why an allow-list keeps missing fields" reasoning). The fingerprint
+   is now a single keccak256 hash of the sanitized message (every byte
+   except the 4 established-mutable ranges, zeroed then hashed), not an
+   object of individually-chosen fields -- comparison is a hash equality
+   check, not a per-field one, in irisMessageMatchesFingerprint below.
 
-   Round 32 (fixing the Round 31 review's Medium finding: "the complete
-   message check doesn't validate the whole message"). Two gaps, fixed
-   together:
-
-   (a) The length/version checks above only ever read through the bytes
-   THIS function itself consumes — before this round, that stopped at
-   messageSender (byte 280); a malformed or corrupted byte anywhere past
-   that (recipient, destinationCaller, minFinalityThreshold, maxFee,
-   feeExecuted, expirationBlock, hookData — none of them read here) could
-   sail through with no throw at all. Codex proved this concretely: garbage
-   at byte 300 (inside what is now the maxFee range) produced a fingerprint
-   with no error. A basic hex well-formedness check — even length, valid
-   hex characters throughout — now runs FIRST, before any offset in this
-   function (or size()/messageHeaderVersionOf/messageBodyVersionOf below
-   it) is trusted. This catches a malformed byte ANYWHERE in the string,
-   independent of which named field it happens to fall in — including the
-   fields this function still never reads (recipient, destinationCaller,
-   sourceDomain, minFinalityThreshold), which stay unvalidated by design
-   (see scope note below) but at least can't be outright non-hex garbage.
-
-   (b) maxFee and hookData are added to the returned fingerprint — both
-   confirmed immutable (see maxFeeOf/hookDataOf's own doc comments), unlike
-   the four established-mutable fields this fingerprint still deliberately
-   excludes (nonce, finalityThresholdExecuted, feeExecuted,
-   expirationBlock). This directly closes Codex's byte-300 proof at the
-   VALUE level too, not just the hex-well-formedness level above: byte 300
-   sits inside maxFee's 280-312 range, so a corruption there that happens
-   to still be valid hex (a different, but still hex, byte) now fails the
-   maxFee comparison in irisMessageMatchesFingerprint instead of being
-   silently ignored.
-
-   Scope note (deliberately NOT a full byte-for-byte diff of everything
-   outside the 4 mutable ranges): version, sourceDomain, recipient,
-   destinationCaller, and minFinalityThreshold are all either already
-   independently checked elsewhere (header/body version, via
-   messageHeaderVersionOf/messageBodyVersionOf) or constant/predictable for
-   every genuine burn THIS contract makes (destinationCaller is always
-   bytes32(0), minFinalityThreshold is always CCTP_MIN_FINALITY_THRESHOLD,
-   recipient is always this app's own TokenMessengerV2 handling address) —
-   comparing them would add parsing surface without adding real
-   discriminating power beyond what verifiedOwnCctpMessage's own header/body
-   sender checks already establish on the receipt side. destinationDomain,
-   burnToken, mintRecipient, amount, messageSender, maxFee, and hookData are
-   the fields that actually VARY per burn (or per app) and are the ones a
-   substituted or corrupted message would most plausibly disagree on — that
-   set, plus the blanket hex-well-formedness check above for everything
-   else, is the actual self-relay recovery need: `encodeReceiveMessage`
-   (EscrowDetail.jsx's SelfRelayCard) packs `delivery.message` — Iris's raw
-   bytes, verbatim, not reconstructed field-by-field — directly into
-   `receiveMessage` calldata, so what this fingerprint has to prove is "this
-   is genuinely the same complete message the receipt proved we burned,"
-   not "every individual field is independently sane." */
+   Hash, not the full sanitized hex string, for storage: a complete message
+   is a few hundred hex characters (408 bytes = 816 hex chars for this
+   app's own hookData-bearing burns, more once a split settlement persists
+   several per milestone), a keccak256 hash is a fixed 66 (0x + 64). This
+   feeds directly into the persisted cctpTrack localStorage record -- a
+   fixed, small size matters there specifically (localStorage has a real
+   per-origin quota, and a mixed split can persist up to MAX_SPLITS=10
+   entries in one record), and nothing downstream needs the sanitized
+   string's actual content back out, only equality against a second
+   independently-computed sanitized hash -- a one-way digest loses nothing
+   the comparison needs. */
 export function cctpMessageFingerprint(message) {
-  if (typeof message !== 'string' || !CCTP_V2_HEX_RE.test(message)) {
-    throw new Error('cctpMessageFingerprint: message is not well-formed hex')
-  }
-  if (size(message) < CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) {
-    throw new Error('cctpMessageFingerprint: message is too short to be a complete CCTP V2 message')
-  }
-  if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION || messageBodyVersionOf(message) !== CCTP_V2_VERSION) {
-    throw new Error('cctpMessageFingerprint: message header/body version is not CCTP V2')
-  }
-  return {
-    destinationDomain: destinationDomainOf(message),
-    burnToken: burnTokenOf(message).toLowerCase(),
-    mintRecipient: mintRecipientOf(message).toLowerCase(),
-    amount: amountOf(message).toString(),
-    messageSender: messageSenderOf(message).toLowerCase(),
-    maxFee: maxFeeOf(message).toString(),
-    hookData: hookDataOf(message)
-  }
+  assertWellFormedCctpV2Message(message)
+  return keccak256(sanitizeCctpMessage(message))
+}
+
+/* Round 33. destinationDomain extracted independently of the fingerprint's
+   own shape -- useCctpDelivery's display-only domain lookup used to read
+   `cctpMessageFingerprint(raw).destinationDomain`, which broke the moment
+   the fingerprint became a bare hash string with no named fields at all.
+   Shares the exact same validation gate as cctpMessageFingerprint
+   (assertWellFormedCctpV2Message) so a malformed/short/wrong-version
+   message throws here too, rather than silently misreading garbage as a
+   domain. */
+export function cctpMessageDestinationDomain(message) {
+  assertWellFormedCctpV2Message(message)
+  return destinationDomainOf(message)
 }
 
 /* Round 29. Checks a fingerprint (from cctpMessageFingerprint, above)
@@ -470,17 +464,11 @@ export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
   } catch {
     return false
   }
-  return (
-    actual.destinationDomain === fingerprint.destinationDomain &&
-    actual.burnToken === fingerprint.burnToken &&
-    actual.mintRecipient === fingerprint.mintRecipient &&
-    actual.amount === fingerprint.amount &&
-    actual.messageSender === fingerprint.messageSender &&
-    // Round 32: maxFee and hookData added — see cctpMessageFingerprint's own
-    // doc comment for why both are immutable and worth comparing.
-    actual.maxFee === fingerprint.maxFee &&
-    actual.hookData === fingerprint.hookData
-  )
+  // Round 33: cctpMessageFingerprint is now a single sanitized-message hash
+  // (see its own doc comment) — comparison is a straight equality check,
+  // not a per-field one. Every byte outside the 4 established-mutable
+  // ranges is covered by construction; there is no field left to omit.
+  return actual === fingerprint
 }
 
 // Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract

@@ -1,7 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageFingerprint } from '../utils/irisDelivery'
+import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageDestinationDomain } from '../utils/irisDelivery'
 
 const POLL_MS = 15_000
+
+// Round 33 (Low finding). Circle's real CCTP V2 attestation is one or more
+// concatenated 65-byte ECDSA signatures (the multi-signature threshold
+// scheme) — confirmed against Circle's own attestation format
+// documentation, not assumed. The old completeness check (below) only ever
+// asked whether `attestation` was truthy and not the literal string
+// 'PENDING'; it never confirmed the value was actually shaped like a real
+// attestation at all. On-chain verification in MessageTransmitterV2's own
+// receiveMessage already prevents any fund-loss risk from a malformed value
+// slipping through — this is purely about not walking a user into a doomed
+// self-relay transaction (SelfRelayCard packs `delivery.attestation`
+// directly into receiveMessage calldata) that will predictably revert and
+// burn their gas for nothing.
+const CCTP_ATTESTATION_HEX_RE = /^0x([0-9a-fA-F]{2})*$/
+const CCTP_SIGNATURE_BYTE_LENGTH = 65
+
+function isWellFormedAttestation(attestation) {
+  if (typeof attestation !== 'string' || !CCTP_ATTESTATION_HEX_RE.test(attestation)) return false
+  const byteLength = (attestation.length - 2) / 2
+  return byteLength > 0 && byteLength % CCTP_SIGNATURE_BYTE_LENGTH === 0
+}
 
 // Round 29 (Low finding): distinguishes "still catching up" from "stuck".
 // Every non-terminal poll outcome below (count mismatch — including the
@@ -245,8 +266,20 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       // Round 30 (Low finding): signature includes WHICH selected index is
       // still unattested, not just that one is — same reasoning as the
       // fingerprint-mismatch signature above.
+      //
+      // Round 33 (Low finding): isWellFormedAttestation added as a fourth,
+      // independent condition — status 'complete' and a present, non-PENDING
+      // string can both hold while the value itself still isn't a real
+      // attestation (wrong length, odd hex, not a multiple of the 65-byte
+      // signature size). Treated the same as any other not-yet-ready state
+      // (stays in the unresolved/keep-polling branch, never an error) — see
+      // isWellFormedAttestation's own doc comment for why this is a
+      // gas-waste guard, not a fund-safety one, so failing permissively
+      // (keep polling) rather than surfacing a hard error is the right
+      // default here, consistent with every other ambiguous outcome in this
+      // function.
       const notAttestedIndexes = messages
-        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' ? null : i))
+        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' && isWellFormedAttestation(m.attestation) ? null : i))
         .filter((i) => i !== null)
       if (notAttestedIndexes.length > 0) {
         markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)
@@ -267,19 +300,19 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       // terminal (FAILED), so reading destinationDomain from it ALONE left
       // EscrowDetail.jsx's SelfRelayCard rendering "Unknown chain" and
       // disabling self-relay for a delivery this app could otherwise recover
-      // in-app. The raw message bytes (m.message) are already being parsed
-      // for the identity check above (irisMessageMatchesFingerprint calls
-      // cctpMessageFingerprint internally) whenever expectedFingerprints is
-      // available — this reuses that SAME parser directly rather than
-      // rebuilding domain-extraction logic a second way, and works
-      // regardless of whether the fingerprint check ran, so it's the
-      // primary source; decodedMessage is only a fallback for the
+      // in-app. The raw message bytes (m.message) are read directly via
+      // cctpMessageDestinationDomain -- independent of whatever shape
+      // cctpMessageFingerprint's own return value happens to be (Round 33:
+      // that's now a single sanitized-message hash with no named fields at
+      // all) -- so domain display and identity verification stay decoupled,
+      // and this works regardless of whether the fingerprint check ran, so
+      // it's the primary source; decodedMessage is only a fallback for the
       // (should-be-unreachable) case where the raw message itself can't be
       // parsed (missing/"0x"/malformed).
       const domainFromRawMessage = (raw) => {
         if (typeof raw !== 'string' || raw === '0x') return null
         try {
-          return cctpMessageFingerprint(raw).destinationDomain
+          return cctpMessageDestinationDomain(raw)
         } catch {
           return null
         }

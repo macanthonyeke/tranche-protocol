@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
 import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
 import {
   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
@@ -1473,24 +1473,44 @@ const CCTP_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
 // tolerance: this ts is always stamped with Date.now() on the same device
 // that later reads it, so a genuinely future value only ever means a
 // tampered/foreign record, not ordinary drift.
-const CCTP_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
-const CCTP_AMOUNT_RE = /^[0-9]+$/
+// Round 33: a cctpMessageFingerprint entry is now a single keccak256 hash
+// string (see irisDelivery.js's own redesign doc comment), not an object of
+// individually-chosen fields — 0x + 64 hex chars, nothing more permissive.
+const CCTP_FINGERPRINT_HASH_RE = /^0x[0-9a-fA-F]{64}$/
 
-// Round 29: shape-checks one cctpMessageFingerprint entry (see
-// irisDelivery.js) the same way the rest of this function shape-checks the
-// record around it — every field a real fingerprint always has, nothing
-// more permissive.
 function isValidFingerprintShape(fp) {
-  if (fp == null || typeof fp !== 'object') return false
-  if (!Number.isInteger(fp.destinationDomain) || fp.destinationDomain < 0) return false
-  if (typeof fp.burnToken !== 'string' || !CCTP_ADDRESS_RE.test(fp.burnToken)) return false
-  if (typeof fp.mintRecipient !== 'string' || !CCTP_ADDRESS_RE.test(fp.mintRecipient)) return false
-  if (typeof fp.messageSender !== 'string' || !CCTP_ADDRESS_RE.test(fp.messageSender)) return false
-  if (typeof fp.amount !== 'string' || !CCTP_AMOUNT_RE.test(fp.amount)) return false
-  return true
+  return typeof fp === 'string' && CCTP_FINGERPRINT_HASH_RE.test(fp)
 }
 
+/* Round 33 (fixing the Round 32 review's Medium finding: "shape validation
+   doesn't reject every prior fingerprint shape" — this exact bug recurring
+   a third time, after Round 26->27's raw-hex expectedMessages array and
+   Round 32 itself shipping a new 7-field fingerprint shape with no matching
+   update here at all). A record persisted under any earlier shape was
+   silently accepted as "valid" by the old per-field checks (they only ever
+   verified the CURRENT shape's own fields, never rejected an unexpected
+   EXTRA/DIFFERENT shape), then permanently failed the real comparison for
+   the rest of its 24h life — hiding real delivery status behind a
+   fingerprint-mismatch that could never resolve.
+
+   Fixed structurally, not just by patching the field checks again:
+   CCTP_TRACK_SHAPE_VERSION (irisDelivery.js) is checked FIRST, before
+   anything else about the record is even inspected. Any record whose
+   shapeVersion isn't EXACTLY the current value is rejected outright — the
+   original 5-field fingerprint array (no shapeVersion at all), Round 32's
+   7-field version (also no shapeVersion — it shipped before this tag
+   existed), and any future shape change that bumps the constant but ships
+   before every write site is updated to match, all fail this one check
+   with no need to separately enumerate what's wrong about each. This is
+   the same reasoning CCTP_TRACK_SHAPE_VERSION's own doc comment gives for
+   why a version tag is worth the extra field: a per-field shape check has
+   to be remembered to reject every SPECIFIC old shape; a version check
+   only has to be remembered to be BUMPED, which every one of this bug's
+   three prior recurrences would have caught immediately if it had existed
+   then — a mismatched constant is a loud, obvious signal in a way a subtly
+   wrong per-field check is not. */
 function isValidCctpTrackRecord(parsed) {
+  if (parsed.shapeVersion !== CCTP_TRACK_SHAPE_VERSION) return false
   if (typeof parsed.txHash !== 'string' || !CCTP_TX_HASH_RE.test(parsed.txHash)) return false
   if (!Number.isFinite(parsed.ts) || parsed.ts > Date.now()) return false
   if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
@@ -1504,10 +1524,10 @@ function isValidCctpTrackRecord(parsed) {
   // Round 29: every real write site now persists a fingerprint alongside
   // each ordinal (see irisDelivery.js's cctpMessageFingerprint and
   // receiptEmittedCctpMessageForMilestone) — a record missing this, or with
-  // a length mismatch, is a PRE-Round-29 legacy shape and gets discarded the
-  // same way Round 27's own legacy-shape records are: readCctpTrack returns
-  // null, MilestoneRow's `!cctpTrack` fallback reverifies from the receipt
-  // instead of ever handing out a record with no fingerprint to check.
+  // a length mismatch, is discarded the same way any other malformed shape
+  // is: readCctpTrack returns null, MilestoneRow's `!cctpTrack` fallback
+  // reverifies from the receipt instead of ever handing out a record with
+  // no fingerprint to check.
   if (!Array.isArray(parsed.expectedFingerprints) || parsed.expectedFingerprints.length !== parsed.expectedOrdinals.length) return false
   if (!parsed.expectedFingerprints.every(isValidFingerprintShape)) return false
   return true
@@ -2805,7 +2825,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
         // actually worked.
         safeSetItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
         onCrossChainRelease?.()
       }
@@ -3859,7 +3879,7 @@ function MilestoneAction({
       if (emitted) {
         safeSetItem(
           cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
         onCrossChainRelease?.()
       }

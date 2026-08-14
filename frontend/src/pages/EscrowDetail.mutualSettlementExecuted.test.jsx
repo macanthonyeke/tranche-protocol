@@ -26,6 +26,7 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
    "executed" receipt (both logs) are the two real shapes this function has
    to tell apart. */
 import { mutualSettlementExecuted, mutualSettleExecutes, mutualSettlementCreatedCctpMessage } from './EscrowDetail.jsx'
+import { cctpMessageFingerprint } from '../utils/irisDelivery.js'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
 const ESCROW_ID = 7n
@@ -90,17 +91,11 @@ const messageSentLog = (logIndex) => ({
   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
   data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage()])
 })
-// Round 29: the fingerprint every message built by buildCctpMessage() above
-// produces — that helper zeroes burnToken/mintRecipient/amount/
-// destinationDomain unconditionally, with a fixed CONTRACT_ADDRESS body
-// sender.
-const DEFAULT_FP = {
-  destinationDomain: 0, burnToken: '0x' + '0'.repeat(40), mintRecipient: '0x' + '0'.repeat(40),
-  amount: '0', messageSender: CONTRACT_ADDRESS.toLowerCase(),
-  // Round 32: maxFee/hookData added to the fingerprint — buildCctpMessage()
-  // above zeroes maxFee unconditionally and uses the fixed CCTP_FORWARD_HOOK_HEX.
-  maxFee: '0', hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
-}
+// Round 33: the fingerprint every message built by buildCctpMessage() above
+// produces. Computed via the real cctpMessageFingerprint (not hand-typed) —
+// the redesign returns a single sanitized-message hash with no named
+// fields, so there is nothing left to reconstruct field-by-field.
+const DEFAULT_FP = cctpMessageFingerprint(buildCctpMessage())
 
 describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {

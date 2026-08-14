@@ -63,9 +63,16 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+// Round 33: a genuinely well-formed attestation — 65 bytes (one ECDSA
+// signature), matching Circle's real CCTP V2 format — not a placeholder
+// string like the old '0xattestation'/'0xrealattestation' literals, which
+// read as plausible English but are not valid hex at all ('t' is not a hex
+// digit) and would now fail isWellFormedAttestation's own check.
+const REAL_ATTESTATION = '0x' + '11'.repeat(65)
+
 const irisMessage = ({
   destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx',
-  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = '0xattestation'
+  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = REAL_ATTESTATION
 } = {}) => ({
   message,
   attestation,
@@ -124,7 +131,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
     // fixture has NO flat destinationDomain at all, only the nested real one,
     // so a reversion to the flat read would make this resolve to null.
     fetchIrisMessages.mockResolvedValue([{
-      message: '0xmessage', attestation: '0xattestation', status: 'complete',
+      message: '0xmessage', attestation: REAL_ATTESTATION, status: 'complete',
       decodedMessage: { destinationDomain: '6' },
       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
     }])
@@ -164,7 +171,7 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
 describe('useCctpDelivery — attestation completeness requires status === "complete", not just a non-PENDING attestation string', () => {
   it('does NOT treat a message as delivered when attestation is present and non-PENDING but status is "pending" — Codex\'s anomalous case', async () => {
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ status: 'pending', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+      irisMessage({ status: 'pending', attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
     ])
     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
@@ -178,7 +185,7 @@ describe('useCctpDelivery — attestation completeness requires status === "comp
     // silently resolve back to 'complete' (JS applies a default parameter
     // whenever the value is undefined, key present or not), which would
     // defeat the point of this exact test.
-    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
     fetchIrisMessages.mockResolvedValue([messageWithoutStatus])
     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
@@ -198,7 +205,66 @@ describe('useCctpDelivery — attestation completeness requires status === "comp
 
   it('resolves to delivered once status is "complete" AND attestation is present and non-PENDING', async () => {
     fetchIrisMessages.mockResolvedValue([
-      irisMessage({ status: 'complete', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+      irisMessage({ status: 'complete', attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+  })
+})
+
+/* Round 33 (Low finding). status === 'complete' and a present, non-PENDING
+   attestation string can both hold while the value itself still isn't
+   shaped like a real attestation — Circle's real format is one or more
+   concatenated 65-byte ECDSA signatures. This is a gas-waste guard, not a
+   fund-safety one (on-chain verification in receiveMessage already rejects
+   a bad value) — a malformed attestation stays in the unresolved/keep-
+   polling branch, exactly like every other not-yet-ready state, never a
+   hard error. */
+describe('useCctpDelivery — attestation completeness also requires a well-formed value, not just status + a non-PENDING string', () => {
+  it('does NOT treat a message as delivered when attestation is present, non-PENDING, and status is "complete", but the value is not valid hex at all', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: '0xnotvalidhexatall', forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('does NOT treat a message as delivered when the attestation is well-formed hex but an odd number of hex digits', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: REAL_ATTESTATION.slice(0, -1), forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('does NOT treat a message as delivered when the attestation is well-formed hex but its byte length is not a multiple of 65 (a truncated or padded signature)', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      // 64 bytes, one short of a real single signature.
+      irisMessage({ status: 'complete', attestation: '0x' + '11'.repeat(64), forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('does NOT treat a message as delivered when the attestation is exactly "0x" — well-formed hex, but zero bytes, not a genuine signature', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: '0x', forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('resolves to delivered for a genuine two-of-two multi-signature attestation (130 bytes = 2x65) — the multiple-signature threshold case, not just a single signature', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: '0x' + '11'.repeat(130), forwardState: 'COMPLETE' })
     ])
     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
@@ -527,7 +593,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
   it('derives destinationDomain from the raw message when decodedMessage is null, even on a terminal FAILED forwardState — SelfRelayCard needs the real chain to offer in-app self-relay, not "Unknown chain"', async () => {
     fetchIrisMessages.mockResolvedValue([{
       message: buildCctpMessage(6),
-      attestation: '0xattestation',
+      attestation: REAL_ATTESTATION,
       status: 'complete',
       decodedMessage: null,
       forwardState: 'FAILED',
@@ -542,7 +608,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
   it('falls back to decodedMessage when the raw message cannot be parsed — malformed/too-short bytes, an anomalous shape a real response should not produce', async () => {
     fetchIrisMessages.mockResolvedValue([{
       message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
-      attestation: '0xattestation',
+      attestation: REAL_ATTESTATION,
       status: 'complete',
       decodedMessage: { destinationDomain: '6' },
       forwardState: 'COMPLETE',

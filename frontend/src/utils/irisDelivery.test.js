@@ -31,6 +31,7 @@ const {
   receiptEmittedCctpMessageForMilestone,
   realMessageTransmitterLogIndexesAsc,
   cctpMessageFingerprint,
+  cctpMessageDestinationDomain,
   irisMessageMatchesFingerprint,
   MESSAGE_TRANSMITTER_V2_ARC,
   TOKEN_MESSENGER_V2_ARC
@@ -428,29 +429,14 @@ const buildCctpMessage = ({
   uint256Hex(expirationBlock) +       // expirationBlock    344-376
   hookData                            // hookData           376+ (dynamic)
 
-// Round 29: the expected cctpMessageFingerprint for a message built by
-// buildCctpMessage above, mirroring the same overridable fields.
-// Round 32: maxFee/hookData added, mirroring buildCctpMessage's own
-// maxFee/hookData defaults (0n / CCTP_FORWARD_HOOK_HEX) — cctpMessageFingerprint
-// now returns both, so an expected object missing either key would fail a
-// toEqual comparison against the real return value.
-const fingerprintFor = ({
-  bodySender = CONTRACT_ADDRESS,
-  destinationDomain = 0,
-  burnToken = ZERO_ADDRESS,
-  mintRecipient = ZERO_ADDRESS,
-  amount = 0n,
-  maxFee = 0n,
-  hookData = CCTP_FORWARD_HOOK_HEX
-} = {}) => ({
-  destinationDomain,
-  burnToken: burnToken.toLowerCase(),
-  mintRecipient: mintRecipient.toLowerCase(),
-  amount: BigInt(amount).toString(),
-  messageSender: bodySender.toLowerCase(),
-  maxFee: BigInt(maxFee).toString(),
-  hookData: ('0x' + hookData).toLowerCase()
-})
+// Round 33: the expected cctpMessageFingerprint for a message built by
+// buildCctpMessage above, mirroring the same overridable fields. Computed
+// via the real cctpMessageFingerprint (not hand-assembled) — Round 33's
+// redesign returns a single sanitized-message hash with no named fields,
+// so there is nothing left to reconstruct field-by-field; this helper just
+// saves callers from writing buildCctpMessage(...) + cctpMessageFingerprint(...)
+// twice at every call site.
+const fingerprintFor = (overrides = {}) => cctpMessageFingerprint(buildCctpMessage(overrides))
 
 const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
   address,
@@ -849,50 +835,99 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
    Iris's attested response.
    Round 32: maxFee and hookData added — also confirmed immutable, see
    cctpMessageFingerprint's own doc comment in irisDelivery.js. */
+// Round 33: flips a single byte (by absolute offset) in an otherwise-valid
+// message and returns the corrupted hex string — used throughout the
+// redesigned describe block below to prove a given byte range DOES or DOES
+// NOT affect the fingerprint, without hand-assembling a second full message
+// per field the way the old field-object design required.
+const flipByteAt = (message, byteOffset) => {
+  const charIndex = 2 + byteOffset * 2
+  const original = message.slice(charIndex, charIndex + 2)
+  const flipped = original === 'ff' ? '00' : 'ff'
+  return message.slice(0, charIndex) + flipped + message.slice(charIndex + 2)
+}
+
 describe('cctpMessageFingerprint', () => {
-  it('extracts destinationDomain, burnToken, mintRecipient, amount, messageSender, maxFee, and hookData at their documented offsets', () => {
-    const burnToken = '0x1111111111111111111111111111111111111111'
-    const mintRecipient = '0x2222222222222222222222222222222222222222'
-    const message = buildCctpMessage({
-      destinationDomain: 6,
-      burnToken,
-      mintRecipient,
-      amount: 123_456_789n,
-      bodySender: CONTRACT_ADDRESS,
-      maxFee: 500_000n
-    })
-    expect(cctpMessageFingerprint(message)).toEqual({
-      destinationDomain: 6,
-      burnToken: burnToken.toLowerCase(),
-      mintRecipient: mintRecipient.toLowerCase(),
-      amount: '123456789',
-      messageSender: CONTRACT_ADDRESS.toLowerCase(),
-      maxFee: '500000',
-      hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
-    })
+  it('returns a fixed-length keccak256 hash string, not a field object', () => {
+    const fp = cctpMessageFingerprint(buildCctpMessage({}))
+    expect(fp).toMatch(/^0x[0-9a-f]{64}$/)
   })
 
-  it('lowercases address fields — case must not cause a spurious mismatch against Iris\'s own (differently-cased) decoded addresses', () => {
-    const shoutedBurnToken = '0xABCDEF0123456789ABCDEF0123456789ABCDEF01'
-    const message = buildCctpMessage({ burnToken: shoutedBurnToken })
-    expect(cctpMessageFingerprint(message).burnToken).toBe(shoutedBurnToken.toLowerCase())
+  it('is deterministic — the same message always produces the same hash', () => {
+    const message = buildCctpMessage({ destinationDomain: 6, amount: 42n })
+    expect(cctpMessageFingerprint(message)).toBe(cctpMessageFingerprint(message))
   })
 
-  it('is unaffected by the four fields Round 27 established mutate between source and attestation (nonce, finalityThresholdExecuted, feeExecuted, expirationBlock are not read at all)', () => {
-    const base = cctpMessageFingerprint(buildCctpMessage({ amount: 42n }))
-    // buildCctpMessage always zeroes nonce/finalityThresholdExecuted/
-    // feeExecuted/expirationBlock — there's no override for them at all,
-    // by construction, since a real fingerprint must never depend on them.
-    expect(base).toEqual(fingerprintFor({ amount: 42n }))
+  it('is unaffected by the four fields Round 27 established mutate between source and attestation — nonce (12-44), finalityThresholdExecuted (144-148), feeExecuted (312-344), and expirationBlock (344-376) can each independently change with no effect on the hash', () => {
+    const genuine = buildCctpMessage({ amount: 42n })
+    const base = cctpMessageFingerprint(genuine)
+    for (const [start, end] of [[12, 44], [144, 148], [312, 344], [344, 376]]) {
+      // Flip a byte in the middle of the range, not just the first byte —
+      // proves the WHOLE range is sanitized, not just its leading byte.
+      const mid = start + Math.floor((end - start) / 2)
+      expect(cctpMessageFingerprint(flipByteAt(genuine, mid))).toBe(base)
+    }
+  })
+
+  /* Round 33 — the actual defect this redesign fixes. Round 32's own
+     allow-list still omitted sourceDomain, header sender, recipient,
+     destinationCaller, and minFinalityThreshold — corrupting any of them
+     produced NO change in the old fingerprint at all. Every one of these
+     now flips the hash, because the hash covers everything except the 4
+     established-mutable ranges above by construction, not by remembering
+     to name each field. */
+  describe('every immutable byte outside the 4 mutable ranges is covered — a single corrupted byte anywhere changes the hash', () => {
+    // version bytes (header offset 0, body offset 148) are deliberately
+    // excluded from this table — assertWellFormedCctpV2Message rejects a
+    // non-V2 version by THROWING before the hash is ever computed (see the
+    // hex well-formedness gate describe block below), not by silently
+    // producing a different hash, so they're a different behavior than
+    // every other byte in the message.
+    const genuine = buildCctpMessage({})
+    const base = cctpMessageFingerprint(genuine)
+    const cases = [
+      ['sourceDomain', 4],
+      ['destinationDomain', 8],
+      ['header sender', 44],
+      ['recipient — the field Round 32 omitted entirely', 76],
+      ['destinationCaller', 108],
+      ['minFinalityThreshold — the other field Round 32 omitted', 140],
+      ['burnToken', 152],
+      ['mintRecipient', 184],
+      ['amount', 216],
+      ['messageSender (body)', 248],
+      ['maxFee', 280],
+      ['hookData', 377]
+    ]
+    for (const [label, offset] of cases) {
+      it(`byte offset ${offset} (${label})`, () => {
+        expect(cctpMessageFingerprint(flipByteAt(genuine, offset))).not.toBe(base)
+      })
+    }
+  })
+
+  it('legitimate recipient variability across DIFFERENT destination domains is ordinary content, not a special case — two messages to different domains (and therefore different TokenMessengerV2-assigned recipients) simply hash differently, the same as any other differing field', () => {
+    const toDomainSix = buildCctpMessage({ destinationDomain: 6 })
+    const toDomainZero = buildCctpMessage({ destinationDomain: 0 })
+    expect(cctpMessageFingerprint(toDomainSix)).not.toBe(cctpMessageFingerprint(toDomainZero))
+  })
+
+  it('hex case does not affect the hash — the same bytes represented with uppercase hex digits fingerprint identically (hex parsing is case-insensitive; only the numeric byte value is hashed)', () => {
+    const message = buildCctpMessage({ burnToken: '0xABCDEF0123456789ABCDEF0123456789ABCDEF01' })
+    const shouted = '0x' + message.slice(2).toUpperCase()
+    expect(cctpMessageFingerprint(shouted)).toBe(cctpMessageFingerprint(message))
   })
 
   /* Round 32 (fixing the Round 31 review's Medium finding: "the complete
      message check doesn't validate the whole message", part a). The
      length/version checks alone only ever covered bytes this function
-     itself reads (through messageSender at 280, now through hookData) —
-     they never independently confirmed the STRING is well-formed hex
-     end-to-end. A non-hex byte anywhere the checks above don't happen to
-     touch could previously slip through with no throw at all. */
+     itself read (through messageSender at 280, in the old field-by-field
+     design) — they never independently confirmed the STRING is well-formed
+     hex end-to-end. A non-hex byte anywhere the checks above don't happen
+     to touch could previously slip through with no throw at all. Still
+     required under the Round 33 redesign: sanitizeCctpMessage's hexToBytes
+     call needs well-formed hex before it can zero the mutable ranges at
+     all. */
   describe('hex well-formedness gate', () => {
     it('throws on an odd-length hex string, even if long enough and version-correct otherwise', () => {
       const valid = buildCctpMessage({})
@@ -900,33 +935,14 @@ describe('cctpMessageFingerprint', () => {
       expect(() => cctpMessageFingerprint(oddLength)).toThrow(/not well-formed hex/)
     })
 
-    it('throws on a non-hex character anywhere in the string, including a byte range this function never explicitly reads', () => {
+    it('throws on a non-hex character anywhere in the string, including a byte range no named field reader ever directly touches', () => {
       const valid = buildCctpMessage({})
-      // byte 100 sits inside `recipient` (76-108) — a field cctpMessageFingerprint
-      // never names or reads directly, proving the well-formedness check is a
-      // blanket string-level gate, not a per-field one.
+      // byte 100 sits inside `recipient` (76-108) — proving the
+      // well-formedness check is a blanket string-level gate, not
+      // dependent on any particular field being read by name.
       const charIndex = 2 + 100 * 2 // "0x" prefix + byte offset -> hex char index
       const corrupted = valid.slice(0, charIndex) + 'zz' + valid.slice(charIndex + 2)
       expect(() => cctpMessageFingerprint(corrupted)).toThrow(/not well-formed hex/)
-    })
-
-    /* Codex's exact proof: a message valid through byte 280 (the OLD
-       fingerprint's read boundary) with a corrupted byte at 300 — inside
-       maxFee's 280-312 range, added to the fingerprint this same round —
-       previously produced a fingerprint with no throw at all. Verifies both
-       layers of the fix independently: replacing byte 300 with genuinely
-       non-hex characters is caught by the well-formedness gate above; this
-       specific test uses a still-valid-hex-but-WRONG byte at 300 instead, so
-       it only fails if the maxFee VALUE comparison (not just hex validity)
-       is what's actually catching it. */
-    it('regression: a message valid through byte 280 with a corrupted (but still hex) byte at 300 must fail the maxFee comparison, not silently produce a fingerprint that ignores it', () => {
-      const genuine = buildCctpMessage({ maxFee: 1_000_000n })
-      const charIndex = 2 + 300 * 2
-      // Flip byte 300 to a different, but still valid, hex byte pair.
-      const originalByte = genuine.slice(charIndex, charIndex + 2)
-      const corruptedByte = originalByte === 'ff' ? '00' : 'ff'
-      const corrupted = genuine.slice(0, charIndex) + corruptedByte + genuine.slice(charIndex + 2)
-      expect(cctpMessageFingerprint(corrupted).maxFee).not.toBe(cctpMessageFingerprint(genuine).maxFee)
     })
   })
 })
@@ -937,7 +953,13 @@ describe('cctpMessageFingerprint', () => {
    nullable (decode failure), so this now derives the Iris-side fingerprint
    directly from irisMessage.message (raw hex) via cctpMessageFingerprint —
    the same byte-offset parser the receipt-side fingerprint uses — instead
-   of depending on Iris's optional decoded convenience object at all. */
+   of depending on Iris's optional decoded convenience object at all.
+
+   Round 33: cctpMessageFingerprint is now a sanitized-message hash, not a
+   field object — most of the "rejects a mismatched X" tests below need no
+   changes at all (a differing message still hashes differently, whatever
+   field the difference is in), which is itself evidence the redesign is
+   strictly more general than the allow-list it replaced. */
 describe('irisMessageMatchesFingerprint', () => {
   const destinationDomain = 6
   const burnToken = '0x1111111111111111111111111111111111111111'
@@ -1007,6 +1029,17 @@ describe('irisMessageMatchesFingerprint', () => {
     const withHookData = fingerprintFor({ destinationDomain, burnToken, mintRecipient, amount, bodySender, hookData: hexZeros(32) })
     const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender, hookData: CCTP_FORWARD_HOOK_HEX }) })
     expect(irisMessageMatchesFingerprint(wrong, withHookData)).toBe(false)
+  })
+
+  /* Round 33 — the actual defect this redesign fixes. Round 32's own
+     allow-list never compared the header's `recipient` field (absolute
+     76-108) at all — buildCctpMessage in this file has no override for it
+     (it's always zeroed), so this corrupts it directly by byte offset,
+     which the field-object design could never have caught regardless of
+     what value it held. */
+  it('rejects a corrupted recipient (header, byte 76) — a field the pre-Round-33 allow-list never compared at all', () => {
+    const corruptedRecipient = irisEntry({ message: flipByteAt(realMessage, 76) })
+    expect(irisMessageMatchesFingerprint(corruptedRecipient, fp)).toBe(false)
   })
 
   it('regression (Round 29 review Medium finding): succeeds when decodedMessage is null but the raw message field is present and genuinely matches — Iris\'s convenience decode failing must not misclassify a real, correct message as a mismatch', () => {

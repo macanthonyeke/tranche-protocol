@@ -171,37 +171,35 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
 // longer trusts decodedMessage/decodedMessageBody (both explicitly nullable
 // per Circle's real schema) and instead derives the Iris-side fingerprint
 // directly from these raw bytes, the same way the receipt-side fingerprint
-// is derived. The default reuses buildCctpMessage() with the SAME
-// destinationDomain/bodySender this fixture represents so a genuinely
-// matching burn decodes to a genuinely matching fingerprint; decodedMessage/
-// decodedMessageBody are kept below only because useCctpDelivery's parsed
-// `destinationDomain` display field still reads decodedMessage.destinationDomain
-// separately (cosmetic, not part of the identity check).
+// is derived. decodedMessage.destinationDomain is kept below only because
+// useCctpDelivery's parsed `destinationDomain` display field still reads it
+// as a fallback (cosmetic, not part of the identity check).
+//
+// Round 33: decodedMessage.decodedMessageBody dropped entirely — it used to
+// mirror the old field-object fingerprint's burnToken/mintRecipient/amount/
+// messageSender, none of which exist anymore now that cctpMessageFingerprint
+// returns a single hash (and nothing in useCctpDelivery ever read
+// decodedMessageBody in the first place — only decodedMessage.destinationDomain).
+// Round 33: a genuinely well-formed attestation — 65 bytes (one ECDSA
+// signature) — not the old '0xattestation' placeholder, which reads as
+// plausible English but is not valid hex ('t' is not a hex digit) and would
+// now fail useCctpDelivery's own isWellFormedAttestation check.
+const REAL_ATTESTATION = '0x' + '11'.repeat(65)
+
 const irisMessage = ({
   destinationDomain = 6,
   forwardState = 'COMPLETE',
   bodySender = CONTRACT_ADDRESS,
   message = buildCctpMessage({ destinationDomain, bodySender })
-} = {}) => {
-  const fp = cctpMessageFingerprint(buildCctpMessage({ destinationDomain, bodySender }))
-  return {
-    message,
-    attestation: '0xattestation',
-    status: 'complete',
-    decodedMessage: {
-      destinationDomain: String(destinationDomain),
-      decodedMessageBody: {
-        burnToken: fp.burnToken,
-        mintRecipient: fp.mintRecipient,
-        amount: fp.amount,
-        messageSender: fp.messageSender
-      }
-    },
-    forwardState,
-    forwardTxHash: '0xdesttx',
-    forwardErrorCode: null
-  }
-}
+} = {}) => ({
+  message,
+  attestation: REAL_ATTESTATION,
+  status: 'complete',
+  decodedMessage: { destinationDomain: String(destinationDomain) },
+  forwardState,
+  forwardTxHash: '0xdesttx',
+  forwardErrorCode: null
+})
 
 const setReceipt = (value) => { receiptMock.current = value }
 
@@ -434,7 +432,7 @@ describe('Round 31: decodedMessage: null must not degrade self-relay recovery to
     })
     fetchIrisMessages.mockResolvedValue([{
       message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
-      attestation: '0xattestation',
+      attestation: REAL_ATTESTATION,
       status: 'complete',
       decodedMessage: null,
       forwardState: 'FAILED',

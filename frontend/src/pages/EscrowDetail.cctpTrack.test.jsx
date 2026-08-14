@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
    exactly what keeps the tracker (and the other leg's recovery card)
    alive. */
 import { shouldClearCctpTrack, readCctpTrack } from './EscrowDetail.jsx'
-import { cctpTrackKey } from '../utils/irisDelivery.js'
+import { cctpTrackKey, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
 import { CONTRACT_ADDRESS } from '../config/contract.js'
 
 const complete = (overrides = {}) => ({ forwardState: 'COMPLETE', destinationDomain: 6, ...overrides })
@@ -51,29 +51,59 @@ describe('shouldClearCctpTrack', () => {
   })
 })
 
-/* readCctpTrack — Round 27 (fixing the Round 26 review's Medium finding).
+/* readCctpTrack -- Round 27 (fixing the Round 26 review's Medium finding).
 
    The old design let a malformed/legacy localStorage record (Round 26's
    raw-hex expectedMessages array, or the earlier Round 22 bare numeric
    count) fall all the way through to CrossChainDelivery's render site,
    where Array.isArray(...) ? ... : undefined turned it into "no identity
-   constraint at all" for the record's remaining 24h lifetime — the exact
+   constraint at all" for the record's remaining 24h lifetime -- the exact
    unfiltered-Iris gap Round 26 as a whole was built to close, reopened by
    its own legacy data. readCctpTrack now validates the shape itself and
    discards anything unusable, the same way it already discards an aged-out
-   record — so it returns null exactly like "no local record", and
+   record -- so it returns null exactly like "no local record", and
    MilestoneRow's existing `!cctpTrack` fallback to FallbackCrossChainDelivery
    naturally reverifies from the receipt instead of ever handing out a
-   record with no usable ordinal data. */
+   record with no usable ordinal data.
+
+   Round 33 (fixing the Round 32 review's Medium finding: "shape validation
+   doesn't reject every prior fingerprint shape" -- this exact bug's third
+   recurrence, after Round 26->27's legacy expectedMessages array and Round
+   32 itself shipping a new 7-field fingerprint shape with no matching
+   isValidCctpTrackRecord update at all). A record's own shapeVersion
+   (CCTP_TRACK_SHAPE_VERSION, irisDelivery.js) is now checked FIRST, before
+   any other field -- so every test below that exercises a SPECIFIC
+   coherence rule (ordinal range, ts, fingerprint shape, ...) builds its
+   fixture via validRecord() to keep shapeVersion correct, proving that
+   rule is what actually causes the rejection rather than relying on the
+   version check to reject it first for an unrelated reason. The dedicated
+   "old shapes" describe block below tests the version gate itself,
+   including each specific prior shape by name. */
 describe('readCctpTrack', () => {
   const ESCROW_ID = 7
   const MILESTONE_INDEX = 1
   const KEY = cctpTrackKey(ESCROW_ID, MILESTONE_INDEX)
-  // Round 29: a real tx hash shape — isValidCctpTrackRecord now checks this.
+  // Round 29: a real tx hash shape -- isValidCctpTrackRecord now checks this.
   const REAL_TX_HASH = '0x' + '1234abcd'.repeat(8)
-  // Round 29: a valid cctpMessageFingerprint shape — a well-formed record
-  // now requires one per ordinal.
-  const FINGERPRINT = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
+  // Round 33: a fingerprint is now a single keccak256-shaped hash string --
+  // 0x + 64 hex chars -- not an object of individually-chosen fields.
+  const FINGERPRINT = '0x' + '1'.repeat(64)
+  const OTHER_FINGERPRINT = '0x' + '2'.repeat(64)
+
+  // Round 33: a well-formed CURRENT-shape record carrying every field a
+  // real write site (EscrowDetail.jsx x2, ArbiterPanel.jsx) persists.
+  // Individual tests override only the field they're exercising, so a test
+  // failure points at the ONE rule that changed, not "shapeVersion also
+  // happened to be missing".
+  const validRecord = (overrides = {}) => ({
+    shapeVersion: CCTP_TRACK_SHAPE_VERSION,
+    txHash: REAL_TX_HASH,
+    ts: Date.now(),
+    expectedOrdinals: [0],
+    expectedTotalMessages: 1,
+    expectedFingerprints: [FINGERPRINT],
+    ...overrides
+  })
 
   afterEach(() => {
     localStorage.clear()
@@ -83,166 +113,215 @@ describe('readCctpTrack', () => {
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
   })
 
-  it('returns a well-formed Round 29 record unchanged', () => {
-    const record = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, FINGERPRINT] }
+  it('returns a well-formed current-shape record unchanged', () => {
+    const record = validRecord({ expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
     localStorage.setItem(KEY, JSON.stringify(record))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(record)
   })
 
   it('discards and removes an aged-out record (older than 24h), same as before this round', () => {
-    const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
+    const record = validRecord({ ts: Date.now() - 25 * 60 * 60 * 1000 })
     localStorage.setItem(KEY, JSON.stringify(record))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('discards and removes a Round 26 legacy record — expectedMessages (raw hex array), no expectedOrdinals at all — rather than treating it as usable', () => {
-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
-    localStorage.setItem(KEY, JSON.stringify(legacy))
-    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
-    expect(localStorage.getItem(KEY)).toBeNull()
-  })
-
-  it('discards and removes a pre-Round-26 legacy record — expectedMessages as a bare numeric count — rather than treating it as usable', () => {
-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: 2 }
-    localStorage.setItem(KEY, JSON.stringify(legacy))
-    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
-    expect(localStorage.getItem(KEY)).toBeNull()
-  })
-
   it('discards a record whose expectedOrdinals is an array but expectedTotalMessages is missing/non-numeric', () => {
-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0] }
+    const malformed = validRecord({ expectedTotalMessages: undefined })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  // Round 28 — coherence, not just shape. A record can be the right TYPES
+  // Round 28 -- coherence, not just shape. A record can be the right TYPES
   // (array, number) and still be nonsense: empty, out of range, negative,
   // fractional, or duplicated. Any of these would previously pass through to
   // useCctpDelivery, which has no way to detect an incoherent ordinal set on
   // its own.
-  it('discards a vacuous record — expectedOrdinals empty, expectedTotalMessages zero', () => {
-    const vacuous = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
+  it('discards a vacuous record -- expectedOrdinals empty, expectedTotalMessages zero', () => {
+    const vacuous = validRecord({ expectedOrdinals: [], expectedTotalMessages: 0, expectedFingerprints: [] })
     localStorage.setItem(KEY, JSON.stringify(vacuous))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with an out-of-range ordinal (ordinal 3 against a total of 2)', () => {
-    const outOfRange = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
+    const outOfRange = validRecord({ expectedOrdinals: [1, 3], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
     localStorage.setItem(KEY, JSON.stringify(outOfRange))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a negative ordinal', () => {
-    const negative = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
+    const negative = validRecord({ expectedOrdinals: [-1], expectedTotalMessages: 2 })
     localStorage.setItem(KEY, JSON.stringify(negative))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a fractional ordinal', () => {
-    const fractional = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
+    const fractional = validRecord({ expectedOrdinals: [0.5], expectedTotalMessages: 2 })
     localStorage.setItem(KEY, JSON.stringify(fractional))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a duplicate ordinal', () => {
-    const duplicate = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
+    const duplicate = validRecord({ expectedOrdinals: [0, 0], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
     localStorage.setItem(KEY, JSON.stringify(duplicate))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  // Round 29 — Medium finding (fingerprints): a pre-Round-29 legacy record
-  // has no expectedFingerprints at all — discarded the same way Round 27's
-  // own legacy shapes are, so readCctpTrack returns null and the fallback
-  // reverifies from the receipt instead of trusting a record with nothing
-  // to check ordinal-selected Iris entries against.
+  // Round 29 -- Medium finding (fingerprints): a record with no
+  // expectedFingerprints at all, or a length mismatch against
+  // expectedOrdinals, is discarded rather than trusted with nothing to
+  // check ordinal-selected Iris entries against.
   it('discards a record missing expectedFingerprints entirely', () => {
-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
-    localStorage.setItem(KEY, JSON.stringify(legacy))
+    const missing = validRecord({ expectedFingerprints: undefined })
+    localStorage.setItem(KEY, JSON.stringify(missing))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record whose expectedFingerprints length does not match expectedOrdinals', () => {
-    const mismatched = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] }
+    const mismatched = validRecord({ expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] })
     localStorage.setItem(KEY, JSON.stringify(mismatched))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('discards a record with a malformed fingerprint (bad address shape)', () => {
-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, burnToken: 'not-an-address' }] }
+  it('discards a record with a malformed fingerprint (not a hex string at all)', () => {
+    const malformed = validRecord({ expectedFingerprints: [12345] })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('discards a record with a malformed fingerprint (non-numeric amount)', () => {
-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, amount: '12.5' }] }
+  it('discards a record with a malformed fingerprint (right prefix, wrong length -- not a genuine 32-byte hash)', () => {
+    const malformed = validRecord({ expectedFingerprints: ['0x1234'] })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('discards a record with a malformed fingerprint (negative destinationDomain)', () => {
-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, destinationDomain: -1 }] }
+  it('discards a record with a malformed fingerprint (non-hex characters)', () => {
+    const malformed = validRecord({ expectedFingerprints: ['0x' + 'zz'.repeat(32)] })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  // Round 29 — Medium finding: a valid-shaped record wasn't actually bound
+  // Round 29 -- Medium finding: a valid-shaped record wasn't actually bound
   // to its context. isValidCctpTrackRecord checked types/ranges but not
   // whether txHash is a real tx hash shape, or whether ts is finite/past.
   it('discards a record with an empty-string txHash', () => {
-    const malformed = { txHash: '', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
+    const malformed = validRecord({ txHash: '' })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a malformed txHash (right prefix, wrong length)', () => {
-    const malformed = { txHash: '0xdeadbeef', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
+    const malformed = validRecord({ txHash: '0xdeadbeef' })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a txHash missing the 0x prefix', () => {
-    const malformed = { txHash: REAL_TX_HASH.slice(2), ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
+    const malformed = validRecord({ txHash: REAL_TX_HASH.slice(2) })
     localStorage.setItem(KEY, JSON.stringify(malformed))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
   it('discards a record with a future timestamp', () => {
-    const future = { txHash: REAL_TX_HASH, ts: Date.now() + 24 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
+    const future = validRecord({ ts: Date.now() + 24 * 60 * 60 * 1000 })
     localStorage.setItem(KEY, JSON.stringify(future))
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  it('discards a record with a non-finite ts (a JSON number literal large enough to overflow to Infinity — valid JSON syntax, but typeof "number" alone would have let it through)', () => {
-    localStorage.setItem(KEY, `{"txHash":"${REAL_TX_HASH}","ts":1e400,"expectedOrdinals":[0],"expectedTotalMessages":1}`)
+  it('discards a record with a non-finite ts (a JSON number literal large enough to overflow to Infinity -- valid JSON syntax, but typeof "number" alone would have let it through)', () => {
+    localStorage.setItem(KEY, `{"shapeVersion":${CCTP_TRACK_SHAPE_VERSION},"txHash":"${REAL_TX_HASH}","ts":1e400,"expectedOrdinals":[0],"expectedTotalMessages":1,"expectedFingerprints":["${FINGERPRINT}"]}`)
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
   })
 
-  it('returns null and removes the entry on unparseable JSON — discarded the same way as any other invalid record, not left behind', () => {
+  it('returns null and removes the entry on unparseable JSON -- discarded the same way as any other invalid record, not left behind', () => {
     localStorage.setItem(KEY, 'not json')
     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
     expect(localStorage.getItem(KEY)).toBeNull()
   })
 
-  // Round 29 — Medium finding: readCctpTrack's own catch block called
+  /* Round 33 (fixing the Round 32 review's Medium finding: "shape
+     validation doesn't reject every prior fingerprint shape"). Each of
+     these builds a record in a SPECIFIC prior shape this app has actually
+     persisted at some point in its history, not just "some invalid
+     object" -- a future round changing the shape again has a concrete
+     pattern to extend: add the new shape here, confirm it's rejected,
+     confirm the CURRENT shape (already covered above) still round-trips. */
+  describe('rejects every prior fingerprint/record shape, not just the immediately-prior one', () => {
+    it('rejects the original Round 29 5-field fingerprint-object shape (destinationDomain/burnToken/mintRecipient/amount/messageSender, no maxFee/hookData, no shapeVersion at all)', () => {
+      const legacyFingerprint = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
+      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [legacyFingerprint] }
+      localStorage.setItem(KEY, JSON.stringify(legacy))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects the Round 32 7-field fingerprint-object shape (adds maxFee/hookData to the Round 29 object, still no shapeVersion) -- the exact shape that shipped without a matching validator update, reopening the fingerprint-mismatch trap this fix closes', () => {
+      const round32Fingerprint = {
+        destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40),
+        amount: '100', messageSender: '0x' + '3'.repeat(40), maxFee: '200000', hookData: '0x' + '0'.repeat(64)
+      }
+      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [round32Fingerprint] }
+      localStorage.setItem(KEY, JSON.stringify(legacy))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects the Round 26 legacy record -- expectedMessages (raw hex array), no expectedOrdinals or shapeVersion at all', () => {
+      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
+      localStorage.setItem(KEY, JSON.stringify(legacy))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects the pre-Round-26 legacy record -- expectedMessages as a bare numeric count', () => {
+      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: 2 }
+      localStorage.setItem(KEY, JSON.stringify(legacy))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects a record with the CURRENT field shape (hash-string fingerprints) but a MISSING shapeVersion -- proves the version gate itself is what is enforced, independent of every other field being otherwise well-formed', () => {
+      const noVersion = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [FINGERPRINT] }
+      localStorage.setItem(KEY, JSON.stringify(noVersion))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects a record with the CURRENT field shape but a WRONG shapeVersion (e.g. a stale "1", the version that would have preceded this round\'s "2")', () => {
+      const wrongVersion = validRecord({ shapeVersion: CCTP_TRACK_SHAPE_VERSION - 1 })
+      localStorage.setItem(KEY, JSON.stringify(wrongVersion))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+
+    it('rejects a record with the CORRECT shapeVersion but old-style object fingerprints -- shapeVersion alone is not a substitute for still validating every field; both must hold', () => {
+      const legacyFingerprint = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
+      const mixed = validRecord({ expectedFingerprints: [legacyFingerprint] })
+      localStorage.setItem(KEY, JSON.stringify(mixed))
+      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+      expect(localStorage.getItem(KEY)).toBeNull()
+    })
+  })
+
+  // Round 29 -- Medium finding: readCctpTrack's own catch block called
   // localStorage.removeItem unguarded. If localStorage itself is throwing
   // (privacy settings, a SecurityError on a denied origin), that removeItem
-  // could throw a SECOND time and escape the catch entirely — readCctpTrack
+  // could throw a SECOND time and escape the catch entirely -- readCctpTrack
   // runs inside MilestoneRow's useState initializer, so an escaped throw
   // there breaks render, not just the tracker. Now routed through
   // safeStorage, which swallows internally at every step.
@@ -260,7 +339,7 @@ describe('readCctpTrack', () => {
     })
 
     it('does not throw when the record is aged-out AND removeItem itself throws', () => {
-      const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
+      const record = validRecord({ ts: Date.now() - 25 * 60 * 60 * 1000 })
       localStorage.setItem(KEY, JSON.stringify(record))
       vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
         throw new DOMException('denied', 'SecurityError')
@@ -279,9 +358,9 @@ describe('readCctpTrack', () => {
     })
   })
 
-  // Round 29 — Medium finding: cctpTrackKey namespaced only by
+  // Round 29 -- Medium finding: cctpTrackKey namespaced only by
   // escrowId+milestoneIndex, not by deployment. A redeploy (routine in this
-  // repo — see CLAUDE.md's deployment history) reuses the same escrow ID
+  // repo -- see CLAUDE.md's deployment history) reuses the same escrow ID
   // space from scratch, so a coherent-looking leftover record from a
   // PREVIOUS contract's escrow #7 milestone #1 would collide on the exact
   // same key as the current contract's own escrow #7 milestone #1.
@@ -297,16 +376,16 @@ describe('readCctpTrack', () => {
       const otherDeploymentKey = KEY.replace(CONTRACT_ADDRESS.toLowerCase(), '0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead')
       expect(otherDeploymentKey).not.toBe(KEY)
 
-      const otherDeploymentRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
+      const otherDeploymentRecord = validRecord()
       localStorage.setItem(otherDeploymentKey, JSON.stringify(otherDeploymentRecord))
 
-      // Nothing under the CURRENT deployment's key yet — the other
+      // Nothing under the CURRENT deployment's key yet -- the other
       // deployment's record must not leak into this read.
       expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
 
       // Writing the CURRENT deployment's own record still works normally,
       // independent of the other key's presence.
-      const ownRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] }
+      const ownRecord = validRecord({ expectedOrdinals: [1], expectedTotalMessages: 2 })
       localStorage.setItem(KEY, JSON.stringify(ownRecord))
       expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(ownRecord)
       // The other deployment's key is untouched by that read.

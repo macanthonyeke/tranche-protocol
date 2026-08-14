@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
 import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
 import { safeSetItem } from '../utils/safeStorage.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
@@ -265,7 +265,7 @@ function DisputeBlock({ detail, index, refetch }) {
         // actually worked.
         safeSetItem(
           cctpTrackKey(detail.id, index),
-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
         )
       }
     }
