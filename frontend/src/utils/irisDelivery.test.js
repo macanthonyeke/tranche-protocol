@@ -827,14 +827,14 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
   })
 })
 
-/* cctpMessageFingerprint — Round 29.
-   Extracts exactly the four IMMUTABLE fields (destinationDomain, burnToken,
-   mintRecipient, amount) plus the already-verified messageSender — never
-   nonce, finalityThresholdExecuted, feeExecuted, or expirationBlock, the
-   four Round 27 established DO mutate between the source-side log and
-   Iris's attested response.
-   Round 32: maxFee and hookData added — also confirmed immutable, see
-   cctpMessageFingerprint's own doc comment in irisDelivery.js. */
+/* cctpMessageFingerprint — Round 29, redesigned Round 33.
+   No longer a named field list. Hashes every byte of the sanitized message
+   EXCEPT the 4 mutable ranges Round 27 established DO change between the
+   source-side log and Iris's attested response — nonce, finalityThreshold-
+   Executed, feeExecuted, and expirationBlock — so any other byte changing
+   (including fields a field-list design could forget to name) flips the
+   hash by construction. See cctpMessageFingerprint's own doc comment in
+   irisDelivery.js for the full redesign rationale. */
 // Round 33: flips a single byte (by absolute offset) in an otherwise-valid
 // message and returns the corrupted hex string — used throughout the
 // redesigned describe block below to prove a given byte range DOES or DOES

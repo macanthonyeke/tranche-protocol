@@ -151,10 +151,11 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
   // both real optional-by-design values) — it means the response doesn't
   // match Circle's documented, required schema at all, which is itself
   // anomalous and worth failing closed on. This field is also the ONLY
-  // transaction-unique value available here: cctpMessageFingerprint's five
-  // fields (destinationDomain/burnToken/mintRecipient/amount/messageSender)
-  // can be byte-identical across two genuinely different transactions (e.g.
-  // the same payer re-sending the same amount to the same recipient), so
+  // transaction-unique value available here: cctpMessageFingerprint (Round
+  // 33: a hash of every byte except the 4 established-mutable ranges, not a
+  // named field list) can still be byte-identical across two genuinely
+  // different transactions (e.g. the same payer re-sending the same amount
+  // to the same recipient), so
   // sourceTxHash is what actually distinguishes them — permissive-on-absence
   // would reopen exactly the substitution gap this check exists to close.
   //
