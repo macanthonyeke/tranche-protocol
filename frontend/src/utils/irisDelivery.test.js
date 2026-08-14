@@ -906,7 +906,14 @@ describe('cctpMessageFingerprint', () => {
     }
   })
 
-  it('legitimate recipient variability across DIFFERENT destination domains is ordinary content, not a special case — two messages to different domains (and therefore different TokenMessengerV2-assigned recipients) simply hash differently, the same as any other differing field', () => {
+  // NOTE: buildCctpMessage always zeros the `recipient` word (76-108) — it
+  // takes no `recipient` param — so this test varies only destinationDomain,
+  // not recipient. Recipient-byte coverage is proven separately by the
+  // byte-offset-76 case in the systematic table above; this test's job is
+  // narrower: showing that ordinary destinationDomain variation between two
+  // otherwise-identical messages is unremarkable, hash-changing content, not
+  // a case requiring special handling.
+  it('legitimate destinationDomain variability is ordinary content, not a special case — two otherwise-identical messages to different destination domains simply hash differently, the same as any other differing field', () => {
     const toDomainSix = buildCctpMessage({ destinationDomain: 6 })
     const toDomainZero = buildCctpMessage({ destinationDomain: 0 })
     expect(cctpMessageFingerprint(toDomainSix)).not.toBe(cctpMessageFingerprint(toDomainZero))
