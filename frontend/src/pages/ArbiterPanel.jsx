@@ -11,16 +11,17 @@ import Skeleton from '../components/Skeleton.jsx'
 import WalletButton from '../components/WalletButton.jsx'
 import { useRoles } from '../hooks/useRoles.jsx'
 import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick, useEscrowInvoice } from '../hooks/useEscrows.js'
-import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
+import InvoiceCard from '../components/InvoiceCard.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { useToast } from '../hooks/useToast.jsx'
-import { resolveMaxFee } from '../utils/cctpFee.js'
+import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
+import { safeSetItem } from '../utils/safeStorage.js'
 import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
 import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
 import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+import { CONTRACT_ADDRESS } from '../config/contract.js'
 
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
@@ -205,6 +206,14 @@ function DisputeBlock({ detail, index, refetch }) {
   const e = detail.escrow
   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
   const [resolveTxHash, setResolveTxHash] = useState(null)
+  const [resolveOrdinals, setResolveOrdinals] = useState(null)
+  const [resolveTotalMessages, setResolveTotalMessages] = useState(null)
+  const [resolveFingerprints, setResolveFingerprints] = useState(null)
+
+  // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
+  // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
+  // used to read independently.
+  const trackingDomain = resolveTrackingDomain(e, detail.splits)
 
   // Single ARBITER_WINDOW read from the contract rather than hardcoding 14d.
   const windowSecs = arbiterWindow
@@ -216,17 +225,52 @@ function DisputeBlock({ detail, index, refetch }) {
   // so the contract's timeout fallback settles it as a fixed 50/50 split.
   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
 
-  const handleResolve = useCallback((txHash) => {
-    if (txHash && Number(e.destinationDomain) !== ARC_DOMAIN) {
-      setResolveTxHash(txHash)
-      // Also persist to localStorage so EscrowDetail picks it up on other devices.
-      localStorage.setItem(
-        cctpTrackKey(detail.id, index),
-        JSON.stringify({ txHash, domain: e.destinationDomain, ts: Date.now() })
-      )
+  // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
+  // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
+  // escrow/split CONFIGURED for cross-chain" — a resolveDispute ruling can
+  // execute while rounding every share to zero or diverting every
+  // cross-chain leg to an Arc credit, with no CCTP message ever created.
+  // Receives the full confirmed receipt now (see ResolveForm's own tx
+  // below), not a broadcast-time txHash string — the same
+  // broadcast-vs-mined gap Round 21 Phase D already closed for mutualSettle.
+  // resolveDisputeByTimeout's own onConfirmed still calls this with `null`
+  // (it never goes cross-chain at all, TrancheProtocol.sol:596/:614 —
+  // both halves always become Arc refund credits), which correctly no-ops
+  // here without needing a receipt to prove that.
+  //
+  // Round 26 finding 3: milestone-scoped and authenticity-verified, not
+  // just "a real MessageSent exists somewhere in this receipt" — Circle
+  // wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack
+  // a foreign UserOperation's logs into the same receipt. detail.id/index
+  // are already in scope — no discovery needed, unlike the fallback path.
+  const handleResolve = useCallback((receipt) => {
+    if (receipt) {
+      const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
+      if (emitted) {
+        setResolveTxHash(receipt.transactionHash)
+        setResolveOrdinals(ordinals)
+        setResolveTotalMessages(totalMessages)
+        setResolveFingerprints(fingerprints)
+        // Also persist to localStorage so EscrowDetail picks it up on other
+        // devices. Round 20 Phase D: no `domain` field — no reader ever
+        // consumed it (both this component and EscrowDetail's MilestoneRow
+        // recompute the domain live from escrow/splits), and a single stored
+        // domain couldn't represent a mixed split's several real per-message
+        // domains anyway. useCctpDelivery gets its per-message domains from
+        // Iris directly once it has the txHash.
+        //
+        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
+        // `messages` array Round 26 persisted here — see useCctpDelivery's
+        // own doc comment for why content matching against Iris never
+        // actually worked.
+        safeSetItem(
+          cctpTrackKey(detail.id, index),
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+        )
+      }
     }
     refetch()
-  }, [e.destinationDomain, detail.id, index, refetch])
+  }, [detail.id, index, refetch])
 
   return (
     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
@@ -283,6 +327,7 @@ function DisputeBlock({ detail, index, refetch }) {
         id={detail.id} index={index}
         escrow={e}
         milestone={m}
+        splits={detail.splits}
         bpsDenominator={bpsDenominator}
         onResolved={handleResolve}
         canTimeout={canTimeout}
@@ -290,10 +335,13 @@ function DisputeBlock({ detail, index, refetch }) {
         timeoutOutcome={timeoutOutcome}
       />
 
-      {resolveTxHash && Number(e.destinationDomain) !== ARC_DOMAIN && (
+      {resolveTxHash && trackingDomain != null && (
         <ArbiterDeliveryStatus
           txHash={resolveTxHash}
-          destinationDomain={e.destinationDomain}
+          isCrossChain={trackingDomain != null}
+          expectedOrdinals={resolveOrdinals}
+          expectedTotalMessages={resolveTotalMessages}
+          expectedFingerprints={resolveFingerprints}
         />
       )}
     </li>
@@ -318,38 +366,76 @@ function Side({ label, who, when, reason, uri }) {
   )
 }
 
+const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
+
 /* Shown in the arbiter's DisputeBlock after resolveDispute confirms cross-chain.
-   Polls Iris so the arbiter can confirm the payment was forwarded. */
-function ArbiterDeliveryStatus({ txHash, destinationDomain }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
-  const chainName = getDomainName(destinationDomain)
+   Polls Iris so the arbiter can confirm the payment was forwarded.
+
+   Round 20 Phase D: renders each CCTP message in `deliveries` independently
+   by its OWN forwardState/destinationDomain, instead of gating the whole
+   block on one aggregate `phase` string — see EscrowDetail.jsx's
+   CrossChainDelivery for the full citation trail on why a single collapsed
+   phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+   leg in the same mixed split failed. */
+// Round 32: exported so ArbiterDeliveryStatus can be rendered and tested
+// directly against a controlled `deliveries` fixture (mocking
+// useCctpDelivery), the same pattern EscrowDetail.jsx's CrossChainDelivery
+// already uses — see EscrowDetail.crossChainDelivery.test.jsx.
+export function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
 
   if (phase === 'idle') return null
 
   return (
     <div className="flex flex-col gap-1.5 pt-2 border-t border-rule mt-1">
-      {phase === 'polling' && (
+      {phase === 'polling' && deliveries.length === 0 && (
         <div className="flex items-center gap-2 text-[12px] text-ink-2">
           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
-          Delivering to {chainName}…
+          Delivering…
         </div>
       )}
-      {phase === 'delivered' && deliveries.map((d, i) => {
-        const url = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+      {deliveries.map((d, i) => {
+        const chainName = domainLabel(d.destinationDomain)
+        if (d.forwardState === 'COMPLETE') {
+          const url = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
+          return (
+            <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
+              <span>✓ Delivered to {chainName}</span>
+              {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
+            </div>
+          )
+        }
+        if (d.forwardState === 'FAILED') {
+          // Round 32 (Low finding): this unconditionally blamed a low
+          // forwarding fee for EVERY FAILED delivery, regardless of
+          // errorCode — misleading for any other failure reason Circle's
+          // forwardErrorCode might report. EscrowDetail.jsx's equivalent UI
+          // (errorIsInsufficientFee) already conditions this copy correctly;
+          // matching that pattern here.
+          const errorIsInsufficientFee = d.errorCode === 'INSUFFICIENT_FEE'
+          return (
+            <p key={i} className="text-[12px] text-warn">
+              {errorIsInsufficientFee
+                ? `Delivery to ${chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.`
+                : `Delivery to ${chainName} failed. The recipient should self-relay via the escrow detail page.`}
+            </p>
+          )
+        }
         return (
-          <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
-            <span>✓ Delivered to {chainName}</span>
-            {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
+          <div key={i} className="flex items-center gap-2 text-[12px] text-ink-2">
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+            Delivering to {chainName}…
           </div>
         )
       })}
-      {phase === 'failed' && (
-        <p className="text-[12px] text-warn">
-          Delivery failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
-        </p>
-      )}
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable.</p>
+      )}
+      {/* Round 29 (Low finding) — same distinct treatment as
+          EscrowDetail.jsx's CrossChainDelivery: 2+ minutes of the identical
+          inconsistent state, not ordinary polling latency. */}
+      {phase === 'stale' && (
+        <p className="text-[12px] text-warn">Delivery status hasn't changed in over 2 minutes — still checking.</p>
       )}
     </div>
   )
@@ -423,23 +509,479 @@ function EvidenceHashRow({ label, hash }) {
   )
 }
 
-function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
+/* Where each half of a timeout settlement lands.
+ *
+ * Deliberately NOT EscrowDetail's payoutLines(): that one describes a CCTP
+ * payout ("Paid on: Base"), and a timeout settlement never routes through
+ * CCTP. Both halves become Arc refund credits regardless of the escrow's
+ * destinationDomain (TrancheProtocol.sol:596, :614), so borrowing that helper
+ * would name a chain the money never reaches.
+ *
+ * Split escrows fan the freelancer's half across the split legs, credited to
+ * each leg's decoded Arc address. The proportional/last-absorbs-dust mechanics
+ * and the SE-4 non-EVM caveat are real but belong in the docs, not on a
+ * signing screen — same level of abstraction as Round 1's split handling. */
+export function timeoutCreditLines(escrow, splits) {
+  return [
+    ...(splits?.length > 0
+      // Round 16 #1: found via the same grep #4 asked for, not itself named
+      // in scope, but the identical shape — "divided across N split
+      // recipients" is an outcome claim the very next line's exception
+      // already contradicts. Not every configured recipient necessarily
+      // gets something: the credit loop is guarded by `share > 0` (:608),
+      // so a leg whose proportional share rounds down to zero is skipped
+      // entirely. Reframed around the CONFIGURATION, same as payoutLines
+      // and resolveDisputeConfirm's split branches.
+      ? [
+        `${splits.length} configured split entries, by their configured percentages`,
+        'A recipient whose share rounds down to zero is credited nothing.'
+      ]
+      : [`Freelancer's share goes to ${escrow.recipient}`]),
+    `Payer's share goes to ${escrow.refundTo}`
+  ]
+}
+
+/* The 50/50 shares, mirroring TrancheProtocol.sol:576-578 exactly — including
+   the remainder. recipientShare rounds down and depositorShare is the
+   subtraction, so on an odd amount the payer absorbs the odd base unit and the
+   two shares always sum to the milestone amount.
+ *
+ * Split out and exported because that invariant cannot be checked through the
+ * rendered copy: the remainder is at most one base unit (0.000001 USDC) and
+ * formatUSDC rounds to two decimals, so both a correct implementation and a
+ * naive amount/2 print the same string. */
+export function timeoutShares(amount, bpsDenominator) {
+  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
+  const recipientShare = (amount * 5000n) / denom
+  return { recipientShare, depositorShare: amount - recipientShare }
+}
+
+/* VALUE-MOVING. resolveDisputeByTimeout is the contract's automatic fallback
+   for a dispute no arbiter ruled on within ARBITER_WINDOW (14 days). It is
+   permissionless and takes no caller input: defaultBps is hardcoded to 5000
+   (TrancheProtocol.sol:576).
+
+   Two things the copy has to keep apart, because the same panel offers both
+   and they are easy to conflate — the arbiter's discretionary resolve (a
+   percentage the arbiter chooses, settled via CCTP) and this, a fixed 50/50
+   that nobody chooses and that never leaves Arc. Whoever signs this may not
+   be the arbiter at all.
+
+   Gross figures only. The two halves are exact — computed the way the
+   contract computes them, with the remainder going to the payer — but the
+   protocol fee is escrowFeeBps, snapshotted at deposit and unreadable from
+   the frontend, so the freelancer's net is not stated. The asymmetry is,
+   because it holds regardless of the rate: the fee comes off the
+   freelancer's half only (:583).
+
+   Round 14 #10: gross-only is fine as a design choice, but the credited-line
+   used to say "Both halves are credited" right below the two gross figures —
+   read together, that states the freelancer's GROSS half lands as their
+   credit. It does not: :593 computes recipientNet = recipientShare - fee and
+   THAT is what's credited (:596/:609); the fee is a separate safeTransfer to
+   the treasury (:621). The payer's half, with no fee, is credited in full
+   (:614) — so the two halves are not even credited the same way, which
+   "Both halves are credited" also flattens. */
+export function timeoutSettlementConfirm({ escrow, milestone, index, splits, timeoutAt, bpsDenominator }) {
+  const { recipientShare, depositorShare } = timeoutShares(milestone.amount, bpsDenominator)
+
+  return {
+    title: 'Settle this dispute by timeout',
+    subtitle: 'The arbitration window closed with no arbiter ruling, so the contract settles it automatically. Anyone can trigger this, and the outcome is fixed.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'resolveDisputeByTimeout',
+    parameters: [
+      `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)}`,
+      'Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.',
+      `Freelancer's half: ${formatUSDC(recipientShare)} before the protocol fee`,
+      `Payer's half: ${formatUSDC(depositorShare)}`,
+      ...timeoutCreditLines(escrow, splits),
+      "The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.",
+      "The payer's half is credited to Arc in full. The freelancer's half is credited net of that fee — the fee itself goes to the protocol treasury, not into either balance. Neither half is sent to a wallet.",
+      `Arbitration window closed ${formatTimestamp(timeoutAt)}. Anyone can submit this.`
+    ]
+  }
+}
+
+/* Where a no-split payout actually lands. The CCTP burn targets
+   e.mintRecipient (TrancheProtocol.sol:1298); e.recipient is only the
+   authorisation identity, and updateReceivingAddress moves mintRecipient
+   without ever touching it (:986-990). Naming `recipient` on a signing screen
+   therefore shows the pre-redirect address as though it were the destination.
+
+   The one place recipient IS the destination is the Finding 3 divert: a
+   cross-chain share at-or-below the floor is credited to
+   refundBalances[e.recipient] on Arc instead (:1291-1293). Handled separately
+   below, and deliberately not conflated with this. */
+function payoutAddress(escrow) {
+  return escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+}
+
+/* Mirrors _assertCrossChainFee (TrancheProtocol.sol): with splits configured,
+   e.destinationDomain is not what the burn uses, so ANY non-Arc leg makes the
+   settlement cross-chain. */
+function resolveIsCrossChain(escrow, splits) {
+  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
+  return Number(escrow.destinationDomain) !== ARC_DOMAIN
+}
+
+/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
+   tracking — null when resolveIsCrossChain says there's nothing to track.
+   Reading the root escrow.destinationDomain here (the bug this replaces)
+   silently disagreed with resolveIsCrossChain whenever an Arc-root escrow's
+   cross-chain-ness came from a split leg instead: tracking would never start
+   even though the burn genuinely leaves Arc. Picking the first non-Arc split
+   leg when one exists keeps the domain passed down consistent with why
+   resolveIsCrossChain said this is cross-chain in the first place. */
+export function resolveTrackingDomain(escrow, splits) {
+  if (!resolveIsCrossChain(escrow, splits)) return null
+  if (splits?.length > 0) {
+    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
+  }
+  return escrow.destinationDomain
+}
+
+/* Round 18 Phase B. Decides what maxFee resolveDispute should submit, reusing
+   resolveIsCrossChain — the SAME split-aware determination the confirm
+   descriptor above already uses — instead of the raw escrow.destinationDomain
+   the submission code used to read independently. That gap meant an Arc-root
+   escrow with a cross-chain split leg would be quoted 0 by the raw check
+   while _assertCrossChainFee (TrancheProtocol.sol:1382) correctly saw the
+   split leg and required a floor-clearing value, so submission and descriptor
+   could disagree in a way that guarantees a revert.
+
+   Round 19 Phase B: Round 18's version tried to estimate the real remainder
+   (via worstCaseRemainder's ceiling bound) to decide whether a live Circle
+   quote could safely be submitted, and REJECTED the transaction outright when
+   the estimate looked unsafe — but "conservative estimate <= floor" and
+   "real remainder <= floor" are different conditions, so it could reject a
+   transaction the contract would have accepted. Verified directly against
+   the contract instead: submitting exactly the escrow's own floor is
+   unconditionally safe for every cross-chain, bps > 0 case — split or not,
+   divert-reachable or not.
+     - The divert-vs-burn decision (TrancheProtocol.sol:1291) is made by the
+       contract from its OWN computed real remainder — the submitted maxFee
+       plays no role in that decision at all.
+     - Exactly one assertion applies beforehand, regardless of which branch
+       later fires: maxFee >= e.escrowCctpForwardFee (TrancheProtocol.sol:
+       1398-1399).
+     - The divert branch never reads maxFee again after that assertion.
+     - The burn branch's only further constraint is maxFee < remainder
+       (TrancheProtocol.sol:1354, inside _approveAndBurn) — and that branch is
+       ONLY entered when remainder > floor (the divert condition's negation),
+       so maxFee = floor always satisfies it without needing to know the real
+       remainder.
+
+   Round 20 Phase C: the floor is always SAFE, but for a no-split cross-chain
+   burn where floor < Circle's live fee < the real remainder, floor-only
+   submission dispatches a burn that clears the contract's own check yet
+   still fails Circle's forwarding delivery with INSUFFICIENT_FEE, forcing a
+   self-relay that a correctly-fee'd burn would never have needed. Split legs
+   and the rounds-to-zero case still skip the live quote entirely — split
+   legs always burn at the snapshot regardless of what's submitted (settled
+   decision #7), and a zero recipient share triggers no burn at all
+   (TrancheProtocol.sol:1248's `if (recipientAmount > 0)` guard) — so a quote
+   for either would fetch a number the contract never uses. Only the genuine
+   no-split, nonzero-share burn signals `needsLiveQuote`; the caller resolves
+   it via {resolveDominantMaxFee} in utils/cctpFee.js, which uses the quote
+   ONLY when it is provably below worstCaseRemainder's bound on the real
+   remainder — never as a rejection trigger, and never blocking the
+   transaction on a failed fetch.
+
+   Synchronous and pure on purpose: this test harness cannot execute real
+   Solidity, but it CAN verify this decision independently of the component. */
+export function resolveDisputeMaxFeePlan({ escrow, splits, bps, recipientAmount, maxProtocolFeeBps }) {
+  const crossChain = resolveIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+
+  // _assertCrossChainFee only runs at all when bps > 0 (TrancheProtocol.sol:
+  // 510) — at bps 0 there is no recipient share and nothing to clear a floor
+  // for.
+  if (!crossChain || !(bps > 0)) return { maxFee: 0n }
+
+  // Split legs burn at the snapshot regardless of what's submitted; a
+  // rounds-to-zero share triggers no burn at all but still runs the fee
+  // assertion (gated on bps alone, not the post-rounding amount) — a live
+  // quote is pointless for either, so both submit the floor directly.
+  if (splits?.length > 0 || recipientAmount === 0n) return { maxFee: floor }
+
+  return {
+    needsLiveQuote: true,
+    quoteParams: { destinationDomain: escrow.destinationDomain, floor, recipientAmount, maxProtocolFeeBps }
+  }
+}
+
+/* VALUE-MOVING, and the last signing site in the project. This is the twin
+   timeoutSettlementConfirm above warns about — same panel, same milestone,
+   opposite mechanics — so the two screens have to be impossible to mix up:
+
+   - The timeout is permissionless, fixed at 50/50, and NEVER LEAVES ARC: both
+     halves land as refund credits (:593-614). This one is ARBITER_ROLE-gated
+     (:495), the percentage is chosen, and the freelancer's share is really
+     burned through CCTP to their destination chain (:516 → :1248-1299). That
+     difference is the single most important thing on the screen.
+
+   Three more things the contract decides that the form does not show:
+
+   1. maxFee is LIVE here, unlike mutualSettle where the same parameter is
+      dead. _assertCrossChainFee floors the CALLER's maxFee (:510), and the
+      no-split burn uses it (:1298). Split legs do not — each burns at the
+      e.escrowCctpForwardFee snapshot instead (:1329). That is settled
+      decision #7's asymmetry, and it is stateable rather than arcane: the fee
+      figure that governs differs between the two shapes, so the screen names
+      whichever one actually applies.
+
+   2. The protocol fee is still escrowFeeBps, snapshotted, no getter. Same
+      rule as everywhere else: exact gross halves, the asymmetry stated, never
+      a rate and never a net.
+
+   3. Once ARBITER_WINDOW has elapsed the timeout becomes available to anyone,
+      so a late ruling races a permissionless 50/50. `canTimeout` is already
+      computed for the button below, so the screen can say so.
+
+   The resolution hash and URI are stored in DisputeData (:512-513) — public
+   and permanent, like the evidence in Round 8. */
+export function resolveDisputeConfirm({
+  escrow, milestone, index, splits, bps, resolutionUri, maxFee, canTimeout, bpsDenominator
+}) {
+  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
+  const recipientShare = (milestone.amount * BigInt(bps)) / denom
+  const payerShare = milestone.amount - recipientShare
+  const pct = bps / 100
+  const crossChain = resolveIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+  const partial = bps > 0 && bps < 10_000
+  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+  // division can floor a small enough milestone amount times a small enough
+  // bps to zero even though the arbiter's ruling assigned a genuinely
+  // nonzero percentage. Distinct from a per-leg rounding-to-zero (still
+  // disclosed below when it applies): here nothing reaches the freelancer
+  // at all, so it gets its own branch rather than walking through
+  // delivery/chain/fee copy for a transfer that never happens.
+  const recipientGetsPaid = bps > 0 && recipientShare > 0n
+  // Round 17 Phase A: whenever both of these hold, Finding 3's sub-floor
+  // divert-to-Arc is reachable for THIS call — the frontend cannot compute
+  // the exact post-fee amount (escrowFeeBps has no getter), so it cannot
+  // know in advance which branch fires. Every destination/delivery/fee fact
+  // below has to hedge both outcomes together rather than assert one and
+  // append a correcting caveat afterward. When this is false, the existing
+  // unconditional wording is provably correct (a full ruling can never
+  // reach the divert branch) and stays exactly as it was.
+  const divertReachable = partial && crossChain
+
+  const params = [
+    `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)} in dispute`,
+    `Your ruling: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
+  ]
+
+  if (bps > 0) {
+    params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
+  }
+  if (bps < 10_000) {
+    params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+  }
+
+  if (recipientGetsPaid) {
+    if (splits?.length > 0) {
+      // Round 15 #11 / Round 16 #1: "most delivered" was a quantified
+      // claim nothing in the contract backs, and "divided across N split
+      // recipients" (what Round 15 replaced it with) is itself still an
+      // outcome claim — it implies N recipients receive something, which
+      // rounding and the sub-floor divert below can both make false.
+      // Describes the escrow's CONFIGURATION instead — N split entries,
+      // each with its own percentage and chain — and leaves what actually
+      // happens to the caveats pushed below rather than a headcount here.
+      // Already fine as a leading line for Round 17 Phase A too: it never
+      // claimed delivery in the first place, so there's nothing to hedge.
+      params.push(`${splits.length} configured split entries, by their configured share and destination chain`)
+      params.push('A recipient whose share rounds down to zero is paid nothing.')
+    } else if (divertReachable) {
+      // Round 17 Phase A: this used to state the destination as fact, then
+      // a caveat further down corrected it if the divert actually fired —
+      // the frontend genuinely cannot know in advance which branch fires,
+      // so both are stated together here instead.
+      params.push(`If this amount clears this escrow's forwarding-fee floor, it is paid to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}.`)
+      // The divert credits refundBalances[e.recipient] (:1292) — the one
+      // branch where `recipient`, not `mintRecipient`, is the destination.
+      params.push(`If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`)
+    } else {
+      // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
+      // updateReceivingAddress rewrites mintRecipient and leaves recipient
+      // untouched (:986-990), so the two diverge the moment a freelancer
+      // redirects — and recipient is the stale one.
+      params.push(`Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`)
+    }
+    // "Pays both sides immediately" was true of neither half. A cross-chain
+    // share is a burn Circle mints minutes later; an Arc share is a
+    // safeTransfer inside this transaction (:1343-1346); and the payer's half
+    // is a credit that is never sent anywhere (:606 below).
+    //
+    // Round 18 Phase A #3/#4: a split escrow is not one outcome here either —
+    // Solidity evaluates each leg independently (TrancheProtocol.sol:1303-
+    // 1312), so an Arc leg, a cross-chain leg that clears the floor, and a
+    // cross-chain leg that doesn't can all settle simultaneously within this
+    // one transaction. The clears/doesn't-clear pair below is correct for a
+    // single destination but was wrong to also apply, unchanged, to a fan-out
+    // — this states timing per leg-type instead of one outcome for the whole
+    // ruling whenever splits are configured.
+    if (splits?.length > 0) {
+      // Round 19 Phase A #1/#3: two more gaps in the same fan-out reasoning.
+      // (a) Solidity's `if (share > 0)` guard (TrancheProtocol.sol:1310) skips
+      // a zero-share leg's whole if/else — it is never transferred, never
+      // burned, and never credited, so "each"/"every" here contradicted the
+      // rounds-to-zero disclosure already on screen (the split leading line
+      // above). Scoped every clause to nonzero shares. (b) The Arc-leg clause
+      // was unconditional even for a split with NO Arc leg configured at all
+      // (e.g. a single-entry cross-chain split) — gated on hasArcLeg so it
+      // doesn't reference legs that don't exist in this escrow's
+      // configuration.
+      if (!crossChain) {
+        params.push('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
+      } else {
+        // Round 19 Phase A follow-up: deliberately scoped to a CONFIGURED Arc
+        // leg, not one with a computed nonzero share. Computing the latter
+        // would mean replicating the contract's order-dependent per-leg split
+        // loop (TrancheProtocol.sol:1301-1312) against a remainder that
+        // depends on the per-escrow protocol-fee snapshot, which has no
+        // getter — any such check could only use a live-rate estimate, and
+        // could therefore FALSELY OMIT this clause for a leg that will
+        // actually receive a nonzero share. That failure mode (silently
+        // dropping true information) is worse than this honest-but-loosely-
+        // scoped statement, which stays true (if vacuously, for a leg that
+        // happens to round to zero) regardless of the real fee rate. Gating
+        // on the leg's configured bps > 0 instead was considered too, but
+        // rejected — it doesn't cover a leg with nonzero bps whose computed
+        // share still rounds to zero (the exact case the tests below exercise).
+        const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
+        const legClauses = []
+        if (hasArcLeg) legClauses.push('Any Arc split leg with a nonzero share transfers immediately as part of this transaction.')
+        if (divertReachable) {
+          legClauses.push(
+            "Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.",
+            'Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).'
+          )
+        } else {
+          legClauses.push("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+        }
+        params.push(legClauses.join(' '))
+      }
+    } else if (divertReachable) {
+      params.push(
+        "If it clears the floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+      )
+    } else {
+      params.push(
+        crossChain
+          ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+          : "The freelancer's share is transferred on Arc as this transaction executes."
+      )
+    }
+    params.push("The protocol fee is taken from the freelancer's share only.")
+  } else if (bps > 0) {
+    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
+  } else {
+    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+  }
+
+  if (bps < 10_000) {
+    params.push(`Payer's share is credited to ${escrow.refundTo} as a withdrawable balance on Arc, not sent to a wallet.`)
+  }
+
+  if (crossChain && recipientGetsPaid) {
+    // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
+    // at the snapshot floor regardless of what maxFee was submitted for them.
+    // Name the one that actually applies rather than both.
+    if (divertReachable) {
+      // Round 17 Phase A: this used to be an unconditional fee line
+      // immediately followed by a separate caveat correcting the
+      // destination if the divert fired — two facts about the same
+      // uncertain outcome, stated as if only one applied.
+      params.push(
+        splits?.length > 0
+          // Split legs have no earlier destination statement to duplicate
+          // (the split leading line above is a configuration fact, not a
+          // destination claim — see Round 16 #1), so fee and destination
+          // are consolidated into one hedge here, since they were already
+          // adjacent and both depend on the same clears-the-floor question.
+          // Round 18 Phase A #2: "a given split leg" implied every leg in the
+          // configuration faces this floor check. An Arc leg never does
+          // (TrancheProtocol.sol:1343, direct transfer) — scoped to the legs
+          // that actually can be diverted.
+          //
+          // Round 19 Phase A: "does not clear the floor, that leg is
+          // credited" was still true only for a NONZERO share — a share that
+          // rounds down to zero is skipped by Solidity's `if (share > 0)`
+          // guard (TrancheProtocol.sol:1310) entirely, so it is never
+          // credited at all. Scoped to nonzero, matching the leading
+          // "rounds down to zero is paid nothing" disclosure above.
+          ? `If a given cross-chain split leg's nonzero share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If that nonzero share does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
+          // Unlike the split case, the no-split destination was ALREADY
+          // hedged above (the "If this amount clears... it is paid to...
+          // / If it does not... credited on Arc to escrow.recipient..."
+          // pair). Restating the destination here would repeat that fact
+          // rather than add the new one (the fee) — this states only what
+          // this line is actually for.
+          : `If this amount clears this escrow's forwarding-fee floor, delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival. If it does not clear the floor, no delivery fee is charged.`
+      )
+    } else {
+      params.push(
+        splits?.length > 0
+          // A cap, not a charge: the snapshot is passed to CCTP as maxFee and
+          // Circle deducts its actual fee — possibly less — from the burned
+          // amount on the destination (TrancheProtocol.sol:874-877).
+          ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
+          : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
+      )
+    }
+  }
+
+  params.push(`Your written reasoning at ${resolutionUri} is stored on-chain permanently and readable by anyone.`)
+
+  if (canTimeout) {
+    params.push('The arbitration window has already closed, so anyone can now settle this at a fixed 50/50 instead. Submitting first is what makes your ruling the outcome.')
+  }
+
+  params.push('This is final. The contract has no appeal path.')
+
+  return {
+    title: 'Resolve this dispute',
+    subtitle: 'Your ruling settles the milestone now. It cannot be appealed, reversed, or re-ruled — but the two shares do not reach the parties the same way, or at the same speed.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'resolveDispute',
+    parameters: params
+  }
+}
+
+function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
   // User works in whole percent (0–100); the contract receives BPS (0–10,000).
   const [pct, setPct] = useState('50')
   const [resolutionUri, setResolutionUri] = useState('')
   const [resolutionHash, setResolutionHash] = useState('')
   const [err, setErr] = useState('')
+  // Round 22 Phase A: onResolved now receives the CONFIRMED receipt, not a
+  // broadcast-time txHash string — DisputeBlock.handleResolve needs the
+  // receipt to check receiptEmittedCctpMessage. Moving this into
+  // onConfirmed closes the same broadcast-vs-mined gap Round 21 Phase D
+  // already closed for mutualSettle.
   const tx = useTx({
-    onConfirmed: () => { setPct('50'); setResolutionUri(''); setResolutionHash('') }
+    onConfirmed: (receipt) => {
+      setPct('50'); setResolutionUri(''); setResolutionHash('')
+      onResolved?.(receipt)
+    }
   })
   const timeoutTx = useTx({ onConfirmed: () => onResolved?.(null) })
+  const { config } = useProtocolConfig()
 
   // A resolution that pays the recipient settles via CCTP; for cross-chain
-  // destinations maxFee must cover Circle's live forwarding fee or the mint
-  // won't auto-deliver (INSUFFICIENT_FEE). Quoted at submit time. Arc same-chain
-  // burns take maxFee = 0.
-  const { config } = useProtocolConfig()
-  const toast = useToast()
+  // destinations a live-quote-when-safe, floor-fallback-otherwise value gets
+  // submitted (see resolveDisputeMaxFeePlan / resolveDominantMaxFee) — Arc
+  // same-chain burns take maxFee = 0.
 
   // Percentage → BPS, plus the live split preview.
   const pctNum = pct === '' ? NaN : Number(pct)
@@ -466,27 +1008,28 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved,
     }
     setErr('')
 
-    let maxFee
-    try {
-      const feeBps = config?.protocolFeeBps ?? 0n
-      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
-      maxFee = await resolveMaxFee({
-        destinationDomain: escrow.destinationDomain,
-        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-        burnAmount: recipientAmount - protocolFee
-      })
-    } catch (e) {
-      toast.error(e.message || "Couldn't check delivery fees. Please try again.")
-      return
-    }
+    // Round 18/19/20 Phase B/C: see resolveDisputeMaxFeePlan for why this
+    // reuses resolveIsCrossChain instead of reading escrow.destinationDomain
+    // directly, why split legs and the rounds-to-zero case skip the network
+    // entirely, and why the one case that needs it resolves through
+    // resolveDominantMaxFee rather than rejecting on a bad quote.
+    const plan = resolveDisputeMaxFeePlan({
+      escrow, splits, bps, recipientAmount, maxProtocolFeeBps: config?.maxProtocolFeeBps
+    })
+    const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
 
-    const txHash = await tx.run(
+    await tx.run(
       escrowWrite('resolveDispute', [
         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
       ]),
-      { loadingMessage: 'Sign to resolve.' }
+      {
+        loadingMessage: 'Sign to resolve.',
+        confirm: resolveDisputeConfirm({
+          escrow, milestone, index, splits, bps,
+          resolutionUri: resolutionUri.trim(), maxFee, canTimeout, bpsDenominator
+        })
+      }
     )
-    onResolved?.(txHash ?? null)
   }
 
   return (
@@ -578,7 +1121,12 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved,
               className="btn-quiet"
               onClick={() => timeoutTx.run(
                 escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
-                { loadingMessage: 'Settling by timeout.' }
+                {
+                  loadingMessage: 'Settling by timeout.',
+                  confirm: timeoutSettlementConfirm({
+                    escrow, milestone, index, splits, timeoutAt, bpsDenominator
+                  })
+                }
               )}
               disabled={timeoutTx.isBusy}
             >

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useReadContract } from 'wagmi'
+import { useReadContract, useWaitForTransactionReceipt } from 'wagmi'
+import { decodeEventLog } from 'viem'
 import { useAuth } from '../hooks/useAuth.jsx'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
@@ -12,15 +13,18 @@ import Field from '../components/Field.jsx'
 import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
 import EditableRow from '../components/EditableRow.jsx'
 import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
-import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
+// One source of truth for the fixed-50/50 copy: ArbiterPanel's trigger and the
+// permissionless one added here must not drift.
+import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
+import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { useToast } from '../hooks/useToast.jsx'
-import { resolveMaxFee } from '../utils/cctpFee.js'
+import { resolveDominantMaxFee } from '../utils/cctpFee.js'
 import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
+import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
 import {
-  isValidAddress, isValidUrl, formatUSDCNumber, formatDeadline, formatTimestamp,
+  isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
   NO_ATTACHMENT_URI
 } from '../utils/format.js'
@@ -217,6 +221,7 @@ function DetailInner() {
             escrow={escrow}
             milestones={milestones}
             disputes={disputes}
+            splits={splits}
             role={role}
             userAddress={address}
             reviewWindowExpired={reviewWindowExpired}
@@ -236,6 +241,7 @@ function DetailInner() {
             escrow={escrow}
             role={role}
             splits={splits}
+            milestones={milestones}
             onChange={handleChange}
             optimistic={optimistic}
             setOpt={setOpt}
@@ -320,6 +326,43 @@ function StateGlowPill({ state }) {
   )
 }
 
+/* EVIDENCE/STATE: acknowledgeInvoice is the recipient's one-way door. It
+ * stamps invoiceAcknowledgedAt (:367) and a second call reverts
+ * InvoiceAlreadyAcknowledged (:366) — there is no un-acknowledge anywhere in
+ * the contract.
+ *
+ * The banner calls it "a record that you agreed to this scope", which
+ * undersells both halves of what it does:
+ *
+ * 1. It is the gate on claimDelivery, and the only ack-gated function there
+ *    is. Until the recipient accepts, they cannot claim a milestone and so
+ *    cannot be paid at all. That is the reason to sign, and the banner never
+ *    states it.
+ * 2. It simultaneously locks the payer out of updateInvoiceURI for good
+ *    (:376, InvoiceLocked). That is a protection the signer is switching on
+ *    for themselves, and the flip side of why accepting early is a bad idea:
+ *    it is the last moment the link can still be corrected.
+ *
+ * Deliberately not pausable (:363-364) — a release precondition must not be
+ * censorable — so there is no paused branch to describe here. */
+export function acknowledgeInvoiceConfirm({ escrow }) {
+  const n = Number(escrow.milestoneCount)
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'acknowledgeInvoice',
+    title: 'Accept these invoice terms',
+    subtitle: 'Records on-chain that you agree to the scope as written. This cannot be undone — there is no way to un-accept.',
+    parameters: [
+      `Escrow #${escrow.id} — ${formatUSDC(escrow.totalAmount)} across ${n} milestone${n === 1 ? '' : 's'}`,
+      'Unlocks your ability to mark milestones delivered. Until you accept, you cannot claim delivery or be paid.',
+      'Locks the invoice link: the payer can no longer change it once you accept.',
+      'Check the invoice document now — this is the last point at which it can still be corrected.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
 /* ---------- Invoice acknowledgment banner ----------
    Shown to the freelancer when the escrow is active, has an invoice, and the
    recipient hasn't yet emitted InvoiceAcknowledged on-chain. */
@@ -342,7 +385,10 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           disabled={busy}
           onClick={() => acceptTx.run(
             escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
-            { loadingMessage: 'Check your wallet.' }
+            {
+              loadingMessage: 'Check your wallet.',
+              confirm: acknowledgeInvoiceConfirm({ escrow })
+            }
           )}
         >
           {acceptTx.isBusy ? 'Working…' : 'Accept terms'}
@@ -353,9 +399,32 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           disabled={busy}
           onClick={() => declineTx.run(
             escrowWrite('declineEscrow', [BigInt(escrow.id)]),
-            { loadingMessage: 'Check your wallet.' }
+            {
+              loadingMessage: 'Check your wallet.',
+              // The banner's two buttons sit side by side and the destructive
+              // one is one click from the constructive one, with no app-side
+              // confirmation between. Circle's screen is the only place this
+              // says out loud that it cancels the whole escrow, not one
+              // milestone. Full totalAmount, no protocol fee, credited on Arc
+              // (TrancheProtocol.sol:1091).
+              confirm: {
+                title: 'Decline this escrow',
+                subtitle: "Rejects the whole engagement and returns everything to the escrow's refund address. This cannot be undone — a new escrow would have to be created.",
+                amount: escrow.totalAmount,
+                amountLabel: 'Amount refunded',
+                contractName: 'Tranche Protocol Escrow',
+                contractAddress: CONTRACT_ADDRESS,
+                functionName: 'declineEscrow',
+                parameters: [
+                  `Escrow #${escrow.id} — all ${Number(escrow.milestoneCount)} milestones refunded`,
+                  ...refundToLines(escrow),
+                  'No protocol fee is taken.',
+                  'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+                ]
+              }
+            }
           )}
-          title="Reject the whole escrow. Refunds the full amount to the payer — no protocol fee. Only available while every milestone is still pending."
+          title="Reject the whole escrow. Refunds the full amount to the escrow's refund address — no protocol fee. Only available while every milestone is still pending."
         >
           {declineTx.isBusy ? 'Working…' : 'Decline escrow'}
         </button>
@@ -519,7 +588,25 @@ function FocusIcon({ tone }) {
    Locked amount up top, then a stack of border-separated parameter rows. The
    secondary cards (mutual cancel, receiving address) sit beneath so the whole
    column scrolls together rather than stacking visually with the milestones. */
-function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
+/* A split recipient is authorised by the contract on the strength of the
+   address currently encoded in their split leg (:1021), not on being
+   e.recipient. Role detection only knows depositor/recipient, so an
+   independent split payee classified as `null` could never reach the row that
+   redirects their own money. Detected separately here rather than folded into
+   `role`, which stays a two-value depositor/recipient concept everywhere else. */
+function useSplitRecipientIndex(splits) {
+  const { address } = useAuth()
+  return useMemo(() => {
+    if (!splits?.length || !address) return -1
+    return splits.findIndex((s) => {
+      const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+      return addr && addr.toLowerCase() === address.toLowerCase()
+    })
+  }, [splits, address])
+}
+
+function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, setOpt, clearOpt }) {
+  const mySplitIndex = useSplitRecipientIndex(splits)
   const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
 
@@ -545,7 +632,7 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
             <span className="text-sm text-ink">Assigned protocol arbiter</span>
           </ParamRow>
           <ParamRow label="Payout chain">
-            <span className="text-sm text-ink">{getDomainName(escrow.destinationDomain)}</span>
+            <span className="text-sm text-ink">{payoutChainLabel(escrow, splits)}</span>
           </ParamRow>
           <ParamRow label="Deadline">
             <DeadlineCell deadline={escrow.deadline} />
@@ -569,13 +656,16 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
 
       {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} />}
 
-      {role && escrow.state === 0 && (
-        <EditableParamsPanel escrow={escrow} role={role} splits={splits} hasInvoice={hasInvoice} onChange={onChange} />
+      {(role || mySplitIndex >= 0) && escrow.state === 0 && (
+        <EditableParamsPanel
+          escrow={escrow} role={role} splits={splits} mySplitIndex={mySplitIndex}
+          hasInvoice={hasInvoice} milestones={milestones} onChange={onChange}
+        />
       )}
 
       {role && escrow.state === 0 && (
         <CancelCard
-          escrow={escrow} role={role} onChange={onChange}
+          escrow={escrow} role={role} milestones={milestones} onChange={onChange}
           optimistic={optimistic} setOpt={setOpt} clearOpt={clearOpt}
         />
       )}
@@ -588,20 +678,14 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
    built on the shared EditableRow primitive so the deadline / invoice link /
    receiving address / split address flows share one interaction pattern
    instead of four hand-rolled inline-edit cards. */
-function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
-  const { address } = useAuth()
-  const mySplitIndex = role === 'freelancer' && splits
-    ? splits.findIndex((s) => {
-        const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
-        return addr && address && addr.toLowerCase() === address.toLowerCase()
-      })
-    : -1
-
+function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, milestones, onChange }) {
   const rows = []
   if (role === 'payer') rows.push('deadline')
   if (role === 'payer' && hasInvoice) rows.push('invoice')
   if (role === 'freelancer') rows.push('receiving')
-  if (role === 'freelancer' && mySplitIndex >= 0) rows.push('split')
+  // Not gated on role: the contract authorises whoever currently holds the
+  // leg's encoded address (:1021), which need not be e.recipient.
+  if (mySplitIndex >= 0) rows.push('split')
   if (rows.length === 0) return null
 
   return (
@@ -613,7 +697,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
           const last = i === rows.length - 1
           if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
           if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
-          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} milestones={milestones} onChange={onChange} last={last} />
           if (key === 'split') {
             const s = splits[mySplitIndex]
             return (
@@ -624,6 +708,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
                 currentDomain={Number(s.destinationDomain)}
                 currentAddress={s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null}
                 pct={Number(s.bps) / 100}
+                milestones={milestones}
                 onChange={onChange}
                 last={last}
               />
@@ -634,6 +719,45 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
       </div>
     </div>
   )
+}
+
+/* CONFIG-CHANGE: extendDeadline is one-way. newDeadline must strictly exceed
+ * the current one (:1055, DeadlineNotExtended), so the payer can give time
+ * away but can never take it back — extending again is the only move
+ * available afterwards.
+ *
+ * The figure that actually matters is not the deadline itself. The payer's
+ * refundAfterDeadline does not open at the deadline; it opens 72 hours later,
+ * once DELIVERY_GRACE_PERIOD has fully elapsed (:703), because the recipient
+ * may still claim inside that window (:405). Both dates go on the screen —
+ * the deadline the parties talk about, and the date the money actually
+ * becomes refundable.
+ *
+ * Two things that date is not. The guard is `block.timestamp <= deadline +
+ * GRACE` (:703), so the refund opens strictly AFTER that moment, not at it —
+ * a signer who reads it as "from 3 Feb" and submits at 3 Feb will be reverted
+ * by DeadlineNotReached. And the refund is credited to e.refundTo (:715),
+ * which is only the depositor when address(0) was passed at deposit
+ * (:274-275); "refundable to you" is an assumption the contract never makes. */
+export function extendDeadlineConfirm({ escrow, newDeadline }) {
+  const GRACE = 72 * 60 * 60
+  const current = Number(escrow.deadline)
+  const next = Number(newDeadline)
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'extendDeadline',
+    title: 'Give this escrow more time',
+    subtitle: 'Moves the deadline later. The deadline can only ever move later — this cannot be shortened or reverted afterwards.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      `Deadline: ${formatDeadline(current)} → ${formatDeadline(next)}`,
+      `Your refund path moves with it: undelivered milestones become refundable only after ${formatDeadline(next + GRACE)} — 72 hours past the new deadline, not at it.`,
+      `Refunds are credited to this escrow's refund address, ${escrow.refundTo} — which is not necessarily the wallet you are signing with.`,
+      'The freelancer gets that much longer to deliver. Their consent is not required.',
+      'No funds move on this transaction.'
+    ]
+  }
 }
 
 function DeadlineEditRow({ escrow, onChange, last }) {
@@ -658,7 +782,7 @@ function DeadlineEditRow({ escrow, onChange, last }) {
       label="Deadline"
       ownerTag="Payer"
       currentDisplay={formatDeadline(escrow.deadline)}
-      help="You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you."
+      help="You can only move the deadline later, never earlier. Once 72 hours past the deadline have elapsed, any undelivered milestone can be refunded to this escrow's refund address."
       fields={[{ key: 'deadline', label: 'New deadline', type: 'datetime', min: minStr }]}
       validate={(d) => toTs(d) > currentTs}
       busy={tx.isBusy}
@@ -666,11 +790,46 @@ function DeadlineEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const newTs = toTs(d)
         setSuccessTs(newTs)
-        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), { loadingMessage: 'Extending. Check your wallet.' })
+        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), {
+          loadingMessage: 'Extending. Check your wallet.',
+          confirm: extendDeadlineConfirm({ escrow, newDeadline: newTs })
+        })
       }}
       last={last}
     />
   )
+}
+
+/* CONFIG-CHANGE: updateInvoiceURI swaps e.invoiceURI and nothing else (:379).
+ * invoiceHash is untouched and never covered this field in the first place —
+ * that is SE-6, and it means there is no on-chain mismatch to detect after a
+ * swap. So the screen must not imply the terms were re-committed, and the
+ * row's help text is already careful about this.
+ *
+ * What keeps the swap honest is the event: InvoiceURIUpdated carries old AND
+ * new (:380) and the subgraph keeps every one of them, so the recipient can
+ * see the link changed and what it used to be. Worth saying plainly — a payer
+ * should not think this is a quiet edit.
+ *
+ * The window closes at acknowledgement (:376, InvoiceLocked), so once the
+ * recipient accepts there is no further chance to correct a bad link. */
+export function updateInvoiceURIConfirm({ escrow, newURI }) {
+  const current = (escrow.invoiceURI && escrow.invoiceURI !== NO_ATTACHMENT_URI) ? escrow.invoiceURI : null
+  return {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateInvoiceURI',
+    title: 'Change the invoice link',
+    subtitle: 'Replaces the link to the full invoice document. The invoice terms committed on-chain do not change — only this link.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      current ? `Link: ${current} → ${newURI}` : `New link: ${newURI}`,
+      'The on-chain invoice fingerprint is not recalculated. This link is a convenience pointer, not part of the committed terms.',
+      'The change is logged publicly with both the old and new link — the freelancer can see it.',
+      'Only possible until the freelancer accepts the terms. After that the link is locked for good.',
+      'No funds move on this transaction.'
+    ]
+  }
 }
 
 function InvoiceLinkEditRow({ escrow, onChange, last }) {
@@ -699,14 +858,235 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const trimmed = d.url.trim()
         setSaved(true)
-        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), { loadingMessage: 'Updating. Check your wallet.' })
+        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), {
+          loadingMessage: 'Updating. Check your wallet.',
+          confirm: updateInvoiceURIConfirm({ escrow, newURI: trimmed })
+        })
       }}
       last={last}
     />
   )
 }
 
-function ReceivingAddressEditRow({ escrow, onChange, last }) {
+/* ---------- Payout redirects ----------
+ *
+ * Nominally CONFIG-CHANGE, but these decide WHERE money later goes, so they
+ * get the scrutiny of a value-moving site. Three things separate them from
+ * Round 6's protocol setters:
+ *
+ * 1. No snapshot. e.mintRecipient / e.destinationDomain are read at release
+ *    time, not captured at deposit — the exact opposite of protocolFeeBps and
+ *    protocolTreasury. So a redirect takes effect on every milestone that has
+ *    not settled yet, including one already claimed and sitting in review.
+ *    Round 6's screens reassure that in-flight escrows are untouched; these
+ *    have to say the opposite, and say it plainly.
+ *
+ * 2. F3 makes some redirects revert. An escrow (or split leg) currently paying
+ *    on Arc cannot be redirected to a cross-chain domain: its milestones were
+ *    never floor-validated against the CCTP forwarding fee at deposit
+ *    (TrancheProtocol.sol:982 and :1033, both reverting MilestoneBelowForwardFee).
+ *    Cross-chain -> cross-chain and anything -> Arc stay allowed. The chain
+ *    dropdown does not filter these out, so the user can pick one and the
+ *    transaction reverts under an error name that does not hint at the cause.
+ *    Same treatment as Round 3's blocked mutualCancel: no promise, say why.
+ *
+ * 3. ARC_DOMAIN is 26 here, and a plain CCTP domain number otherwise — domain
+ *    0 means Ethereum Sepolia. That is NOT the domain-0 sentinel from
+ *    Settings.jsx's withdrawRefund, where 0 means "stay on Arc". Same number,
+ *    opposite meaning, two screens apart; getDomainName is correct here and
+ *    would have been wrong there.
+ */
+
+const REDIRECT_BLOCKED_REASON =
+  'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
+
+/* What a redirect is actually worth, which is the one thing these screens
+ * never said. "Applies to every milestone not yet released" is true and
+ * unquantified: it covers the whole remaining escrow on a fresh one and
+ * nothing at all on a finished one, and the signer cannot tell which from the
+ * screen. The figure is already loaded — LedgerColumn receives `milestones`
+ * and dropped it before EditableParamsPanel — so this is disclosure, not a
+ * new read.
+ *
+ * Terminal states are RELEASED(3) and REFUNDED(4); everything else (PENDING,
+ * IN_REVIEW, DISPUTED) is principal that has not settled yet — a CEILING on
+ * what could still route through the address, not a promise that it will.
+ * Round 14 #18.3: the copy that renders this used to overstate it as money
+ * "still to be paid". It is not: a pending milestone can end in a refund or a
+ * mutual cancellation, a disputed one can award the freelancer nothing, and —
+ * for a no-split escrow — a timeout settlement (resolveDisputeByTimeout,
+ * TrancheProtocol.sol:596) pays e.recipient, the ORIGINAL address, never the
+ * redirected e.mintRecipient; redirects only ever touch mintRecipient
+ * (:986-990), a field that function never reads.
+ * Deliberately gross: netting it would need escrowFeeBps, which is
+ * snapshotted with no getter — the same rule payoutLines follows.
+ *
+ * Returns null rather than 0 when the list is missing, so an unknown exposure
+ * prints nothing instead of a confident "0.00 USDC". */
+export function unreleasedExposure(milestones) {
+  if (!Array.isArray(milestones) || milestones.length === 0) return null
+  return milestones
+    .filter((m) => m.state !== 3 && m.state !== 4)
+    .reduce((sum, m) => sum + BigInt(m.amount ?? 0n), 0n)
+}
+
+export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain, milestones }) {
+  const exposure = unreleasedExposure(milestones)
+  const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+  const oldDomain = Number(escrow.destinationDomain)
+  const domain = Number(newDomain)
+  // Mirrors :982 exactly, including the splits carve-out: with splits
+  // configured, e.destinationDomain is not what the burn uses, so the guard
+  // does not apply.
+  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN && !hasSplits
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateReceivingAddress'
+  }
+
+  if (blocked) {
+    return {
+      ...base,
+      title: 'Change where this escrow pays out',
+      subtitle: 'This transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        REDIRECT_BLOCKED_REASON,
+        'You can still change the address while staying on Arc.'
+      ]
+    }
+  }
+
+  // With splits configured the burn loop reads s[i].mintRecipient exclusively
+  // (:1280-1332) and e.mintRecipient is never consulted. The write succeeds and
+  // changes nothing about where money goes, so promising a redirect here would
+  // be the most expensive kind of wrong: a signed transaction, a paid fee, and
+  // a payout that still lands at the old address.
+  if (hasSplits) {
+    return {
+      ...base,
+      title: 'Change where this escrow pays out',
+      subtitle: 'This escrow pays through split recipients, so this setting no longer affects where money goes.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Address: ${oldAddress} → ${newAddress}`,
+        `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        'Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.',
+        'To redirect your own share, use the split address row instead.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Change where this escrow pays out',
+    // Round 16 #1: this used to claim completeness on its own — "takes
+    // effect immediately for everything not yet released" — which is the
+    // same blanket claim Round 15 already removed from the leading
+    // parameter below for making a promise the timeout exception breaks.
+    // Fixing the parameter and leaving the subtitle saying something
+    // different about the same fact is not a fix, it is moving the
+    // contradiction one field over. The subtitle now states only what is
+    // unconditionally true (the redirect writes now); scope and the
+    // exception live in exactly one place, the leading parameter.
+    subtitle: 'Redirects your milestone payments to a different address, effective immediately.',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      `Address: ${oldAddress} → ${newAddress}`,
+      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+      // Round 15 #6/#8: this used to be an unqualified "every milestone",
+      // with the timeout exception appended several lines later — and
+      // dropped entirely when milestones was unavailable, at which point the
+      // still-present blanket claim was the LEAST accurate it ever got. The
+      // exception is a fact about mechanism, not about the exposure figure,
+      // so it belongs in this always-present sentence rather than gated
+      // alongside a number that may or may not be known.
+      "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.",
+      ...(exposure === null
+        ? []
+        : [`That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`]),
+      'Milestones already released are unaffected and cannot be recalled.'
+    ]
+  }
+}
+
+export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain, milestones }) {
+  const exposure = unreleasedExposure(milestones)
+  const oldDomain = Number(currentDomain)
+  const domain = Number(newDomain)
+  // Mirrors :1033 — no splits carve-out here; this leg's own domain is what
+  // the burn uses.
+  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'updateSplitReceivingAddress'
+  }
+
+  const shareLabel = `${pct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% share`
+
+  if (blocked) {
+    return {
+      ...base,
+      title: 'Change where your split share pays out',
+      subtitle: 'This transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
+        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+        REDIRECT_BLOCKED_REASON,
+        'You can still change the address while staying on Arc.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Change where your split share pays out',
+    subtitle: 'Redirects your share of this escrow to a different address. Other recipients are not affected.',
+    parameters: [
+      `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
+      `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
+      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+      // Round 16 #2: this used to be an unqualified "every milestone not yet
+      // released", identical in shape to the blanket claim Round 15 already
+      // fixed on the no-split screen above — with the actual caveat sitting
+      // in a separate line several lines down. Same bug, same fix: the
+      // caveat is a fact about mechanism, not a footnote, so it belongs in
+      // this always-present leading sentence. NOT phrased as "with one
+      // exception" — unlike the no-split screen's clean exclusion (a
+      // timeout pays the ORIGINAL recipient, full stop), a timeout here is a
+      // partial modification: the split loop reads the live, current
+      // s[i].mintRecipient (TrancheProtocol.sol:609), so the address change
+      // DOES still apply, just always credited on Arc rather than the
+      // configured chain, because that same loop never reads
+      // s[i].destinationDomain at all (:594-610). Calling that "an
+      // exception" reads as a full carve-out to anyone who just saw the
+      // no-split screen's genuine one and would pattern-match this the same
+      // way — it is not.
+      "Applies to every milestone not yet released, including any currently in review. If a milestone times out with no arbiter ruling, this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain; changing the chain alone has no effect there.",
+      // The leg's own exposure, not the escrow's: this row moves one share.
+      // Stated as the pool and the share rather than a multiplied-out figure —
+      // the per-leg amount is computed from each release's post-fee remainder
+      // (:1309), so a product of two gross numbers would be a number the
+      // contract never arrives at.
+      //
+      // Round 14 #18.3: the share is what this leg actually receives out of
+      // that pool once a milestone resolves, not an unconditional cut of the
+      // gross figure — a pending milestone can still refund, and a disputed
+      // one can rule this leg's share to zero.
+      ...(exposure === null
+        ? []
+        : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
+      'Milestones already released are unaffected and cannot be recalled.'
+    ]
+  }
+}
+
+function ReceivingAddressEditRow({ escrow, hasSplits, milestones, onChange, last }) {
   const [saveNonce, setSaveNonce] = useState(0)
   const [successInfo, setSuccessInfo] = useState(null)
   const { supported } = useSupportedDomains()
@@ -734,14 +1114,19 @@ function ReceivingAddressEditRow({ escrow, onChange, last }) {
         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain || ARC_DOMAIN }
       ]}
-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
       busy={tx.isBusy}
       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
       onSubmit={(d) => {
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
           escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
-          { loadingMessage: 'Updating. Check your wallet.' }
+          {
+            loadingMessage: 'Updating. Check your wallet.',
+            confirm: redirectPayoutConfirm({
+              escrow, hasSplits, milestones, newAddress: d.addr, newDomain: Number(d.domain)
+            })
+          }
         )
       }}
       last={last}
@@ -749,7 +1134,7 @@ function ReceivingAddressEditRow({ escrow, onChange, last }) {
   )
 }
 
-function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, onChange, last }) {
+function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, milestones, onChange, last }) {
   const [saveNonce, setSaveNonce] = useState(0)
   const [successInfo, setSuccessInfo] = useState(null)
   const { supported } = useSupportedDomains()
@@ -777,14 +1162,20 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain }
       ]}
-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
       busy={tx.isBusy}
       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
       onSubmit={(d) => {
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
           escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
-          { loadingMessage: 'Updating. Check your wallet.' }
+          {
+            loadingMessage: 'Updating. Check your wallet.',
+            confirm: redirectSplitConfirm({
+              escrow, splitIndex, currentAddress, currentDomain, pct, milestones,
+              newAddress: d.addr, newDomain: Number(d.domain)
+            })
+          }
         )
       }}
       last={last}
@@ -795,13 +1186,24 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
 /* ---------- Split recipients ----------
    Only present when the escrow was created with a multi-party split. Each
    released milestone's remainder (after the protocol fee) is divided across
-   these recipients by their bps share, each on its own CCTP destination. */
+   these recipients by their bps share, each configured with its own CCTP
+   destination.
+
+   Round 16 #4: the caption used to claim the outcome directly — "each on
+   its own destination chain" — the same shape as #11's "paid to N
+   recipients": true of the configuration, not guaranteed of any one
+   release. A share can round to zero (nothing paid) or land at-or-below
+   the forwarding-fee floor (credited on Arc instead of its configured
+   chain) — see payoutLines' caveats on the actual release/settle screens.
+   This caption now states only the configuration fact and points at where
+   the real disclosure lives, rather than repeating it here at a length a
+   caption card can't hold. */
 function SplitRecipients({ splits }) {
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
       <p className="text-xs text-ink-2 leading-relaxed">
-        Released funds are divided across these wallets by share, each on its own destination chain.
+        These wallets are configured with their own share and destination chain. A share can round to zero or fall below the delivery floor — see the payout details when a milestone releases or settles.
       </p>
       <div className="flex flex-col">
         {splits.map((s, i) => {
@@ -913,7 +1315,7 @@ function defaultOpenIndex(milestones) {
 }
 
 function MilestoneStack({
-  escrow, milestones, disputes, role, userAddress,
+  escrow, milestones, disputes, splits, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadlines,
   optimistic, onChange, setOpt, clearOpt, flashIndex, openRef
 }) {
@@ -979,6 +1381,7 @@ function MilestoneStack({
                   escrow={escrow}
                   milestone={m}
                   dispute={disputes?.[i]}
+                  splits={splits}
                   role={role}
                   userAddress={userAddress}
                   reviewWindowExpired={!!reviewWindowExpired[i]}
@@ -1046,23 +1449,157 @@ function useMilestoneReleaseTxs(escrowId) {
 
 const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
-function readCctpTrack(escrowId, milestoneIndex) {
+// Round 29: a real transaction hash shape — 0x + 64 hex chars — not just
+// "some string". Round 28's `typeof === 'string'` check let an empty string,
+// a truncated hash, or any other non-hash string through as a "valid"
+// record, which readCctpTrack would then hand to CrossChainDelivery as a
+// txHash to poll Iris with.
+const CCTP_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+
+// Round 28: expectedOrdinals/expectedTotalMessages being the right TYPES
+// (array / number) doesn't mean they're COHERENT — an out-of-range, negative,
+// fractional, or duplicate ordinal, or a vacuous {ordinals: [], total: 0}
+// record, would still pass the Round 27 shape check and later feed
+// useCctpDelivery a broken selection key. Every field the record actually
+// needs gets checked here, once, so an incoherent record is discarded the
+// same way a malformed or aged-out one already is.
+//
+// Round 29: also rejects a non-finite ts (NaN/Infinity — `typeof === 'number'`
+// alone lets both through, since typeof NaN is 'number') and a FUTURE ts.
+// A future ts matters specifically because it defeats the aged-out check
+// above readCctpTrack's own call site: `Date.now() - parsed.ts` goes
+// negative for a future ts, which is never `> CCTP_TRACK_MAX_AGE_MS`, so
+// nothing else in readCctpTrack would ever catch it. No clock-skew
+// tolerance: this ts is always stamped with Date.now() on the same device
+// that later reads it, so a genuinely future value only ever means a
+// tampered/foreign record, not ordinary drift.
+// Round 33: a cctpMessageFingerprint entry is now a single keccak256 hash
+// string (see irisDelivery.js's own redesign doc comment), not an object of
+// individually-chosen fields — 0x + 64 hex chars, nothing more permissive.
+const CCTP_FINGERPRINT_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+
+function isValidFingerprintShape(fp) {
+  return typeof fp === 'string' && CCTP_FINGERPRINT_HASH_RE.test(fp)
+}
+
+/* Round 33 (fixing the Round 32 review's Medium finding: "shape validation
+   doesn't reject every prior fingerprint shape" — this exact bug recurring
+   a third time, after Round 26->27's raw-hex expectedMessages array and
+   Round 32 itself shipping a new 7-field fingerprint shape with no matching
+   update here at all). A record persisted under any earlier shape was
+   silently accepted as "valid" by the old per-field checks (they only ever
+   verified the CURRENT shape's own fields, never rejected an unexpected
+   EXTRA/DIFFERENT shape), then permanently failed the real comparison for
+   the rest of its 24h life — hiding real delivery status behind a
+   fingerprint-mismatch that could never resolve.
+
+   Fixed structurally, not just by patching the field checks again:
+   CCTP_TRACK_SHAPE_VERSION (irisDelivery.js) is checked FIRST, before
+   anything else about the record is even inspected. Any record whose
+   shapeVersion isn't EXACTLY the current value is rejected outright — the
+   original 5-field fingerprint array (no shapeVersion at all), Round 32's
+   7-field version (also no shapeVersion — it shipped before this tag
+   existed), and any future shape change that bumps the constant but ships
+   before every write site is updated to match, all fail this one check
+   with no need to separately enumerate what's wrong about each. This is
+   the same reasoning CCTP_TRACK_SHAPE_VERSION's own doc comment gives for
+   why a version tag is worth the extra field: a per-field shape check has
+   to be remembered to reject every SPECIFIC old shape; a version check
+   only has to be remembered to be BUMPED, which every one of this bug's
+   three prior recurrences would have caught immediately if it had existed
+   then — a mismatched constant is a loud, obvious signal in a way a subtly
+   wrong per-field check is not. */
+function isValidCctpTrackRecord(parsed) {
+  if (parsed.shapeVersion !== CCTP_TRACK_SHAPE_VERSION) return false
+  if (typeof parsed.txHash !== 'string' || !CCTP_TX_HASH_RE.test(parsed.txHash)) return false
+  if (!Number.isFinite(parsed.ts) || parsed.ts > Date.now()) return false
+  if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
+  if (!Array.isArray(parsed.expectedOrdinals) || parsed.expectedOrdinals.length === 0) return false
+  const seen = new Set()
+  for (const ord of parsed.expectedOrdinals) {
+    if (!Number.isInteger(ord) || ord < 0 || ord >= parsed.expectedTotalMessages) return false
+    if (seen.has(ord)) return false
+    seen.add(ord)
+  }
+  // Round 29: every real write site now persists a fingerprint alongside
+  // each ordinal (see irisDelivery.js's cctpMessageFingerprint and
+  // receiptEmittedCctpMessageForMilestone) — a record missing this, or with
+  // a length mismatch, is discarded the same way any other malformed shape
+  // is: readCctpTrack returns null, MilestoneRow's `!cctpTrack` fallback
+  // reverifies from the receipt instead of ever handing out a record with
+  // no fingerprint to check.
+  if (!Array.isArray(parsed.expectedFingerprints) || parsed.expectedFingerprints.length !== parsed.expectedOrdinals.length) return false
+  if (!parsed.expectedFingerprints.every(isValidFingerprintShape)) return false
+  return true
+}
+
+// Round 29 — scope note on the reviewer's further suggestion (reconciling a
+// local record against the subgraph's own releaseTx once indexed, or
+// reverifying its receipt outright instead of trusting the persisted record
+// for its full 24h life): deliberately NOT done here. The hash-format check
+// and CONTRACT_ADDRESS namespacing above already close the concrete gap —
+// "coherent-looking garbage from a stale/foreign source" — that made a
+// persisted record risky to trust in the first place. What's left after
+// those fixes is trusting a record that (a) has a real tx hash shape, (b)
+// belongs to this exact deployment, (c) is at most 24h old, and (d) per
+// Round 22 Phase A, was ONLY ever written by this app's own
+// receipt-verified code paths (every write site gates on
+// receiptEmittedCctpMessageForMilestone(receipt, ...).emitted first) — not
+// arbitrary tamper-resistance. Reconciling against the subgraph on every
+// read would add a Goldsky round-trip (and its own failure/staleness modes)
+// to a value that's already provably correct at write time; reverifying the
+// receipt outright is exactly what FallbackCrossChainDelivery already does
+// as the fallback path when there's no local record — duplicating it here
+// would just run the expensive path unconditionally instead of only when
+// needed. If a live incident ever surfaces cross-deployment or stale-record
+// bugs in practice despite these fixes, that would justify revisiting this;
+// nothing in the current threat model does.
+export function readCctpTrack(escrowId, milestoneIndex) {
+  const key = cctpTrackKey(escrowId, milestoneIndex)
+  // Round 29: getItem/removeItem go through safeStorage — storage itself can
+  // throw (privacy mode, denied origin), and an unguarded removeItem inside
+  // this function's own catch block used to be able to throw a SECOND time
+  // and escape entirely, breaking MilestoneRow's useState initializer during
+  // render. safeStorage swallows internally, so every branch below degrades
+  // to "no local record" the same way, never propagates.
+  const raw = safeGetItem(key)
+  if (!raw) return null
   try {
-    const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
-    if (!raw) return null
     const parsed = JSON.parse(raw)
     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      safeRemoveItem(key)
+      return null
+    }
+    // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
+    // array (dropped this round, see useCctpDelivery's own doc comment for
+    // why content matching never worked) or the earlier Round 22 bare
+    // numeric count — carries no usable ordinal data. MUST NOT be treated
+    // as "no constraint": the old design let a missing/malformed shape fall
+    // through to useCctpDelivery's fully-unfiltered branch for this
+    // record's remaining lifetime inside CCTP_TRACK_MAX_AGE_MS, silently
+    // reopening the exact identity gap Round 26 (and this round) exist to
+    // close. Discarding it here — the same way an aged-out record is
+    // discarded just above — makes readCctpTrack return null exactly like
+    // "no local record at all", so MilestoneRow's existing `!cctpTrack`
+    // fallback to FallbackCrossChainDelivery naturally takes over and
+    // reverifies straight from the receipt instead. Round 28: this check now
+    // also covers coherence, not just shape — see isValidCctpTrackRecord.
+    if (!isValidCctpTrackRecord(parsed)) {
+      safeRemoveItem(key)
       return null
     }
     return parsed
   } catch {
+    // Round 28: unparseable JSON is exactly as unusable as a malformed
+    // record — discard it the same way, instead of leaving a dead key that
+    // getItem/JSON.parse will keep failing on for the rest of its 24h life.
+    safeRemoveItem(key)
     return null
   }
 }
 
 function MilestoneRow({
-  escrow, milestone, dispute, role, userAddress,
+  escrow, milestone, dispute, splits, role, userAddress,
   reviewWindowExpired, claimed, reviewDeadline,
   optimisticBadge, prevTerminal, onChange, setOpt, clearOpt,
   open, onToggle, flash
@@ -1079,7 +1616,27 @@ function MilestoneRow({
     readCctpTrack(escrow.id, milestone.index)
   )
   const releaseTxs = useMilestoneReleaseTxs(escrow.id)
-  const cctpTxHash = cctpTrack?.txHash || releaseTxs[milestone.index] || null
+  // Round 23: the two txHash sources no longer merge into one. A local
+  // cctpTrack record is already receipt-verified at write time (Round 22
+  // Phase A gates every write on receiptEmittedCctpMessage(receipt).emitted)
+  // — its mere presence is trustworthy, same as before. A subgraph-sourced
+  // releaseTx carries no such guarantee: the indexer stamps releaseTx on
+  // every successful DisputeResolved/MutualSettlementExecuted/etc regardless
+  // of whether a CCTP message actually fired (a partial award where every
+  // leg rounds to zero, or a divert-to-Arc credit, settle with no burn at
+  // all), so it gets its own receipt check in FallbackCrossChainDelivery
+  // below instead of reusing this same trusted path. Deliberately gated on
+  // releaseTxs alone, not on the escrow's CURRENT cross-chain config — the
+  // receipt is ground truth for a terminal milestone, so there is no longer
+  // a reason to pre-filter on a signal that can be wrong in both directions
+  // (a redirect can hide a real historical release, or a config that looks
+  // cross-chain today says nothing about whether THIS milestone's specific
+  // settlement actually burned anything). This closed the CLAUDE.md
+  // "Round 21 Phase C remaining piece" gap as a side effect: a milestone
+  // redirected to Arc AFTER a historical cross-chain release no longer
+  // hides the tracker for a device without a local record; the receipt
+  // doesn't care what today's config says.
+  const fallbackTxHash = !cctpTrack ? (releaseTxs[milestone.index] || null) : null
 
   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
   // device, they write to localStorage and call onCrossChainRelease so we re-read.
@@ -1181,6 +1738,7 @@ function MilestoneRow({
                   <MilestoneAction
                     escrow={escrow}
                     milestone={milestone}
+                    splits={splits}
                     role={role}
                     gracePassed={gracePassed}
                     reviewWindowExpired={reviewWindowExpired}
@@ -1204,10 +1762,21 @@ function MilestoneRow({
                   escrow={escrow}
                   milestone={milestone}
                   dispute={dispute}
+                  splits={splits}
                   role={role}
                   userAddress={userAddress}
                   onChange={onChange}
                   onCrossChainRelease={handleCrossChainRelease}
+                />
+              )}
+
+              {milestone.state === 2 && (
+                <TimeoutSettlementTrigger
+                  escrow={escrow}
+                  milestone={milestone}
+                  dispute={dispute}
+                  splits={splits}
+                  onChange={onChange}
                 />
               )}
 
@@ -1219,10 +1788,26 @@ function MilestoneRow({
                 (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
                   <TimeoutOutcomeCard milestone={milestone} role={role} />
                 )}
-              {milestone.state === 3 && cctpTxHash && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
+              {milestone.state === 3 && cctpTrack?.txHash && (
                 <CrossChainDelivery
-                  txHash={cctpTxHash}
-                  destinationDomain={escrow.destinationDomain}
+                  txHash={cctpTrack.txHash}
+                  isCrossChain
+                  escrowId={escrow.id}
+                  milestoneIndex={milestone.index}
+                  // Round 27: readCctpTrack itself now discards any record
+                  // whose expectedOrdinals/expectedTotalMessages shape isn't
+                  // usable (legacy or malformed) — see its own doc comment —
+                  // so cctpTrack.expectedOrdinals is guaranteed to be a real
+                  // array whenever cctpTrack is non-null here. Round 29: the
+                  // same is now true of expectedFingerprints.
+                  expectedOrdinals={cctpTrack.expectedOrdinals}
+                  expectedTotalMessages={cctpTrack.expectedTotalMessages}
+                  expectedFingerprints={cctpTrack.expectedFingerprints}
+                />
+              )}
+              {milestone.state === 3 && fallbackTxHash && (
+                <FallbackCrossChainDelivery
+                  txHash={fallbackTxHash}
                   escrowId={escrow.id}
                   milestoneIndex={milestone.index}
                 />
@@ -1232,7 +1817,8 @@ function MilestoneRow({
                 (milestone.state === 0 || milestone.state === 1) && (
                   <MilestoneCancelControl
                     escrow={escrow}
-                    milestoneIndex={milestone.index}
+                    milestone={milestone}
+                    milestones={milestones}
                     role={role}
                     onChange={onChange}
                   />
@@ -1259,25 +1845,186 @@ function ChevronIcon({ open }) {
   )
 }
 
+/* Shared by proposeMilestoneCancelConfirm below and by the panel's own blurb,
+ * so the signing screen and the screen behind it cannot reach opposite
+ * conclusions about the same cancellation. Terminal states are RELEASED(3) and
+ * REFUNDED(4) — the same two _checkEscrowCompletion accepts (:727).
+ *
+ * `reconciled` is the honesty gate rather than a loading check: today
+ * getEscrowDetail builds `milestones` as `new Milestone[](e.milestoneCount)` in
+ * the same call that returns the escrow (:1163-1184), and useEscrowDetail
+ * derives both from that one response, so a short list cannot occur through the
+ * app's own path. It guards the exported descriptor, which any future caller
+ * can hand a partial list. */
+export function milestoneCancelCompletion(escrow, milestoneIndex, milestones) {
+  const list = milestones || []
+  const reconciled = list.length > 0 && list.length === Number(escrow?.milestoneCount)
+  const completesEscrow = reconciled &&
+    list.every((m) => m.index === milestoneIndex || m.state === 3 || m.state === 4)
+  return { reconciled, completesEscrow }
+}
+
+/* The panel's static blurb. Three-way for the same reason the descriptor is:
+ * with nothing to reconcile against, "the rest of the escrow continues" is a
+ * claim, not a default. */
+export function milestoneCancelBlurb({ reconciled, completesEscrow }) {
+  const base = 'Both the payer and freelancer must propose. Once both agree, this milestone'
+  if (!reconciled) return `${base} is refunded.`
+  return completesEscrow
+    ? `${base}'s amount is refunded to the escrow's refund address — and since every other milestone has settled, that completes the whole escrow.`
+    : `${base}'s amount is refunded to the escrow's refund address and the rest of the escrow continues.`
+}
+
+/* EVIDENCE/STATE: proposeMilestoneCancel is two transactions wearing one
+ * button. With the counterparty not yet on board it writes a single bool
+ * (:799); with them already on board the same call falls straight through to
+ * the refund branch (:803-817) — REFUNDED, credited to e.refundTo, possibly
+ * completing the escrow. So the screen has to be told which one it is, the
+ * way cancelEscrowConfirm is told via otherApproved.
+ *
+ * The asymmetry worth stating out loud: the escrow-wide cancellation can be
+ * taken back with retractCancelApproval (:1062), but that function only
+ * clears the escrow-level flags. Nothing clears milestoneCancelProposals
+ * except the refund branch itself or a completed escrow-wide mutualCancel
+ * (:761-762). A milestone proposal is therefore irrevocable, which is exactly
+ * the sort of thing a user assumes carries over from the screen next door.
+ *
+ * "The rest of the escrow carries on" is the other claim that needs care: the
+ * refund branch calls _checkEscrowCompletion (:814), which flips the escrow to
+ * COMPLETED once every milestone is RELEASED or REFUNDED (:722-733). Cancel the
+ * last nonterminal one and this transaction ends the engagement rather than
+ * trimming it. That needs the sibling milestones to know, so `milestones` is
+ * passed in; when it cannot be reconciled against milestoneCount the line is
+ * dropped rather than guessed, since both readings are consequential. */
+export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed, milestones }) {
+  const line = milestoneLineFor(escrow, milestone)
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'proposeMilestoneCancel'
+  }
+  // The refund always goes to the payer's refund address, never to the
+  // caller. For the freelancer that makes this a giving-up-payment action,
+  // and it should not take reading an address to work that out.
+  const givingUp = role === 'freelancer'
+
+  if (!otherProposed) {
+    // No `amount`: this call only writes a bool. A Total here would put the
+    // refund figure on the one call that does not perform the refund.
+    return {
+      ...base,
+      title: 'Propose cancelling this milestone',
+      subtitle: 'Records your proposal. The milestone is only cancelled once the other party proposes it too — but unlike cancelling the whole escrow, this proposal cannot be taken back.',
+      parameters: [
+        line,
+        `Would refund ${formatUSDC(milestone.amount)} to ${escrow.refundTo} once both parties have proposed.`,
+        ...(givingUp ? ['This is your payment for this milestone. Proposing gives it up.'] : []),
+        'There is no way to withdraw a milestone cancellation proposal once submitted.',
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  const { reconciled, completesEscrow } = milestoneCancelCompletion(escrow, milestone.index, milestones)
+
+  return {
+    ...base,
+    title: 'Cancel this milestone and refund it',
+    subtitle: 'The other party has already proposed this, so signing cancels the milestone and refunds it now. This cannot be undone.',
+    amount: milestone.amount,
+    amountLabel: 'Amount refunded',
+    parameters: [
+      line,
+      ...refundToLines(escrow),
+      ...(givingUp ? ['This is your payment for this milestone. You will not be paid for it.'] : []),
+      'No protocol fee is taken.',
+      'Credited as a withdrawable refund balance on Arc, not sent to a wallet.',
+      ...(completesEscrow
+        ? ['Every other milestone has already settled, so this completes the whole escrow — nothing carries on afterwards.']
+        : reconciled
+          ? ['The rest of the escrow carries on — only this milestone is cancelled.']
+          : [])
+    ]
+  }
+}
+
+/* resolveDisputeByTimeout takes no caller input and carries no role gate
+   (:561): once block.timestamp reaches raisedAt + ARBITER_WINDOW, anyone can
+   settle the milestone at the fixed 50/50. Until now the only button for it
+   lived behind ArbiterPanel's role gate, so the permissionless escape hatch
+   was reachable only by the very party whose inaction it exists to route
+   around.
+
+   Rendered for ANY connected wallet, deliberately — that is the contract's
+   own access rule, not a relaxation of it. ArbiterPanel's own trigger is
+   untouched; this is an addition.
+
+   The descriptor is imported from ArbiterPanel rather than re-written, so the
+   two buttons cannot drift into describing the same call differently. */
+function TimeoutSettlementTrigger({ escrow, milestone, dispute, splits, onChange }) {
+  const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+  const tx = useTx({ onConfirmed: () => onChange?.() })
+
+  const raisedAt = Number(dispute?.raisedAt ?? 0)
+  const windowSecs = Number(arbiterWindow ?? 0n)
+  const timeoutAt = raisedAt + windowSecs
+  // Fails closed: an unloaded window or a dispute with no raisedAt yields
+  // nothing rather than an always-on button.
+  const reached = raisedAt > 0 && windowSecs > 0 && Math.floor(Date.now() / 1000) >= timeoutAt
+  if (!reached) return null
+
+  return (
+    <div className="mt-4 pt-4 border-t border-rule/50 flex flex-col gap-2">
+      <h4 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbitration window closed</h4>
+      <p className="text-xs text-ink-2 leading-relaxed">
+        No arbiter ruled within {formatWindow(arbiterWindow)}. Anyone can now settle this milestone
+        at the fixed 50/50 the contract falls back to — including you.
+      </p>
+      <div>
+        <TxButton
+          className="btn-secondary text-sm py-2"
+          onClick={() => tx.run(
+            escrowWrite('resolveDisputeByTimeout', [BigInt(escrow.id), BigInt(milestone.index)]),
+            {
+              loadingMessage: 'Settling by timeout.',
+              confirm: timeoutSettlementConfirm({
+                escrow, milestone, index: milestone.index, splits, timeoutAt, bpsDenominator
+              })
+            }
+          )}
+          disabled={tx.isBusy}
+          loading={tx.isBusy}
+          label="Settle by timeout"
+        />
+      </div>
+    </div>
+  )
+}
+
 /* ---------- Per-milestone mutual cancel ----------
    Cancels a single milestone (refunds its amount to the payer) once both
    parties have proposed — the milestone-level analogue of {mutualCancel}. The
    public `milestoneCancelProposals` mapping is read directly for both parties
    so each side sees the live approval state. */
-function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
+function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange }) {
   const [open, setOpen] = useState(false)
+  const milestoneIndex = milestone.index
 
   const baseArgs = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'milestoneCancelProposals' }
-  const { data: payerProposedRaw, refetch: refetchPayer } = useReadContract({
+  const { data: payerProposedRaw, isLoading: payerLoading, refetch: refetchPayer } = useReadContract({
     ...baseArgs,
     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.depositor],
     query: { refetchInterval: POLL_MS }
   })
-  const { data: freelancerProposedRaw, refetch: refetchFreelancer } = useReadContract({
+  const { data: freelancerProposedRaw, isLoading: freelancerLoading, refetch: refetchFreelancer } = useReadContract({
     ...baseArgs,
     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.recipient],
     query: { refetchInterval: POLL_MS }
   })
+  // An unread proposal coerces to false, which is the same value as "they have
+  // not proposed" — and that is the branch deciding whether this call records a
+  // vote or immediately refunds the milestone (:803).
+  const proposalsLoading = payerLoading || freelancerLoading
 
   const tx = useTx({
     onConfirmed: () => { refetchPayer(); refetchFreelancer(); onChange?.() }
@@ -1287,9 +2034,18 @@ function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
   const freelancerProposed = !!freelancerProposedRaw
   const iProposed = role === 'payer' ? payerProposed : freelancerProposed
 
+  const otherProposed = role === 'payer' ? freelancerProposed : payerProposed
+
+  // Literally the same call the descriptor makes, so the panel and the signing
+  // screen cannot disagree about whether this cancellation ends the escrow.
+  const completion = milestoneCancelCompletion(escrow, milestoneIndex, milestones)
+
   const submit = () => tx.run(
     escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
-    { loadingMessage: 'Submitting. Check your wallet.' }
+    {
+      loadingMessage: 'Submitting. Check your wallet.',
+      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, milestones, role, otherProposed })
+    }
   )
 
   if (!open) {
@@ -1316,7 +2072,7 @@ function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
         </button>
       </div>
       <p className="text-xs text-ink-2 leading-relaxed">
-        Both the payer and freelancer must propose. Once both agree, this milestone's amount is refunded to the payer and the rest of the escrow continues.
+        {milestoneCancelBlurb(completion)}
       </p>
       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
         <ApprovalRow label="Payer" approved={payerProposed} />
@@ -1325,7 +2081,7 @@ function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
       <TxButton
         className="btn-danger text-sm py-2"
         onClick={submit}
-        disabled={iProposed || tx.isBusy}
+        disabled={iProposed || tx.isBusy || proposalsLoading}
         loading={tx.isBusy}
         label={iProposed
           ? 'You proposed this'
@@ -1350,7 +2106,7 @@ const DISPUTE_TABS = [
   ['settle', 'Settle']
 ]
 
-function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange, onCrossChainRelease }) {
+function DisputePanel({ escrow, milestone, dispute, splits, role, userAddress, onChange, onCrossChainRelease }) {
   const [tab, setTab] = useState('overview')
 
   return (
@@ -1407,6 +2163,7 @@ function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange,
         <SettlementPanel
           escrow={escrow}
           milestone={milestone}
+          splits={splits}
           role={role}
           onChange={onChange}
           onCrossChainRelease={onCrossChainRelease}
@@ -1602,22 +2359,478 @@ function DisputeDetails({ dispute }) {
   )
 }
 
+/* VALUE-MOVING: mutualSettle is the densest signing site in the app, and the
+ * things that make it dense are mostly NOT what they look like from the
+ * frontend. Read against TrancheProtocol.sol:521-559 and :1222-1334:
+ *
+ * 1. The caller's `maxFee` is dead. It is in the signature and never read in
+ *    the body — the executing branch burns at e.escrowCctpForwardFee, the
+ *    per-escrow snapshot, precisely so one party cannot pick a fee that
+ *    strands the other's payout (:552-556; settled decision #7). Round 20
+ *    Phase B removed the live Circle quote this used to fetch before
+ *    submitting — a quote the contract was always going to discard could
+ *    still block a valid proposal on a transient fee-API failure, and it was
+ *    computed from the raw escrow.destinationDomain rather than
+ *    settlementIsCrossChain, so it could also misjudge cross-chain status for
+ *    a non-Arc-root escrow with an all-Arc split. The panel now submits a
+ *    fixed floor value with no network call. Nothing on this screen may
+ *    present it as a cost.
+ *
+ * 2. The protocol fee is escrowFeeBps, snapshotted at deposit, an internal
+ *    mapping with no getter. The only bps the frontend can read is the live
+ *    global, which drifts the moment an admin calls setProtocolFee. Same rule
+ *    payoutLines and timeoutSettlementConfirm already follow: gross figures
+ *    only, state the asymmetry (fee off the freelancer's share alone,
+ *    :1270-1271), never a rate and never a net.
+ *
+ * 3. Execution needs an EXACT bps match from both sides (:549). A different
+ *    number from the other party does not part-settle and does not
+ *    counter-offer — it just sits there. That is the case a signer is most
+ *    likely to misread as agreement.
+ *
+ * 4. A proposal is overwritable (:541-542, unconditional assignment), so
+ *    unlike Round 8's milestone cancel this one CAN be changed later. Worth
+ *    saying, because the neighbouring screen says the opposite.
+ *
+ * 5. Finding 3 / SE-3 bites hardest here. A partial settlement scales the
+ *    freelancer's share down; if it lands at-or-below the escrow's forwarding
+ *    fee it is credited on Arc instead of delivered cross-chain (:1291,
+ *    :1319). A FULL release can never reach that branch (:1285-1288), so this
+ *    is specific to the partial case — which is the only case this screen
+ *    ever describes. */
+const BPS = 10_000n
+
+function settlementIsCrossChain(escrow, splits) {
+  // Mirrors _assertCrossChainFee: with splits, any non-Arc leg counts.
+  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
+  return Number(escrow.destinationDomain) !== ARC_DOMAIN
+}
+
+/* Round 20 Phase A #3. The Ledger's "Payout chain" row used to print
+   escrow.destinationDomain unconditionally — accurate for a no-split escrow,
+   but false the moment splits are configured: the contract pays out per split
+   leg's own destinationDomain (TrancheProtocol.sol:1298 vs :1329), never the
+   escrow-level field, so a mixed split can pay out to several different
+   chains in one settlement. Rather than pick one (any single choice would be
+   wrong for the others) or duplicate SplitRecipients' per-leg list here, this
+   row defers to that list, which is rendered immediately below it whenever
+   splits exist. */
+export function payoutChainLabel(escrow, splits) {
+  if (splits?.length > 0) return 'Per split leg — see below'
+  return getDomainName(escrow.destinationDomain)
+}
+
+/* Round 18 Phase B. Decides what maxFee approveRelease / release should
+   submit, reusing settlementIsCrossChain — the SAME split-aware determination
+   the confirm descriptor above already uses — instead of the raw
+   escrow.destinationDomain the submission code used to read independently.
+   That gap meant an Arc-root escrow with a cross-chain split leg would be
+   quoted 0 by the raw check while _assertCrossChainFee
+   (TrancheProtocol.sol:1382) correctly saw the split leg and required a
+   floor-clearing value, so submission and descriptor could disagree in a way
+   that guarantees a revert.
+
+   approveRelease and release() always pass the FULL milestone.amount — no
+   bps scaling, so unlike resolveDispute there is no rounds-to-zero case to
+   gate on here.
+
+   Round 19 Phase B: Round 18's version tried to estimate the real remainder
+   (via worstCaseRemainder's ceiling bound) to decide whether a live Circle
+   quote could safely be submitted, and REJECTED the transaction outright
+   when the estimate looked unsafe — but "conservative estimate <= floor" and
+   "real remainder <= floor" are different conditions, so it could reject a
+   transaction the contract would have accepted. Verified directly against
+   the contract instead (see resolveDisputeMaxFeePlan in ArbiterPanel.jsx for
+   the full citation trail — both functions share the exact same
+   _executeCCTPReleaseAmount execution path, TrancheProtocol.sol:1258-1334):
+   submitting exactly the escrow's own floor is unconditionally safe.
+     - The divert-vs-burn decision (TrancheProtocol.sol:1291) is made by the
+       contract from its OWN computed real remainder — the submitted maxFee
+       plays no role in that decision at all.
+     - Exactly one assertion applies beforehand: maxFee >= e.escrowCctpForwardFee
+       (TrancheProtocol.sol:1398-1399).
+     - The burn branch's only further constraint is maxFee < remainder
+       (TrancheProtocol.sol:1354), and that branch is ONLY entered when
+       remainder > floor — so maxFee = floor always satisfies it.
+   For approveRelease specifically, the divert branch is structurally
+   UNREACHABLE in the first place: deposit-time validation (F2,
+   TrancheProtocol.sol:286-295) requires every milestone's net-of-protocol-fee
+   amount, at the smallest configured share, to already exceed the floor — and
+   a full release always releases at least that much, at the maximum possible
+   share (no bps scaling below 100%). So a full release's remainder is
+   guaranteed > floor by construction, meaning it always lands in the burn
+   branch, where floor-submission is trivially safe.
+
+   Round 20 Phase C: floor-only is always safe against the CONTRACT's own
+   check, but says nothing about Circle's separate, off-chain forwarding
+   requirement — for a no-split cross-chain burn where floor < Circle's live
+   fee < the real remainder, a floor-only submission still dispatches
+   successfully on-chain and then fails delivery with INSUFFICIENT_FEE,
+   forcing a self-relay recovery that a correctly-fee'd burn never would have
+   needed. So the no-split, cross-chain, approveRelease case now signals
+   `needsLiveQuote` instead of returning a floor immediately; the caller
+   resolves it through {resolveDominantMaxFee} in utils/cctpFee.js, which
+   uses the live quote ONLY when it is provably below worstCaseRemainder's
+   bound on the real remainder — never as a rejection trigger, and never
+   blocking the transaction if the fetch fails.
+
+   Round 21 Phase B: release() ignores whatever is submitted here and
+   substitutes the snapshot regardless (:674) — Round 20 Phase C still
+   resolved a live quote for it anyway ("harmless if unnecessary"), the same
+   class of pointless request already removed from mutualSettle
+   (Round 20 Phase B). Now gated on `actionKey === 'approve'`, matching how
+   the caller (MilestoneAction.run) already distinguishes the two — release()
+   goes straight to the floor with no network call, same as split legs.
+
+   Synchronous and pure on purpose: this test harness cannot execute real
+   Solidity, but it CAN verify this decision independently of the component. */
+export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps, actionKey }) {
+  const crossChain = settlementIsCrossChain(escrow, splits)
+  if (!crossChain) return { maxFee: 0n }
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+
+  // Split legs always burn at the snapshot regardless of what's submitted
+  // (settled decision #7) — a live quote would fetch a number the contract
+  // never uses. Same for release(): it substitutes its own snapshot and
+  // never reads the submitted value at all.
+  if (splits?.length > 0 || actionKey !== 'approve') return { maxFee: floor }
+
+  return {
+    needsLiveQuote: true,
+    quoteParams: { destinationDomain: escrow.destinationDomain, floor, recipientAmount: milestoneAmount, maxProtocolFeeBps }
+  }
+}
+
+/* Round 20 Phase B #6. Whether a mutualSettle call proposing `bps` will
+   actually execute the settlement (TrancheProtocol.sol:549's
+   dep.bps == rec.bps condition), from this signer's perspective. The
+   signer's own proposal is about to become `bps` — the only unknown is
+   whether the other side's already-loaded proposal already agrees. Shared
+   between the confirm descriptor's "would settle" vs. "settles now" branch
+   and SettlementPanel.propose's decision to start post-submission delivery
+   tracking, so the two can't drift the way the tracker write used to. */
+export function mutualSettleExecutes(theirs, bps) {
+  const theirBps = theirs?.exists ? Number(theirs.bps) : null
+  return theirBps !== null && theirBps === bps
+}
+
+/* Round 21 Phase D. Ground truth for whether a CONFIRMED mutualSettle call
+   actually executed the settlement — answers a different question than
+   mutualSettleExecutes above, which stays exactly as it was: that one
+   predicts from a PRE-SUBMISSION `theirs` snapshot, correctly used for the
+   confirm descriptor's copy, since no receipt exists yet at signing time.
+
+   SettlementPanel.propose used to reuse that same stale snapshot AFTER
+   submission to decide whether to start delivery tracking — but useTx's
+   run() resolves as soon as the wallet broadcasts, not once the transaction
+   is mined (see useTx.js: the receipt arrives later via a separate
+   useWaitForTransactionReceipt effect). The other party can change their
+   proposal anywhere in that window, so the stale snapshot could disagree
+   with what the chain actually did in either direction: predict no
+   execution while the real tx executes (missing a genuine cross-chain burn
+   that needs tracking/recovery — the more dangerous direction), or predict
+   execution while the real tx doesn't (reintroducing the exact stale-tracker
+   bug Round 20 Phase B already closed, via a different path).
+
+   The confirmed receipt is authoritative — decode its logs for a real
+   MutualSettlementExecuted event, the same way CreateEscrow.jsx's
+   depositTx.onConfirmed reads EscrowCreated out of receipt.logs to get the
+   new escrow id: filtered to this contract's own address, one try/catch per
+   log since some logs (e.g. the USDC precompile's Transfer) won't decode
+   against this ABI at all. */
+export function mutualSettlementExecuted(receipt) {
+  for (const log of receipt.logs) {
+    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+    try {
+      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
+      if (dec.eventName === 'MutualSettlementExecuted') return true
+    } catch {}
+  }
+  return false
+}
+
+/* Round 22 Phase A. mutualSettlementExecuted proves the SETTLEMENT
+   happened, not that it happened cross-chain — a partial settlement can
+   round every leg's share to zero, or divert every cross-chain leg to an
+   Arc credit, and still fire MutualSettlementExecuted with no CCTP message
+   ever created. Both facts matter for different reasons and neither implies
+   the other, so SettlementPanel's tracker write requires both: this wraps
+   them into one composite ground-truth check.
+
+   Round 26 finding 3: now takes escrowId/milestoneIndex and delegates to
+   receiptEmittedCctpMessageForMilestone (the same authenticity- and
+   milestone-scoped check FallbackCrossChainDelivery uses), not the bare
+   receiptEmittedCctpMessage this used to call directly — Circle-managed
+   wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack a
+   foreign UserOperation's logs into the same receipt even for a tx this
+   device itself submitted, so "this device's own single-purpose call"
+   never actually guaranteed a single-purpose RECEIPT. SettlementPanel
+   already has escrow.id/milestone.index in scope at the call site — it
+   isn't discovering them from the subgraph the way the fallback path has
+   to, so no new plumbing was needed to make this call. */
+export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
+  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0, fingerprints: [] }
+  return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+}
+
+export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+  const n = milestone.index + 1
+  const of = Number(escrow.milestoneCount) || n
+  const pct = bps / 100
+  const recipientShare = (milestone.amount * BigInt(bps)) / BPS
+  const payerShare = milestone.amount - recipientShare
+  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)} in dispute`
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'mutualSettle'
+  }
+
+  const theirBps = theirs?.exists ? Number(theirs.bps) : null
+  const matches = mutualSettleExecutes(theirs, bps)
+
+  if (!matches) {
+    // Nothing executes. No `amount` — the figures below are what WOULD happen,
+    // and a Total row would assert they are happening now.
+    // "Would pay X and Y" flattens three different things: the freelancer's
+    // figure is gross (the protocol fee comes off it, :1270-1271), and the
+    // payer's is never paid at all — it becomes a refund credit they have to
+    // withdraw (:1241).
+    //
+    // Round 14 #9: "credited to the payer's refund balance" is only true when
+    // refundTo happens to equal the depositor — the contract credits
+    // e.refundTo (:1241), which can be a different address set at deposit.
+    // refundToLines states the real destination and, only where it actually
+    // diverges, that it is not the payer's own wallet.
+    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited as a refund balance.`
+    return {
+      ...base,
+      title: 'Propose settling this dispute',
+      subtitle: 'Records the split you are proposing. Nothing settles until both sides have proposed exactly the same percentage.',
+      parameters: [
+        milestoneLine,
+        `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
+        splitLine,
+        ...refundToLines(escrow),
+        ...(theirBps !== null
+          ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
+          : ['The other party has not proposed anything yet.']),
+        'You can change your number later by proposing again.',
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  // Both sides now agree; this call settles the milestone.
+  const crossChain = settlementIsCrossChain(escrow, splits)
+  const floor = escrow.escrowCctpForwardFee ?? 0n
+  const partial = bps > 0 && bps < 10_000
+  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
+  // division can floor a small enough milestone amount times a small enough
+  // bps to zero even though a genuinely nonzero percentage was agreed.
+  // Distinct from a per-leg rounding-to-zero (payoutLines already discloses
+  // that one when it applies): here NOTHING reaches the freelancer at all,
+  // so this gets its own branch below rather than walking through
+  // delivery/chain/fee copy for a transfer that never happens.
+  const recipientGetsPaid = bps > 0 && recipientShare > 0n
+  // Round 17 Phase A: whenever both of these hold, Finding 3's sub-floor
+  // divert-to-Arc is reachable for THIS call — the frontend cannot compute
+  // the exact post-fee amount (escrowFeeBps has no getter), so it cannot
+  // know in advance which branch fires. Every destination/delivery/fee fact
+  // below has to hedge both outcomes together rather than assert one and
+  // append a correcting caveat, the same shape already fixed elsewhere this
+  // round for scope claims. When this is false, the existing unconditional
+  // wording is provably correct (a full release/settlement can never reach
+  // the divert branch) and stays exactly as it was.
+  const divertReachable = partial && crossChain
+
+  const params = [
+    milestoneLine,
+    `Agreed split: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
+  ]
+
+  if (bps > 0) {
+    params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
+  }
+  if (bps < 10_000) {
+    params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+  }
+  if (recipientGetsPaid) {
+    params.push(...payoutLines(escrow, splits, { partial, crossChain, floor }))
+    // Three different arrival behaviours hide behind "pays out": an Arc leg is
+    // a safeTransfer inside this transaction (:1343-1346), a cross-chain leg is
+    // a burn that Circle mints minutes later, and the payer's half is a credit
+    // that is never sent anywhere (:1241). The subtitle no longer claims one
+    // speed for all three, so the distinction has to appear here.
+    //
+    // Round 18 Phase A #3/#4: a split escrow is not one outcome here either —
+    // Solidity evaluates each leg independently (TrancheProtocol.sol:1303-
+    // 1312), so an Arc leg, a cross-chain leg that clears the floor, and a
+    // cross-chain leg that doesn't can all settle simultaneously within this
+    // one transaction. The clears/doesn't-clear pair below is correct for a
+    // single destination but was wrong to also apply, unchanged, to a fan-out
+    // — this states timing per leg-type instead of one outcome for the whole
+    // settlement whenever splits are configured.
+    if (splits?.length > 0) {
+      // Round 19 Phase A #1/#3: two more gaps in the same fan-out reasoning.
+      // (a) Solidity's `if (share > 0)` guard (TrancheProtocol.sol:1310) skips
+      // a zero-share leg's whole if/else — it is never transferred, never
+      // burned, and never credited, so "each"/"every" here contradicted the
+      // rounds-to-zero disclosure already on screen (from payoutLines above,
+      // or the split leading line below). Scoped every clause to nonzero
+      // shares. (b) The Arc-leg clause was unconditional even for a split
+      // with NO Arc leg configured at all (e.g. a single-entry cross-chain
+      // split) — gated on hasArcLeg so it doesn't reference legs that don't
+      // exist in this escrow's configuration.
+      if (!crossChain) {
+        params.push('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
+      } else {
+        // Round 19 Phase A follow-up: deliberately scoped to a CONFIGURED Arc
+        // leg, not one with a computed nonzero share. Computing the latter
+        // would mean replicating the contract's order-dependent per-leg split
+        // loop (TrancheProtocol.sol:1301-1312) against a remainder that
+        // depends on the per-escrow protocol-fee snapshot, which has no
+        // getter — any such check could only use a live-rate estimate, and
+        // could therefore FALSELY OMIT this clause for a leg that will
+        // actually receive a nonzero share. That failure mode (silently
+        // dropping true information) is worse than this honest-but-loosely-
+        // scoped statement, which stays true (if vacuously, for a leg that
+        // happens to round to zero) regardless of the real fee rate. Gating
+        // on the leg's configured bps > 0 instead was considered too, but
+        // rejected — it doesn't cover a leg with nonzero bps whose computed
+        // share still rounds to zero (the exact case the tests below exercise).
+        const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
+        const legClauses = []
+        if (hasArcLeg) legClauses.push('Any Arc split leg with a nonzero share transfers immediately as part of this transaction.')
+        if (divertReachable) {
+          legClauses.push(
+            "Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.",
+            'Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).'
+          )
+        } else {
+          legClauses.push("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
+        }
+        params.push(legClauses.join(' '))
+      }
+    } else if (divertReachable) {
+      params.push(
+        "If it clears this escrow's forwarding-fee floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+      )
+    } else {
+      params.push(
+        crossChain
+          ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
+          : "The freelancer's share is transferred on Arc as this transaction executes."
+      )
+    }
+    params.push("The protocol fee is taken from the freelancer's share only.")
+  } else if (bps > 0) {
+    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
+  } else {
+    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+  }
+  if (bps < 10_000) {
+    // Round 14 #9: credits e.refundTo (:1241), not necessarily the payer's
+    // own wallet — same divergence refundToLines already discloses elsewhere.
+    params.push(...refundToLines(escrow))
+    params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
+  }
+  if (crossChain && recipientGetsPaid) {
+    // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
+    // Circle deducts its actual forwarding fee — which may be less — from the
+    // burned amount on the destination (TrancheProtocol.sol:874-877).
+    //
+    // Round 18 Phase A #5: each split leg burns independently and carries its
+    // own copy of this cap (:1324, F1 / settled decision #7) — Circle charges
+    // its full per-burn forwarding fee per leg, keyed to destination gas, not
+    // to the share size. A settlement with more than one delivered
+    // cross-chain leg can therefore incur this fee more than once, once per
+    // leg, each deducted from that leg's own share — never one combined
+    // figure for the whole settlement.
+    if (divertReachable) {
+      params.push(
+        splits?.length > 0
+          ? `Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's own share. Legs that do not clear the floor are not charged.`
+          : `If it clears the floor, delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}. If it does not clear the floor, no delivery fee is charged.`
+      )
+    } else {
+      params.push(
+        splits?.length > 0
+          ? `Each cross-chain split leg costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and deducted from that leg's own share on arrival.`
+          : `Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`
+      )
+    }
+  }
+  params.push('This cannot be undone.')
+
+  return {
+    ...base,
+    title: 'Settle this dispute now',
+    subtitle: 'Both sides have proposed the same split, so signing settles the milestone now. Where each share goes, and when it actually arrives, is set out below.',
+    amount: milestone.amount,
+    amountLabel: 'Amount settled',
+    parameters: params
+  }
+}
+
 /* Mutual settlement (mutualSettle). Either party proposes a recipient share in
    whole percent; when both parties' proposals match, the contract executes the
    split automatically. We surface both standing proposals and a one-click
    "agree to their number" path. */
-function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainRelease }) {
-  const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
+function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossChainRelease }) {
+  // isLoading matters here, not just for spinners: an unread proposal looks
+  // exactly like "no proposal", and the descriptor branches on that to decide
+  // between "nothing settles yet" and a settlement that executes on this very
+  // transaction (:549). Submitting mid-read can therefore promise the wrong
+  // one of those two.
+  const { depositorProposal, recipientProposal, isLoading: proposalsLoading, refetch } = useSettlementProposals(
     escrow.id, milestone.index, escrow.depositor, escrow.recipient
   )
-  const { config } = useProtocolConfig()
-  const toast = useToast()
 
   const mine = role === 'payer' ? depositorProposal : recipientProposal
   const theirs = role === 'payer' ? recipientProposal : depositorProposal
 
   const [pct, setPct] = useState('50')
-  const tx = useTx({ onConfirmed: () => { setPct('50'); refetch(); onChange?.() } })
+  const tx = useTx({
+    onConfirmed: (receipt) => {
+      setPct('50'); refetch(); onChange?.()
+      // Round 21 Phase D: ground truth from the CONFIRMED receipt, not a
+      // pre-submission `theirs` snapshot — see mutualSettlementExecuted's
+      // own doc comment for why the snapshot this used to reuse here (still
+      // correctly used by mutualSettleConfirm below, for a different
+      // question) can go stale in the window before this transaction lands.
+      //
+      // Round 22 Phase A: mutualSettlementExecuted alone proves the
+      // SETTLEMENT happened, not that it happened cross-chain — a partial
+      // settlement can round every leg's share to zero or divert every
+      // cross-chain leg to an Arc credit and still fire
+      // MutualSettlementExecuted, with no CCTP message ever created.
+      // mutualSettlementCreatedCctpMessage requires both: settlement
+      // executed AND the receipt proves a real message genuinely THIS
+      // milestone's own was sent (Round 26: authenticity- and
+      // milestone-scoped, not just "a message exists somewhere").
+      const { emitted, ordinals, totalMessages, fingerprints } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
+      if (emitted) {
+        // Round 20 Phase D: no `domain` field — no reader ever consumed it
+        // (both MilestoneRow and DisputeBlock recompute the domain live from
+        // escrow/splits rather than trusting a persisted value), and a single
+        // stored domain couldn't represent a mixed split's several real
+        // per-message domains anyway. useCctpDelivery gets its per-message
+        // domains from Iris directly once it has the txHash.
+        //
+        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
+        // `messages` array Round 26 persisted here — see useCctpDelivery's
+        // own doc comment for why content matching against Iris never
+        // actually worked.
+        safeSetItem(
+          cctpTrackKey(escrow.id, milestone.index),
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+        )
+        onCrossChainRelease?.()
+      }
+    }
+  })
 
   useEffect(() => {
     if (mine.exists) setPct(String(bpsToPct(mine.bps)))
@@ -1625,36 +2838,27 @@ function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainReleas
 
   const pctNum = pct === '' ? NaN : Number(pct)
   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
-  const canSubmit = pctValid && !tx.isBusy
+  const canSubmit = pctValid && !tx.isBusy && !proposalsLoading
 
-  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
-  // Circle's live forwarding fee on the recipient's share, quoted at submit time.
+  // Round 20 Phase B #5: the contract never reads this argument at all
+  // (mutualSettleConfirm's VALUE-MOVING comment #1) — the executing branch
+  // always burns at e.escrowCctpForwardFee regardless of what's submitted.
+  // A live Circle quote here was therefore pure risk with no corresponding
+  // benefit: it could block a valid proposal on a transient fee-API failure,
+  // and it was computed from the raw escrow.destinationDomain rather than
+  // settlementIsCrossChain, so it could also misjudge cross-chain status for
+  // a non-Arc-root escrow with an all-Arc split. Submitting the escrow's own
+  // floor is simplest and exactly as safe, since the value is discarded
+  // either way.
   const propose = async (bps) => {
-    let maxFee
-    try {
-      const recipientAmount = (milestone.amount * BigInt(bps)) / 10_000n
-      const feeBps = config?.protocolFeeBps ?? 0n
-      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
-      maxFee = await resolveMaxFee({
-        destinationDomain: escrow.destinationDomain,
-        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-        burnAmount: recipientAmount - protocolFee
-      })
-    } catch (err) {
-      toast.error(err.message || "Couldn't check delivery fees. Please try again.")
-      return
-    }
-    const txHash = await tx.run(
+    const maxFee = escrow.escrowCctpForwardFee ?? 0n
+    await tx.run(
       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
-      { loadingMessage: 'Check your wallet.' }
+      {
+        loadingMessage: 'Check your wallet.',
+        confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+      }
     )
-    if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
-      localStorage.setItem(
-        cctpTrackKey(escrow.id, milestone.index),
-        JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
-      )
-      onCrossChainRelease?.()
-    }
   }
 
   const submit = () => { if (canSubmit) propose(Math.round(pctNum * 100)) }
@@ -1662,7 +2866,7 @@ function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainReleas
   const bpsToPct = (bps) => Number(bps) / 100
   // Their proposal differs from mine (or I have none): offer to accept it,
   // which makes both proposals match and settles on-chain.
-  const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
+  const canAgree = !proposalsLoading && theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
 
   // Perspective-relative copy: `role === 'payer'` is the depositor (client),
   // otherwise the recipient (freelancer). Both sides always enter the
@@ -1766,81 +2970,289 @@ function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainReleas
   )
 }
 
+const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
+
+/* Round 20 Phase D. Whether the shared cctpTrackKey entry should be cleared:
+   only once every CCTP message Iris knows about for this tx has actually
+   reached COMPLETE. Extracted as its own pure function so the property is
+   directly testable — a message that stays FAILED (even one the user has
+   since self-relayed; Iris's own bookkeeping never learns about an
+   out-of-band relay) must NOT cause this to return true, since the tracker
+   is the only thing keeping that still-failed message's recovery card
+   reachable on a later visit. */
+export function shouldClearCctpTrack(deliveries) {
+  return deliveries.length > 0 && deliveries.every((d) => d.forwardState === 'COMPLETE')
+}
+
 /* Cross-chain delivery tracker. Shown on a RELEASED cross-chain milestone when
-   we have a tracked burn tx hash from this device. Polls Iris every 15s. */
-function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneIndex }) {
-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
-  const chainName = getDomainName(destinationDomain)
+   we have a tracked burn tx hash from this device. Polls Iris every 15s.
+
+   Round 20 Phase D: renders each CCTP message in `deliveries` independently
+   by its OWN forwardState/destinationDomain, instead of gating the whole
+   block on one aggregate `phase` string. A split settlement can burn
+   multiple messages to DIFFERENT chains in one transaction (bounded by
+   MAX_SPLITS = 10, TrancheProtocol.sol:31) — the old single-branch render
+   meant one leg failing made a DIFFERENT, already-delivered leg's
+   confirmation disappear entirely (phase collapsed to 'failed' globally, so
+   the 'delivered' branch never rendered at all), and only ever offered a
+   recovery card for one of potentially several simultaneously-failed legs.
+   Exported for direct testing — the same reasoning EscrowDetail exports its
+   other confirm-descriptor and decision functions for. */
+export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
   const [copied, setCopied] = useState(false)
+
+  // Once every message Iris knows about for this tx has actually completed,
+  // there is nothing left to track — clear the shared entry so it doesn't
+  // resurface on a later visit. A message that stays FAILED (even one the
+  // user has since self-relayed — Iris's own bookkeeping never learns about
+  // an out-of-band relay) intentionally keeps the tracker alive; "already
+  // relayed" lives in that message's own SelfRelayCard instance below, not
+  // here, so handling one failed leg never tears down tracking for another.
+  useEffect(() => {
+    if (shouldClearCctpTrack(deliveries)) {
+      safeRemoveItem(cctpTrackKey(escrowId, milestoneIndex))
+    }
+  }, [deliveries, escrowId, milestoneIndex])
 
   if (phase === 'idle') return null
 
   return (
     <div className="mt-3 pt-3 border-t border-rule flex flex-col gap-2">
-      {phase === 'polling' && (
+      {phase === 'polling' && deliveries.length === 0 && (
         <div className="flex items-center gap-2 text-[12.5px] text-ink-2">
           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
-          Delivering to {chainName}…
+          Delivering…
           <span className="text-[11px] text-ink-3">(checking every 15s)</span>
         </div>
       )}
 
-      {phase === 'delivered' && deliveries.map((d, i) => {
-        const explorerUrl = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
+      {deliveries.map((d, i) => {
+        const chainName = domainLabel(d.destinationDomain)
+        if (d.forwardState === 'COMPLETE') {
+          const explorerUrl = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
+          return (
+            <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Delivered to {chainName}
+              {explorerUrl && (
+                <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
+                  View tx <ExternalLinkIcon size={11} />
+                </a>
+              )}
+            </div>
+          )
+        }
+        if (d.forwardState === 'FAILED') {
+          return (
+            <SelfRelayCard
+              key={i}
+              delivery={d}
+              copied={copied}
+              onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+            />
+          )
+        }
         return (
-          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
-              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-            Delivered to {chainName}
-            {explorerUrl && (
-              <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
-                View tx <ExternalLinkIcon size={11} />
-              </a>
-            )}
+          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ink-2">
+            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+            Delivering to {chainName}…
           </div>
         )
       })}
 
-      {phase === 'failed' && (
-        <SelfRelayCard
-          deliveries={deliveries}
-          destinationDomain={destinationDomain}
-          escrowId={escrowId}
-          milestoneIndex={milestoneIndex}
-          copied={copied}
-          onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-        />
-      )}
-
       {phase === 'unavailable' && (
         <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+      )}
+
+      {/* Round 29 (Low finding): distinct from the ordinary 'polling' spinner
+          above — this has been the SAME inconsistent state for 2+ minutes,
+          not a delivery that's merely taking a while. Modeled on the
+          'unavailable' treatment (a short, honest status line, no spinner)
+          since there's nothing actionable for the user to click — this is a
+          background reconciliation issue, not a stuck-message recovery case
+          (that's SelfRelayCard, for a message Iris has explicitly marked
+          FAILED). Still polling underneath, so it can still resolve on its
+          own; the message says so rather than implying the tracker gave up. */}
+      {phase === 'stale' && (
+        <p className="text-[12px] text-warn">
+          Delivery status hasn't changed in over 2 minutes — still checking, but this may be an indexing delay worth keeping an eye on.
+        </p>
       )}
     </div>
   )
 }
 
-/* Recovery card shown when Iris reports forwardState: FAILED.
-   Explains what happened in plain English and walks the user through relaying
-   the CCTP message on the destination chain to complete the transfer. */
-function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex, copied, onCopied }) {
+// Round 23: single-shot, generous-but-bounded read of an already-mined
+// receipt. useWaitForTransactionReceipt's 180s default timeout exists for
+// "wait for MY just-submitted tx to get mined" — the polling loop that
+// budget protects. That doesn't apply here: this hash belongs to a
+// milestone already in a terminal state (state === 3), so the receipt
+// either exists right now or an RPC endpoint genuinely can't/won't serve it
+// (pruned history, hash too old). viem's waitForTransactionReceipt checks
+// getTransactionReceipt ONCE, immediately, before any polling begins — for
+// an already-mined tx that single round trip is the whole story, so this
+// bound only matters for the "can't serve it" case, where it decides how
+// long a background milestone row shows a spinner before giving up.
+//
+// Round 24 Phase B: this bound only holds if the query attempts exactly
+// once. The app's QueryClient (main.jsx: `new QueryClient()`) takes
+// TanStack's untouched default of retry: 3 with exponential backoff — and
+// each retry re-runs useWaitForTransactionReceipt's queryFn from scratch,
+// getting its OWN fresh FALLBACK_RECEIPT_TIMEOUT_MS-bounded attempt rather
+// than counting against one shared deadline. Left alone, the real worst
+// case to reach isError is 4 attempts x 20s + (1s + 2s + 4s) backoff = ~87s,
+// silently multiplying the number in this constant's name by four. Retrying
+// is also the wrong instinct for what this query actually is: a receipt an
+// RPC genuinely can't produce for an old/pruned tx is exactly as absent on
+// attempt 4 as attempt 1 (the underlying fact — this tx is already
+// terminal, immutable, on-chain — cannot become newly true from waiting),
+// unlike a typical flaky-network read where a retry against a different
+// backend might succeed. So `retry: false` below isn't a workaround, it's
+// what makes FALLBACK_RECEIPT_TIMEOUT_MS an honest bound instead of a
+// per-attempt figure silently inflated by the QueryClient's app-wide
+// default — re-opening the milestone row (which remounts the query) is
+// already a natural retry path if the RPC issue was transient.
+const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
+
+/* Round 23. MilestoneRow's fallback path — a milestone whose cross-chain
+   release this device never submitted itself, known about only via the
+   subgraph's Milestone.releaseTx. The two gaps the 11th confirm-descriptor
+   review pass found, both traced to the same root cause (this path had no
+   receipt to run receiptEmittedCctpMessage against, unlike the three
+   Phase A/B write sites — MilestoneAction.run, DisputeBlock.handleResolve,
+   SettlementPanel's onConfirmed):
+
+     (a) The indexer stamps releaseTx for every successful
+         DisputeResolved/MutualSettlementExecuted/etc regardless of whether
+         a CCTP message actually fired — a partial award where every leg
+         rounds to zero, or a divert-to-Arc credit, settles with no burn at
+         all. The old fallback activated the tracker on the mere presence
+         of releaseTx + current cross-chain config, and since no Iris
+         message will ever appear for a tx that never burned anything, the
+         UI showed "Delivering…" permanently.
+     (b) This path had no persisted expected-message-count — that only
+         exists in the submitting device's OWN localStorage record — so
+         useCctpDelivery's completeness guard was silently skipped. A burn
+         that emitted 2 messages but Iris had only indexed 1 of could be
+         marked fully delivered before the second leg's status was known.
+
+   Fixed by fetching the receipt directly (useWaitForTransactionReceipt is
+   the same provider-read hook useTx.js already uses to turn a hash into a
+   receipt) and reusing the shared ground-truth check the write sites run
+   (as of Round 26, receiptEmittedCctpMessageForMilestone — see its own doc
+   comment), just read after the fact instead of at confirmation time. Its
+   own verified messages become expectedOrdinals/expectedTotalMessages
+   (Round 27: ordinal position, not raw-hex identity — see
+   useCctpDelivery's own doc comment), closing (b) the same way a local
+   cctpTrack record already does. A receipt that emits zero
+   messages renders nothing (same as any other non-cross-chain milestone),
+   closing (a).
+
+   Introduces an async fetch on a path that used to render synchronously
+   from local/subgraph data alone, so there are three states to cover
+   beyond "verified cross-chain, delegate to CrossChainDelivery":
+     - pending: shows a distinct "Checking delivery status…" line rather
+       than reusing CrossChainDelivery's "Delivering…" copy — that copy
+       specifically means "a cross-chain transfer is in progress", which is
+       not yet known to be true here; and rather than rendering nothing,
+       which would make a milestone that just settled look inexplicably
+       frozen for however long the fetch takes.
+     - error (RPC couldn't serve the receipt — see FALLBACK_RECEIPT_TIMEOUT_MS
+       above): reuses CrossChainDelivery's own "unavailable" copy, since the
+       honest answer really is "can't tell right now", not a false negative
+       (silently rendering nothing here would look identical to a milestone
+       that was never cross-chain, wrongly implying certainty about a burn
+       that may still be worth checking manually) or a false positive
+       (rendering "Delivering…" for a tx that may never have burned
+       anything, reintroducing failure mode (a) via a different door).
+     - verified cross-chain: delegates the actual delivery UI to
+       CrossChainDelivery so the two paths share one rendering
+       implementation once a receipt is in hand, local or fallback. */
+export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex }) {
+  const { data: receipt, isPending, isError } = useWaitForTransactionReceipt({
+    hash: txHash,
+    timeout: FALLBACK_RECEIPT_TIMEOUT_MS,
+    query: { enabled: !!txHash, retry: false }
+  })
+
+  if (receipt) {
+    // Round 24 Phase A / Round 26: scoped to this milestone's own log
+    // range AND authenticity-verified (see receiptEmittedCctpMessageForMilestone's
+    // own doc comment) — this receipt can belong to a batched,
+    // multi-milestone transaction release()'s permissionless callers can
+    // compose, the same class of risk Round 26 finding 3 found the three
+    // write sites share too (Circle-managed wallets are ERC-4337 smart
+    // accounts; a bundler can pack a foreign UserOperation's logs into any
+    // receipt, not just this permissionless path's).
+    const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+    if (!emitted) return null
+    return (
+      <CrossChainDelivery
+        txHash={txHash}
+        isCrossChain
+        escrowId={escrowId}
+        milestoneIndex={milestoneIndex}
+        expectedOrdinals={ordinals}
+        expectedTotalMessages={totalMessages}
+        expectedFingerprints={fingerprints}
+      />
+    )
+  }
+
+  if (isError) {
+    return (
+      <div className="mt-3 pt-3 border-t border-rule">
+        <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+      </div>
+    )
+  }
+
+  if (isPending) {
+    return (
+      <div className="mt-3 pt-3 border-t border-rule flex items-center gap-2 text-[12.5px] text-ink-2">
+        <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+        Checking delivery status…
+      </div>
+    )
+  }
+
+  return null
+}
+
+/* Recovery card shown when Iris reports forwardState: FAILED for one CCTP
+   message. Explains what happened in plain English and walks the user
+   through relaying that SPECIFIC message on ITS OWN destination chain.
+
+   Round 20 Phase D: takes exactly ONE `delivery` object instead of the whole
+   `deliveries` array plus an outer `destinationDomain` prop. A mixed split
+   settlement can burn to several different chains in one transaction — under
+   the old design, picking "the first failed message" (or worse, an outer
+   collapsed domain unrelated to which message actually failed) meant a
+   failed message on chain A could prompt the user to switch to chain B and
+   call chain B's MessageTransmitterV2 — a broken recovery action, not just
+   inaccurate copy. Every lookup here reads `delivery.destinationDomain`, the
+   real domain Iris reported for THIS message, so there is no longer an
+   "outer" value to wrongly prefer. CrossChainDelivery renders one instance
+   of this per failed message, so a settlement with multiple simultaneous
+   failures gets a recovery card for each, not just one. */
+function SelfRelayCard({ delivery, copied, onCopied }) {
   const { address } = useAuth()
   const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
   const [relayTxHash, setRelayTxHash] = useState(null)
   const [relayError, setRelayError] = useState(null)
   const [calldataOpen, setCalldataOpen] = useState(false)
-  const chainName = getDomainName(destinationDomain)
+  const destinationDomain = delivery.destinationDomain
+  const chainName = domainLabel(destinationDomain)
 
-  // Use the first failed delivery (or all of them for multi-split)
-  const primary = deliveries.find((d) => d.forwardState === 'FAILED') ?? deliveries[0]
-  if (!primary) return null
-
-  const transmitter = MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null
-  const chainParams = EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null
+  const transmitter = destinationDomain != null ? (MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null) : null
+  const chainParams = destinationDomain != null ? (EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null) : null
   const canRelayInApp = !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
 
-  const calldata = primary.message && primary.attestation
-    ? encodeReceiveMessage(primary.message, primary.attestation)
+  const calldata = delivery.message && delivery.attestation
+    ? encodeReceiveMessage(delivery.message, delivery.attestation)
     : null
 
   const copyText = async (text) => {
@@ -1872,15 +3284,20 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
       const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params })
       setRelayTxHash(txHash)
       setRelayPhase('done')
-      // Clean up localStorage so the tracker doesn't restart next visit
-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+      // Round 20 Phase D: no longer clears the shared tracker here — Iris
+      // keeps reporting this message as FAILED forever (an out-of-band relay
+      // isn't something its own bookkeeping learns about), and other
+      // messages under the same txHash may still be genuinely in flight.
+      // "Done" lives in this card's own relayPhase state instead;
+      // CrossChainDelivery clears the shared entry once every message is
+      // actually COMPLETE per Iris.
     } catch (err) {
       setRelayPhase('error')
       setRelayError(err.message || 'Relay failed. Try again.')
     }
   }
 
-  const errorIsInsufficientFee = primary.errorCode === 'INSUFFICIENT_FEE'
+  const errorIsInsufficientFee = delivery.errorCode === 'INSUFFICIENT_FEE'
 
   return (
     <div className="rounded-xl border border-warn/30 bg-warn/[0.04] px-4 py-4 flex flex-col gap-4">
@@ -1965,8 +3382,8 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
         </button>
         {calldataOpen && (
           <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-2">
-            <CallDataRow label="Message"     value={primary.message}     onCopy={copyText} copied={copied} />
-            <CallDataRow label="Attestation" value={primary.attestation} onCopy={copyText} copied={copied} />
+            <CallDataRow label="Message"     value={delivery.message}     onCopy={copyText} copied={copied} />
+            <CallDataRow label="Attestation" value={delivery.attestation} onCopy={copyText} copied={copied} />
             {calldata && <CallDataRow label="Calldata"    value={calldata}           onCopy={copyText} copied={copied} />}
             <p className="text-[11px] text-ink-3 leading-relaxed pt-1">
               Call <span className="font-mono">receiveMessage(message, attestation)</span> on {chainName}'s MessageTransmitterV2 to complete the transfer.
@@ -2134,6 +3551,130 @@ function MilestoneStateGlyph({ state }) {
    Single most relevant action per role/state. Glowing clay for primary
    positive actions; warning tone reserved for the dispute portal at the
    bottom of the page so the inline action stays positive-leaning. */
+/* Refund-destination lines, the counterpart to payoutLines below.
+ *
+ * Every refund in this contract credits e.refundTo, and refundTo is whatever
+ * address was passed at deposit — it falls back to the depositor only when
+ * address(0) was supplied (TrancheProtocol.sol:274-275). So "refunded to the
+ * payer" is an assumption the contract never makes: a payer who set a treasury
+ * or a co-founder's wallet as refundTo gets a screen promising them money that
+ * goes somewhere else.
+ *
+ * The address alone does not fix that — a signer who assumes it is their own
+ * wallet reads past it. State the divergence only where it is real, so the
+ * ordinary case (refundTo == depositor) stays quiet. */
+export function refundToLines(escrow) {
+  const to = escrow?.refundTo
+  if (!to) return []
+  const lines = [`Credited to: ${to}`]
+  const depositor = escrow?.depositor
+  if (depositor && to.toLowerCase() !== depositor.toLowerCase()) {
+    lines.push("That is this escrow's configured refund address, not the payer's own wallet.")
+  }
+  return lines
+}
+
+/* Payout-destination lines for a signing screen's `parameters`.
+ *
+ * A split escrow pays each leg to its own address on its own destination
+ * domain, so naming escrow.mintRecipient there would state something false on
+ * the one screen that has to be true. Describe the fan-out instead and let the
+ * ledger column carry the per-leg detail.
+ *
+ * Deliberately no fee or net-of-fee figure: the fee actually applied is
+ * escrowFeeBps, snapshotted at deposit (TrancheProtocol.sol), an internal
+ * mapping with no getter. The only bps the frontend can see is the live global
+ * from getProtocolConfig(), which drifts from the snapshot the moment an admin
+ * calls setProtocolFee. A wrong number on a confirm screen is worse than none —
+ * same reasoning as networkFee in utils/circleTheme.js.
+ *
+ * `partial`/`crossChain`/`floor` are optional context from a caller that
+ * knows whether Finding 3's sub-floor divert-to-Arc is reachable for THIS
+ * call (TrancheProtocol.sol:1291, :1319) — a full release (approveRelease /
+ * release) can never hit it, by construction of the deposit-time F2 floor
+ * check plus the F3 redirect guard, so callers that only ever pay the full
+ * amount simply omit them and get the plain description. Round 16 #2: this
+ * caveat used to be hand-rolled separately by mutualSettleConfirm after
+ * calling this function, duplicating logic resolveDisputeConfirm also
+ * hand-rolls independently — the exact "same fact, two places" shape Phase B
+ * of this round fixed for the redirect screens. Owning it here means no
+ * future caller can forget it. */
+export function payoutLines(escrow, splits, { partial = false, crossChain = false, floor = 0n } = {}) {
+  if (splits?.length > 0) {
+    // Round 15 #11 / Round 16 #1: "most delivered" was still a quantified
+    // claim nothing in the contract backs, and even "Paid to: N split
+    // recipients" (what Round 15 replaced it with) is itself an outcome
+    // claim — it asserts N recipients were paid, which rounding and the
+    // sub-floor divert below can both make false. Describes the escrow's
+    // CONFIGURATION instead — it has N split entries, each with its own
+    // percentage and chain — and leaves what actually happens to each to
+    // the caveats that follow, rather than asserting a headcount up front.
+    const lines = [
+      `${splits.length} configured split entries, by their configured share and destination chain`,
+      'A recipient whose share rounds down to zero is paid nothing.'
+    ]
+    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
+    // above — a nonzero share that still can't clear this escrow's CCTP
+    // forwarding-fee floor lands as an Arc credit instead of reaching its
+    // configured chain (:1319). Conflating the two would itself be
+    // inaccurate: one is integer rounding, the other is the forwarding
+    // floor, and they can fire independently of each other.
+    //
+    // Round 17 Phase A investigated this branch specifically and found
+    // nothing to restructure here: unlike the no-split branch below, this
+    // line was never an unconditional destination claim in the first place
+    // — it already names the exception per leg ("Any split leg WHOSE
+    // share...") rather than asserting delivery as fact and correcting it
+    // afterward. The leading configuration line above doesn't claim
+    // delivery either. So this stays a single conditional line, not a
+    // two-sided hedge.
+    //
+    // Round 18 Phase A #1: "Any split leg" was still wrong on its own terms
+    // — an Arc leg (TrancheProtocol.sol:1343) is never subject to this floor
+    // check at all, so wording it as if every leg risks the divert misstates
+    // the Arc legs in the same configuration. Scoped to the legs that
+    // actually face the check.
+    //
+    // Round 19 Phase A #2: "falls to X or less" still included a share that
+    // falls all the way to exactly zero — but Solidity's `if (share > 0)`
+    // guard (TrancheProtocol.sol:1310) skips a zero-share leg's whole
+    // if/else entirely, so it is never credited at all, let alone credited
+    // on Arc. That case is the rounds-to-zero line above's job, not this
+    // one's — scoped to nonzero so the two caveats describe disjoint cases.
+    if (partial && crossChain) {
+      lines.push(`Any cross-chain split leg whose nonzero share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
+    }
+    return lines
+  }
+  const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+  const chainName = getDomainName(Number(escrow.destinationDomain))
+  if (partial && crossChain) {
+    // Round 17 Phase A: this used to state "Paid to: X" / "Paid on: Y" as
+    // fact, THEN append a caveat contradicting it if the divert actually
+    // fires — the same leading-claim-vs-trailing-caveat shape fixed
+    // elsewhere this round for other findings, just for a destination
+    // instead of a scope claim. The frontend cannot compute the exact
+    // post-fee amount (escrowFeeBps is snapshotted with no getter), so it
+    // cannot know in advance which branch fires: both outcomes are
+    // genuinely possible from the signer's perspective, so both are stated
+    // together as one conditional rather than one asserted and one
+    // appended as a correction.
+    return [
+      `If this amount clears this escrow's forwarding-fee floor, it is paid to ${addr} on ${chainName}.`,
+      // Credited to escrow.recipient specifically, NOT `addr` above — the
+      // divert targets refundBalances[e.recipient] on-chain (:1292), the
+      // pre-redirect authorization identity, even when mintRecipient has
+      // since been redirected elsewhere. See ArbiterPanel.jsx's
+      // payoutAddress() for the same distinction on the no-split path.
+      `If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`
+    ]
+  }
+  return [
+    `Paid to: ${addr}`,
+    `Paid on: ${chainName}`
+  ]
+}
+
 // Picks the single highest-priority action available to a given caller role
 // on a milestone right now. Shared between MilestoneAction (which submits
 // the tx) and FocusBar (which only needs to know what's next). Lifecycle:
@@ -2165,25 +3706,193 @@ function computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, 
   return null
 }
 
+/* Confirm-screen copy for the four actions computeMilestoneAction can return,
+   keyed the same way. See utils/circleTheme.js for the descriptor shape; this
+   is the only description of these calls a UCW user ever sees, since none of
+   the four has an app-side confirmation step in front of it. */
+export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
+  const n = milestone.index + 1
+  const of = Number(escrow.milestoneCount) || n
+  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: action.fn
+  }
+
+  if (action.key === 'claim') {
+    // No `amount`: claimDelivery moves nothing. Putting the milestone figure in
+    // the Total row would tell the freelancer they are being paid right now.
+    //
+    // The window's length is the one number that decides when this freelancer
+    // gets paid, it is per-escrow (e.reviewWindow, set at deposit and used at
+    // :417), and it is already on the escrow object every other surface reads
+    // — the row at :640 and FocusBar at :472 both print it. Only the signing
+    // screen said "the review window" and left the signer to guess.
+    return {
+      ...base,
+      title: 'Mark this milestone as delivered',
+      subtitle: "Starts the client's review window. If they don't dispute before it ends, the milestone can be released.",
+      parameters: [
+        milestoneLine,
+        ...(escrow.reviewWindow
+          ? [`Review window: ${formatWindow(escrow.reviewWindow)} from this transaction. After it ends without a dispute, anyone can release the payment.`]
+          : []),
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  if (action.key === 'refund') {
+    // refundAfterDeadline credits refundBalances[e.refundTo] on Arc — it does
+    // not transfer and does not go cross-chain (TrancheProtocol.sol:715). The
+    // copy has to say credited, not sent, or the payer will go looking for it
+    // in their wallet.
+    return {
+      ...base,
+      title: 'Refund this milestone',
+      subtitle: 'The deadline and its 72-hour grace period have both passed, so this milestone can be refunded. No protocol fee is taken.',
+      amount: milestone.amount,
+      amountLabel: 'Amount refunded',
+      parameters: [
+        milestoneLine,
+        ...refundToLines(escrow),
+        'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+      ]
+    }
+  }
+
+  /* The two release paths do NOT pay the same forwarding fee, so they cannot
+     share one line about it.
+
+     approveRelease hands the caller's submitted maxFee straight through
+     (:647), and the no-split burn uses it (:1298) — but since Round 19 Phase
+     B that submission is always the escrow's own snapshotted floor (see
+     releaseMaxFeePlan above), never a live Circle quote. release() throws
+     the argument away regardless and substitutes e.escrowCctpForwardFee
+     (:674, :682) precisely because it is permissionless and a griefer could
+     otherwise authorise Circle to consume almost the whole payout. Split
+     legs always burn at the snapshot (:1329) whichever path ran.
+
+     So: the no-split approve path names the figure the contract actually
+     reads from the caller (currently pinned to the floor); every other
+     cross-chain case names the contract's own snapshot instead, since
+     nothing the frontend submits there is read at all; nothing at all on
+     Arc, where _approveAndBurn forces maxFee = 0 (:1343-1346). */
+  const releaseFeeLines = (key) => {
+    const crossChain = settlementIsCrossChain(escrow, splits)
+    if (!crossChain) return []
+
+    // The no-split approve path names the caller-submitted maxFee
+    // explicitly; every other cross-chain path names the contract's own
+    // snapshot instead, since nothing else the frontend submits is read.
+    if (key === 'approve' && splits?.length === 0 && maxFee !== undefined && maxFee !== null) {
+      return [`Delivery costs up to ${formatUSDC(maxFee)} in Circle forwarding fees, deducted from the payout on arrival.`]
+    }
+
+    // No quote to fall back on: an absent or zero snapshot means the figure is
+    // unknown, not that delivery is free. Printing "0.00 USDC" would state a
+    // fee that is both wrong and reassuring — say nothing instead.
+    const floor = escrow.escrowCctpForwardFee ?? 0n
+    if (floor === 0n) return []
+
+    if (splits?.length > 0) {
+      return [`Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted on delivery.`]
+    }
+    return [`Delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from the payout on arrival.`]
+  }
+
+  const releaseParams = (key) => [
+    milestoneLine,
+    ...payoutLines(escrow, splits),
+    'Protocol fee is deducted from this amount before payout.',
+    ...releaseFeeLines(key)
+  ]
+
+  if (action.key === 'approve') {
+    return {
+      ...base,
+      title: 'Approve and release this milestone',
+      subtitle: 'Releases the milestone out of escrow to the freelancer. This cannot be undone.',
+      amount: milestone.amount,
+      amountLabel: 'Amount released',
+      parameters: releaseParams('approve')
+    }
+  }
+
+  if (action.key === 'release') {
+    // Permissionless once the review window has lapsed.
+    return {
+      ...base,
+      title: 'Release this milestone',
+      subtitle: 'The review window closed without a dispute, so this milestone can now be released to the freelancer by anyone.',
+      amount: milestone.amount,
+      amountLabel: 'Amount released',
+      parameters: releaseParams('release')
+    }
+  }
+
+  /* computeMilestoneAction returns a closed set of four keys today. This is
+     deliberately not an unconditional `release` fallback: a fifth key added
+     there without a descriptor here would inherit release's title AND its
+     Total row, i.e. a signing screen confidently describing the wrong
+     transaction. Fail visibly instead, and fall back to copy that is vague
+     but true — no `amount`, since an unknown action's value is unknown. */
+  console.warn(`No confirm descriptor for milestone action "${action.key}" — falling back to generic copy.`)
+  return {
+    ...base,
+    title: 'Confirm this milestone action',
+    subtitle: 'Check the details below, then confirm to sign.',
+    parameters: [milestoneLine]
+  }
+}
+
 function MilestoneAction({
-  escrow, milestone, role, gracePassed, reviewWindowExpired,
+  escrow, milestone, splits, role, gracePassed, reviewWindowExpired,
   setOpt, clearOpt, onChange, onCrossChainRelease
 }) {
   const [activeKey, setActiveKey] = useState(null)
   const tx = useTx({
-    onConfirmed: () => { onChange?.(); setActiveKey(null) },
+    // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
+    // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
+    // escrow/split CONFIGURED for cross-chain" — MilestoneAction shares
+    // this one run() across all four milestone actions, and two of them
+    // (claim, refund) never touch CCTP at all regardless of the escrow's
+    // domain: claimDelivery moves no funds (milestoneConfirm: "No funds
+    // move on this transaction"), refundAfterDeadline only ever credits an
+    // Arc refund balance (TrancheProtocol.sol:715). The old gate tracked
+    // both anyway whenever the escrow happened to be cross-chain-configured.
+    // Also moved from right after tx.run() (broadcast time) into
+    // onConfirmed (confirmation time) — the same broadcast-vs-mined gap
+    // Round 21 Phase D already closed for mutualSettle specifically.
+    //
+    // Round 26 finding 3: milestone-scoped and authenticity-verified, not
+    // just "a real MessageSent exists somewhere in this receipt" — Circle
+    // wallets are ERC-4337 smart accounts, and a bundler's handleOps can
+    // pack a foreign UserOperation's logs into the same receipt this
+    // device's own submission produced, even though this device only ever
+    // submitted one call. escrow.id/milestone.index are already in scope
+    // here — no discovery needed, unlike the fallback path.
+    onConfirmed: (receipt) => {
+      onChange?.(); setActiveKey(null)
+      const { emitted, ordinals, totalMessages, fingerprints } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+      if (emitted) {
+        safeSetItem(
+          cctpTrackKey(escrow.id, milestone.index),
+          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+        )
+        onCrossChainRelease?.()
+      }
+    },
     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
   })
-
-  // Cross-chain burns must carry a maxFee that covers Circle's live Forwarding
-  // Service fee, or the burn is attested but the mint is rejected
-  // (INSUFFICIENT_FEE). We quote that fee at submit time (see {resolveMaxFee})
-  // rather than reusing the contract's static floor. approveRelease honours the
-  // caller-supplied maxFee; release ignores it and uses the escrow's snapshotted
-  // fee, but the arg is kept for ABI compatibility. Same-chain (Arc) burns force
-  // maxFee = 0 inside the contract regardless.
   const { config } = useProtocolConfig()
-  const toast = useToast()
+
+  // Cross-chain burns must carry a maxFee that clears the escrow's own
+  // snapshotted floor (see {releaseMaxFeePlan}) — approveRelease honours the
+  // caller-supplied maxFee; release ignores it and uses the escrow's
+  // snapshotted fee, but the arg is kept for ABI compatibility. Same-chain
+  // (Arc) burns force maxFee = 0 inside the contract regardless.
 
   const action = computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, gracePassed })
   if (!action) return null
@@ -2193,36 +3902,27 @@ function MilestoneAction({
     setOpt(`milestone_${milestone.index}`, action.optimistic)
 
     let args = action.args
+    // Kept outside the try so the descriptor can name the figure that will
+    // actually govern an approveRelease burn.
+    let quotedMaxFee
     if (action.needsForwardFee) {
-      // Whole milestone is released; burn amount is the milestone minus the
-      // protocol fee. Quote Circle's live forwarding fee for the band check.
-      // This runs before the wallet prompt, so useTx won't toast its failures.
-      try {
-        const feeBps = config?.protocolFeeBps ?? 0n
-        const protocolFee = (milestone.amount * BigInt(feeBps)) / 10_000n
-        const maxFee = await resolveMaxFee({
-          destinationDomain: escrow.destinationDomain,
-          escrowCctpForwardFee: escrow.escrowCctpForwardFee,
-          burnAmount: milestone.amount - protocolFee
-        })
-        args = [...action.args, maxFee]
-      } catch (err) {
-        clearOpt(`milestone_${milestone.index}`)
-        setActiveKey(null)
-        toast.error(err.message || "Couldn't check delivery fees. Please try again.")
-        return
-      }
+      // Round 18/19/20/21 Phase B/C/B: see releaseMaxFeePlan for why this
+      // reuses settlementIsCrossChain instead of reading
+      // escrow.destinationDomain directly, why split legs and release()
+      // (actionKey !== 'approve') both skip the network entirely, and why
+      // the one case that needs it resolves through resolveDominantMaxFee
+      // rather than rejecting on a bad quote.
+      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps, actionKey: action.key })
+      const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
+      args = [...action.args, maxFee]
+      quotedMaxFee = maxFee
     }
 
     try {
-      const txHash = await tx.run(escrowWrite(action.fn, args), { loadingMessage: 'Check your wallet.' })
-      if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
-        localStorage.setItem(
-          cctpTrackKey(escrow.id, milestone.index),
-          JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
-        )
-        onCrossChainRelease?.()
-      }
+      await tx.run(escrowWrite(action.fn, args), {
+        loadingMessage: 'Check your wallet.',
+        confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+      })
     } catch {
       clearOpt(`milestone_${milestone.index}`)
     }
@@ -2319,8 +4019,8 @@ function RaiseDisputeButton({ escrow, milestone, role, reviewWindowExpired, onCh
       <EvidenceModal
         open={modal}
         mode="raise"
-        escrowId={escrow.id}
-        milestoneIndex={milestone.index}
+        escrow={escrow}
+        milestone={milestone}
         onClose={() => setModal(false)}
         onConfirmed={() => { setModal(false); onChange?.() }}
       />
@@ -2365,8 +4065,8 @@ function EvidenceTabActions({ escrow, milestone, dispute, role, userAddress, onC
       <EvidenceModal
         open={!!modal}
         mode={modal}
-        escrowId={escrow.id}
-        milestoneIndex={milestone.index}
+        escrow={escrow}
+        milestone={milestone}
         onClose={() => setModal(null)}
         onConfirmed={() => { setModal(null); onChange?.() }}
       />
@@ -2374,10 +4074,148 @@ function EvidenceTabActions({ escrow, milestone, dispute, role, userAddress, onC
   )
 }
 
+/* ---------- Dispute evidence (EVIDENCE/STATE) ----------
+ *
+ * Three calls that move no money, so none of them carries an `amount` — a
+ * Total row on a transaction that transfers nothing is the mistake the
+ * claimDelivery branch avoids at :2362.
+ *
+ * What they cost is disclosure instead, and it is the same two things every
+ * time: the text goes on-chain in the clear and stays there, and two of the
+ * three are one-shot. The in-app modal blurbs say some of this already, but
+ * a UCW user signs on Circle's screen — for them the blurb is a screen they
+ * have already left behind by the time anything is irreversible.
+ */
+
+// Long reasons are capped at 500 chars by the textarea; a confirm screen is
+// not the place to render all of them.
+function truncateText(s, max = 140) {
+  const t = (s || '').trim()
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
+/* The on-chain hash is the dropped file's fingerprint, falling back to
+ * keccak256(uri) when only a link was given (:2700). That fallback is worth
+ * naming out loud: a hash of the link text proves the *link* is unchanged
+ * and says nothing about the file, so if the host rots or quietly swaps the
+ * document, the hash still verifies while the evidence is gone. */
+function evidenceLines({ uri, fileName }) {
+  return [
+    `Evidence link: ${truncateText(uri, 90)}`,
+    fileName
+      ? `Fingerprint: the contents of ${fileName} — still provable if the link later changes.`
+      : 'Fingerprint: a hash of the link text, not of the document it points to.'
+  ]
+}
+
+function milestoneLineFor(escrow, milestone) {
+  const n = milestone.index + 1
+  const of = Number(escrow.milestoneCount) || n
+  return `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
+}
+
+const EVIDENCE_BASE = {
+  contractName: 'Tranche Protocol Escrow',
+  contractAddress: CONTRACT_ADDRESS
+}
+
+/* raiseDispute freezes the milestone into DISPUTED (:456) and writes the
+ * reason and URI into DisputeData as plain strings (:443-454). There is no
+ * withdrawDispute anywhere in the contract — once raised, it cannot be taken
+ * back. That much belongs on the screen: this is not a reversible "flag for
+ * review".
+ *
+ * What the copy previously got wrong is the other half — that raising a
+ * dispute "hands it to the arbiter", as though the arbiter were the only way
+ * out. Three exits exist, and two of them need no arbiter at all:
+ *
+ *   - mutualSettle accepts DISPUTED explicitly (:534), so the two parties can
+ *     still agree a split between themselves afterwards;
+ *   - resolveDisputeByTimeout has no role gate (:561), so once ARBITER_WINDOW
+ *     elapses anyone — including either party — can settle it at a fixed
+ *     50/50;
+ *   - resolveDispute, the arbiter's discretionary ruling (:495).
+ *
+ * A signer told the arbiter decides will wait for one, which is exactly the
+ * inaction the timeout exists to route around.
+ *
+ * Phase D: that line named the window without measuring it. ARBITER_WINDOW is
+ * 14 days (sol:69) and the fallback is hardcoded 5000 bps (:576) — both fixed
+ * at compile time, so there is nothing to fetch and no reason to be vague. The
+ * figures go into the existing sentence rather than a second one: "no arbiter
+ * rules" and "how long you wait for one" are the same fact, and splitting them
+ * across two bullets reads as two separate escape hatches. `arbiterWindow` is
+ * threaded in rather than re-hardcoded here so this cannot drift from the
+ * countdown the dispute panel renders from the same source. */
+export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName, arbiterWindow }) {
+  // Degrade to the unquantified phrasing rather than printing "undefined days".
+  const window = arbiterWindow ? formatWindow(arbiterWindow) : null
+  return {
+    ...EVIDENCE_BASE,
+    functionName: 'raiseDispute',
+    title: 'Dispute this milestone',
+    subtitle: 'Freezes the milestone so it cannot be released while the disagreement is open. A dispute cannot be withdrawn once raised.',
+    parameters: [
+      `${milestoneLineFor(escrow, milestone)} — frozen, not refunded`,
+      `Reason: "${truncateText(reason)}"`,
+      ...evidenceLines({ uri, fileName }),
+      'Your reason and link are stored on-chain in the clear, readable by anyone, permanently.',
+      'The arbiter can award any split from 0 to 100% — disputing does not guarantee a refund.',
+      window
+        ? `An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within ${window}, anyone can settle it at a fixed 50/50.`
+        : 'An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
+/* submitCounterEvidence is genuinely one-shot: CounterEvidenceAlreadySubmitted
+ * at :479 rejects a second attempt, and nothing anywhere clears the field. The
+ * modal blurb calls it "your one opportunity to respond" — the confirm screen
+ * has to carry that too, because it is the screen a UCW user is actually
+ * looking at when it becomes true. */
+export function counterEvidenceConfirm({ escrow, milestone, uri, fileName }) {
+  return {
+    ...EVIDENCE_BASE,
+    functionName: 'submitCounterEvidence',
+    title: 'Respond to this dispute',
+    subtitle: 'Your one opportunity to respond. The contract accepts exactly one counter-evidence submission per dispute — it cannot be edited, replaced, or withdrawn afterwards.',
+    parameters: [
+      `${milestoneLineFor(escrow, milestone)} — still frozen`,
+      ...evidenceLines({ uri, fileName }),
+      'Stored on-chain in the clear, readable by anyone, permanently.',
+      'The milestone stays disputed and waits on the arbiter either way.',
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
+/* appendEvidence writes NO state — it emits and returns (:1098-1106), as its
+ * own docstring says. That makes it the weakest action in the set and the one
+ * most likely to be over-read: a user who has just paid gas reasonably assumes
+ * something happened. Nothing did, beyond the log entry, and in particular the
+ * arbiter window keeps running. */
+export function appendEvidenceConfirm({ escrow, milestone, uri, fileName }) {
+  return {
+    ...EVIDENCE_BASE,
+    functionName: 'appendEvidence',
+    title: 'Add evidence to this dispute',
+    subtitle: 'Publishes one more evidence link to the dispute record. Unlike counter-evidence, you can add as many as you need while the dispute stays open.',
+    parameters: [
+      `${milestoneLineFor(escrow, milestone)} — still frozen`,
+      ...evidenceLines({ uri, fileName }),
+      'Published on-chain in the clear, readable by anyone, permanently — it cannot be deleted or edited.',
+      "Recorded as a log entry only: nothing about the dispute or the milestone changes, and the arbiter's deadline does not move.",
+      'No funds move on this transaction.'
+    ]
+  }
+}
+
 const EVIDENCE_MODES = {
   raise: {
     title: 'Raise a dispute',
     fn: 'raiseDispute',
+    confirm: raiseDisputeConfirm,
     needsReason: true,
     submitLabel: 'Submit dispute',
     evidenceLabel: 'Evidence link',
@@ -2386,6 +4224,7 @@ const EVIDENCE_MODES = {
   counter: {
     title: 'Submit counter-evidence',
     fn: 'submitCounterEvidence',
+    confirm: counterEvidenceConfirm,
     needsReason: false,
     submitLabel: 'Submit counter-evidence',
     evidenceLabel: 'Counter-evidence link',
@@ -2394,6 +4233,7 @@ const EVIDENCE_MODES = {
   append: {
     title: 'Add evidence',
     fn: 'appendEvidence',
+    confirm: appendEvidenceConfirm,
     needsReason: false,
     submitLabel: 'Add evidence',
     evidenceLabel: 'Evidence link',
@@ -2405,7 +4245,7 @@ const EVIDENCE_MODES = {
    The on-chain hash is the file fingerprint when a file is dropped, falling
    back to keccak256(uri) when only a link is provided. The URI is always
    stored separately so the arbiter can fetch the content. */
-function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {
+function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed }) {
   const meta = mode ? EVIDENCE_MODES[mode] : null
   const [reason, setReason] = useState('')
   const [uri, setUri] = useState('')
@@ -2416,6 +4256,10 @@ function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfir
 
   const reset = () => { setReason(''); setUri(''); setFileHash(null); setFileName(null) }
   const tx = useTx({ onConfirmed: () => { reset(); onConfirmed?.() } })
+  // Above the early return: this sits with the other hook calls so the ordering
+  // stays stable whether or not the modal is open. Only `raise` reads it; the
+  // other two descriptors ignore the extra key.
+  const { arbiterWindow } = useDisputeConfig()
 
   useEffect(() => { if (!open) reset() }, [open]) // eslint-disable-line
 
@@ -2445,12 +4289,15 @@ function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfir
 
   const submit = () => {
     if (!canSubmit) return
-    const id = BigInt(escrowId)
-    const idx = BigInt(milestoneIndex)
+    const id = BigInt(escrow.id)
+    const idx = BigInt(milestone.index)
     const args = meta.needsReason
       ? [id, idx, reason.trim(), evidenceHash, uri]
       : [id, idx, evidenceHash, uri]
-    tx.run(escrowWrite(meta.fn, args), { loadingMessage: 'Check your wallet.' })
+    tx.run(escrowWrite(meta.fn, args), {
+      loadingMessage: 'Check your wallet.',
+      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName, arbiterWindow })
+    })
   }
 
   return (
@@ -2583,7 +4430,122 @@ function Countdown({ label, target, tone = 'warning' }) {
 }
 
 /* ---------- Cancel by mutual agreement ---------- */
-function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
+
+/* Confirm-screen copy for mutualCancel, which is two different transactions
+   behind one button (TrancheProtocol.sol:735).
+ *
+ *  - First party to call: sets their approval flag and returns. Nothing moves.
+ *  - Second party to call: both flags are now true, so the same call falls into
+ *    the refund branch, cancels the escrow and credits the payer.
+ *
+ * So `otherApproved` decides whether this is EVIDENCE/STATE or VALUE-MOVING.
+ * The button already knows — it switches its own label between "Approve
+ * cancellation" and "Finalize cancellation" — and the signing screen has to
+ * make the same distinction, or the approving party sees a Total for money
+ * that this transaction does not move.
+ *
+ * The refundable figure is the sum of PENDING milestones only. RELEASED ones
+ * are already paid out and are not clawed back; REFUNDED ones are already
+ * credited. It is NOT total-minus-released, because IN_REVIEW milestones are
+ * neither — they make the finalising call revert outright
+ * (CannotCancelDuringDispute, :752), which is the third case below. */
+export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
+  const list = milestones || []
+  const pending = list.filter((m) => m.state === 0)
+  const refundable = pending.reduce((sum, m) => sum + m.amount, 0n)
+  // IN_REVIEW(1) and DISPUTED(2) both trip CannotCancelDuringDispute.
+  const blocking = list.filter((m) => m.state === 1 || m.state === 2)
+
+  const base = {
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'mutualCancel'
+  }
+
+  if (!otherApproved) {
+    // No `amount`: this call only writes a flag. A Total here would show the
+    // refund figure on the one call that does not perform the refund.
+    return {
+      ...base,
+      title: 'Approve cancelling this escrow',
+      subtitle: "Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the escrow's refund address.",
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Would refund ${formatUSDC(refundable)} across ${pending.length} unstarted milestone${pending.length === 1 ? '' : 's'} once both parties approve.`,
+        'No funds move on this transaction.'
+      ]
+    }
+  }
+
+  if (blocking.length > 0) {
+    // Both parties have approved, so this call takes the refund branch — and
+    // that branch reverts while any milestone is in review or disputed. Do not
+    // put a refund figure on a screen for a transaction that cannot succeed.
+    return {
+      ...base,
+      title: 'Cancel this escrow and refund it',
+      subtitle: 'The contract rejects a cancellation while a milestone is in review or disputed, so this transaction will not go through.',
+      parameters: [
+        `Escrow #${escrow.id}`,
+        `Blocked by ${blocking.length} milestone${blocking.length === 1 ? '' : 's'} in review or disputed.`,
+        'Let those milestones settle, or resolve the dispute, then try again.'
+      ]
+    }
+  }
+
+  return {
+    ...base,
+    title: 'Cancel this escrow and refund it',
+    subtitle: 'Both parties have now approved. This cancels the escrow and refunds every milestone that has not started. This cannot be undone.',
+    amount: refundable,
+    amountLabel: 'Amount refunded',
+    parameters: [
+      `Escrow #${escrow.id} — ${pending.length} of ${Number(escrow.milestoneCount)} milestones refunded`,
+      ...refundToLines(escrow),
+      'Already-released milestones are not clawed back.',
+      'No protocol fee is taken.',
+      'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+    ]
+  }
+}
+
+/* EVIDENCE/STATE: retractCancelApproval clears the caller's own flag and
+   nothing else (TrancheProtocol.sol:1062). There is no figure to anchor on, so
+   the copy carries the consequence instead.
+
+   The retract button only renders once the caller has approved, and an escrow
+   where BOTH parties have approved cannot still be ACTIVE — the second
+   approval finalises the cancellation in the same call. So at this point the
+   caller has approved and the other party has not, which is what makes
+   "the other party can no longer complete it on their own" true. */
+export function retractCancelConfirm({ escrow }) {
+  return {
+    title: 'Withdraw your cancellation approval',
+    subtitle: 'Takes back your approval to cancel this escrow. The escrow stays active and its milestones carry on as normal.',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'retractCancelApproval',
+    parameters: [
+      `Escrow #${escrow.id}`,
+      'The other party can no longer complete the cancellation on their own.',
+      'No funds move on this transaction. You can approve again at any time.'
+    ]
+  }
+}
+
+// Round 14 #9: mutualCancel refunds e.refundTo (:1241 area — see
+// refundToLines above), which is the payer's own wallet only when nothing
+// else was set at deposit. Stated only where it actually diverges, same rule
+// refundToLines already follows for the confirm-screen version of this text.
+export function refundDestinationPhrase(escrow) {
+  const diverges = escrow?.refundTo && escrow?.depositor &&
+    escrow.refundTo.toLowerCase() !== escrow.depositor.toLowerCase()
+  return diverges
+    ? "this escrow's configured refund address, not necessarily the payer's own wallet"
+    : "the payer's refund balance"
+}
+
+function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
   const optApproved = optimistic.cancel === 'approved'
@@ -2604,12 +4566,18 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
 
   const submit = () => tx.run(
     escrowWrite('mutualCancel', [BigInt(escrow.id)]),
-    { loadingMessage: 'Submitting. Check your wallet.' }
+    {
+      loadingMessage: 'Submitting. Check your wallet.',
+      confirm: cancelEscrowConfirm({ escrow, milestones, otherApproved: otherFlag })
+    }
   )
 
   const retract = () => retractTx.run(
     escrowWrite('retractCancelApproval', [BigInt(escrow.id)]),
-    { loadingMessage: 'Retracting. Check your wallet.' }
+    {
+      loadingMessage: 'Retracting. Check your wallet.',
+      confirm: retractCancelConfirm({ escrow })
+    }
   )
 
   // Has the caller approved on-chain, and not yet optimistically retracted?
@@ -2620,7 +4588,7 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
   return (
     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Cancel by mutual agreement</h3>
-      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
+      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to {refundDestinationPhrase(escrow)}.</p>
       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
         <ApprovalRow label="Payer" approved={payerApproved} />
         <ApprovalRow label="Freelancer" approved={freelancerApproved} />

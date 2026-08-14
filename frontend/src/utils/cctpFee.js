@@ -13,6 +13,17 @@ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbo
 // pick this tier's forwardFee from the API response.
 const STANDARD_FINALITY = 2000
 
+// Round 21 Phase B: a request that simply hangs (a stalled connection,
+// unusually slow response — no explicit timeout at all before this) never
+// resolves and never rejects, so an unprotected `await` here never
+// completes. That breaks resolveDominantMaxFee's "never blocks the
+// transaction" guarantee just as surely as an outright failure would, since
+// its try/catch can only catch a REJECTION, not a hang. 8s: long enough to
+// tolerate a slow/mobile connection to Circle's API for a single small GET,
+// short enough that a genuine hang doesn't leave the pre-signature UI
+// (before the wallet prompt even appears) stalled for an unreasonable time.
+const FEE_QUOTE_TIMEOUT_MS = 8_000
+
 /**
  * Fetch Circle's live Forwarding-Service fee for an Arc→destination burn.
  * @param {number} srcDomain   CCTP source domain (Arc = 26).
@@ -22,9 +33,26 @@ const STANDARD_FINALITY = 2000
  */
 export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
-  const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } })
-  if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
-  const data = await res.json()
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), FEE_QUOTE_TIMEOUT_MS)
+  let data
+  try {
+    // Round 22 Phase B: fetch() resolves once HEADERS arrive, before the
+    // body is read — clearing the timeout here (as this used to) leaves
+    // res.json() completely unprotected. A server that sends headers and
+    // then stalls the body can block past FEE_QUOTE_TIMEOUT_MS indefinitely.
+    // The same AbortController/signal governs the whole request, including
+    // an in-flight body read, so keeping it live through res.json() aborts
+    // a stalled body exactly the same way it aborts a stalled connect.
+    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
+    if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
+    data = await res.json()
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error("Delivery fee request timed out. Please try again.")
+    throw err
+  } finally {
+    clearTimeout(timeoutId)
+  }
   if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
   const tier = data.find((t) => Number(t.finalityThreshold) === STANDARD_FINALITY) ?? data[0]
   const fwd = tier?.forwardFee
@@ -35,33 +63,87 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
 }
 
 /**
- * Resolve the `maxFee` to pass to a cross-chain release / settlement / dispute
- * call. Same-chain (Arc) burns force maxFee = 0 inside the contract. Cross-chain
- * burns must cover Circle's live forwarding fee, clamped into the band the
- * contract accepts: [escrowCctpForwardFee snapshot floor, burnAmount).
+ * A lower bound on what the contract will actually remainder after its
+ * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
+ * (escrowFeeBps has no getter — see TrancheProtocol.sol:117). Every escrow's
+ * snapshot was checked against `maxProtocolFeeBps` (TrancheProtocol.sol:191,
+ * MAX_PROTOCOL_FEE) at the moment `setProtocolFee` set it, and that ceiling
+ * itself never changes — so the real per-escrow rate is always <= this
+ * ceiling, meaning the real fee is always <= worstCaseFee and the real
+ * remainder is always >= what this returns.
+ *
+ * Round 20 Phase C: re-added in a different role than Round 18 gave it.
+ * Round 18 fed this straight into the (Round 20 Phase D removed) resolveMaxFee
+ * helper's `burnAmount` to REJECT a transaction outright when the estimate
+ * looked unsafe — but "conservative estimate <= floor" and "real remainder
+ * <= floor" are different conditions,
+ * so it could reject transactions the contract would have accepted (Round 19
+ * removed it for exactly this reason). Here it is a pure SAFETY GATE inside
+ * {resolveDominantMaxFee}, deciding whether a live quote is trustworthy
+ * enough to prefer over the floor — never deciding whether to submit at all.
+ * A live quote strictly below this bound is guaranteed strictly below the
+ * REAL remainder too (this bound <= real remainder), so using it satisfies
+ * the burn branch's `maxFee < remainder` constraint with certainty, not an
+ * estimate. When the quote is NOT provably below this bound, the caller
+ * falls back to the floor — which Round 19 already proved unconditionally
+ * safe on its own, independent of any estimate.
+ * @param {bigint} amount             Gross amount the protocol fee is cut from.
+ * @param {bigint} [maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
+ *   Defaults to 500 (TrancheProtocol.sol:23's hardcoded MAX_PROTOCOL_FEE,
+ *   this contract's actual ceiling) for the brief window before
+ *   getProtocolConfig() resolves — NOT to 0, which would assume no fee at
+ *   all and overestimate the remainder, reproducing the exact bug this
+ *   function exists to close.
+ * @returns {bigint}
+ */
+export function worstCaseRemainder(amount, maxProtocolFeeBps) {
+  const ceiling = maxProtocolFeeBps ?? 500n
+  const worstCaseFee = (BigInt(amount) * BigInt(ceiling)) / 10_000n
+  return BigInt(amount) - worstCaseFee
+}
+
+/**
+ * Round 20 Phase C. Attempts a live Circle quote and uses it only when
+ * PROVABLY safe against the contract's real, unknowable-in-advance remainder
+ * — strictly below {worstCaseRemainder}'s lower bound on that remainder.
+ * Falls back to `floor` — Round 19's unconditionally-safe submission — in
+ * every other case: the quote fetch throws, the response is malformed, the
+ * request times out (fetchForwardFee's own FEE_QUOTE_TIMEOUT_MS — Round 21
+ * Phase B; a hang neither resolves nor rejects, so this guarantee needed a
+ * timeout somewhere underneath it regardless of this function's own
+ * try/catch), or the quote resolves but isn't provably safe. NEVER throws
+ * itself, so a transient Circle fee-API outage — slow, erroring, or hung —
+ * degrades to exactly Round 19's behaviour instead of blocking the caller's
+ * transaction.
+ *
+ * Scope: only meaningful for a no-split cross-chain burn where the submitted
+ * maxFee genuinely governs the burn (approveRelease, resolveDispute with
+ * bps > 0 and a nonzero recipient share). Split legs, release()'s
+ * permissionless path, and mutualSettle all ignore whatever maxFee is
+ * submitted regardless (settled decision #7) — a live quote there would be
+ * exactly as pointless as it was before this function existed, so callers
+ * should keep submitting `floor` directly on those paths rather than routing
+ * them through here.
  *
  * @param {object}  p
  * @param {number}  p.destinationDomain
- * @param {bigint}  [p.escrowCctpForwardFee]  Per-escrow snapshotted floor.
- * @param {bigint}  [p.burnAmount]            USDC actually burned for the recipient
- *                                            (after protocol fee); used to keep
- *                                            maxFee < burnAmount. Pass 0n / omit
- *                                            when no recipient burn occurs.
+ * @param {bigint}  p.floor              Escrow's own snapshotted forwarding-fee floor.
+ * @param {bigint}  p.recipientAmount    USDC amount the protocol fee is cut from.
+ * @param {bigint}  [p.maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
  * @param {'low'|'med'|'high'} [p.level]
  * @returns {Promise<bigint>}
  */
-export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, burnAmount, level = 'high' }) {
-  if (Number(destinationDomain) === ARC_DOMAIN) return 0n
-  // A pure refund / 0% recipient share triggers no recipient burn, so the
-  // contract skips the cross-chain fee floor — any maxFee (incl. 0) is fine.
-  if (burnAmount != null && BigInt(burnAmount) === 0n) return 0n
-
-  const live = await fetchForwardFee(ARC_DOMAIN, Number(destinationDomain), level)
-  const floor = BigInt(escrowCctpForwardFee ?? 0n)
-  const maxFee = live > floor ? live : floor
-
-  if (burnAmount != null && maxFee >= BigInt(burnAmount)) {
-    throw new Error('This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.')
+export async function resolveDominantMaxFee({ destinationDomain, floor, recipientAmount, maxProtocolFeeBps, level = 'high' }) {
+  const safeFloor = BigInt(floor ?? 0n)
+  try {
+    const liveQuote = await fetchForwardFee(ARC_DOMAIN, Number(destinationDomain), level)
+    const safeThreshold = worstCaseRemainder(recipientAmount, maxProtocolFeeBps)
+    if (liveQuote < safeThreshold) {
+      return liveQuote > safeFloor ? liveQuote : safeFloor
+    }
+  } catch {
+    // Quote failed, errored, or came back malformed — fall through to the
+    // floor rather than propagating. Never blocks the caller's transaction.
   }
-  return maxFee
+  return safeFloor
 }

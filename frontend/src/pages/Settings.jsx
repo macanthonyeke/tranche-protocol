@@ -9,7 +9,84 @@ import AddressDisplay from '../components/AddressDisplay.jsx'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTheme } from '../hooks/useTheme.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
-import { formatUSDC, isValidAddress } from '../utils/format.js'
+import { formatUSDC, isValidAddress, isNonZeroAddress } from '../utils/format.js'
+import { CONTRACT_ADDRESS } from '../config/contract.js'
+
+/* ---------- Confirm-screen descriptors ----------
+   Both refund actions move a user's whole balance in one irreversible step
+   against a free-text address, and neither has an app-side confirmation in
+   front of it — so Circle's signing screen is the last checkpoint before an
+   address typo becomes permanent. Descriptor shape: utils/circleTheme.js.
+
+   These are the far end of the language used on the release/refund screens
+   in EscrowDetail: milestones are "credited" to a refund balance, and this
+   is where credited finally becomes sent. Only withdrawRefund actually sends
+   anything — see transferRefundCreditConfirm below.
+
+   Both also carry a side effect nothing on screen mentions. F5: each one
+   deletes any pending two-step recovery proposal targeting the caller's
+   wallet (TrancheProtocol.sol:851-852, :897-898), on the reasoning that a
+   wallet able to transact is not a wallet needing recovery. That is correct,
+   but it is destructive to somebody else's in-flight work: a RECOVERY_MANAGER
+   proposal made minutes earlier is gone, and the 14-day clock restarts from
+   whenever they propose again. A user mid-recovery who withdraws a small
+   balance in the meantime has silently undone it. */
+
+export function withdrawRefundConfirm({ balance, recipient, signer }) {
+  const parameters = [
+    `Sent to: ${recipient}`,
+    // The UI always calls withdrawRefund with destinationDomain = 0, which in
+    // this contract is the sentinel for the Arc path — a plain
+    // usdc.safeTransfer, no CCTP (TrancheProtocol.sol:854). Do NOT render this
+    // with getDomainName(0): in CCTP_DOMAINS domain 0 is Ethereum Sepolia, so
+    // that would name the wrong chain on a signing screen.
+    'Sent on: Arc — a direct USDC transfer, not a cross-chain delivery.',
+    'Withdraws your entire refund balance. Partial withdrawals are not supported.',
+    'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
+  ]
+
+  // Withdrawing to a wallet other than the signer is a supported flow (that is
+  // the point of the "withdraw to any address you control" field), so this
+  // states the fact rather than warning — but it states it, because it is the
+  // difference between a routine withdrawal and sending everything to a typo.
+  if (signer && recipient?.toLowerCase() !== signer.toLowerCase()) {
+    parameters.push('This is not the wallet you are signing with.')
+  }
+
+  return {
+    title: 'Withdraw your refund balance',
+    subtitle: 'Sends your full refund balance out of the escrow contract to the address below. This cannot be undone.',
+    amount: balance,
+    amountLabel: 'Amount withdrawn',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'withdrawRefund',
+    parameters
+  }
+}
+
+export function transferRefundCreditConfirm({ balance, recipient }) {
+  return {
+    title: 'Transfer your refund credit',
+    subtitle: 'Hands your entire refund credit to another wallet. Only that wallet can withdraw it afterwards — you cannot reverse this yourself.',
+    // An amount, because the whole credit does leave you and becomes someone
+    // else's to withdraw. But no USDC moves here: the contract only re-keys
+    // refundBalances (TrancheProtocol.sol:900-901, "Does NOT transfer USDC").
+    // The figure says how much is at stake; the parameters say what actually
+    // happens, so this cannot be misread as a payout.
+    amount: balance,
+    amountLabel: 'Credit transferred',
+    contractName: 'Tranche Protocol Escrow',
+    contractAddress: CONTRACT_ADDRESS,
+    functionName: 'transferRefundCredit',
+    parameters: [
+      `New owner: ${recipient}`,
+      'No USDC moves on this transaction — it re-keys who the credit belongs to.',
+      'The new owner withdraws it from their own wallet.',
+      'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
+    ]
+  }
+}
 
 export default function Settings() {
   return (
@@ -45,10 +122,13 @@ function RefundSection() {
   useEffect(() => { if (address) setRecipient(address) }, [address])
 
   const submit = () => {
-    if (!isValidAddress(recipient)) return
+    if (!isNonZeroAddress(recipient)) return
     tx.run(
       escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
-      { loadingMessage: 'Submitting. Check your wallet.' }
+      {
+        loadingMessage: 'Submitting. Check your wallet.',
+        confirm: withdrawRefundConfirm({ balance, recipient, signer: address })
+      }
     )
   }
 
@@ -83,7 +163,7 @@ function RefundSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
+        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
       >
         {tx.isBusy ? 'Submitting…' : 'Withdraw funds'}
       </button>
@@ -103,10 +183,13 @@ function TransferRefundCreditSection() {
   const tx = useTx({ onConfirmed: () => refetch() })
 
   const submit = () => {
-    if (!isValidAddress(recipient)) return
+    if (!isNonZeroAddress(recipient)) return
     tx.run(
       escrowWrite('transferRefundCredit', [recipient]),
-      { loadingMessage: 'Submitting. Check your wallet.' }
+      {
+        loadingMessage: 'Submitting. Check your wallet.',
+        confirm: transferRefundCreditConfirm({ balance, recipient })
+      }
     )
   }
 
@@ -139,7 +222,7 @@ function TransferRefundCreditSection() {
         type="button"
         className="btn-primary"
         onClick={submit}
-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
+        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
       >
         {tx.isBusy ? 'Submitting…' : 'Transfer credit'}
       </button>

@@ -254,14 +254,18 @@ export function useAccountActivity(address) {
 
 export function useRefundBalance(address) {
   const enabled = !!address
-  const { data, isLoading, refetch } = useReadContract({
+  const { data, isLoading, error, refetch } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi: ESCROW_ABI,
     functionName: 'refundBalances',
     args: enabled ? [address] : undefined,
     query: { enabled }
   })
-  return { balance: data ?? 0n, isLoading, refetch }
+  // `data ?? 0n` reads identically to a genuine zero balance whether the read
+  // succeeded or failed — callers that gate on isLoading alone cannot tell an
+  // RPC failure from "this wallet really has nothing", so the error travels
+  // alongside rather than being swallowed here.
+  return { balance: data ?? 0n, isLoading, error: enabled ? (error ?? null) : null, refetch }
 }
 
 export function useUsdcBalance(address) {
