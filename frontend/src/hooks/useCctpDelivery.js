@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchIrisMessages, irisMessageMatchesFingerprint } from '../utils/irisDelivery'
+import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageFingerprint } from '../utils/irisDelivery'
 
 const POLL_MS = 15_000
 
@@ -229,10 +229,37 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
       // forwardTxHash/forwardErrorCode flat on the message itself — there is
       // no `forward` wrapper object at all. Verified against real captured
       // responses for actual Arc-testnet burns.
+      //
+      // Round 31 (fixing the Round 30 review's Medium finding:
+      // "display/recovery logic still depends on the nullable decode").
+      // decodedMessage is nullable per Circle's real schema (Round 30's own
+      // doc comment on irisMessageMatchesFingerprint) — a genuine message
+      // can have decodedMessage: null and still be fully real and even
+      // terminal (FAILED), so reading destinationDomain from it ALONE left
+      // EscrowDetail.jsx's SelfRelayCard rendering "Unknown chain" and
+      // disabling self-relay for a delivery this app could otherwise recover
+      // in-app. The raw message bytes (m.message) are already being parsed
+      // for the identity check above (irisMessageMatchesFingerprint calls
+      // cctpMessageFingerprint internally) whenever expectedFingerprints is
+      // available — this reuses that SAME parser directly rather than
+      // rebuilding domain-extraction logic a second way, and works
+      // regardless of whether the fingerprint check ran, so it's the
+      // primary source; decodedMessage is only a fallback for the
+      // (should-be-unreachable) case where the raw message itself can't be
+      // parsed (missing/"0x"/malformed).
+      const domainFromRawMessage = (raw) => {
+        if (typeof raw !== 'string' || raw === '0x') return null
+        try {
+          return cctpMessageFingerprint(raw).destinationDomain
+        } catch {
+          return null
+        }
+      }
       const parsed = messages.map((m) => ({
         message:          m.message,
         attestation:      m.attestation,
-        destinationDomain: m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null,
+        destinationDomain: domainFromRawMessage(m.message) ??
+          (m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null),
         destinationTxHash: m.forwardTxHash ?? null,
         forwardState:      m.forwardState ?? null,
         errorCode:         m.forwardErrorCode ?? null,

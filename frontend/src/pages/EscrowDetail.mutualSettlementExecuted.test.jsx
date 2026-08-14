@@ -61,6 +61,13 @@ const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
 const MESSAGE_SENT_ABI = [
   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
 ]
+// Round 31: extended past byte 280 (messageSender) to a genuinely complete
+// CCTP V2 message. cctpMessageFingerprint (irisDelivery.js) gained a
+// minimum-length floor matching the real BurnMessageV2 fixed-field size
+// (376 bytes, through expirationBlock, before any hookData) — the old
+// 280-byte fixture was an unfair truncated-prefix test, shorter than any
+// real message this app's own cctp-forward hook actually produces.
+const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
 const buildCctpMessage = () =>
   '0x' +
   '00000001' +                                                          // header version 1
@@ -69,7 +76,9 @@ const buildCctpMessage = () =>
   '00'.repeat(32 + 32 + 4 + 4) +                                         // recipient, destinationCaller, finality fields
   '00000001' +                                                          // body version 1
   '00'.repeat(32 + 32 + 32) +                                            // burnToken, mintRecipient, amount
-  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0')              // body messageSender
+  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0') +            // body messageSender
+  '00'.repeat(32 + 32 + 32) +                                            // maxFee, feeExecuted, expirationBlock
+  CCTP_FORWARD_HOOK_HEX                                                  // hookData
 const messageSentLog = (logIndex) => ({
   address: MESSAGE_TRANSMITTER_V2_ARC,
   logIndex,

@@ -40,7 +40,16 @@ const fetchIrisMessages = vi.hoisted(() => vi.fn())
 // let normal flow continue). Defaults to true so every pre-Round-29 test
 // below, which never passes expectedFingerprints, is unaffected.
 const irisMessageMatchesFingerprint = vi.hoisted(() => vi.fn(() => true))
-vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages, irisMessageMatchesFingerprint }))
+// Round 31: cctpMessageFingerprint is left as the REAL implementation
+// (spread from importOriginal), not mocked — useCctpDelivery now calls it
+// directly to derive destinationDomain from the raw message bytes (see the
+// "raw-message domain" describe block below), and that needs genuine
+// byte-offset parsing to exercise for real, not a stub.
+vi.mock('../utils/irisDelivery', async (importOriginal) => ({
+  ...(await importOriginal()),
+  fetchIrisMessages,
+  irisMessageMatchesFingerprint
+}))
 
 const { useCctpDelivery } = await import('./useCctpDelivery.js')
 
@@ -417,6 +426,67 @@ describe('useCctpDelivery — expectedFingerprints identity check', () => {
     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
     await waitFor(() => expect(result.current.phase).toBe('delivered'))
     expect(irisMessageMatchesFingerprint).not.toHaveBeenCalled()
+  })
+})
+
+/* Round 31 (fixing the Round 30 review's Medium finding: "display/recovery
+   logic still depends on the nullable decode"). decodedMessage is nullable
+   per Circle's real schema — a genuine, terminal (even FAILED) message can
+   have decodedMessage: null. The old code read destinationDomain from
+   decodedMessage alone, so this case rendered EscrowDetail.jsx's
+   SelfRelayCard with "Unknown chain" and no in-app self-relay option, even
+   though the raw message bytes (already parsed for the identity check) hold
+   the real domain. buildCctpMessage below constructs a real, complete
+   (376+ byte) CCTP V2 message so cctpMessageFingerprint can genuinely parse
+   it — the same fixture shape irisDelivery.test.js uses, needed because
+   Round 31 also added a minimum-length/version floor to that parser. */
+const hexZeros = (byteLen) => '00'.repeat(byteLen)
+const uint32Hex = (n) => n.toString(16).padStart(8, '0')
+const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
+const SOME_ADDRESS = '0x1234567890123456789012345678901234567890'
+const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+
+const buildCctpMessage = (destinationDomain) =>
+  '0x' +
+  uint32Hex(1) +                       // header version            0-4
+  hexZeros(4) +                        // sourceDomain               4-8
+  uint32Hex(destinationDomain) +       // destinationDomain          8-12
+  hexZeros(32) +                       // nonce                      12-44
+  addressWordHex(SOME_ADDRESS) +       // header sender              44-76
+  hexZeros(32 + 32 + 4 + 4) +          // recipient, destinationCaller, finality fields  76-148
+  uint32Hex(1) +                       // body version               148-152
+  hexZeros(32 + 32 + 32) +             // burnToken, mintRecipient, amount               152-248
+  addressWordHex(SOME_ADDRESS) +       // messageSender              248-280
+  hexZeros(32 + 32 + 32) +             // maxFee, feeExecuted, expirationBlock           280-376
+  CCTP_FORWARD_HOOK_HEX                // hookData                   376+
+
+describe('useCctpDelivery — raw-message domain, not solely the nullable decode', () => {
+  it('derives destinationDomain from the raw message when decodedMessage is null, even on a terminal FAILED forwardState — SelfRelayCard needs the real chain to offer in-app self-relay, not "Unknown chain"', async () => {
+    fetchIrisMessages.mockResolvedValue([{
+      message: buildCctpMessage(6),
+      attestation: '0xattestation',
+      decodedMessage: null,
+      forwardState: 'FAILED',
+      forwardTxHash: null,
+      forwardErrorCode: 'INSUFFICIENT_FEE'
+    }])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(result.current.phase).toBe('failed'))
+    expect(result.current.deliveries[0].destinationDomain).toBe(6)
+  })
+
+  it('falls back to decodedMessage when the raw message cannot be parsed — malformed/too-short bytes, an anomalous shape a real response should not produce', async () => {
+    fetchIrisMessages.mockResolvedValue([{
+      message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
+      attestation: '0xattestation',
+      decodedMessage: { destinationDomain: '6' },
+      forwardState: 'COMPLETE',
+      forwardTxHash: '0xdesttx',
+      forwardErrorCode: null
+    }])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
+    expect(result.current.deliveries[0].destinationDomain).toBe(6)
   })
 })
 

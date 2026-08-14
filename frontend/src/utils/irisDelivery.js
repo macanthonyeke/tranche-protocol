@@ -1,9 +1,14 @@
-import { encodeFunctionData, decodeEventLog, slice, toEventSelector } from 'viem'
+import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector } from 'viem'
 import { ARC_DOMAIN } from '../config/chains.js'
 import { bytes32ToAddress } from './encode.js'
 import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
 
 const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
+
+// Same 32-byte-hash shape EscrowDetail.jsx's CCTP_TX_HASH_RE already
+// validates tx hashes against — kept as a separate literal (not imported)
+// since EscrowDetail.jsx imports FROM this module, not the reverse.
+const SOURCE_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
 
 const RECEIVE_MESSAGE_ABI = [
   {
@@ -114,21 +119,41 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
   // membership) would have sailed through untouched. The real check has to
   // run once, against the envelope, before `messages` is trusted at all.
   //
-  // An absent envelope field (should be unreachable per Circle's schema,
-  // which marks it required) is treated as nothing to check — the same
-  // permissive-when-structurally-absent convention already used elsewhere
-  // in this codebase (irisMessageMatchesFingerprint's `fingerprint == null`,
-  // useCctpDelivery's `expectedOrdinals == null`). A PRESENT mismatch
-  // throws rather than silently returning [] — an empty array already means
-  // something specific in this function ("not yet indexed", the 404 branch
-  // above), and a wrong-transaction envelope is a categorically different,
-  // more anomalous condition that deserves its own signal rather than
-  // looking identical to "still indexing". useCctpDelivery's poll() already
-  // catches any thrown error here, sets phase 'unavailable', and keeps
-  // polling on the next tick — the same fail-closed, keep-retrying behavior
-  // a mismatch here should get.
-  if (typeof json?.sourceTxHash === 'string' && json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()) {
-    throw new Error('Iris response envelope sourceTxHash does not match the requested transaction')
+  // Round 31 (fixing the Round 30 review's Medium finding: "absence should
+  // fail, not pass"). Confirmed a second time against Circle's real OpenAPI
+  // schema for this endpoint: sourceTxHash is listed in the response's
+  // `required` array with no `nullable: true`, so an absent/null/wrong-type
+  // envelope field is not a normal compatibility case the way it would be
+  // for a genuinely optional value (contrast irisMessageMatchesFingerprint's
+  // `fingerprint == null` and useCctpDelivery's `expectedOrdinals == null`,
+  // both real optional-by-design values) — it means the response doesn't
+  // match Circle's documented, required schema at all, which is itself
+  // anomalous and worth failing closed on. This field is also the ONLY
+  // transaction-unique value available here: cctpMessageFingerprint's five
+  // fields (destinationDomain/burnToken/mintRecipient/amount/messageSender)
+  // can be byte-identical across two genuinely different transactions (e.g.
+  // the same payer re-sending the same amount to the same recipient), so
+  // sourceTxHash is what actually distinguishes them — permissive-on-absence
+  // would reopen exactly the substitution gap this check exists to close.
+  //
+  // Format-validated with the same 32-byte-hash regex this codebase already
+  // uses for tx hashes elsewhere (EscrowDetail.jsx's CCTP_TX_HASH_RE) so a
+  // malformed-but-coincidentally-matching value can't slip through the
+  // equality check below. An empty array already means something specific
+  // in this function ("not yet indexed", the 404 branch above), so any
+  // failure here throws rather than returning [] — a wrong-transaction or
+  // schema-violating envelope is a categorically different, more anomalous
+  // condition that deserves its own signal rather than looking identical to
+  // "still indexing". useCctpDelivery's poll() already catches any thrown
+  // error here, sets phase 'unavailable', and keeps polling on the next
+  // tick — the same fail-closed, keep-retrying behavior every failure mode
+  // here should get.
+  if (
+    typeof json?.sourceTxHash !== 'string' ||
+    !SOURCE_TX_HASH_RE.test(json.sourceTxHash) ||
+    json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()
+  ) {
+    throw new Error('Iris response envelope sourceTxHash is missing, malformed, or does not match the requested transaction')
   }
 
   const messages = json?.messages || []
@@ -240,8 +265,36 @@ function amountOf(message) {
    actually achievable here, unlike Round 26's attempt.
    Stored as plain JSON-safe values (lowercased address strings, amount as a
    decimal string — BigInt doesn't survive JSON.stringify) since this feeds
-   directly into the persisted cctpTrack record. */
+   directly into the persisted cctpTrack record.
+
+   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
+   fingerprint check is fail-open in two ways", part b). This previously
+   read straight through byte 280 with no minimum-length or version-field
+   check at all — unlike verifiedOwnCctpMessage on the receipt side, which
+   checks both header and body version before ever trusting its offsets.
+   The receipt-side caller (receiptEmittedCctpMessageForMilestone) only ever
+   passes messages that already passed verifiedOwnCctpMessage's own version
+   checks, so this was latent there — but irisMessageMatchesFingerprint
+   passes this UNTRUSTED bytes straight from Iris's API response, never
+   independently checked before now. A short or non-V2 value could have its
+   arbitrary bytes silently misread as real fingerprint fields (e.g. a
+   truncated or malformed response reading zero/garbage where amount or
+   mintRecipient should be) instead of being rejected outright. Fixed by
+   reusing the SAME header/body version-check functions already built for
+   the receipt side (messageHeaderVersionOf / messageBodyVersionOf) rather
+   than rebuilding them, plus a minimum-length floor against the real
+   complete-message size (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) before any
+   offset is read. Throws on either failure — every real call site already
+   wraps this in try/catch and fails closed (irisMessageMatchesFingerprint
+   explicitly; the receipt-side caller can't reach either failure in
+   practice, since verifiedOwnCctpMessage already guarantees both). */
 export function cctpMessageFingerprint(message) {
+  if (typeof message !== 'string' || size(message) < CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) {
+    throw new Error('cctpMessageFingerprint: message is too short to be a complete CCTP V2 message')
+  }
+  if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION || messageBodyVersionOf(message) !== CCTP_V2_VERSION) {
+    throw new Error('cctpMessageFingerprint: message header/body version is not CCTP V2')
+  }
   return {
     destinationDomain: destinationDomainOf(message),
     burnToken: burnTokenOf(message).toLowerCase(),
@@ -289,6 +342,20 @@ export function cctpMessageFingerprint(message) {
    truncated) is a different, more anomalous case and fails closed (treated
    as a mismatch) rather than being let through.
 
+   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
+   fingerprint check is fail-open in two ways", part a). Circle documents
+   only ONE legitimate pre-attestation state: message: "0x" paired with
+   attestation: "PENDING" on the SAME entry. The permissive branch above
+   originally trusted a missing/"0x" message on its own, without checking
+   that the same entry's own attestation actually says PENDING — so an
+   entry with an empty message but a non-PENDING attestation and a terminal
+   forwardState (internally inconsistent; should be unreachable in a real
+   response) would previously have been waved through as "nothing to check
+   yet" instead of being recognized as anomalous. Now the permissive branch
+   only fires when the invariant genuinely holds; a missing/"0x" message
+   paired with anything other than a genuinely-PENDING attestation fails
+   closed like any other unparseable entry.
+
    `fingerprint == null` is treated as "nothing to check against" (matches),
    not a failure — the same permissive default useCctpDelivery already uses
    for expectedOrdinals == null, since every real call site provides both
@@ -296,7 +363,9 @@ export function cctpMessageFingerprint(message) {
 export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
   if (fingerprint == null) return true
   const message = irisMessage?.message
-  if (typeof message !== 'string' || message === '0x') return true
+  if (typeof message !== 'string' || message === '0x') {
+    return irisMessage?.attestation === 'PENDING'
+  }
   let actual
   try {
     actual = cctpMessageFingerprint(message)
@@ -335,6 +404,21 @@ export const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DA
 // CCTP V2's version tag, on both the top-level header and BurnMessageV2's
 // own body (verified against Circle's docs: V1 uses 0 for the same field).
 const CCTP_V2_VERSION = 1
+
+// Round 31. The full fixed-field length of a complete CCTP V2 message
+// BEFORE any hookData — verified against Circle's own technical guide for
+// BOTH the top-level header (developers.circle.com/cctp/references/
+// technical-guide#message-header, ending at messageBody / absolute offset
+// 148) and BurnMessageV2's body (same page, "Message body" table): version
+// 0-4, burnToken 4-36, mintRecipient 36-68, amount 68-100, messageSender
+// 100-132, maxFee 132-164, feeExecuted 164-196, expirationBlock 196-228,
+// then hookData (dynamic) at relative 228 — 148 + 228 = 376 absolute.
+// hookData itself is dynamic and can be zero-length for a hookless burn, so
+// 376 is the real minimum a genuinely complete message can be; this app's
+// own depositForBurnWithHook burns are always longer (FORWARD_HOOK_DATA
+// appended past this point). A message shorter than this is truncated or
+// fabricated and must never have its fixed-field offsets trusted.
+const CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES = 376
 
 function readUint32(message, byteOffset) {
   return Number(BigInt(slice(message, byteOffset, byteOffset + 4)))

@@ -42,37 +42,59 @@ afterEach(() => {
 
 const mockOk = (body) => ({ ok: true, status: 200, json: async () => body })
 
+// Round 31: sourceTxHash is now strictly format-validated against the same
+// 32-byte-hash shape as a real tx hash (SOURCE_TX_HASH_RE in irisDelivery.js),
+// so short placeholder strings like '0xabc123' can no longer stand in for a
+// well-formed one anywhere the mock response needs to resolve successfully.
+// Deterministically expands any short, readable seed into a full 66-char
+// hex string (via char codes, so it's valid hex regardless of the seed's
+// own letters) — keeps fixtures legible ('same', 'errors', ...) while
+// satisfying the format check.
+const hash = (seed) =>
+  ('0x' + Array.from(seed).map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('').padEnd(64, '0')).slice(0, 66)
+
+const TX = hash('abc123')
+
+// Generic mock: echoes back whatever txHash was actually requested as the
+// envelope's sourceTxHash, so dedup/guard tests that don't care about the
+// response CONTENT (only about call counts/timing) still resolve
+// successfully under the now-mandatory, format-checked sourceTxHash.
+const echoFetch = () => vi.fn((url) => {
+  const tx = new URL(url).searchParams.get('transactionHash')
+  return Promise.resolve(mockOk({ messages: [], sourceTxHash: tx }))
+})
+
 describe('fetchIrisMessages', () => {
   it('requests the sourceDomain as a path segment and the tx hash as a transactionHash query param', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
     vi.stubGlobal('fetch', fetchMock)
 
-    await fetchIrisMessages('0xabc123')
+    await fetchIrisMessages(TX)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url] = fetchMock.mock.calls[0]
     expect(url).toContain(`/v2/messages/${ARC_DOMAIN}`)
-    expect(url).toContain('transactionHash=0xabc123')
+    expect(url).toContain(`transactionHash=${TX}`)
     // The bug this closes: the tx hash must never appear where the domain
     // path segment goes.
-    expect(url).not.toContain(`/v2/messages/0xabc123`)
+    expect(url).not.toContain(`/v2/messages/${TX}`)
   })
 
   it('defaults sourceDomain to ARC_DOMAIN — every tracked burn in this app originates from Arc', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
     vi.stubGlobal('fetch', fetchMock)
 
-    await fetchIrisMessages('0xabc123')
+    await fetchIrisMessages(TX)
 
     const [url] = fetchMock.mock.calls[0]
     expect(url).toContain('/v2/messages/26?')
   })
 
   it('accepts an explicit sourceDomain override', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
     vi.stubGlobal('fetch', fetchMock)
 
-    await fetchIrisMessages('0xabc123', 6)
+    await fetchIrisMessages(TX, 6)
 
     const [url] = fetchMock.mock.calls[0]
     expect(url).toContain('/v2/messages/6?')
@@ -94,8 +116,8 @@ describe('fetchIrisMessages', () => {
       decodedMessage: { destinationDomain: '6' },
       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
     }
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: '0xabc123' }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: TX }))))
+    await expect(fetchIrisMessages(TX)).resolves.toEqual([realShapedMessage])
   })
 })
 
@@ -112,23 +134,47 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
   const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', ...overrides })
 
   it('resolves normally when the envelope sourceTxHash matches the requested tx', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xabc123' }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: TX }))))
+    await expect(fetchIrisMessages(TX)).resolves.toEqual([own()])
   })
 
   it('matches the envelope sourceTxHash case-insensitively', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xABC123' }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0x' + TX.slice(2).toUpperCase() }))))
+    await expect(fetchIrisMessages(TX)).resolves.toEqual([own()])
   })
 
-  it('resolves normally when the envelope has no sourceTxHash field at all — permissive when structurally absent, same convention as fingerprint == null / expectedOrdinals == null elsewhere in this app', async () => {
+  // Round 31 (fixing the Round 30 review's Medium finding: "absence should
+  // fail, not pass"). Was previously the mirror-image test — "resolves
+  // normally when absent". Circle's real OpenAPI schema marks sourceTxHash
+  // required and non-nullable on this envelope (confirmed live, see
+  // irisDelivery.js's doc comment), so an absent field means the response
+  // doesn't match the documented schema at all — anomalous, not a normal
+  // compatibility case — and must fail closed rather than being treated the
+  // same as this app's own genuinely-optional values.
+  it('throws when the envelope has no sourceTxHash field at all — Circle marks the field required and non-nullable, so absence is anomalous rather than a permissive compatibility case', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
+  })
+
+  it('throws when the envelope sourceTxHash is explicitly null', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: null }))))
+    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
+  })
+
+  it('throws when the envelope sourceTxHash is the wrong type (not a string)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: 12345 }))))
+    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
+  })
+
+  it('throws when the envelope sourceTxHash is a malformed shape — a string that is not a valid 32-byte hash, even though it happens to equal the requested tx hash by length coincidence', async () => {
+    const notAHash = '0xnothex' // same general "0x..." shape, but not valid hex / not 32 bytes
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: notAHash }))))
+    await expect(fetchIrisMessages(notAHash)).rejects.toThrow(/sourceTxHash/i)
   })
 
   it('throws when the envelope sourceTxHash belongs to a DIFFERENT transaction, rather than silently returning the wrong transaction\'s messages', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xdeadbeef' }))))
-    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: TX }))))
+    await expect(fetchIrisMessages(hash('different'))).rejects.toThrow(/sourceTxHash/i)
   })
 
   it('regression: right length, wrong transaction — a same-length response for an entirely different burn is rejected wholesale, not silently ordinal-selected as if it were this transaction\'s own verified set', async () => {
@@ -139,9 +185,9 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
     // milestone's own messages.
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({
       messages: [own({ message: '0xforeign1' }), own({ message: '0xforeign2' })],
-      sourceTxHash: '0xnottherequestedtx'
+      sourceTxHash: hash('notrequested')
     }))))
-    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
+    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
   })
 })
 
@@ -153,18 +199,18 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
    against any genuine response; these fixtures fabricate the field only to
    confirm the dead-but-harmless code path still behaves as written. */
 describe('fetchIrisMessages — per-message sourceTxHash (defensive no-op)', () => {
-  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
+  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: TX, ...overrides })
 
   it('keeps a message with no per-message sourceTxHash field at all — the normal case for a real response', async () => {
     const noField = { message: '0xown', attestation: '0xatt' }
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: '0xabc123' }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: TX }))))
+    await expect(fetchIrisMessages(TX)).resolves.toEqual([noField])
   })
 
   it('would drop a message whose fabricated per-message sourceTxHash mismatches, if a response ever carried that field — envelope sourceTxHash still matches, so only the (dead-in-practice) per-message filter is exercised here', async () => {
     const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: '0xabc123' }))))
-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: TX }))))
+    await expect(fetchIrisMessages(TX)).resolves.toEqual([])
   })
 })
 
@@ -209,9 +255,9 @@ describe('fetchIrisMessages — timeout', () => {
   })
 
   it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
     vi.stubGlobal('fetch', fetchMock)
-    return fetchIrisMessages('0xabc999').then(() => {
+    return fetchIrisMessages(TX).then(() => {
       const [, opts] = fetchMock.mock.calls[0]
       expect(opts.signal).toBeInstanceOf(AbortSignal)
     })
@@ -233,51 +279,55 @@ describe('fetchIrisMessages — in-flight guard', () => {
   })
 
   it('reuses the in-flight request for the SAME txHash instead of issuing a second fetch', async () => {
+    const txSame = hash('same')
     let resolveFetch
     const fetchMock = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const p1 = fetchIrisMessages('0xsame')
-    const p2 = fetchIrisMessages('0xsame')
+    const p1 = fetchIrisMessages(txSame)
+    const p2 = fetchIrisMessages(txSame)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    resolveFetch(mockOk({ messages: [{ message: '0xshared' }] }))
+    resolveFetch(mockOk({ messages: [{ message: '0xshared' }], sourceTxHash: txSame }))
     await expect(p1).resolves.toEqual([{ message: '0xshared' }])
     await expect(p2).resolves.toEqual([{ message: '0xshared' }])
   })
 
   it('does NOT dedup a concurrent request for a genuinely different txHash', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = echoFetch()
     vi.stubGlobal('fetch', fetchMock)
 
-    await Promise.all([fetchIrisMessages('0xone'), fetchIrisMessages('0xtwo')])
+    await Promise.all([fetchIrisMessages(hash('one')), fetchIrisMessages(hash('two'))])
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('does NOT dedup requests for the same txHash on different sourceDomains', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = echoFetch()
     vi.stubGlobal('fetch', fetchMock)
 
-    await Promise.all([fetchIrisMessages('0xsametx', 26), fetchIrisMessages('0xsametx', 6)])
+    const txSame = hash('sametx')
+    await Promise.all([fetchIrisMessages(txSame, 26), fetchIrisMessages(txSame, 6)])
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('allows a fresh request for the same txHash once the prior one has settled — the guard is not permanent', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
+    const fetchMock = echoFetch()
     vi.stubGlobal('fetch', fetchMock)
 
-    await fetchIrisMessages('0xsequential')
-    await fetchIrisMessages('0xsequential')
+    const tx = hash('sequential')
+    await fetchIrisMessages(tx)
+    await fetchIrisMessages(tx)
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('clears the in-flight slot even when the request throws, so the next poll is not permanently blocked', async () => {
+    const tx = hash('errors')
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 500 })))
-    await expect(fetchIrisMessages('0xerrors')).rejects.toThrow('Iris HTTP 500')
+    await expect(fetchIrisMessages(tx)).rejects.toThrow('Iris HTTP 500')
 
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [] }))))
-    await expect(fetchIrisMessages('0xerrors')).resolves.toEqual([])
+    vi.stubGlobal('fetch', echoFetch())
+    await expect(fetchIrisMessages(tx)).resolves.toEqual([])
   })
 })
 
@@ -320,6 +370,20 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 // (each defaulting to the same zero value every pre-Round-29 call site
 // already implicitly relied on) so cctpMessageFingerprint's actual field
 // extraction can be tested against non-default values, not just zeros.
+// Round 31: extended past byte 280 (messageSender) to a genuinely complete
+// CCTP V2 message — maxFee/feeExecuted/expirationBlock through byte 376,
+// then hookData — after cctpMessageFingerprint gained a minimum-length
+// floor (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES, irisDelivery.js) matching the
+// real BurnMessageV2 fixed-field size. The old fixture stopped at exactly
+// byte 280 — long enough for the fields the old code actually read, but
+// shorter than any real message, so it was an unfair "truncated prefix"
+// test rather than testing against a genuine message shape. hookData
+// defaults to "cctp-forward" in hex, the actual hook this app's own
+// deposits use (see FORWARD_HOOK_DATA in TrancheProtocol.sol via CLAUDE.md),
+// so the default fixture matches a real message end-to-end, not just the
+// minimum length required to pass.
+const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+
 const buildCctpMessage = ({
   headerVersion = 1,
   headerSender = TOKEN_MESSENGER_V2_ARC,
@@ -328,7 +392,11 @@ const buildCctpMessage = ({
   burnToken = ZERO_ADDRESS,
   mintRecipient = ZERO_ADDRESS,
   amount = 0n,
-  bodySender = CONTRACT_ADDRESS
+  bodySender = CONTRACT_ADDRESS,
+  maxFee = 0n,
+  feeExecuted = 0n,
+  expirationBlock = 0n,
+  hookData = CCTP_FORWARD_HOOK_HEX
 } = {}) =>
   '0x' +
   uint32Hex(headerVersion) +          // version            0-4
@@ -344,7 +412,11 @@ const buildCctpMessage = ({
   addressWordHex(burnToken) +         // burnToken          152-184
   addressWordHex(mintRecipient) +     // mintRecipient       184-216
   uint256Hex(amount) +                // amount             216-248
-  addressWordHex(bodySender)          // messageSender      248-280
+  addressWordHex(bodySender) +        // messageSender      248-280
+  uint256Hex(maxFee) +                // maxFee             280-312
+  uint256Hex(feeExecuted) +           // feeExecuted        312-344
+  uint256Hex(expirationBlock) +       // expirationBlock    344-376
+  hookData                            // hookData           376+ (dynamic)
 
 // Round 29: the expected cctpMessageFingerprint for a message built by
 // buildCctpMessage above, mirroring the same overridable fields.
@@ -872,5 +944,25 @@ describe('irisMessageMatchesFingerprint', () => {
 
   it('fails closed on a raw message that is present, non-"0x", but not valid CCTP V2 bytes — a genuinely different, more anomalous case than "not ready yet", so it must not be treated as a permissive match', () => {
     expect(irisMessageMatchesFingerprint(irisEntry({ message: '0xdead' }), fp)).toBe(false)
+  })
+
+  // Round 31 (fixing the Round 30 review's Medium finding: "raw-message
+  // fingerprint check is fail-open in two ways", part a). Circle documents
+  // only ONE legitimate pre-attestation state — message missing/"0x" paired
+  // with attestation: "PENDING" on the SAME entry. An entry with an empty
+  // message but a non-PENDING attestation (and, in a real response, a
+  // terminal forwardState) is internally inconsistent and should be
+  // unreachable — but the old code trusted the missing message alone,
+  // without checking the paired attestation, so this anomalous shape would
+  // previously have been waved through as "nothing to check yet".
+  it('fails closed on a missing raw message whose attestation is NOT genuinely PENDING — an internally inconsistent shape a real response should never produce', () => {
+    expect(irisMessageMatchesFingerprint({ attestation: 'COMPLETE' }, fp)).toBe(false)
+    expect(irisMessageMatchesFingerprint({}, fp)).toBe(false)
+    expect(irisMessageMatchesFingerprint({ attestation: null }, fp)).toBe(false)
+  })
+
+  it('fails closed on a raw message of "0x" whose attestation is NOT genuinely PENDING', () => {
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: 'COMPLETE' }), fp)).toBe(false)
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x' }), fp)).toBe(false)
   })
 })

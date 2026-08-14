@@ -87,12 +87,20 @@ const hexZeros = (byteLen) => '00'.repeat(byteLen)
 const uint32Hex = (n) => n.toString(16).padStart(8, '0')
 const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
 
+// Round 31: extended past byte 280 (messageSender) to a genuinely complete
+// CCTP V2 message. cctpMessageFingerprint (irisDelivery.js) gained a
+// minimum-length floor matching the real BurnMessageV2 fixed-field size
+// (376 bytes, through expirationBlock, before any hookData) — the old
+// 280-byte fixture was an unfair truncated-prefix test, shorter than any
+// real message this app's own cctp-forward hook actually produces.
+// hookData defaults to "cctp-forward" in hex, this app's real hook.
+const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+
 // A real, offset-correct CCTP V2 message — every field a genuine message
-// would have up through messageSender (byte 280), not just the one field a
-// given test cares about (Round 26: header sender/version were added
-// alongside Round 25's body sender). Defaults describe a fully genuine
-// message this contract's own burn would produce; individual tests
-// override exactly the field they're exercising.
+// would have, not just the one field a given test cares about (Round 26:
+// header sender/version were added alongside Round 25's body sender).
+// Defaults describe a fully genuine message this contract's own burn would
+// produce; individual tests override exactly the field they're exercising.
 // Round 29: destinationDomain now overridable (byte 8-12) so the fingerprint
 // check (cctpMessageFingerprint reads this field) can be exercised
 // end-to-end — previously always left at the zeroed default regardless of
@@ -106,15 +114,17 @@ const buildCctpMessage = ({
   bodySender = CONTRACT_ADDRESS
 } = {}) =>
   '0x' +
-  uint32Hex(headerVersion) +
-  hexZeros(4) +
-  uint32Hex(destinationDomain) +
-  hexZeros(32) +
-  addressWordHex(headerSender) +
-  hexZeros(32 + 32 + 4 + 4) +
-  uint32Hex(bodyVersion) +
-  hexZeros(32 + 32 + 32) +
-  addressWordHex(bodySender)
+  uint32Hex(headerVersion) +          // version            0-4
+  hexZeros(4) +                       // sourceDomain       4-8
+  uint32Hex(destinationDomain) +      // destinationDomain  8-12
+  hexZeros(32) +                      // nonce              12-44
+  addressWordHex(headerSender) +      // sender             44-76
+  hexZeros(32 + 32 + 4 + 4) +         // recipient, destinationCaller, minFinalityThreshold, finalityThresholdExecuted  76-148
+  uint32Hex(bodyVersion) +            // body version       148-152
+  hexZeros(32 + 32 + 32) +            // burnToken, mintRecipient, amount     152-248
+  addressWordHex(bodySender) +        // messageSender      248-280
+  hexZeros(32 + 32 + 32) +            // maxFee, feeExecuted, expirationBlock 280-376
+  CCTP_FORWARD_HOOK_HEX               // hookData           376+ (dynamic)
 
 // logIndex is a real field on every viem log — milestoneCctpLogRange orders
 // and partitions on it, so every fixture below sets it explicitly rather
@@ -392,6 +402,47 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
     renderFallback({ txHash: '0xplaintx' })
 
     await waitFor(() => expect(screen.getByText(/Delivered to/)).toBeInTheDocument())
+  })
+})
+
+/* Round 31 (fixing the Round 30 review's Medium finding: "display/recovery
+   logic still depends on the nullable decode"). decodedMessage is nullable
+   per Circle's real schema — a genuine, terminal FAILED message can have
+   decodedMessage: null. Before this fix, SelfRelayCard read destinationDomain
+   from decodedMessage alone and rendered "an unknown chain" with self-relay
+   disabled for a delivery this app could otherwise walk the user through
+   recovering in-app. This renders the FULL component tree (real
+   useCctpDelivery, real SelfRelayCard) end to end, not just the hook in
+   isolation, to prove the fix actually reaches the UI. */
+describe('Round 31: decodedMessage: null must not degrade self-relay recovery to "unknown chain"', () => {
+  it('renders the real chain name and an in-app relay option for a FAILED message whose decodedMessage is null, using the domain parsed from the raw message bytes', async () => {
+    setReceipt({
+      data: {
+        transactionHash: '0xnulldecodetx',
+        logs: [
+          messageSentLog(0, { destinationDomain: 6 }),
+          escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
+        ]
+      },
+      isPending: false,
+      isError: false
+    })
+    fetchIrisMessages.mockResolvedValue([{
+      message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
+      attestation: '0xattestation',
+      decodedMessage: null,
+      forwardState: 'FAILED',
+      forwardTxHash: null,
+      forwardErrorCode: 'INSUFFICIENT_FEE'
+    }])
+
+    renderFallback({ txHash: '0xnulldecodetx' })
+
+    await waitFor(() => expect(screen.getByText(/Delivery failed/)).toBeInTheDocument())
+    // Real chain name (Base Sepolia, domain 6), never the "an unknown chain"
+    // fallback domainLabel() renders for a null/unresolved domain.
+    expect(screen.getByText(/Switch your wallet to/).closest('p').textContent).toContain('Base Sepolia')
+    expect(screen.queryByText(/an unknown chain/)).not.toBeInTheDocument()
   })
 })
 
