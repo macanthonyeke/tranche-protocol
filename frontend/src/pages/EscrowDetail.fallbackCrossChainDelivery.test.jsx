@@ -93,8 +93,12 @@ const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
 // (376 bytes, through expirationBlock, before any hookData) — the old
 // 280-byte fixture was an unfair truncated-prefix test, shorter than any
 // real message this app's own cctp-forward hook actually produces.
-// hookData defaults to "cctp-forward" in hex, this app's real hook.
-const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+// Round 32: hookData is the FULL, right-padded 32-byte FORWARD_HOOK_DATA
+// (bytes32, TrancheProtocol.sol:51), not just the raw 12-byte ASCII
+// "cctp-forward" string — abi.encodePacked(bytes32) packs the whole
+// fixed-size value verbatim (TrancheProtocol.sol:1371).
+const asciiHex = (s) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
+const CCTP_FORWARD_HOOK_HEX = asciiHex('cctp-forward') + hexZeros(32 - 'cctp-forward'.length)
 
 // A real, offset-correct CCTP V2 message — every field a genuine message
 // would have, not just the one field a given test cares about (Round 26:
@@ -183,6 +187,7 @@ const irisMessage = ({
   return {
     message,
     attestation: '0xattestation',
+    status: 'complete',
     decodedMessage: {
       destinationDomain: String(destinationDomain),
       decodedMessageBody: {
@@ -430,6 +435,7 @@ describe('Round 31: decodedMessage: null must not degrade self-relay recovery to
     fetchIrisMessages.mockResolvedValue([{
       message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
       attestation: '0xattestation',
+      status: 'complete',
       decodedMessage: null,
       forwardState: 'FAILED',
       forwardTxHash: null,

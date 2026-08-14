@@ -63,10 +63,13 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null, message = '0xmessage' } = {}) => ({
+const irisMessage = ({
+  destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx',
+  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = '0xattestation'
+} = {}) => ({
   message,
-  attestation: '0xattestation',
-  status: 'complete',
+  attestation,
+  status,
   decodedMessage: destinationDomain != null ? { destinationDomain: String(destinationDomain) } : {},
   forwardState,
   forwardTxHash,
@@ -146,6 +149,59 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
     await waitFor(() => expect(result.current.phase).toBe('failed'))
     expect(result.current.deliveries[0].forwardState).toBe('FAILED')
     expect(result.current.deliveries[0].errorCode).toBe('INSUFFICIENT_FEE')
+  })
+})
+
+/* Round 32 — attestation completeness must check Circle's own `status`
+   field, not just a present/non-PENDING `attestation` string.
+   Codex's exact anomalous case: a message with a real, non-empty,
+   non-PENDING attestation and even a terminal forwardState, but status
+   still 'pending' (or absent) — internally inconsistent, should be
+   unreachable in a genuine response, but the OLD gate (`m.attestation &&
+   m.attestation !== 'PENDING'`) would have waved it through as delivered
+   anyway, ignoring forwardState terminality entirely being reached on a
+   response Circle itself hasn't marked complete. */
+describe('useCctpDelivery — attestation completeness requires status === "complete", not just a non-PENDING attestation string', () => {
+  it('does NOT treat a message as delivered when attestation is present and non-PENDING but status is "pending" — Codex\'s anomalous case', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'pending', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('does NOT treat a message as delivered when status is missing entirely, even with a real attestation and terminal forwardState', async () => {
+    // Built directly, not via the irisMessage() helper — passing
+    // status: undefined through the helper's destructuring defaults would
+    // silently resolve back to 'complete' (JS applies a default parameter
+    // whenever the value is undefined, key present or not), which would
+    // defeat the point of this exact test.
+    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+    fetchIrisMessages.mockResolvedValue([messageWithoutStatus])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('treats a null attestation as unresolved (keep polling), not an error state, even with status "complete"', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: null, forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+    expect(result.current.phase).toBe('polling')
+    expect(result.current.deliveries).toHaveLength(0)
+  })
+
+  it('resolves to delivered once status is "complete" AND attestation is present and non-PENDING', async () => {
+    fetchIrisMessages.mockResolvedValue([
+      irisMessage({ status: 'complete', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
+    ])
+    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+    await waitFor(() => expect(result.current.phase).toBe('delivered'))
   })
 })
 
@@ -444,7 +500,14 @@ const hexZeros = (byteLen) => '00'.repeat(byteLen)
 const uint32Hex = (n) => n.toString(16).padStart(8, '0')
 const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
 const SOME_ADDRESS = '0x1234567890123456789012345678901234567890'
-const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+// Round 32: this app's real hookData is the FULL, right-padded 32-byte
+// FORWARD_HOOK_DATA (bytes32, TrancheProtocol.sol:51), not just the raw
+// 12-byte ASCII "cctp-forward" string — abi.encodePacked(bytes32) packs the
+// whole fixed-size value verbatim (TrancheProtocol.sol:1371). Built
+// programmatically (asciiHex + hexZeros) rather than hand-typed, matching
+// irisDelivery.test.js's own fixture.
+const asciiHex = (s) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
+const CCTP_FORWARD_HOOK_HEX = asciiHex('cctp-forward') + hexZeros(32 - 'cctp-forward'.length)
 
 const buildCctpMessage = (destinationDomain) =>
   '0x' +
@@ -465,6 +528,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
     fetchIrisMessages.mockResolvedValue([{
       message: buildCctpMessage(6),
       attestation: '0xattestation',
+      status: 'complete',
       decodedMessage: null,
       forwardState: 'FAILED',
       forwardTxHash: null,
@@ -479,6 +543,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
     fetchIrisMessages.mockResolvedValue([{
       message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
       attestation: '0xattestation',
+      status: 'complete',
       decodedMessage: { destinationDomain: '6' },
       forwardState: 'COMPLETE',
       forwardTxHash: '0xdesttx',

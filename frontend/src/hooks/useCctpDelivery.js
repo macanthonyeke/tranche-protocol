@@ -212,12 +212,41 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
         }
       }
 
-      // Circle returns attestation: "PENDING" (string) while still confirming.
+      // Round 32 (fixing the Round 31 review's Medium finding: "attestation
+      // completeness ignores Circle's status field"). Circle's own
+      // resolve-stuck-attestation troubleshooting guide gives the canonical
+      // completeness check verbatim: `if (message.status === "complete" &&
+      // message.attestation)` — status is the authoritative signal that an
+      // attestation is genuinely ready, not just that some attestation
+      // string happens to be present and non-PENDING. Confirmed against two
+      // independent Circle doc pages (the troubleshooting guide's polling
+      // loop and the V1->V2 migration guide's sample response), both of
+      // which show status as a per-MESSAGE field ("complete" / "pending"),
+      // not an envelope-level one — same level as attestation itself.
+      //
+      // Previously this only checked `m.attestation && m.attestation !==
+      // 'PENDING'`, which is fail-open against exactly the anomalous case
+      // Codex constructed: a message with a present, non-PENDING attestation
+      // string but status still 'pending' (or absent) — internally
+      // inconsistent, should be unreachable in a genuine response, but
+      // nothing before this line ever verified that. Requiring status ===
+      // 'complete' closes that gap without weakening anything: a real
+      // resolved message always has both fields agree per Circle's own
+      // documented example.
+      //
+      // Both a 'PENDING'-string attestation AND a null/undefined attestation
+      // are legitimate pre-attestation states here — Circle's own polling
+      // example checks `message.attestation` truthy exactly because it can
+      // be empty/null before status flips to complete, not only "PENDING".
+      // Either way this stays in the same unresolved (keep polling) branch,
+      // never an error state — this is normal, expected latency, not a
+      // fault condition.
+      //
       // Round 30 (Low finding): signature includes WHICH selected index is
       // still unattested, not just that one is — same reasoning as the
       // fingerprint-mismatch signature above.
       const notAttestedIndexes = messages
-        .map((m, i) => (m.attestation && m.attestation !== 'PENDING' ? null : i))
+        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' ? null : i))
         .filter((i) => i !== null)
       if (notAttestedIndexes.length > 0) {
         markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)

@@ -377,12 +377,22 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 // real BurnMessageV2 fixed-field size. The old fixture stopped at exactly
 // byte 280 — long enough for the fields the old code actually read, but
 // shorter than any real message, so it was an unfair "truncated prefix"
-// test rather than testing against a genuine message shape. hookData
-// defaults to "cctp-forward" in hex, the actual hook this app's own
-// deposits use (see FORWARD_HOOK_DATA in TrancheProtocol.sol via CLAUDE.md),
-// so the default fixture matches a real message end-to-end, not just the
-// minimum length required to pass.
-const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+// test rather than testing against a genuine message shape.
+//
+// Round 32 (fixing the Round 31 review's Medium finding: fixture accuracy
+// part of "the complete message check doesn't validate the whole
+// message"). hookData previously defaulted to the raw 12-byte ASCII
+// "cctp-forward" string alone — but TrancheProtocol.sol:51 declares
+// FORWARD_HOOK_DATA as `bytes32` (right-padded with zero bytes to 32), and
+// :1371 passes it to depositForBurnWithHook via
+// `abi.encodePacked(FORWARD_HOOK_DATA)`, which packs a bytes32 as the FULL,
+// FIXED 32 bytes verbatim — never trimmed. A genuine message from this
+// app's own burn is therefore always exactly 408 bytes (376 + 32), never
+// 388 (376 + 12) the old fixture implied. Built the same programmatic way
+// as every other field here (asciiHex + hexZeros), not hand-typed, to avoid
+// a transcription error in a 64-hex-char literal.
+const asciiHex = (s) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
+const CCTP_FORWARD_HOOK_HEX = asciiHex('cctp-forward') + hexZeros(32 - 'cctp-forward'.length)
 
 const buildCctpMessage = ({
   headerVersion = 1,
@@ -420,18 +430,26 @@ const buildCctpMessage = ({
 
 // Round 29: the expected cctpMessageFingerprint for a message built by
 // buildCctpMessage above, mirroring the same overridable fields.
+// Round 32: maxFee/hookData added, mirroring buildCctpMessage's own
+// maxFee/hookData defaults (0n / CCTP_FORWARD_HOOK_HEX) — cctpMessageFingerprint
+// now returns both, so an expected object missing either key would fail a
+// toEqual comparison against the real return value.
 const fingerprintFor = ({
   bodySender = CONTRACT_ADDRESS,
   destinationDomain = 0,
   burnToken = ZERO_ADDRESS,
   mintRecipient = ZERO_ADDRESS,
-  amount = 0n
+  amount = 0n,
+  maxFee = 0n,
+  hookData = CCTP_FORWARD_HOOK_HEX
 } = {}) => ({
   destinationDomain,
   burnToken: burnToken.toLowerCase(),
   mintRecipient: mintRecipient.toLowerCase(),
   amount: BigInt(amount).toString(),
-  messageSender: bodySender.toLowerCase()
+  messageSender: bodySender.toLowerCase(),
+  maxFee: BigInt(maxFee).toString(),
+  hookData: ('0x' + hookData).toLowerCase()
 })
 
 const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
@@ -828,9 +846,11 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
    mintRecipient, amount) plus the already-verified messageSender — never
    nonce, finalityThresholdExecuted, feeExecuted, or expirationBlock, the
    four Round 27 established DO mutate between the source-side log and
-   Iris's attested response. */
+   Iris's attested response.
+   Round 32: maxFee and hookData added — also confirmed immutable, see
+   cctpMessageFingerprint's own doc comment in irisDelivery.js. */
 describe('cctpMessageFingerprint', () => {
-  it('extracts destinationDomain, burnToken, mintRecipient, amount, and messageSender at their documented offsets', () => {
+  it('extracts destinationDomain, burnToken, mintRecipient, amount, messageSender, maxFee, and hookData at their documented offsets', () => {
     const burnToken = '0x1111111111111111111111111111111111111111'
     const mintRecipient = '0x2222222222222222222222222222222222222222'
     const message = buildCctpMessage({
@@ -838,14 +858,17 @@ describe('cctpMessageFingerprint', () => {
       burnToken,
       mintRecipient,
       amount: 123_456_789n,
-      bodySender: CONTRACT_ADDRESS
+      bodySender: CONTRACT_ADDRESS,
+      maxFee: 500_000n
     })
     expect(cctpMessageFingerprint(message)).toEqual({
       destinationDomain: 6,
       burnToken: burnToken.toLowerCase(),
       mintRecipient: mintRecipient.toLowerCase(),
       amount: '123456789',
-      messageSender: CONTRACT_ADDRESS.toLowerCase()
+      messageSender: CONTRACT_ADDRESS.toLowerCase(),
+      maxFee: '500000',
+      hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
     })
   })
 
@@ -861,6 +884,50 @@ describe('cctpMessageFingerprint', () => {
     // feeExecuted/expirationBlock — there's no override for them at all,
     // by construction, since a real fingerprint must never depend on them.
     expect(base).toEqual(fingerprintFor({ amount: 42n }))
+  })
+
+  /* Round 32 (fixing the Round 31 review's Medium finding: "the complete
+     message check doesn't validate the whole message", part a). The
+     length/version checks alone only ever covered bytes this function
+     itself reads (through messageSender at 280, now through hookData) —
+     they never independently confirmed the STRING is well-formed hex
+     end-to-end. A non-hex byte anywhere the checks above don't happen to
+     touch could previously slip through with no throw at all. */
+  describe('hex well-formedness gate', () => {
+    it('throws on an odd-length hex string, even if long enough and version-correct otherwise', () => {
+      const valid = buildCctpMessage({})
+      const oddLength = valid.slice(0, -1) // drop the last hex digit
+      expect(() => cctpMessageFingerprint(oddLength)).toThrow(/not well-formed hex/)
+    })
+
+    it('throws on a non-hex character anywhere in the string, including a byte range this function never explicitly reads', () => {
+      const valid = buildCctpMessage({})
+      // byte 100 sits inside `recipient` (76-108) — a field cctpMessageFingerprint
+      // never names or reads directly, proving the well-formedness check is a
+      // blanket string-level gate, not a per-field one.
+      const charIndex = 2 + 100 * 2 // "0x" prefix + byte offset -> hex char index
+      const corrupted = valid.slice(0, charIndex) + 'zz' + valid.slice(charIndex + 2)
+      expect(() => cctpMessageFingerprint(corrupted)).toThrow(/not well-formed hex/)
+    })
+
+    /* Codex's exact proof: a message valid through byte 280 (the OLD
+       fingerprint's read boundary) with a corrupted byte at 300 — inside
+       maxFee's 280-312 range, added to the fingerprint this same round —
+       previously produced a fingerprint with no throw at all. Verifies both
+       layers of the fix independently: replacing byte 300 with genuinely
+       non-hex characters is caught by the well-formedness gate above; this
+       specific test uses a still-valid-hex-but-WRONG byte at 300 instead, so
+       it only fails if the maxFee VALUE comparison (not just hex validity)
+       is what's actually catching it. */
+    it('regression: a message valid through byte 280 with a corrupted (but still hex) byte at 300 must fail the maxFee comparison, not silently produce a fingerprint that ignores it', () => {
+      const genuine = buildCctpMessage({ maxFee: 1_000_000n })
+      const charIndex = 2 + 300 * 2
+      // Flip byte 300 to a different, but still valid, hex byte pair.
+      const originalByte = genuine.slice(charIndex, charIndex + 2)
+      const corruptedByte = originalByte === 'ff' ? '00' : 'ff'
+      const corrupted = genuine.slice(0, charIndex) + corruptedByte + genuine.slice(charIndex + 2)
+      expect(cctpMessageFingerprint(corrupted).maxFee).not.toBe(cctpMessageFingerprint(genuine).maxFee)
+    })
   })
 })
 
@@ -929,6 +996,19 @@ describe('irisMessageMatchesFingerprint', () => {
     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
   })
 
+  // Round 32: maxFee and hookData, both newly added to the fingerprint.
+  it('rejects a mismatched maxFee', () => {
+    const withMaxFee = fingerprintFor({ destinationDomain, burnToken, mintRecipient, amount, bodySender, maxFee: 500_000n })
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender, maxFee: 999_999n }) })
+    expect(irisMessageMatchesFingerprint(wrong, withMaxFee)).toBe(false)
+  })
+
+  it('rejects a mismatched hookData', () => {
+    const withHookData = fingerprintFor({ destinationDomain, burnToken, mintRecipient, amount, bodySender, hookData: hexZeros(32) })
+    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender, hookData: CCTP_FORWARD_HOOK_HEX }) })
+    expect(irisMessageMatchesFingerprint(wrong, withHookData)).toBe(false)
+  })
+
   it('regression (Round 29 review Medium finding): succeeds when decodedMessage is null but the raw message field is present and genuinely matches — Iris\'s convenience decode failing must not misclassify a real, correct message as a mismatch', () => {
     const noDecode = irisEntry({ decodedMessage: null })
     expect(irisMessageMatchesFingerprint(noDecode, fp)).toBe(true)
@@ -947,22 +1027,34 @@ describe('irisMessageMatchesFingerprint', () => {
   })
 
   // Round 31 (fixing the Round 30 review's Medium finding: "raw-message
-  // fingerprint check is fail-open in two ways", part a). Circle documents
-  // only ONE legitimate pre-attestation state — message missing/"0x" paired
-  // with attestation: "PENDING" on the SAME entry. An entry with an empty
-  // message but a non-PENDING attestation (and, in a real response, a
-  // terminal forwardState) is internally inconsistent and should be
-  // unreachable — but the old code trusted the missing message alone,
-  // without checking the paired attestation, so this anomalous shape would
-  // previously have been waved through as "nothing to check yet".
-  it('fails closed on a missing raw message whose attestation is NOT genuinely PENDING — an internally inconsistent shape a real response should never produce', () => {
+  // fingerprint check is fail-open in two ways", part a). An entry with an
+  // empty message but a real, non-PENDING, non-null attestation (and, in a
+  // real response, a terminal forwardState) is internally inconsistent and
+  // should be unreachable — but the old code trusted the missing message
+  // alone, without checking the paired attestation at all, so this
+  // anomalous shape would previously have been waved through as "nothing
+  // to check yet".
+  it('fails closed on a missing raw message whose attestation is a real, non-PENDING, non-null value — an internally inconsistent shape a real response should never produce', () => {
     expect(irisMessageMatchesFingerprint({ attestation: 'COMPLETE' }, fp)).toBe(false)
-    expect(irisMessageMatchesFingerprint({}, fp)).toBe(false)
-    expect(irisMessageMatchesFingerprint({ attestation: null }, fp)).toBe(false)
   })
 
-  it('fails closed on a raw message of "0x" whose attestation is NOT genuinely PENDING', () => {
+  it('fails closed on a raw message of "0x" whose attestation is a real, non-PENDING, non-null value', () => {
     expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: 'COMPLETE' }), fp)).toBe(false)
     expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x' }), fp)).toBe(false)
+  })
+
+  /* Round 32 (fixing the Round 31 review's Medium finding: "attestation
+     completeness ignores Circle's status field", the null-attestation
+     half). Circle marks `attestation` itself nullable — a null (or
+     entirely absent) attestation is a second, equally legitimate
+     pre-attestation pairing alongside the PENDING-string one, not a
+     mismatch. Matches useCctpDelivery's own attestation gate, which
+     already treats a falsy attestation (including null) as unresolved,
+     not an error. */
+  it('treats a missing/"0x" message paired with a null OR entirely absent attestation as "nothing to check yet" (matches, permissively), not a mismatch', () => {
+    expect(irisMessageMatchesFingerprint({ attestation: null }, fp)).toBe(true)
+    expect(irisMessageMatchesFingerprint({}, fp)).toBe(true)
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: null }), fp)).toBe(true)
+    expect(irisMessageMatchesFingerprint(irisEntry({ message: undefined, attestation: null }), fp)).toBe(true)
   })
 })

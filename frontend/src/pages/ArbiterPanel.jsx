@@ -377,7 +377,11 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
    CrossChainDelivery for the full citation trail on why a single collapsed
    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
    leg in the same mixed split failed. */
-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+// Round 32: exported so ArbiterDeliveryStatus can be rendered and tested
+// directly against a controlled `deliveries` fixture (mocking
+// useCctpDelivery), the same pattern EscrowDetail.jsx's CrossChainDelivery
+// already uses — see EscrowDetail.crossChainDelivery.test.jsx.
+export function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
   const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
 
   if (phase === 'idle') return null
@@ -402,9 +406,18 @@ function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expecte
           )
         }
         if (d.forwardState === 'FAILED') {
+          // Round 32 (Low finding): this unconditionally blamed a low
+          // forwarding fee for EVERY FAILED delivery, regardless of
+          // errorCode — misleading for any other failure reason Circle's
+          // forwardErrorCode might report. EscrowDetail.jsx's equivalent UI
+          // (errorIsInsufficientFee) already conditions this copy correctly;
+          // matching that pattern here.
+          const errorIsInsufficientFee = d.errorCode === 'INSUFFICIENT_FEE'
           return (
             <p key={i} className="text-[12px] text-warn">
-              Delivery to {chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
+              {errorIsInsufficientFee
+                ? `Delivery to ${chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.`
+                : `Delivery to ${chainName} failed. The recipient should self-relay via the escrow detail page.`}
             </p>
           )
         }

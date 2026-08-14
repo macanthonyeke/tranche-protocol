@@ -67,7 +67,12 @@ const MESSAGE_SENT_ABI = [
 // (376 bytes, through expirationBlock, before any hookData) — the old
 // 280-byte fixture was an unfair truncated-prefix test, shorter than any
 // real message this app's own cctp-forward hook actually produces.
-const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+// Round 32: hookData is the FULL, right-padded 32-byte FORWARD_HOOK_DATA
+// (bytes32, TrancheProtocol.sol:51), not just the raw 12-byte ASCII
+// "cctp-forward" string — abi.encodePacked(bytes32) packs the whole
+// fixed-size value verbatim (TrancheProtocol.sol:1371).
+const asciiHex = (s) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
+const CCTP_FORWARD_HOOK_HEX = asciiHex('cctp-forward') + '00'.repeat(32 - 'cctp-forward'.length)
 const buildCctpMessage = () =>
   '0x' +
   '00000001' +                                                          // header version 1
@@ -89,7 +94,13 @@ const messageSentLog = (logIndex) => ({
 // produces — that helper zeroes burnToken/mintRecipient/amount/
 // destinationDomain unconditionally, with a fixed CONTRACT_ADDRESS body
 // sender.
-const DEFAULT_FP = { destinationDomain: 0, burnToken: '0x' + '0'.repeat(40), mintRecipient: '0x' + '0'.repeat(40), amount: '0', messageSender: CONTRACT_ADDRESS.toLowerCase() }
+const DEFAULT_FP = {
+  destinationDomain: 0, burnToken: '0x' + '0'.repeat(40), mintRecipient: '0x' + '0'.repeat(40),
+  amount: '0', messageSender: CONTRACT_ADDRESS.toLowerCase(),
+  // Round 32: maxFee/hookData added to the fingerprint — buildCctpMessage()
+  // above zeroes maxFee unconditionally and uses the fixed CCTP_FORWARD_HOOK_HEX.
+  maxFee: '0', hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
+}
 
 describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {
