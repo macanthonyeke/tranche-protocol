@@ -7,7 +7,7 @@ import { parseRevertReason } from '../utils/errors'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
 import { arcTestnet } from '../config/wagmi'
 import { createTransactionAction, InvalidTransactionActionError } from '../confirm/action.js'
-import { getConfirmMode } from '../confirm/mode.js'
+import { getConfirmMode, CONFIRM_MODE_COMPARE } from '../confirm/mode.js'
 import { ConcurrentCircleActionError, TransactionCancelledError, useTransactionConfirm } from './useTransactionConfirm.js'
 
 // How long to wait for Circle to broadcast an approved challenge. Generous:
@@ -112,8 +112,14 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
      the raw wagmi request and bypass this Circle-only action path. */
   const run = useCallback(async (input, { loadingMessage = 'Awaiting wallet signature…' } = {}) => {
     setError(null)
-    setStatus('confirming')
-    toastRef.current = txToast({ loading: loadingMessage })
+    const circleMode = isSca ? getConfirmMode() : null
+    const waitingForCompareReview = circleMode === CONFIRM_MODE_COMPARE
+    // The compare review is the only active modal before continuation. Keep
+    // the legacy transaction status idle until the coordinator grants the
+    // executor lease; otherwise CreateEscrow's TxModal opens over the global
+    // review before any Circle challenge is allowed to exist.
+    setStatus(waitingForCompareReview ? 'idle' : 'confirming')
+    toastRef.current = waitingForCompareReview ? null : txToast({ loading: loadingMessage })
     try {
       const args = input?.request ?? input
       const descriptor = input?.descriptor
@@ -131,6 +137,10 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
           walletId
         })
         const pending = await runCircleConfirmation(action, async (lease) => {
+          if (waitingForCompareReview) {
+            setStatus('confirming')
+            toastRef.current = txToast({ loading: loadingMessage })
+          }
           const circleResult = await executeContractCall(action, { lease })
           if (!circleResult) throw new Error('Could not reach your wallet. Please sign in again.')
           // Keep the single-flight lease through the status lookup as well.
@@ -139,7 +149,7 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
           toastRef.current.update('Approved. Submitting…')
           const txHash = await awaitScaTxHash(circleResult)
           return { ...circleResult, txHash }
-        }, { mode: getConfirmMode() })
+        }, { mode: circleMode })
         if (!pending) throw new Error('Could not reach your wallet. Please sign in again.')
         const tx = pending.txHash
         setHash(tx)

@@ -20,6 +20,7 @@ import { resolveFileAttachment, resolveUrlAttachment, resolveRemoveAttachment, p
 import { toGatewayUrl } from '../utils/ipfsGateway.js'
 import InvoiceViewer from '../components/InvoiceViewer.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
+import { useTransactionConfirm } from '../hooks/useTransactionConfirm.js'
 import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
 import { useProtocolConfig } from '../hooks/useArbiter.js'
 import { ARC_DOMAIN, getDomainName, isEvmDomain } from '../config/chains.js'
@@ -1516,12 +1517,14 @@ function summarizeMissing(errors) {
   return out
 }
 
-function ReviewSection({
+export function ReviewSection({
   state, totalBaseUnits, errors, approved, approveTx, depositTx, onApprove, onDeposit, address,
   allowanceLoading, allowanceIsError, refetchAllowance, usdcBalance, balanceLoading,
   envelopePinning, envelopeError, onJump
 }) {
   const disconnected = !address
+  const { active: confirmation } = useTransactionConfirm()
+  const compareReviewing = confirmation?.phase === 'reviewing'
   const busy = approveTx.isBusy || depositTx.isBusy || envelopePinning
   const hasInsufficientBalance = !balanceLoading && usdcBalance !== undefined
     && totalBaseUnits > 0n && BigInt(usdcBalance) < totalBaseUnits
@@ -1637,40 +1640,46 @@ function ReviewSection({
         />
       </div>
 
-      <Modal
-        open={confirmOpen && depositTx.status === 'idle'}
-        onClose={() => setConfirmOpen(false)}
-        title="Lock funds into escrow"
-        footer={
-          <>
-            <button className="btn-quiet" onClick={() => setConfirmOpen(false)}>Cancel</button>
-            <button className="btn-primary" onClick={onDeposit}>Sign and lock</button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-2.5">
-          <p className="text-[13.5px] text-ink-2 leading-relaxed">
-            This is the second and final signature. Your USDC moves into the contract and is held until milestones are approved.
-          </p>
-          <div className="rule" />
-          <div className="flex items-baseline justify-between pt-1">
-            <span className="text-[13px] text-ink-2">Locking</span>
-            <span className="num text-[15px] text-ink font-medium">{formatUSDC(totalBaseUnits)}</span>
+      {!compareReviewing && (
+        <Modal
+          // Once Circle compare mode owns the review, this legacy CreateEscrow
+          // modal is unmounted immediately. Its contents remain useful before
+          // the global action is created, but it must never compete with the
+          // one actionable coordinator modal or cover its continuation button.
+          open={confirmOpen && depositTx.status === 'idle'}
+          onClose={() => setConfirmOpen(false)}
+          title="Lock funds into escrow"
+          footer={
+            <>
+              <button className="btn-quiet" onClick={() => setConfirmOpen(false)}>Cancel</button>
+              <button className="btn-primary" onClick={onDeposit}>Sign and lock</button>
+            </>
+          }
+        >
+          <div className="flex flex-col gap-2.5">
+            <p className="text-[13.5px] text-ink-2 leading-relaxed">
+              This is the second and final signature. Your USDC moves into the contract and is held until milestones are approved.
+            </p>
+            <div className="rule" />
+            <div className="flex items-baseline justify-between pt-1">
+              <span className="text-[13px] text-ink-2">Locking</span>
+              <span className="num text-[15px] text-ink font-medium">{formatUSDC(totalBaseUnits)}</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] text-ink-2">Freelancer</span>
+              <AddressDisplay address={state.freelancer} size="sm" />
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] text-ink-2">Paid on</span>
+              <span className="text-[13px] text-ink">{chainName}</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] text-ink-2">Milestones</span>
+              <span className="num text-[13px] text-ink">{state.milestones.length}</span>
+            </div>
           </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-[13px] text-ink-2">Freelancer</span>
-            <AddressDisplay address={state.freelancer} size="sm" />
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-[13px] text-ink-2">Paid on</span>
-            <span className="text-[13px] text-ink">{chainName}</span>
-          </div>
-          <div className="flex items-baseline justify-between">
-            <span className="text-[13px] text-ink-2">Milestones</span>
-            <span className="num text-[13px] text-ink">{state.milestones.length}</span>
-          </div>
-        </div>
-      </Modal>
+        </Modal>
+      )}
 
       <TxModal
         status={depositTx.status}
