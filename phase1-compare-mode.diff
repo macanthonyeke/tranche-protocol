@@ -1,0 +1,767 @@
+diff --git a/frontend/src/confirm/action.js b/frontend/src/confirm/action.js
+new file mode 100644
+index 0000000..9b8b3a7
+--- /dev/null
++++ b/frontend/src/confirm/action.js
+@@ -0,0 +1,177 @@
++import { isAddress, keccak256, toBytes, encodeFunctionData } from 'viem'
++
++// Keep the action module independent of wagmi's browser connector setup. This
++// is the chain every existing Circle SCA write targets; useTx still imports
++// the full wagmi chain for EOA switching.
++const ARC_TESTNET_ID = 5042002
++const ARC_TESTNET_NAME = 'Arc Testnet'
++
++/** Error raised before a Circle challenge can be created. */
++export class InvalidTransactionActionError extends Error {
++  constructor(message) {
++    super(message)
++    this.name = 'InvalidTransactionActionError'
++  }
++}
++
++function isPlainObject(value) {
++  if (value === null || typeof value !== 'object') return false
++  const prototype = Object.getPrototypeOf(value)
++  return prototype === Object.prototype || prototype === null
++}
++
++/* Clone before freezing. Freezing a caller-owned request in place would make
++   the confirmation boundary surprising to every existing EOA caller. The
++   production requests are JSON-shaped plus bigint values, so preserving
++   those primitives is enough and also makes the clone deterministic. */
++function clone(value, seen = new WeakSet()) {
++  if (value === null || typeof value !== 'object') return value
++  if (seen.has(value)) throw new InvalidTransactionActionError('Circle action contains a cyclic value.')
++  if (!Array.isArray(value) && !isPlainObject(value)) {
++    throw new InvalidTransactionActionError('Circle action contains an unsupported value.')
++  }
++
++  seen.add(value)
++  const result = Array.isArray(value)
++    ? value.map((entry) => clone(entry, seen))
++    : Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, clone(entry, seen)]))
++  seen.delete(value)
++  return result
++}
++
++function deepFreeze(value, seen = new WeakSet()) {
++  if (value === null || typeof value !== 'object' || seen.has(value)) return value
++  seen.add(value)
++  for (const child of Object.values(value)) deepFreeze(child, seen)
++  return Object.freeze(value)
++}
++
++/* A small canonical serializer. JSON.stringify cannot represent bigint and
++   object insertion order must not change an action digest. The resulting
++   bytes cover both the exact request and the exact calldata sent to Circle. */
++export function stableStringify(value) {
++  if (value === null) return 'null'
++  if (value === undefined) return '"$undefined"'
++  if (typeof value === 'bigint') return `{"$bigint":"${value.toString()}"}`
++  if (typeof value === 'string') return JSON.stringify(value)
++  if (typeof value === 'boolean') return value ? 'true' : 'false'
++  if (typeof value === 'number') {
++    if (!Number.isFinite(value)) throw new InvalidTransactionActionError('Circle action contains a non-finite number.')
++    return JSON.stringify(value)
++  }
++  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
++  if (isPlainObject(value)) {
++    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
++  }
++  throw new InvalidTransactionActionError('Circle action contains an unsupported value.')
++}
++
++function requireString(value, label) {
++  if (typeof value !== 'string' || value.trim() === '') {
++    throw new InvalidTransactionActionError(`Circle action is missing ${label}.`)
++  }
++  return value
++}
++
++function validateDescriptor(descriptor, request) {
++  if (!descriptor || typeof descriptor !== 'object') {
++    throw new InvalidTransactionActionError('Circle transaction confirmation is unavailable.')
++  }
++
++  for (const field of ['title', 'subtitle', 'contractName', 'contractAddress', 'functionName']) {
++    requireString(descriptor[field], `descriptor.${field}`)
++  }
++  if (!isAddress(descriptor.contractAddress)) {
++    throw new InvalidTransactionActionError('Circle transaction confirmation has an invalid contract address.')
++  }
++  if (!Array.isArray(descriptor.parameters) || descriptor.parameters.some((item) => typeof item !== 'string')) {
++    throw new InvalidTransactionActionError('Circle transaction confirmation has invalid parameters.')
++  }
++  if (descriptor.amount !== undefined &&
++    !((typeof descriptor.amount === 'bigint') ||
++      (typeof descriptor.amount === 'number' && Number.isFinite(descriptor.amount)))) {
++    throw new InvalidTransactionActionError('Circle transaction confirmation has an invalid amount.')
++  }
++  if (descriptor.amountLabel !== undefined) requireString(descriptor.amountLabel, 'descriptor.amountLabel')
++  if (descriptor.contractAddress.toLowerCase() !== request.address.toLowerCase()) {
++    throw new InvalidTransactionActionError('Circle descriptor contract does not match the transaction request.')
++  }
++  if (descriptor.functionName !== request.functionName) {
++    throw new InvalidTransactionActionError('Circle descriptor function does not match the transaction request.')
++  }
++}
++
++function validateRequest(request) {
++  if (!request || typeof request !== 'object') {
++    throw new InvalidTransactionActionError('Circle transaction request is missing.')
++  }
++  if (!isAddress(request.address)) {
++    throw new InvalidTransactionActionError('Circle transaction request has an invalid contract address.')
++  }
++  if (!Array.isArray(request.abi) || request.abi.length === 0) {
++    throw new InvalidTransactionActionError('Circle transaction request is missing an ABI.')
++  }
++  requireString(request.functionName, 'request.functionName')
++  if (!Array.isArray(request.args)) {
++    throw new InvalidTransactionActionError('Circle transaction request is missing arguments.')
++  }
++}
++
++/**
++ * Build the one object that both the Tranche review and Circle submission use.
++ * The caller's request/descriptor are cloned, frozen recursively, and never
++ * reconstructed after this function returns.
++ */
++export function createTransactionAction({ request, descriptor, walletAddress = null, walletId = null } = {}) {
++  validateRequest(request)
++  validateDescriptor(descriptor, request)
++  if (walletAddress !== null && walletAddress !== undefined && !isAddress(walletAddress)) {
++    throw new InvalidTransactionActionError('Circle action has an invalid wallet address.')
++  }
++  if (walletId !== null && walletId !== undefined &&
++    (typeof walletId !== 'string' || walletId.trim() === '')) {
++    throw new InvalidTransactionActionError('Circle action has an invalid wallet identifier.')
++  }
++
++  let callData
++  try {
++    callData = encodeFunctionData({
++      abi: request.abi,
++      functionName: request.functionName,
++      args: request.args
++    })
++  } catch (error) {
++    throw new InvalidTransactionActionError(`Circle transaction calldata is invalid: ${error.message}`)
++  }
++
++  const frozenRequest = clone(request)
++  const frozenDescriptor = clone({
++    ...descriptor,
++    chain: { id: ARC_TESTNET_ID, name: ARC_TESTNET_NAME }
++  })
++  const digestPayload = {
++    chainId: ARC_TESTNET_ID,
++    request: frozenRequest,
++    callData
++  }
++  const digest = keccak256(toBytes(stableStringify(digestPayload)))
++
++  return deepFreeze({
++    version: 1,
++    digest,
++    chain: { id: ARC_TESTNET_ID, name: ARC_TESTNET_NAME },
++    walletAddress: walletAddress ?? null,
++    walletId: walletId ?? null,
++    request: frozenRequest,
++    callData,
++    descriptor: frozenDescriptor
++  })
++}
++
++export function isTransactionAction(value) {
++  return !!value && Object.isFrozen(value) &&
++    typeof value.digest === 'string' &&
++    Object.isFrozen(value.request) &&
++    Object.isFrozen(value.descriptor) &&
++    value.chain?.id === ARC_TESTNET_ID
++}
+
+diff --git a/frontend/src/confirm/mode.js b/frontend/src/confirm/mode.js
+new file mode 100644
+index 0000000..dd3d603
+--- /dev/null
++++ b/frontend/src/confirm/mode.js
+@@ -0,0 +1,8 @@
++export const CONFIRM_MODE_CIRCLE = 'circle'
++export const CONFIRM_MODE_COMPARE = 'compare'
++
++/* Native is deliberately not a valid Phase 1 value. Unknown values, including
++   the future "native" value, fail closed to Circle's hosted confirmation. */
++export function getConfirmMode(value = import.meta.env.VITE_UCW_CONFIRM_MODE) {
++  return value === CONFIRM_MODE_COMPARE ? CONFIRM_MODE_COMPARE : CONFIRM_MODE_CIRCLE
++}
+
+diff --git a/frontend/src/confirm/mode.test.js b/frontend/src/confirm/mode.test.js
+new file mode 100644
+index 0000000..4507882
+--- /dev/null
++++ b/frontend/src/confirm/mode.test.js
+@@ -0,0 +1,66 @@
++import { describe, it, expect } from 'vitest'
++import { createTransactionAction, InvalidTransactionActionError } from './action.js'
++import { getConfirmMode } from './mode.js'
++
++const ADDRESS = '0x2222222222222222222222222222222222222222'
++const request = {
++  address: ADDRESS,
++  abi: [{
++    type: 'function', name: 'pause', stateMutability: 'nonpayable', inputs: [], outputs: []
++  }],
++  functionName: 'pause',
++  args: []
++}
++const descriptor = {
++  title: 'Pause deposits',
++  subtitle: 'Stops new deposits.',
++  contractName: 'Tranche Protocol Escrow',
++  contractAddress: ADDRESS,
++  functionName: 'pause',
++  parameters: ['Protocol-wide']
++}
++
++describe('UCW confirmation mode', () => {
++  it('allows only circle and compare, with native and unknown values failing closed', () => {
++    expect(getConfirmMode('circle')).toBe('circle')
++    expect(getConfirmMode('compare')).toBe('compare')
++    expect(getConfirmMode('native')).toBe('circle')
++    expect(getConfirmMode('anything-else')).toBe('circle')
++  })
++})
++
++describe('canonical Circle transaction action', () => {
++  it('deep-freezes the request, descriptor, chain, and action', () => {
++    const action = createTransactionAction({ request, descriptor })
++    expect(Object.isFrozen(action)).toBe(true)
++    expect(Object.isFrozen(action.request)).toBe(true)
++    expect(Object.isFrozen(action.request.abi[0])).toBe(true)
++    expect(Object.isFrozen(action.descriptor)).toBe(true)
++    expect(Object.isFrozen(action.descriptor.parameters)).toBe(true)
++    expect(Object.isFrozen(action.chain)).toBe(true)
++    expect(action.callData).toMatch(/^0x8456cb59$/)
++    expect(() => action.request.args.push(1n)).toThrow(TypeError)
++    expect(() => { action.descriptor.title = 'Changed' }).toThrow(TypeError)
++  })
++
++  it('does not allow caller mutation to change the reviewed request or digest', () => {
++    const callerRequest = { ...request, args: [] }
++    const callerDescriptor = { ...descriptor, parameters: ['Before'] }
++    const action = createTransactionAction({ request: callerRequest, descriptor: callerDescriptor })
++    const digest = action.digest
++    callerRequest.args.push(1n)
++    callerDescriptor.parameters[0] = 'After'
++    expect(action.request.args).toEqual([])
++    expect(action.descriptor.parameters).toEqual(['Before'])
++    expect(action.digest).toBe(digest)
++  })
++
++  it('fails closed for a missing or mismatched descriptor before any challenge boundary', () => {
++    expect(() => createTransactionAction({ request, descriptor: null }))
++      .toThrow(InvalidTransactionActionError)
++    expect(() => createTransactionAction({
++      request,
++      descriptor: { ...descriptor, functionName: 'unpause' }
++    })).toThrow(/does not match/i)
++  })
++})
+
+diff --git a/frontend/src/confirm/native-mode-security.md b/frontend/src/confirm/native-mode-security.md
+new file mode 100644
+index 0000000..de6550d
+--- /dev/null
++++ b/frontend/src/confirm/native-mode-security.md
+@@ -0,0 +1,57 @@
++# Native UCW confirmation security requirements
++
++Status: Phase 2 prerequisite. Native mode is not implemented or available.
++Phase 1 compare mode keeps Circle's hosted confirmation UI enabled.
++
++## Current Phase 1 boundary
++
++The private JavaScript lease means **no normal production React call-site
++bypass exists**: the intended `useTx` → `useTransactionConfirm` → `useAuth`
++path must reach the review/continuation gate before `executeContractCall`
++creates a Circle challenge. The lease is an in-process UI capability, not a
++server-verifiable authorization.
++
++The current endpoint, `frontend/api/_lib/wallet/execute-contract-call.js`,
++still receives browser-supplied `userToken`, `walletId`, `contractAddress`,
++and `callData`. It validates their shape and forwards them to Circle. A
++browser UI alone cannot defend against XSS; in particular, this app currently
++keeps the UCW `userToken` and `encryptionKey` in `localStorage`, where injected
++same-origin JavaScript could read and use them.
++
++## Required before native mode
++
++Native mode must not be enabled by changing the frontend feature flag until
++all of these server-side controls exist and are tested:
++
++1. **Canonical wallet resolution.** Authenticate the app user on the server
++   and resolve the Circle user/wallet identity from that authenticated
++   identity. Do not treat browser-provided `walletId` or address as authority;
++   verify the resolved wallet belongs to the authenticated user and is the
++   wallet being reviewed.
++
++2. **Contract and function allowlisting.** Permit only registered chain,
++   contract, function selector, and parameter schemas. Validate the exact
++   calldata, recipient, amount, and other policy limits server-side rather
++   than trusting the descriptor or a browser-provided contract address.
++
++3. **Action/challenge audit records.** Before creating a Circle challenge,
++   persist an immutable action digest plus the authenticated user, resolved
++   Circle user/wallet identifiers, exact calldata, chain/contract/function,
++   and creation time. Bind the resulting `challengeId`, status transitions,
++   and eventual transaction hash to that record. Reject reuse, mismatch, and
++   stale or already-terminal actions.
++
++4. **Strict transaction-intent protocol.** The browser should submit a
++   server-verifiable intent or action identifier, not an authority-bearing
++   bundle of raw `walletId`, `contractAddress`, and `callData`. The server
++   must canonicalize the intent, compute/verify the digest, resolve the
++   wallet, enforce the allowlist, create exactly one challenge, and return
++   only the challenge data needed by the supported Circle SDK completion
++   path. Prefer a server-managed/HttpOnly authenticated session or token
++   broker so native mode does not depend on accepting the raw UCW credential
++   from arbitrary browser JavaScript.
++
++These controls are defense-in-depth, not a claim that a web UI can make a
++compromised browser safe. Add browser-side protections such as a strict CSP,
++dependency and output sanitization controls, and careful secret/logging
++hygiene, but do not treat them as a substitute for server authorization.
+
+diff --git a/frontend/src/components/TransactionConfirmModal.jsx b/frontend/src/components/TransactionConfirmModal.jsx
+new file mode 100644
+index 0000000..5dc6ac1
+--- /dev/null
++++ b/frontend/src/components/TransactionConfirmModal.jsx
+@@ -0,0 +1,69 @@
++import Modal from './Modal.jsx'
++import { formatUSDC } from '../utils/format.js'
++
++function Detail({ label, children }) {
++  return (
++    <div className="flex flex-col gap-0.5">
++      <dt className="text-[10px] uppercase tracking-[0.16em] text-ink-3">{label}</dt>
++      <dd className="text-sm text-ink break-words">{children}</dd>
++    </div>
++  )
++}
++
++export default function TransactionConfirmModal({ action, onContinue, onCancel }) {
++  const descriptor = action.descriptor
++  const busy = false
++
++  return (
++    <Modal
++      open
++      onClose={onCancel}
++      title={descriptor.title}
++      size="lg"
++      footer={(
++        <>
++          <button type="button" className="btn-quiet" onClick={onCancel} disabled={busy}>
++            Cancel
++          </button>
++          <button type="button" className="btn-primary" onClick={onContinue} disabled={busy}>
++            Continue to Circle confirmation
++          </button>
++        </>
++      )}
++    >
++      <div className="flex flex-col gap-5">
++        <div>
++          <p className="text-sm text-ink-2 leading-relaxed">{descriptor.subtitle}</p>
++          <p className="text-xs text-ink-3 mt-2">Review the exact blockchain action before continuing.</p>
++        </div>
++
++        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
++          <Detail label="Chain">{action.chain.name} ({action.chain.id})</Detail>
++          {action.walletAddress && <Detail label="Wallet">{action.walletAddress}</Detail>}
++          {descriptor.amount !== undefined && (
++            <Detail label={descriptor.amountLabel || 'Amount'}>{formatUSDC(descriptor.amount)}</Detail>
++          )}
++          <Detail label="Contract">
++            <span className="block">{descriptor.contractName}</span>
++            <span className="block font-mono text-xs text-ink-2">{descriptor.contractAddress}</span>
++          </Detail>
++          <Detail label="Function">{descriptor.functionName}</Detail>
++        </dl>
++
++        {descriptor.parameters.length > 0 && (
++          <div>
++            <p className="text-[10px] uppercase tracking-[0.16em] text-ink-3 mb-2">Parameters</p>
++            <ul className="list-disc pl-5 space-y-1 text-sm text-ink-2">
++              {descriptor.parameters.map((parameter, index) => <li key={`${index}-${parameter}`}>{parameter}</li>)}
++            </ul>
++          </div>
++        )}
++
++        <p className="text-xs text-ink-2 leading-relaxed border-l-2 border-clay pl-3">
++          By continuing, you acknowledge that you are authorizing the blockchain action displayed above.
++          Circle will show its confirmation screen next.
++        </p>
++      </div>
++    </Modal>
++  )
++}
+
+diff --git a/frontend/src/hooks/useTransactionConfirm.js b/frontend/src/hooks/useTransactionConfirm.js
+new file mode 100644
+index 0000000..c9ac0ad
+--- /dev/null
++++ b/frontend/src/hooks/useTransactionConfirm.js
+@@ -0,0 +1,167 @@
++import { createElement, useCallback, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
++import { useLocation } from 'react-router-dom'
++import TransactionConfirmModal from '../components/TransactionConfirmModal.jsx'
++import { getConfirmMode, CONFIRM_MODE_COMPARE } from '../confirm/mode.js'
++
++const LEASE_MARKER = Symbol('tranche-circle-execution-lease')
++let active = null
++let activeSnapshot = null
++let nextOwnerId = 1
++const listeners = new Set()
++
++function notify() {
++  listeners.forEach((listener) => listener())
++}
++
++function subscribe(listener) {
++  listeners.add(listener)
++  return () => listeners.delete(listener)
++}
++
++function snapshot() {
++  return activeSnapshot
++}
++
++export class ConcurrentCircleActionError extends Error {
++  constructor() {
++    super('Another Circle transaction is already awaiting confirmation. Finish it before starting another.')
++    this.name = 'ConcurrentCircleActionError'
++  }
++}
++
++export class TransactionCancelledError extends Error {
++  constructor() {
++    super('Transaction cancelled.')
++    this.name = 'TransactionCancelledError'
++  }
++}
++
++function clear(record) {
++  if (!active || active.ownerId !== record.ownerId) return
++  active = null
++  activeSnapshot = null
++  notify()
++}
++
++function makeLease(record) {
++  return Object.freeze({
++    [LEASE_MARKER]: true,
++    ownerId: record.ownerId,
++    actionDigest: record.action.digest
++  })
++}
++
++/* Only useAuth imports this verifier. The marker is module-private, so the
++   bounded claim is: no normal production React call-site bypass exists. A
++   raw executeContractCall call cannot get a valid lease without going through
++   this coordinator. This is an in-process UI boundary, not a server-verifiable
++   authorization: the current API still trusts browser-supplied transaction
++   fields after this boundary. Native mode must not rely on the lease alone. */
++export function isCircleExecutionLease(lease, action) {
++  return !!lease && lease[LEASE_MARKER] === true &&
++    lease.actionDigest === action?.digest &&
++    lease.ownerId === active?.ownerId
++}
++
++async function execute(record) {
++  const lease = makeLease(record)
++  try {
++    const result = await record.executor(lease)
++    record.resolve(result)
++  } catch (error) {
++    record.reject(error)
++  } finally {
++    clear(record)
++  }
++}
++
++function start(action, executor, mode) {
++  if (active) return Promise.reject(new ConcurrentCircleActionError())
++
++  const ownerId = nextOwnerId++
++  let resolve
++  let reject
++  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
++  const record = {
++    action,
++    executor,
++    mode,
++    ownerId,
++    phase: mode === CONFIRM_MODE_COMPARE ? 'reviewing' : 'executing',
++    resolve,
++    reject
++  }
++  active = record
++  activeSnapshot = record
++  notify()
++
++  if (mode !== CONFIRM_MODE_COMPARE) void execute(record)
++  return promise
++}
++
++export function continueActiveConfirmation() {
++  const record = active
++  if (!record || record.phase !== 'reviewing') return false
++  active = { ...record, phase: 'executing' }
++  activeSnapshot = active
++  notify()
++  void execute(active)
++  return true
++}
++
++export function cancelActiveConfirmation() {
++  const record = active
++  if (!record || record.phase !== 'reviewing') return false
++  record.reject(new TransactionCancelledError())
++  clear(record)
++  return true
++}
++
++/* Test-only reset. It rejects an intentionally held action so no promise or
++   lease survives between tests. Production code never calls this. */
++export function __resetConfirmationForTests() {
++  const record = active
++  if (!record) return
++  record.reject(new TransactionCancelledError())
++  clear(record)
++}
++
++export function useTransactionConfirm() {
++  const current = useSyncExternalStore(subscribe, snapshot, snapshot)
++  const run = useCallback((action, executor, { mode } = {}) => {
++    return start(action, executor, getConfirmMode(mode))
++  }, [])
++  return {
++    active: current,
++    run,
++    continueConfirmation: continueActiveConfirmation,
++    cancelConfirmation: cancelActiveConfirmation
++  }
++}
++
++export function TransactionConfirmHost() {
++  const { active: current, continueConfirmation, cancelConfirmation } = useTransactionConfirm()
++  if (!current || current.phase !== 'reviewing') return null
++  return createElement(TransactionConfirmModal, {
++    action: current.action,
++    onContinue: continueConfirmation,
++    onCancel: cancelConfirmation
++  })
++}
++
++/* The host intentionally lives above the route tree, so a route component
++   unmount cannot accidentally submit or own the review. This companion sits
++   just inside BrowserRouter and cancels a still-reviewing action whenever the
++   route changes; navigation is therefore another guaranteed no-submit exit. */
++export function TransactionConfirmNavigationGuard() {
++  const location = useLocation()
++  const previousKey = useRef(location.key)
++
++  useLayoutEffect(() => {
++    if (previousKey.current === location.key) return
++    previousKey.current = location.key
++    cancelActiveConfirmation()
++  }, [location.key])
++
++  return null
++}
+
+diff --git a/frontend/src/hooks/useTransactionConfirm.test.jsx b/frontend/src/hooks/useTransactionConfirm.test.jsx
+new file mode 100644
+index 0000000..def0a2c
+--- /dev/null
++++ b/frontend/src/hooks/useTransactionConfirm.test.jsx
+@@ -0,0 +1,175 @@
++import { describe, it, expect, vi, afterEach } from 'vitest'
++import { render, renderHook, screen, fireEvent, act } from '@testing-library/react'
++import { MemoryRouter, useNavigate } from 'react-router-dom'
++
++import {
++  TransactionConfirmHost,
++  TransactionConfirmNavigationGuard,
++  useTransactionConfirm,
++  __resetConfirmationForTests
++} from './useTransactionConfirm.js'
++import { createTransactionAction } from '../confirm/action.js'
++
++const ADDRESS = '0x2222222222222222222222222222222222222222'
++const REQUEST = {
++  address: ADDRESS,
++  abi: [{
++    type: 'function', name: 'claimDelivery', stateMutability: 'nonpayable',
++    inputs: [{ name: 'escrowId', type: 'uint256' }, { name: 'milestone', type: 'uint256' }],
++    outputs: []
++  }],
++  functionName: 'claimDelivery',
++  args: [1n, 0n]
++}
++const DESCRIPTOR = {
++  title: 'Claim delivery',
++  subtitle: 'Claims this milestone.',
++  contractName: 'Tranche Protocol Escrow',
++  contractAddress: ADDRESS,
++  functionName: 'claimDelivery',
++  parameters: ['Escrow #1', 'Milestone 1']
++}
++const ACTION = createTransactionAction({ request: REQUEST, descriptor: DESCRIPTOR })
++
++function deferred() {
++  let resolve, reject
++  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
++  return { promise, resolve, reject }
++}
++
++afterEach(() => __resetConfirmationForTests())
++
++describe('live Circle confirmation coordinator', () => {
++  it('cancelling the Tranche review makes no executor/API call', async () => {
++    const executor = vi.fn()
++    const { result } = renderHook(() => useTransactionConfirm())
++    let pending
++    act(() => { pending = result.current.run(ACTION, executor, { mode: 'compare' }) })
++
++    expect(executor).not.toHaveBeenCalled()
++    act(() => { expect(result.current.cancelConfirmation()).toBe(true) })
++    await expect(pending).rejects.toThrow('Transaction cancelled.')
++    expect(executor).not.toHaveBeenCalled()
++  })
++
++  it('cancels a still-reviewing action when the route navigates', async () => {
++    function NavigateAway() {
++      const navigate = useNavigate()
++      return <button type="button" onClick={() => navigate('/next')}>Navigate away</button>
++    }
++
++    const executor = vi.fn()
++    const { result } = renderHook(() => useTransactionConfirm())
++    render(
++      <MemoryRouter initialEntries={['/current']}>
++        <TransactionConfirmNavigationGuard />
++        <NavigateAway />
++      </MemoryRouter>
++    )
++    let pending
++    act(() => { pending = result.current.run(ACTION, executor, { mode: 'compare' }) })
++
++    fireEvent.click(screen.getByRole('button', { name: 'Navigate away' }))
++    await expect(pending).rejects.toThrow('Transaction cancelled.')
++    expect(executor).not.toHaveBeenCalled()
++  })
++
++  it('only exposes the final continuation button through the global host', async () => {
++    const executor = vi.fn().mockResolvedValue('submitted')
++    const { result } = renderHook(() => useTransactionConfirm())
++    render(<TransactionConfirmHost />)
++
++    let pending
++    act(() => { pending = result.current.run(ACTION, executor, { mode: 'compare' }) })
++    expect(screen.getByRole('button', { name: 'Continue to Circle confirmation' })).toBeTruthy()
++    expect(executor).not.toHaveBeenCalled()
++
++    fireEvent.click(screen.getByRole('button', { name: 'Continue to Circle confirmation' }))
++    await expect(pending).resolves.toBe('submitted')
++    expect(executor).toHaveBeenCalledTimes(1)
++  })
++
++  it('rejects a double continuation and executes exactly once', async () => {
++    const gate = deferred()
++    const executor = vi.fn().mockReturnValue(gate.promise)
++    const { result } = renderHook(() => useTransactionConfirm())
++    let pending
++    act(() => { pending = result.current.run(ACTION, executor, { mode: 'compare' }) })
++
++    let first, second
++    act(() => {
++      first = result.current.continueConfirmation()
++      second = result.current.continueConfirmation()
++    })
++    expect(first).toBe(true)
++    expect(second).toBe(false)
++    expect(executor).toHaveBeenCalledTimes(1)
++
++    await act(async () => { gate.resolve('done'); await pending })
++  })
++
++  it('rejects a second Circle action across hook instances instead of queueing it', async () => {
++    const gate = deferred()
++    const firstExecutor = vi.fn().mockReturnValue(gate.promise)
++    const secondExecutor = vi.fn()
++    const { result: first } = renderHook(() => useTransactionConfirm())
++    const { result: second } = renderHook(() => useTransactionConfirm())
++
++    let firstPending, secondPending
++    act(() => {
++      firstPending = first.current.run(ACTION, firstExecutor, { mode: 'compare' })
++      secondPending = second.current.run(ACTION, secondExecutor, { mode: 'compare' })
++    })
++    await expect(secondPending).rejects.toThrow('Another Circle transaction is already awaiting confirmation.')
++    expect(secondExecutor).not.toHaveBeenCalled()
++
++    act(() => { first.current.continueConfirmation() })
++    await act(async () => { gate.resolve('done'); await firstPending })
++  })
++
++  it('keeps CreateEscrow approval and deposit as two explicit compare actions', async () => {
++    const approveRequest = {
++      ...REQUEST,
++      functionName: 'approve',
++      abi: [{
++        type: 'function', name: 'approve', stateMutability: 'nonpayable',
++        inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: []
++      }],
++      args: [ADDRESS, 250000000n]
++    }
++    const depositRequest = {
++      ...REQUEST,
++      functionName: 'deposit',
++      abi: [{
++        type: 'function', name: 'deposit', stateMutability: 'nonpayable',
++        inputs: [{ name: 'recipient', type: 'address' }], outputs: []
++      }],
++      args: [ADDRESS]
++    }
++    const approve = createTransactionAction({
++      request: approveRequest,
++      descriptor: { ...DESCRIPTOR, title: 'Allow Tranche to move this USDC', functionName: 'approve', parameters: ['Amount: 250.00 USDC'] }
++    })
++    const deposit = createTransactionAction({
++      request: depositRequest,
++      descriptor: { ...DESCRIPTOR, title: 'Sign and lock', functionName: 'deposit', parameters: ['Escrow deposit'] }
++    })
++    const approveExecutor = vi.fn().mockResolvedValue('approval-hash')
++    const depositExecutor = vi.fn().mockResolvedValue('deposit-hash')
++    const { result } = renderHook(() => useTransactionConfirm())
++
++    let approvalPending
++    act(() => { approvalPending = result.current.run(approve, approveExecutor, { mode: 'compare' }) })
++    expect(approveExecutor).not.toHaveBeenCalled()
++    act(() => { result.current.continueConfirmation() })
++    await expect(approvalPending).resolves.toBe('approval-hash')
++
++    let depositPending
++    act(() => { depositPending = result.current.run(deposit, depositExecutor, { mode: 'compare' }) })
++    expect(depositExecutor).not.toHaveBeenCalled()
++    act(() => { result.current.continueConfirmation() })
++    await expect(depositPending).resolves.toBe('deposit-hash')
++    expect(approveExecutor).toHaveBeenCalledTimes(1)
++    expect(depositExecutor).toHaveBeenCalledTimes(1)
++  })
++})

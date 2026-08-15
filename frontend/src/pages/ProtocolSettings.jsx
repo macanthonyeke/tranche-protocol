@@ -511,9 +511,11 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!bpsValid || feeTx.isBusy}
-            onClick={() => feeTx.run(escrowWrite('setProtocolFee', [BigInt(bps || 0)]), {
-              loadingMessage: 'Set protocol fee.',
-              confirm: protocolFeeConfirm({ currentBps: config?.protocolFeeBps, newBps: BigInt(bps || 0) })
+            onClick={() => feeTx.run({
+              request: escrowWrite('setProtocolFee', [BigInt(bps || 0)]),
+              descriptor: protocolFeeConfirm({ currentBps: config?.protocolFeeBps, newBps: BigInt(bps || 0) })
+            }, {
+              loadingMessage: 'Set protocol fee.'
             })}
           >
             {feeTx.isBusy ? 'Working…' : 'Update fee'}
@@ -533,9 +535,11 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!trValid || trTx.isBusy}
-            onClick={() => trTx.run(escrowWrite('setProtocolTreasury', [tr]), {
-              loadingMessage: 'Set treasury.',
-              confirm: protocolTreasuryConfirm({ currentTreasury: config?.protocolTreasury, newTreasury: tr })
+            onClick={() => trTx.run({
+              request: escrowWrite('setProtocolTreasury', [tr]),
+              descriptor: protocolTreasuryConfirm({ currentTreasury: config?.protocolTreasury, newTreasury: tr })
+            }, {
+              loadingMessage: 'Set treasury.'
             })}
           >
             {trTx.isBusy ? 'Working…' : 'Update treasury'}
@@ -555,9 +559,11 @@ function FeeControls({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={!cctpValid || cctpTx.isBusy}
-            onClick={() => cctpTx.run(escrowWrite('setCctpForwardFee', [BigInt(cctpVal || 0)]), {
-              loadingMessage: 'Set CCTP fee.',
-              confirm: cctpForwardFeeConfirm({ currentFee: config?.cctpForwardFee, newFee: BigInt(cctpVal || 0) })
+            onClick={() => cctpTx.run({
+              request: escrowWrite('setCctpForwardFee', [BigInt(cctpVal || 0)]),
+              descriptor: cctpForwardFeeConfirm({ currentFee: config?.cctpForwardFee, newFee: BigInt(cctpVal || 0) })
+            }, {
+              loadingMessage: 'Set CCTP fee.'
             })}
           >
             {cctpTx.isBusy ? 'Working…' : 'Update CCTP fee'}
@@ -596,8 +602,14 @@ function DomainControls() {
                 onClick={() => {
                   const confirm = domainConfirm({ domain: d, domainName: getDomainName(d), enabled: on })
                   return on
-                    ? removeTx.run(escrowWrite('removeSupportedDomain', [d]), { loadingMessage: `Remove ${getDomainName(d)}.`, confirm })
-                    : addTx.run(escrowWrite('addSupportedDomain', [d]), { loadingMessage: `Add ${getDomainName(d)}.`, confirm })
+                    ? removeTx.run({
+                      request: escrowWrite('removeSupportedDomain', [d]),
+                      descriptor: confirm
+                    }, { loadingMessage: `Remove ${getDomainName(d)}.` })
+                    : addTx.run({
+                      request: escrowWrite('addSupportedDomain', [d]),
+                      descriptor: confirm
+                    }, { loadingMessage: `Add ${getDomainName(d)}.` })
                 }}
               >
                 {on ? 'Disable' : 'Enable'}
@@ -813,11 +825,13 @@ function ProposeRecovery() {
             <button className="btn-quiet" onClick={() => setConfirm(false)} disabled={tx.isBusy}>Cancel</button>
             <button
               className="btn-danger"
-              onClick={() => tx.run(escrowWrite('proposeRefundCreditTransfer', [from, to]), {
-                loadingMessage: 'Submitting proposal…',
-                confirm: proposeRecoveryConfirm({
+              onClick={() => tx.run({
+                request: escrowWrite('proposeRefundCreditTransfer', [from, to]),
+                descriptor: proposeRecoveryConfirm({
                   from, to, balance, existingOwner: proposedOwner, existingExpiry: expiryOf(proposedAt)
                 })
+              }, {
+                loadingMessage: 'Submitting proposal…'
               })}
               disabled={!valid || tx.isBusy}
             >
@@ -963,9 +977,11 @@ function ClaimRecovery() {
                   forceExpiryRecheck((n) => n + 1)
                   return
                 }
-                tx.run(escrowWrite('claimRefundCreditTransfer', [blacklisted]), {
-                  loadingMessage: 'Claiming refund credit…',
-                  confirm: claimRecoveryConfirm({ blacklisted, balance, expiry })
+                tx.run({
+                  request: escrowWrite('claimRefundCreditTransfer', [blacklisted]),
+                  descriptor: claimRecoveryConfirm({ blacklisted, balance, expiry })
+                }, {
+                  loadingMessage: 'Claiming refund credit…'
                 })
               }}
               disabled={!valid || tx.isBusy}
@@ -1001,9 +1017,11 @@ function PauseControl({ config, refetch }) {
           <button
             className="btn-primary"
             disabled={tx.isBusy || !loaded}
-            onClick={() => tx.run(escrowWrite('unpause', []), {
-              loadingMessage: 'Unpause.',
-              confirm: pauseConfirm({ paused: isPaused })
+            onClick={() => tx.run({
+              request: escrowWrite('unpause', []),
+              descriptor: pauseConfirm({ paused: isPaused })
+            }, {
+              loadingMessage: 'Unpause.'
             })}
           >
             {tx.isBusy ? 'Working…' : 'Unpause deposits'}
@@ -1012,9 +1030,11 @@ function PauseControl({ config, refetch }) {
           <button
             className="btn-danger"
             disabled={tx.isBusy || !loaded}
-            onClick={() => tx.run(escrowWrite('pause', []), {
-              loadingMessage: 'Pause.',
-              confirm: pauseConfirm({ paused: isPaused })
+            onClick={() => tx.run({
+              request: escrowWrite('pause', []),
+              descriptor: pauseConfirm({ paused: isPaused })
+            }, {
+              loadingMessage: 'Pause.'
             })}
           >
             {tx.isBusy ? 'Working…' : 'Pause deposits'}

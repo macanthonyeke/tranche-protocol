@@ -384,11 +384,11 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           className="btn-primary text-sm py-2"
           disabled={busy}
           onClick={() => acceptTx.run(
-            escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
             {
-              loadingMessage: 'Check your wallet.',
-              confirm: acknowledgeInvoiceConfirm({ escrow })
-            }
+              request: escrowWrite('acknowledgeInvoice', [BigInt(escrow.id)]),
+              descriptor: acknowledgeInvoiceConfirm({ escrow })
+            },
+            { loadingMessage: 'Check your wallet.' }
           )}
         >
           {acceptTx.isBusy ? 'Working…' : 'Accept terms'}
@@ -398,16 +398,15 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
           className="btn-danger text-sm py-2"
           disabled={busy}
           onClick={() => declineTx.run(
-            escrowWrite('declineEscrow', [BigInt(escrow.id)]),
             {
-              loadingMessage: 'Check your wallet.',
+              request: escrowWrite('declineEscrow', [BigInt(escrow.id)]),
+              descriptor: {
               // The banner's two buttons sit side by side and the destructive
               // one is one click from the constructive one, with no app-side
               // confirmation between. Circle's screen is the only place this
               // says out loud that it cancels the whole escrow, not one
               // milestone. Full totalAmount, no protocol fee, credited on Arc
               // (TrancheProtocol.sol:1091).
-              confirm: {
                 title: 'Decline this escrow',
                 subtitle: "Rejects the whole engagement and returns everything to the escrow's refund address. This cannot be undone — a new escrow would have to be created.",
                 amount: escrow.totalAmount,
@@ -422,7 +421,8 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
                   'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
                 ]
               }
-            }
+            },
+            { loadingMessage: 'Check your wallet.' }
           )}
           title="Reject the whole escrow. Refunds the full amount to the escrow's refund address — no protocol fee. Only available while every milestone is still pending."
         >
@@ -790,9 +790,11 @@ function DeadlineEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const newTs = toTs(d)
         setSuccessTs(newTs)
-        tx.run(escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]), {
-          loadingMessage: 'Extending. Check your wallet.',
-          confirm: extendDeadlineConfirm({ escrow, newDeadline: newTs })
+        tx.run({
+          request: escrowWrite('extendDeadline', [BigInt(escrow.id), BigInt(newTs)]),
+          descriptor: extendDeadlineConfirm({ escrow, newDeadline: newTs })
+        }, {
+          loadingMessage: 'Extending. Check your wallet.'
         })
       }}
       last={last}
@@ -858,9 +860,11 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
       onSubmit={(d) => {
         const trimmed = d.url.trim()
         setSaved(true)
-        tx.run(escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]), {
-          loadingMessage: 'Updating. Check your wallet.',
-          confirm: updateInvoiceURIConfirm({ escrow, newURI: trimmed })
+        tx.run({
+          request: escrowWrite('updateInvoiceURI', [BigInt(escrow.id), trimmed]),
+          descriptor: updateInvoiceURIConfirm({ escrow, newURI: trimmed })
+        }, {
+          loadingMessage: 'Updating. Check your wallet.'
         })
       }}
       last={last}
@@ -1120,13 +1124,13 @@ function ReceivingAddressEditRow({ escrow, hasSplits, milestones, onChange, last
       onSubmit={(d) => {
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
-          escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
           {
-            loadingMessage: 'Updating. Check your wallet.',
-            confirm: redirectPayoutConfirm({
+            request: escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
+            descriptor: redirectPayoutConfirm({
               escrow, hasSplits, milestones, newAddress: d.addr, newDomain: Number(d.domain)
             })
-          }
+          },
+          { loadingMessage: 'Updating. Check your wallet.' }
         )
       }}
       last={last}
@@ -1168,14 +1172,14 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
       onSubmit={(d) => {
         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
         tx.run(
-          escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
           {
-            loadingMessage: 'Updating. Check your wallet.',
-            confirm: redirectSplitConfirm({
+            request: escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
+            descriptor: redirectSplitConfirm({
               escrow, splitIndex, currentAddress, currentDomain, pct, milestones,
               newAddress: d.addr, newDomain: Number(d.domain)
             })
-          }
+          },
+          { loadingMessage: 'Updating. Check your wallet.' }
         )
       }}
       last={last}
@@ -1984,13 +1988,13 @@ function TimeoutSettlementTrigger({ escrow, milestone, dispute, splits, onChange
         <TxButton
           className="btn-secondary text-sm py-2"
           onClick={() => tx.run(
-            escrowWrite('resolveDisputeByTimeout', [BigInt(escrow.id), BigInt(milestone.index)]),
             {
-              loadingMessage: 'Settling by timeout.',
-              confirm: timeoutSettlementConfirm({
+              request: escrowWrite('resolveDisputeByTimeout', [BigInt(escrow.id), BigInt(milestone.index)]),
+              descriptor: timeoutSettlementConfirm({
                 escrow, milestone, index: milestone.index, splits, timeoutAt, bpsDenominator
               })
-            }
+            },
+            { loadingMessage: 'Settling by timeout.' }
           )}
           disabled={tx.isBusy}
           loading={tx.isBusy}
@@ -2041,11 +2045,11 @@ function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange 
   const completion = milestoneCancelCompletion(escrow, milestoneIndex, milestones)
 
   const submit = () => tx.run(
-    escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
     {
-      loadingMessage: 'Submitting. Check your wallet.',
-      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, milestones, role, otherProposed })
-    }
+      request: escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
+      descriptor: proposeMilestoneCancelConfirm({ escrow, milestone, milestones, role, otherProposed })
+    },
+    { loadingMessage: 'Submitting. Check your wallet.' }
   )
 
   if (!open) {
@@ -2853,11 +2857,11 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
   const propose = async (bps) => {
     const maxFee = escrow.escrowCctpForwardFee ?? 0n
     await tx.run(
-      escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
       {
-        loadingMessage: 'Check your wallet.',
-        confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
-      }
+        request: escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+        descriptor: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+      },
+      { loadingMessage: 'Check your wallet.' }
     )
   }
 
@@ -3239,7 +3243,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
    of this per failed message, so a settlement with multiple simultaneous
    failures gets a recovery card for each, not just one. */
 function SelfRelayCard({ delivery, copied, onCopied }) {
-  const { address } = useAuth()
+  const { address, walletType } = useAuth()
   const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
   const [relayTxHash, setRelayTxHash] = useState(null)
   const [relayError, setRelayError] = useState(null)
@@ -3249,7 +3253,11 @@ function SelfRelayCard({ delivery, copied, onCopied }) {
 
   const transmitter = destinationDomain != null ? (MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null) : null
   const chainParams = destinationDomain != null ? (EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null) : null
-  const canRelayInApp = !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
+  // This recovery write is deliberately the injected-wallet-only exception:
+  // it targets the destination MessageTransmitter, not Tranche's Circle SCA
+  // contract-write path. Never offer it while Circle is the active identity;
+  // a Circle user must not reach a raw eth_sendTransaction escape hatch.
+  const canRelayInApp = walletType === 'eoa' && !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
 
   const calldata = delivery.message && delivery.attestation
     ? encodeReceiveMessage(delivery.message, delivery.attestation)
@@ -3919,9 +3927,11 @@ function MilestoneAction({
     }
 
     try {
-      await tx.run(escrowWrite(action.fn, args), {
-        loadingMessage: 'Check your wallet.',
-        confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+      await tx.run({
+        request: escrowWrite(action.fn, args),
+        descriptor: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+      }, {
+        loadingMessage: 'Check your wallet.'
       })
     } catch {
       clearOpt(`milestone_${milestone.index}`)
@@ -4294,9 +4304,11 @@ function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed }) 
     const args = meta.needsReason
       ? [id, idx, reason.trim(), evidenceHash, uri]
       : [id, idx, evidenceHash, uri]
-    tx.run(escrowWrite(meta.fn, args), {
-      loadingMessage: 'Check your wallet.',
-      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName, arbiterWindow })
+    tx.run({
+      request: escrowWrite(meta.fn, args),
+      descriptor: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName, arbiterWindow })
+    }, {
+      loadingMessage: 'Check your wallet.'
     })
   }
 
@@ -4565,19 +4577,19 @@ function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, cl
   })
 
   const submit = () => tx.run(
-    escrowWrite('mutualCancel', [BigInt(escrow.id)]),
     {
-      loadingMessage: 'Submitting. Check your wallet.',
-      confirm: cancelEscrowConfirm({ escrow, milestones, otherApproved: otherFlag })
-    }
+      request: escrowWrite('mutualCancel', [BigInt(escrow.id)]),
+      descriptor: cancelEscrowConfirm({ escrow, milestones, otherApproved: otherFlag })
+    },
+    { loadingMessage: 'Submitting. Check your wallet.' }
   )
 
   const retract = () => retractTx.run(
-    escrowWrite('retractCancelApproval', [BigInt(escrow.id)]),
     {
-      loadingMessage: 'Retracting. Check your wallet.',
-      confirm: retractCancelConfirm({ escrow })
-    }
+      request: escrowWrite('retractCancelApproval', [BigInt(escrow.id)]),
+      descriptor: retractCancelConfirm({ escrow })
+    },
+    { loadingMessage: 'Retracting. Check your wallet.' }
   )
 
   // Has the caller approved on-chain, and not yet optimistically retracted?

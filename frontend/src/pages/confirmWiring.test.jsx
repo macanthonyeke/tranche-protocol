@@ -6,11 +6,11 @@ import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
  * Every other confirm test in this suite calls a descriptor directly and
  * asserts its output. That proves the descriptor is right; it proves nothing
  * about whether the app ever hands it to the signing screen. A call site that
- * forgot `confirm:` entirely, or passed a stale variable, or wired the wrong
+ * omitted the descriptor entirely, or passed a stale variable, or wired the wrong
  * descriptor to the wrong button, would leave all of those tests green.
  *
  * These render the real components and assert what actually reaches tx.run —
- * the object Circle's screen is built from. They also pin the guards that stop
+ * the immutable action Circle's screen is built from. They also pin the guards that stop
  * a submission happening at all: the zero-address checks (which the contract
  * rejects on-chain) and the loading gates (where an unresolved read is
  * indistinguishable from a real empty answer).
@@ -72,8 +72,9 @@ const { claimRecoveryConfirm, protocolTreasuryConfirm } = await import('./Protoc
 const ZERO = '0x0000000000000000000000000000000000000000'
 const GOOD = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
 
-// The options object tx.run received, i.e. what actually feeds the signing screen.
-const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
+// The canonical action tx.run received, i.e. what both review surfaces use.
+const lastAction = () => runMock.mock.calls.at(-1)?.[0]
+const lastConfirm = () => lastAction()?.descriptor
 
 const type = (el, value) => fireEvent.change(el, { target: { value } })
 

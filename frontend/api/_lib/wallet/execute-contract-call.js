@@ -22,6 +22,15 @@
 //
 // abiFunctionSignature is still accepted for callers that genuinely have no
 // ABI to hand, but callData wins whenever both are present.
+//
+// SECURITY BOUNDARY (Phase 1): this handler currently validates request shape
+// and forwards browser-supplied userToken, walletId, contractAddress, and
+// callData. The React coordinator's private lease is not visible here and is
+// not a server authorization. Before native confirmation mode is enabled,
+// this endpoint needs a server-verifiable identity/intent protocol: resolve
+// the canonical wallet from the authenticated user, allowlist contracts and
+// function selectors, and persist an action/challenge audit record. See
+// frontend/src/confirm/native-mode-security.md.
 
 import { getCircleClient } from '../circle.js'
 import { postRoute, requireString, RequestError } from '../walletRoute.js'

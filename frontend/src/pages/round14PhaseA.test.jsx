@@ -96,7 +96,8 @@ const ADDR_B = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
 const REPLACEMENT = '0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03'
 
 const type = (el, value) => fireEvent.change(el, { target: { value } })
-const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
+const lastAction = () => runMock.mock.calls.at(-1)?.[0]
+const lastConfirm = () => lastAction()?.descriptor
 
 const RECOVERY_DEBOUNCE_MS = 400
 const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
@@ -159,8 +160,7 @@ describe('#1/#2 — the propose panel re-validates at the moment of signing', ()
     fireEvent.click(confirmBtn)
 
     expect(runMock).toHaveBeenCalledTimes(1)
-    const [call] = runMock.mock.calls.at(-1)
-    expect(call.args[0]).toBe(ADDR_B)
+    expect(lastAction().request.args[0]).toBe(ADDR_B)
     // B's own balance (500.00), not A's stale cached balance (100.00).
     expect(lastConfirm().parameters.join('\n')).toContain('Balance today: 500.00 USDC')
   })
@@ -219,8 +219,7 @@ describe('#1/#2 — the claim panel re-validates at the moment of signing', () =
     fireEvent.click(confirmBtn)
 
     expect(runMock).toHaveBeenCalledTimes(1)
-    const [call] = runMock.mock.calls.at(-1)
-    expect(call.args[0]).toBe(ADDR_B)
+    expect(lastAction().request.args[0]).toBe(ADDR_B)
     expect(lastConfirm().amount).toBe(500000000n)
   })
 })

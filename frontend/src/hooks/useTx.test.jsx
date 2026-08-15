@@ -1,11 +1,3 @@
-// Dispatch tests for the one write path both wallet types share.
-//
-// The value here is proving that the SAME call — tx.run(escrowWrite(fn, args)),
-// exactly as the ~25 untouched call sites make it — reaches the correct
-// signing mechanism for whichever way the user signed in, and that neither
-// path leaks into the other. That is the property that makes "payer and
-// freelancer independently pick either wallet type" true.
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 
@@ -14,61 +6,85 @@ const writeContractAsync = vi.hoisted(() => vi.fn())
 const switchChainAsync = vi.hoisted(() => vi.fn())
 const accountMock = vi.hoisted(() => ({ current: { chainId: 5042002 } }))
 
-// Partial mock: config/wagmi.js runs createConfig at import time (useTx pulls
-// it in via config/contract.js), so the real module still has to be there.
 vi.mock('wagmi', async (importOriginal) => ({
   ...(await importOriginal()),
   useWriteContract: () => ({ writeContractAsync }),
   useSwitchChain: () => ({ switchChainAsync }),
   useAccount: () => accountMock.current,
-  // Receipt never resolves during these tests; we're asserting how a hash is
-  // obtained, not what happens after one exists.
   useWaitForTransactionReceipt: () => ({ data: undefined, isError: false, error: null })
 }))
 
 vi.mock('./useAuth.jsx', () => ({ useAuth: () => authMock.current }))
-
 vi.mock('./useToast.jsx', () => ({
   txToast: () => ({ update: vi.fn(), success: vi.fn(), error: vi.fn() })
 }))
 
 const { useTx, escrowWrite } = await import('./useTx.js')
+const { CONTRACT_ADDRESS } = await import('../config/contract.js')
+const {
+  useTransactionConfirm,
+  __resetConfirmationForTests
+} = await import('./useTransactionConfirm.js')
 
-const ARGS = escrowWrite('claimDelivery', [1n, 0n])
+const REQUEST = escrowWrite('claimDelivery', [1n, 0n])
+const DESCRIPTOR = {
+  title: 'Claim delivery',
+  subtitle: 'Claims the milestone.',
+  contractName: 'Tranche Protocol Escrow',
+  contractAddress: CONTRACT_ADDRESS,
+  functionName: 'claimDelivery',
+  parameters: ['Escrow #1', 'Milestone 1']
+}
+const ACTION_INPUT = { request: REQUEST, descriptor: DESCRIPTOR }
 
 beforeEach(() => {
   writeContractAsync.mockReset()
   switchChainAsync.mockReset()
   accountMock.current = { chainId: 5042002 }
-  vi.stubGlobal('fetch', vi.fn())
+  globalThis.fetch = vi.fn()
+  vi.stubEnv('VITE_UCW_CONFIRM_MODE', 'circle')
+  __resetConfirmationForTests()
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  __resetConfirmationForTests()
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
+})
 
 function asEoa() {
-  authMock.current = { isSca: false, executeContractCall: vi.fn() }
+  authMock.current = { isSca: false, address: '0x1111111111111111111111111111111111111111', executeContractCall: vi.fn() }
   return authMock.current
 }
 
 function asSca({ challengeId = 'chal-1' } = {}) {
   authMock.current = {
     isSca: true,
-    executeContractCall: vi.fn().mockResolvedValue({ challengeId, userToken: 'tok' })
+    address: '0x1111111111111111111111111111111111111111',
+    walletId: 'wallet-1',
+    executeContractCall: vi.fn().mockResolvedValue({ challengeId, userToken: 'test-token' })
   }
   return authMock.current
 }
 
+function hashResponse(hash = '0xSCAHASH') {
+  globalThis.fetch.mockResolvedValue({
+    ok: true,
+    json: async () => ({ txHash: hash, done: true, failed: false })
+  })
+}
+
 describe('useTx — EOA (connected wallet)', () => {
-  it('signs through wagmi and never calls the Circle route', async () => {
+  it('keeps the raw request on wagmi and never calls the Circle path', async () => {
     const auth = asEoa()
     writeContractAsync.mockResolvedValue('0xEOAHASH')
 
     const { result } = renderHook(() => useTx())
     let hash
-    await act(async () => { hash = await result.current.run(ARGS) })
+    await act(async () => { hash = await result.current.run(ACTION_INPUT) })
 
     expect(hash).toBe('0xEOAHASH')
-    expect(writeContractAsync).toHaveBeenCalledWith(ARGS)
+    expect(writeContractAsync).toHaveBeenCalledWith(REQUEST)
     expect(auth.executeContractCall).not.toHaveBeenCalled()
     expect(globalThis.fetch).not.toHaveBeenCalled()
   })
@@ -79,59 +95,68 @@ describe('useTx — EOA (connected wallet)', () => {
     writeContractAsync.mockResolvedValue('0xEOAHASH')
 
     const { result } = renderHook(() => useTx())
-    await act(async () => { await result.current.run(ARGS) })
+    await act(async () => { await result.current.run(ACTION_INPUT) })
 
     expect(switchChainAsync).toHaveBeenCalledWith({ chainId: 5042002 })
   })
 })
 
 describe('useTx — Circle SCA (email sign-in)', () => {
-  it('goes through Circle and never touches wagmi writeContract', async () => {
+  it('creates one frozen action and reaches Circle only in the default circle mode', async () => {
     const auth = asSca()
-    globalThis.fetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ txHash: '0xSCAHASH', done: true, failed: false })
-    })
+    hashResponse()
 
     const { result } = renderHook(() => useTx())
     let hash
-    await act(async () => { hash = await result.current.run(ARGS) })
+    await act(async () => { hash = await result.current.run(ACTION_INPUT) })
 
     expect(hash).toBe('0xSCAHASH')
-    expect(auth.executeContractCall).toHaveBeenCalledWith(ARGS, { confirm: undefined })
+    expect(auth.executeContractCall).toHaveBeenCalledTimes(1)
+    const [action, options] = auth.executeContractCall.mock.calls[0]
+    expect(Object.isFrozen(action)).toBe(true)
+    expect(Object.isFrozen(action.request)).toBe(true)
+    expect(action.request).toEqual(REQUEST)
+    expect(action.descriptor).toEqual(expect.objectContaining(DESCRIPTOR))
+    expect(options.lease.actionDigest).toBe(action.digest)
     expect(writeContractAsync).not.toHaveBeenCalled()
   })
 
-  // The confirm descriptor is SCA-only, and useTx is the only thing that
-  // routes it — a caller passing one must reach Circle's dialog, since the
-  // alternative is a signing screen showing the previous transaction's amount.
-  it('forwards the confirm descriptor for Circle’s signing screen', async () => {
+  it('does not create a challenge when the descriptor is missing', async () => {
     const auth = asSca()
-    globalThis.fetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ txHash: '0xSCAHASH', done: true, failed: false })
-    })
-    const confirm = { title: 'Lock funds into escrow', amount: 250000000n }
-
     const { result } = renderHook(() => useTx())
-    await act(async () => { await result.current.run(ARGS, { confirm }) })
 
-    expect(auth.executeContractCall).toHaveBeenCalledWith(ARGS, { confirm })
+    await act(async () => {
+      await expect(result.current.run(REQUEST)).rejects.toThrow(/confirmation is unavailable/i)
+    })
+    expect(auth.executeContractCall).not.toHaveBeenCalled()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 
-  // An SCA user has no injected connector, so useAccount().chainId is
-  // undefined for them. Running the switch would prompt a wallet that isn't
-  // there and fail every write — hence the SCA branch sits ahead of it.
+  it('shows no API activity before compare continuation, then preserves the Circle path', async () => {
+    vi.stubEnv('VITE_UCW_CONFIRM_MODE', 'compare')
+    const auth = asSca()
+    hashResponse('0xCOMPARE')
+    const { result } = renderHook(() => useTx())
+    const { result: coordinator } = renderHook(() => useTransactionConfirm())
+
+    let pending
+    act(() => { pending = result.current.run(ACTION_INPUT) })
+    expect(auth.executeContractCall).not.toHaveBeenCalled()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+
+    act(() => { coordinator.current.continueConfirmation() })
+    await expect(pending).resolves.toBe('0xCOMPARE')
+    expect(auth.executeContractCall).toHaveBeenCalledTimes(1)
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('never attempts a network switch, even with no chainId', async () => {
     asSca()
     accountMock.current = { chainId: undefined }
-    globalThis.fetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ txHash: '0xSCAHASH', done: true, failed: false })
-    })
+    hashResponse()
 
     const { result } = renderHook(() => useTx())
-    await act(async () => { await result.current.run(ARGS) })
+    await act(async () => { await result.current.run(ACTION_INPUT) })
 
     expect(switchChainAsync).not.toHaveBeenCalled()
   })
@@ -144,7 +169,7 @@ describe('useTx — Circle SCA (email sign-in)', () => {
 
     const { result } = renderHook(() => useTx())
     let hash
-    await act(async () => { hash = await result.current.run(ARGS) })
+    await act(async () => { hash = await result.current.run(ACTION_INPUT) })
 
     expect(hash).toBe('0xLATE')
     expect(globalThis.fetch).toHaveBeenCalledTimes(2)
@@ -159,17 +184,22 @@ describe('useTx — Circle SCA (email sign-in)', () => {
 
     const { result } = renderHook(() => useTx())
     await act(async () => {
-      await expect(result.current.run(ARGS)).rejects.toThrow('INSUFFICIENT_FUNDS')
+      await expect(result.current.run(ACTION_INPUT)).rejects.toThrow('INSUFFICIENT_FUNDS')
     })
     await waitFor(() => expect(result.current.status).toBe('error'))
   })
 
   it('fails clearly when the Circle session has gone', async () => {
-    authMock.current = { isSca: true, executeContractCall: vi.fn().mockResolvedValue(null) }
+    authMock.current = {
+      isSca: true,
+      address: '0x1111111111111111111111111111111111111111',
+      walletId: 'wallet-1',
+      executeContractCall: vi.fn().mockResolvedValue(null)
+    }
 
     const { result } = renderHook(() => useTx())
     await act(async () => {
-      await expect(result.current.run(ARGS)).rejects.toThrow(/sign in again/i)
+      await expect(result.current.run(ACTION_INPUT)).rejects.toThrow(/sign in again/i)
     })
   })
 })

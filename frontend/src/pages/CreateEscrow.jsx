@@ -480,17 +480,17 @@ function Flow() {
       return
     }
     approveTx.run({
-      address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'approve',
-      args: [CONTRACT_ADDRESS, totalBaseUnits]
-    }, {
-      loadingMessage: 'Approve USDC in your wallet.',
+      request: {
+        address: USDC_ADDRESS, abi: USDC_ABI, functionName: 'approve',
+        args: [CONTRACT_ADDRESS, totalBaseUnits]
+      },
+      descriptor: {
       // Circle's confirm screen for SCA users. The amount is totalBaseUnits —
       // the same milestone sum passed as the approve argument, not an
       // unlimited allowance — so "authorised" and "locked" are deliberately
       // the same figure across the two steps. contractName says USDC and not
       // Tranche because on this step the callee genuinely IS Arc's USDC
       // precompile; Tranche is the spender, and appears as such below.
-      confirm: {
         title: 'Allow Tranche to move this USDC',
         subtitle: 'Step 1 of 2. Nothing moves yet — this only authorises the escrow contract.',
         amount: totalBaseUnits,
@@ -503,6 +503,8 @@ function Flow() {
           `Amount: ${formatUSDC(totalBaseUnits)}`
         ]
       }
+    }, {
+      loadingMessage: 'Approve USDC in your wallet.'
     }).catch(() => {})
   }
 
@@ -578,25 +580,25 @@ function Flow() {
     const mintRecipient = addressToBytes32(state.freelancer)
     const deadline = BigInt(Math.floor(new Date(state.deadline).getTime() / 1000))
     const reviewWindow = BigInt(daysToSeconds(state.reviewWindowDays))
-    depositTx.run(escrowWrite('deposit', [
-      state.freelancer,
-      '0x0000000000000000000000000000000000000000',
-      totalBaseUnits,
-      Number(state.destinationDomain),
-      mintRecipient,
-      reviewWindow,
-      invoiceHash,
-      invoiceURIArg,
-      milestoneAmountsBigInt,
-      deadline,
-      [],
-      invoiceDataArg
-    ]), {
-      loadingMessage: 'Sign to create the escrow.',
+    depositTx.run({
+      request: escrowWrite('deposit', [
+        state.freelancer,
+        '0x0000000000000000000000000000000000000000',
+        totalBaseUnits,
+        Number(state.destinationDomain),
+        mintRecipient,
+        reviewWindow,
+        invoiceHash,
+        invoiceURIArg,
+        milestoneAmountsBigInt,
+        deadline,
+        [],
+        invoiceDataArg
+      ]),
+      descriptor: {
       // Mirrors the terms already shown in ReviewSection's confirm modal, so
       // Circle's screen agrees with the one the user just read rather than
       // being the one blank surface in the flow.
-      confirm: {
         title: 'Lock funds into escrow',
         subtitle: 'Step 2 of 2. Your USDC moves into the escrow contract and is held until milestones are approved.',
         amount: totalBaseUnits,
@@ -611,6 +613,8 @@ function Flow() {
           `Paid on: ${getDomainName(state.destinationDomain)}`
         ]
       }
+    }, {
+      loadingMessage: 'Sign to create the escrow.'
     }).catch(() => {})
   }
 

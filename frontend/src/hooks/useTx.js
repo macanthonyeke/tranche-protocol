@@ -6,6 +6,9 @@ import { useAuth } from './useAuth.jsx'
 import { parseRevertReason } from '../utils/errors'
 import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract'
 import { arcTestnet } from '../config/wagmi'
+import { createTransactionAction, InvalidTransactionActionError } from '../confirm/action.js'
+import { getConfirmMode } from '../confirm/mode.js'
+import { ConcurrentCircleActionError, TransactionCancelledError, useTransactionConfirm } from './useTransactionConfirm.js'
 
 // How long to wait for Circle to broadcast an approved challenge. Generous:
 // by this point the user has already approved on Circle's confirm screen and
@@ -43,9 +46,8 @@ async function awaitScaTxHash({ challengeId, userToken }) {
    - onConfirmed / onReverted lifecycle hooks
    - rollback hook so callers can revert local state on revert
 
-   Handles both wallet types behind one API, so the ~25 call sites that do
-   tx.run(escrowWrite(fn, args)) need no branching and were not touched when
-   email sign-in landed. The paths differ only in how a hash is obtained: an
+   Handles both wallet types behind one API. The paths differ only in how a
+   hash is obtained: an
    EOA returns one from writeContract, a Circle SCA must be polled for one
    after the user approves on Circle's hosted confirm screen. Once a hash exists
    both converge on the same receipt wait below, so onConfirmed always gets a
@@ -53,7 +55,8 @@ async function awaitScaTxHash({ challengeId, userToken }) {
    it reads the new escrow id out of receipt.logs. */
 export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
   const { writeContractAsync } = useWriteContract()
-  const { executeContractCall, isSca } = useAuth()
+  const { executeContractCall, isSca, address, walletId } = useAuth()
+  const { run: runCircleConfirmation } = useTransactionConfirm()
   // useAccount().chainId, NOT wagmi's useChainId(): useChainId() reads a
   // top-level state value that wagmi's syncConnectedChain subscriber only
   // updates when the wallet's real chain is in config.chains. Our config
@@ -102,28 +105,43 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
     }
   }, [receipt, receiptIsError, receiptError, hash])
 
-  /* `confirm` describes what this call is worth, for Circle's hosted confirm
-     screen (utils/circleTheme.js). Optional, and only the SCA path reads it —
-     an injected wallet builds its own confirmation from the calldata and has
-     nowhere to put ours. Call sites that omit it get a generic-but-branded
-     screen, not a stale one. */
-  const run = useCallback(async (args, { loadingMessage = 'Awaiting wallet signature…', confirm } = {}) => {
+  /* Circle receives one immutable action: the request, its exact encoded
+     calldata, and the descriptor rendered by the Tranche review. The
+     coordinator owns the global single-flight gate and only gives useAuth a
+     private lease after the user has continued. EOA calls deliberately keep
+     the raw wagmi request and bypass this Circle-only action path. */
+  const run = useCallback(async (input, { loadingMessage = 'Awaiting wallet signature…' } = {}) => {
     setError(null)
     setStatus('confirming')
     toastRef.current = txToast({ loading: loadingMessage })
     try {
+      const args = input?.request ?? input
+      const descriptor = input?.descriptor
+
       // Circle SCA path. Deliberately ahead of the network-switch block: a
       // Circle wallet has no injected connector and no "current chain" to
       // switch — Circle broadcasts to Arc directly, and useAccount().chainId
       // is undefined for these users, so running the switch would prompt a
       // wallet that isn't there and fail every write.
       if (isSca) {
-        const pending = await executeContractCall(args, { confirm })
+        const action = createTransactionAction({
+          request: args,
+          descriptor,
+          walletAddress: address,
+          walletId
+        })
+        const pending = await runCircleConfirmation(action, async (lease) => {
+          const circleResult = await executeContractCall(action, { lease })
+          if (!circleResult) throw new Error('Could not reach your wallet. Please sign in again.')
+          // Keep the single-flight lease through the status lookup as well.
+          // No second Circle challenge can start while this action is still
+          // being resolved to its broadcast hash.
+          toastRef.current.update('Approved. Submitting…')
+          const txHash = await awaitScaTxHash(circleResult)
+          return { ...circleResult, txHash }
+        }, { mode: getConfirmMode() })
         if (!pending) throw new Error('Could not reach your wallet. Please sign in again.')
-        // The user has approved in Circle's dialog; from here it behaves like
-        // a submitted transaction.
-        toastRef.current.update('Approved. Submitting…')
-        const tx = await awaitScaTxHash(pending)
+        const tx = pending.txHash
         setHash(tx)
         setStatus('pending')
         toastRef.current.update('Submitted. Waiting for confirmation…')
@@ -164,7 +182,11 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
     } catch (err) {
       setError(err)
       setStatus('error')
-      const msg = err.message === 'NETWORK_SWITCH_FAILED'
+      const msg = err instanceof ConcurrentCircleActionError ||
+        err instanceof TransactionCancelledError ||
+        err instanceof InvalidTransactionActionError
+        ? err.message
+        : err.message === 'NETWORK_SWITCH_FAILED'
         ? "Couldn't switch to Arc Testnet — please approve the network prompt in your wallet."
         : parseRevertReason(err)
       toastRef.current?.error(msg)
@@ -172,7 +194,7 @@ export function useTx({ onSign, onConfirmed, onReverted, onSettled } = {}) {
       callbacksRef.current.onSettled?.(null)
       throw err
     }
-  }, [writeContractAsync, chainId, switchChainAsync, isSca, executeContractCall])
+  }, [writeContractAsync, chainId, switchChainAsync, isSca, executeContractCall, address, walletId, runCircleConfirmation])
 
   const reset = useCallback(() => {
     setStatus('idle'); setHash(null); setError(null)

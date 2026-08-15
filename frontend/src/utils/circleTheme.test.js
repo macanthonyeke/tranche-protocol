@@ -122,6 +122,24 @@ describe('buildContractInteraction', () => {
     expect(buildContractInteraction({ amount: 0n }).total).toEqual(['0.00 USDC'])
   })
 
+  it('reads the immutable canonical descriptor without changing it', () => {
+    const descriptor = Object.freeze({
+      ...DEPOSIT,
+      parameters: Object.freeze([...DEPOSIT.parameters])
+    })
+    const before = JSON.stringify({
+      title: descriptor.title,
+      functionName: descriptor.functionName,
+      parameters: descriptor.parameters
+    })
+    buildContractInteraction(descriptor)
+    expect(JSON.stringify({
+      title: descriptor.title,
+      functionName: descriptor.functionName,
+      parameters: descriptor.parameters
+    })).toBe(before)
+  })
+
   it('falls back to branded generic copy with no descriptor at all', () => {
     const ci = buildContractInteraction(undefined)
     expect(ci.title).not.toMatch(/contract interaction/i)

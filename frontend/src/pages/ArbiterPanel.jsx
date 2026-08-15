@@ -1019,15 +1019,17 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
     const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
 
     await tx.run(
-      escrowWrite('resolveDispute', [
-        BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
-      ]),
       {
-        loadingMessage: 'Sign to resolve.',
-        confirm: resolveDisputeConfirm({
+        request: escrowWrite('resolveDispute', [
+          BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
+        ]),
+        descriptor: resolveDisputeConfirm({
           escrow, milestone, index, splits, bps,
           resolutionUri: resolutionUri.trim(), maxFee, canTimeout, bpsDenominator
         })
+      },
+      {
+        loadingMessage: 'Sign to resolve.'
       }
     )
   }
@@ -1120,12 +1122,14 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
             <button
               className="btn-quiet"
               onClick={() => timeoutTx.run(
-                escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
                 {
-                  loadingMessage: 'Settling by timeout.',
-                  confirm: timeoutSettlementConfirm({
+                  request: escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
+                  descriptor: timeoutSettlementConfirm({
                     escrow, milestone, index, splits, timeoutAt, bpsDenominator
                   })
+                },
+                {
+                  loadingMessage: 'Settling by timeout.'
                 }
               )}
               disabled={timeoutTx.isBusy}

@@ -39,6 +39,8 @@ vi.mock('@circle-fin/w3s-pw-web-sdk', () => ({
 }))
 
 const { AuthProvider, useAuth } = await import('./useAuth.jsx')
+const { useTransactionConfirm, __resetConfirmationForTests } = await import('./useTransactionConfirm.js')
+const { createTransactionAction } = await import('../confirm/action.js')
 
 const STORAGE_KEY = 'tranche.circleSession'
 const ACTIVITY_KEY = 'tranche.circleActivity'
@@ -68,9 +70,11 @@ beforeEach(() => {
   disconnect.mockReset()
   executeSpy.mockReset()
   accountMock.current = { address: undefined, isConnected: false }
+  __resetConfirmationForTests()
 })
 
 afterEach(() => {
+  __resetConfirmationForTests()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
 })
@@ -177,24 +181,79 @@ describe('activity on real use', () => {
       json: async () => ({ challengeId: 'chal-1' })
     }))
 
-    const { result } = renderHook(() => useAuth(), { wrapper })
+    const { result } = renderHook(() => ({ auth: useAuth(), coordinator: useTransactionConfirm() }), { wrapper })
     // The app-open stamp fires first; take it out of the picture so what this
     // asserts is unambiguously the executeContractCall stamp.
     await waitFor(() => expect(localStorage.getItem(ACTIVITY_KEY)).not.toBeNull())
     localStorage.setItem(ACTIVITY_KEY, JSON.stringify({ lastActivityAt: Date.now() - 6 * DAY }))
 
-    await act(async () => {
-      await result.current.executeContractCall({
-        address: '0x2222222222222222222222222222222222222222',
-        abi: [{ type: 'function', name: 'pause', inputs: [], outputs: [] }],
+    const request = {
+      address: '0x2222222222222222222222222222222222222222',
+      abi: [{ type: 'function', name: 'pause', inputs: [], outputs: [] }],
+      functionName: 'pause',
+      args: []
+    }
+    const action = createTransactionAction({
+      request,
+      walletAddress: '0x1111111111111111111111111111111111111111',
+      walletId: 'wallet-1',
+      descriptor: {
+        title: 'Pause deposits',
+        subtitle: 'Stops new deposits.',
+        contractName: 'Tranche Protocol Escrow',
+        contractAddress: request.address,
         functionName: 'pause',
-        args: []
-      })
+        parameters: ['Protocol-wide']
+      }
+    })
+    let pending
+    await act(async () => {
+      pending = result.current.coordinator.run(
+        action,
+        (lease) => result.current.auth.executeContractCall(action, { lease }),
+        { mode: 'circle' }
+      )
+      await pending
     })
 
     expect(executeSpy).toHaveBeenCalledWith('chal-1')
+    const executeCall = globalThis.fetch.mock.calls.find(([path]) => path === '/api/wallet/execute-contract-call')
+    expect(JSON.parse(executeCall[1].body)).toMatchObject({
+      userToken: 'tok-1',
+      walletId: 'wallet-1',
+      contractAddress: request.address,
+      callData: action.callData
+    })
     const stamped = JSON.parse(localStorage.getItem(ACTIVITY_KEY)).lastActivityAt
     expect(Date.now() - stamped).toBeLessThan(5000)
+  })
+
+  it('rejects a raw Circle contract call from the normal React call graph without a coordinator lease', async () => {
+    // This proves only the in-process React boundary. It does not prove that
+    // the API can distinguish a browser-supplied request from a coordinator
+    // request; native mode needs server-side identity and intent checks.
+    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 0 })
+    vi.stubGlobal('fetch', vi.fn())
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    const action = createTransactionAction({
+      request: {
+        address: '0x2222222222222222222222222222222222222222',
+        abi: [{ type: 'function', name: 'pause', inputs: [], outputs: [] }],
+        functionName: 'pause', args: []
+      },
+      descriptor: {
+        title: 'Pause deposits', subtitle: 'Stops new deposits.',
+        contractName: 'Tranche Protocol Escrow',
+        contractAddress: '0x2222222222222222222222222222222222222222',
+        functionName: 'pause', parameters: ['Protocol-wide']
+      }
+    })
+
+    await act(async () => {
+      await expect(result.current.executeContractCall(action)).rejects.toThrow(/requires confirmation/i)
+    })
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 })
 

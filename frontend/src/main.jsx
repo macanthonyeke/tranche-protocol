@@ -9,6 +9,7 @@ import App from './App.jsx'
 import { config } from './config/wagmi.js'
 import { ThemeProvider } from './hooks/useTheme.jsx'
 import { AuthProvider } from './hooks/useAuth.jsx'
+import { TransactionConfirmHost, TransactionConfirmNavigationGuard } from './hooks/useTransactionConfirm.js'
 import { RoleProvider } from './hooks/useRoles.jsx'
 import './styles/globals.css'
 
@@ -23,8 +24,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               the active address, and that address now comes from whichever
               sign-in path the user chose, not from wagmi alone. */}
           <AuthProvider>
+            <TransactionConfirmHost />
             <RoleProvider>
               <BrowserRouter>
+                <TransactionConfirmNavigationGuard />
                 <MotionConfig reducedMotion="user">
                   <App />
                 </MotionConfig>

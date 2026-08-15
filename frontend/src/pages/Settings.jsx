@@ -124,10 +124,12 @@ function RefundSection() {
   const submit = () => {
     if (!isNonZeroAddress(recipient)) return
     tx.run(
-      escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
       {
-        loadingMessage: 'Submitting. Check your wallet.',
-        confirm: withdrawRefundConfirm({ balance, recipient, signer: address })
+        request: escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
+        descriptor: withdrawRefundConfirm({ balance, recipient, signer: address })
+      },
+      {
+        loadingMessage: 'Submitting. Check your wallet.'
       }
     )
   }
@@ -185,10 +187,12 @@ function TransferRefundCreditSection() {
   const submit = () => {
     if (!isNonZeroAddress(recipient)) return
     tx.run(
-      escrowWrite('transferRefundCredit', [recipient]),
       {
-        loadingMessage: 'Submitting. Check your wallet.',
-        confirm: transferRefundCreditConfirm({ balance, recipient })
+        request: escrowWrite('transferRefundCredit', [recipient]),
+        descriptor: transferRefundCreditConfirm({ balance, recipient })
+      },
+      {
+        loadingMessage: 'Submitting. Check your wallet.'
       }
     )
   }

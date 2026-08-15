@@ -39,7 +39,7 @@ beforeEach(() => {
 })
 
 describe('POST /api/wallet/execute-contract-call', () => {
-  it('forwards calldata to Circle unmodified and returns the challenge', async () => {
+  it('documents the current browser-supplied request boundary while forwarding calldata unmodified', async () => {
     const res = await invoke(VALID)
 
     expect(res.statusCode).toBe(200)

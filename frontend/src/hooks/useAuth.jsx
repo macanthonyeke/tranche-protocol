@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useAccount, useDisconnect } from 'wagmi'
-import { encodeFunctionData } from 'viem'
 import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleTheme.js'
+import { isTransactionAction } from '../confirm/action.js'
+import { isCircleExecutionLease } from './useTransactionConfirm.js'
 
 /* One source of truth for "who is the current user and how do they sign".
    Both sign-in paths land here, and the rest of the app reads identity from
@@ -361,38 +362,39 @@ export function AuthProvider({ children }) {
     setPendingVerification(null)
   }, [eoaConnected, persist, disconnect])
 
-  /* The single write path. Callers hand over exactly what wagmi's
-     writeContract takes, and this decides how it gets signed.
-
-     For 'eoa' it returns null, which tells useTx to run its existing wagmi
-     path untouched — keeping that path literally unchanged rather than
-     re-implementing it here. For 'circle-sca' it encodes the call, opens
-     Circle's confirm screen, and hands back the challengeId that useTx polls
-     to a transaction hash.
-
-     `confirm` is the optional descriptor for Circle's confirm screen (see
-     utils/circleTheme.js). It has no equivalent on the EOA side — an injected
-     wallet renders its own confirmation from the calldata and takes no copy
-     from us — so it is not part of the shared write API's semantics, just
-     something this path can use when the caller knows what the call is worth. */
-  const executeContractCall = useCallback(async ({ address, abi, functionName, args }, { confirm } = {}) => {
+  /* The only Circle contract-write boundary in the intended React call graph.
+     useTx supplies an immutable action plus the private lease minted by
+     useTransactionConfirm after the user has continued. The bounded claim is:
+     no normal production React call-site bypass exists. A raw request, stale
+     descriptor, or invalid lease is rejected before the server challenge
+     endpoint is reached. The lease is JavaScript-only, not server-verifiable;
+     the current endpoint still receives browser-supplied userToken, walletId,
+     contractAddress, and callData. Native mode must add the server-side
+     intent and identity controls documented in confirm/native-mode-security.md. */
+  const executeContractCall = useCallback(async (action, { lease } = {}) => {
     if (!circle) return null
-
-    const callData = encodeFunctionData({ abi, functionName, args })
+    if (!isTransactionAction(action) || !isCircleExecutionLease(lease, action)) {
+      throw new Error('Circle transaction requires confirmation.')
+    }
+    if (!action.walletAddress || !circle.address ||
+      action.walletAddress.toLowerCase() !== circle.address.toLowerCase() ||
+      !action.walletId || action.walletId !== circle.walletId) {
+      throw new Error('Circle wallet session changed. Please review the transaction again.')
+    }
 
     const { challengeId } = await postJson('/api/wallet/execute-contract-call', {
       userToken: circle.userToken,
       walletId: circle.walletId,
-      contractAddress: address,
-      callData
+      contractAddress: action.request.address,
+      callData: action.callData
     })
 
     const sdk = await getSdk()
     sdk.setAuthentication({ userToken: circle.userToken, encryptionKey: circle.encryptionKey })
     // Unconditional, and it must stay that way: the SDK is a singleton, so
-    // skipping this when `confirm` is absent would leave the last
+    // skipping this when the descriptor is absent would leave the last
     // transaction's amount on this one's signing screen.
-    applyConfirmLocalization(sdk, confirm)
+    applyConfirmLocalization(sdk, action.descriptor)
 
     await new Promise((resolve, reject) => {
       sdk.execute(challengeId, (error) => {
@@ -447,6 +449,7 @@ export function AuthProvider({ children }) {
     return {
       walletType,
       address: circle ? circle.address : eoaAddress,
+      walletId: circle?.walletId ?? null,
       email: circle?.email ?? null,
       isConnected: !!walletType,
       isSca: walletType === 'circle-sca',
