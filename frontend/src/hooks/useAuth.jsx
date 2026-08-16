@@ -112,6 +112,7 @@ function readStoredSession() {
 async function postJson(path, body) {
   const res = await fetch(path, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   })
@@ -136,11 +137,14 @@ export function AuthProvider({ children }) {
 
   const [circle, setCircle] = useState(() => readStoredSession())
   const [sdkReady, setSdkReady] = useState(false)
-  // Set when this email has never been bound to an address before and is
-  // waiting on Tranche's own verification code. Held in memory only: it
-  // guards a write, so letting it survive a reload would be handing the
-  // pending binding to whoever next opens the browser.
+  // Set only by the explicit email-directory claim flow. It is never created
+  // as a side effect of Circle sign-in.
   const [pendingVerification, setPendingVerification] = useState(null)
+  // A localStorage Circle blob is only a credential cache. The server cookie
+  // must validate before the app treats the UCW as connected.
+  const [serverSessionState, setServerSessionState] = useState(() => (
+    readStoredSession() ? 'checking' : 'ready'
+  ))
   const sdkRef = useRef(null)
   const deviceIdRef = useRef(null)
   // Resolves the in-flight OTP dialog. Circle reports the login result through
@@ -202,6 +206,7 @@ export function AuthProvider({ children }) {
 
   const persist = useCallback((session) => {
     setCircle(session)
+    setServerSessionState('ready')
     try {
       if (session) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
@@ -220,9 +225,9 @@ export function AuthProvider({ children }) {
     }
   }, [])
 
-  /* Full email onboarding: OTP -> verify -> wallet -> directory entry.
-     Safe to call for a returning user; Circle reports the wallet already
-     exists and we skip straight to looking it up. */
+  /* Full email onboarding: Circle OTP -> wallet provisioning -> canonical
+     Circle identity/wallet validation -> Tranche cookie-backed session.
+     Email-directory binding is deliberately not part of this path. */
   const signInWithEmail = useCallback(async (rawEmail, { onStage } = {}) => {
     const email = String(rawEmail || '').trim().toLowerCase()
     if (!email) throw new Error('Enter your email address.')
@@ -232,14 +237,14 @@ export function AuthProvider({ children }) {
     if (!deviceId) throw new Error('Could not identify this device. Please reload and try again.')
 
     onStage?.('sending')
-    const session = await postJson('/api/wallet/email-token', { deviceId, email })
+    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email })
 
     sdk.updateConfigs({
       appSettings: { appId: import.meta.env.VITE_CIRCLE_APP_ID },
       loginConfigs: {
-        deviceToken: session.deviceToken,
-        deviceEncryptionKey: session.deviceEncryptionKey,
-        otpToken: session.otpToken,
+        deviceToken: otpSession.deviceToken,
+        deviceEncryptionKey: otpSession.deviceEncryptionKey,
+        otpToken: otpSession.otpToken,
         email: { email }
       }
     })
@@ -249,7 +254,7 @@ export function AuthProvider({ children }) {
         await postJson('/api/wallet/email-resend', {
           deviceId,
           email,
-          otpToken: session.otpToken
+          otpToken: otpSession.otpToken
         })
       } catch {
         // Circle's dialog owns this interaction; surfacing our own error on
@@ -264,7 +269,10 @@ export function AuthProvider({ children }) {
     })
 
     onStage?.('creating')
-    const init = await postJson('/api/wallet/initialize', { userToken: login.userToken })
+    const init = await postJson('/api/wallet/initialize', {
+      sessionId: otpSession.sessionId,
+      userToken: login.userToken
+    })
 
     if (init.challengeId) {
       sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
@@ -277,14 +285,14 @@ export function AuthProvider({ children }) {
     }
 
     onStage?.('linking')
-    // Circle needs a moment to index a freshly created wallet, and register
-    // 409s until the address exists. Retry rather than dumping that race on
-    // the user as a failure.
-    let registered = null
+    // Circle needs a moment to index a freshly created wallet, and
+    // complete-login 409s until the address exists. Retry rather than
+    // dumping that normal race on the user as a failure.
+    let authenticated = null
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        registered = await postJson('/api/wallet/register', {
-          sessionId: session.sessionId,
+        authenticated = await postJson('/api/wallet/complete-login', {
+          sessionId: otpSession.sessionId,
           userToken: login.userToken
         })
         break
@@ -294,34 +302,20 @@ export function AuthProvider({ children }) {
       }
     }
 
-    // First time on this email: the wallet exists and the user is signed in,
-    // but they are not in the payable-by-email directory until they return
-    // the code we just mailed them. Deliberately not fatal — they can use the
-    // whole app meanwhile; the only thing gated is other people being able to
-    // find them by email.
-    if (registered?.verificationRequired) {
-      setPendingVerification({
-        verificationId: registered.verificationId,
-        email: registered.email,
-        expiresInMinutes: registered.expiresInMinutes
-      })
+    const wallet = authenticated?.session
+    if (!wallet?.walletId || !wallet?.walletAddress) {
+      throw new Error('Your wallet was verified but the Tranche session could not be created.')
     }
-
-    const { wallets } = await postJson('/api/wallet/list', { userToken: login.userToken })
-    const wallet = wallets?.find((w) => w.state === 'LIVE') ?? wallets?.[0]
-    if (!wallet?.address) throw new Error('Your wallet was created but could not be loaded.')
 
     const next = {
       userToken: login.userToken,
       encryptionKey: login.encryptionKey,
-      // registered.address is absent while verification is pending — the
-      // directory entry is what's withheld, not the wallet itself, so the
-      // user still signs in at their real Circle address.
-      address: registered?.address ?? wallet.address,
-      walletId: wallet.id,
+      address: wallet.walletAddress,
+      walletId: wallet.walletId,
       email,
       issuedAt: Date.now()
     }
+    setPendingVerification(null)
     persist(next)
     onStage?.('done')
     return next
@@ -351,16 +345,40 @@ export function AuthProvider({ children }) {
   // listed in the email directory until they verify.
   const dismissEmailVerification = useCallback(() => setPendingVerification(null), [])
 
+  /* Explicit product-email opt-in. Circle sign-in never calls this. The
+     requested address is only an email-directory alias; the server derives
+     the wallet and Circle user from the cookie session before sending code. */
+  const startDirectoryClaim = useCallback(async () => {
+    if (!circle?.email || serverSessionState !== 'ready') {
+      throw new Error('Sign in with Circle before claiming an email address.')
+    }
+    const verification = await postJson('/api/wallet/directory-claim', { email: circle.email })
+    if (verification.verificationRequired) {
+      setPendingVerification({
+        verificationId: verification.verificationId,
+        email: verification.email,
+        expiresInMinutes: verification.expiresInMinutes
+      })
+    }
+    return verification
+  }, [circle, serverSessionState])
+
   const signOut = useCallback(() => {
     // Unconditional, where this used to be guarded on `circle`: persist(null)
     // is what clears the activity stamp as well, and logout has to be terminal
     // — leaving a stamp behind would be leaving a session half-revived.
     // Harmless when there was no Circle session; setCircle(null) on already-null
     // state doesn't re-render, and removeItem on an absent key is a no-op.
+    const hadCircleSession = !!circle
     persist(null)
+    if (hadCircleSession) {
+      // Best effort: local sign-out remains terminal even if the network is
+      // unavailable, while the server revocation closes the cookie session.
+      void postJson('/api/wallet/logout', {}).catch(() => {})
+    }
     if (eoaConnected) disconnect()
     setPendingVerification(null)
-  }, [eoaConnected, persist, disconnect])
+  }, [circle, eoaConnected, persist, disconnect])
 
   /* The only Circle contract-write boundary in the intended React call graph.
      useTx supplies an immutable action plus the private lease minted by
@@ -368,8 +386,9 @@ export function AuthProvider({ children }) {
      no normal production React call-site bypass exists. A raw request, stale
      descriptor, or invalid lease is rejected before the server challenge
      endpoint is reached. The lease is JavaScript-only, not server-verifiable;
-     the current endpoint still receives browser-supplied userToken, walletId,
-     contractAddress, and callData. Native mode must add the server-side
+     the current endpoint still receives a browser-supplied userToken plus
+     contractAddress and callData; the server derives wallet identity from the
+     cookie session. Native mode must add the server-side
      intent and identity controls documented in confirm/native-mode-security.md. */
   const executeContractCall = useCallback(async (action, { lease } = {}) => {
     if (!circle) return null
@@ -384,7 +403,6 @@ export function AuthProvider({ children }) {
 
     const { challengeId } = await postJson('/api/wallet/execute-contract-call', {
       userToken: circle.userToken,
-      walletId: circle.walletId,
       contractAddress: action.request.address,
       callData: action.callData
     })
@@ -409,7 +427,61 @@ export function AuthProvider({ children }) {
     writeActivityAt()
 
     return { challengeId, userToken: circle.userToken }
-  }, [circle, getSdk])
+  }, [circle, serverSessionState, getSdk])
+
+  /* Test-only read path. The canary page receives only the sanitized report;
+     the Circle bearer token stays inside this auth closure and is never part
+     of the page's props, route state, or rendered data. This deliberately
+     does not stamp activity: inspecting a preflight is not approving a
+     transaction. */
+  const runCanaryPreflight = useCallback(async () => {
+    if (!circle?.userToken || serverSessionState !== 'ready') {
+      throw new Error('Sign in with a Circle UCW before opening the canary.')
+    }
+    return postJson('/api/wallet/canary-preflight', { userToken: circle.userToken })
+  }, [circle, serverSessionState])
+
+  // Validate the app session on reload. This deliberately does not alter or
+  // delete the Circle SDK storage; that credential-lifecycle change is a
+  // separate follow-up documented in confirm/ucw-auth-storage-follow-up.md.
+  useEffect(() => {
+    const stored = readStoredSession()
+    if (!stored) {
+      setServerSessionState('ready')
+      return undefined
+    }
+
+    let cancelled = false
+    Promise.resolve()
+      .then(() => fetch('/api/wallet/session', { credentials: 'same-origin' }))
+      .then(async (res) => {
+        let data = {}
+        try {
+          if (typeof res?.json === 'function') data = await res.json()
+        } catch {
+          // Treat an unreadable response as an invalid server session.
+        }
+        return { ok: res?.ok === true, data }
+      })
+      .then(({ ok, data }) => {
+        if (cancelled) return
+        if (!ok || !data.authenticated || !data.session) {
+          persist(null)
+          return
+        }
+        setCircle((current) => current ? {
+          ...current,
+          address: data.session.walletAddress,
+          walletId: data.session.walletId
+        } : current)
+        setServerSessionState('ready')
+      })
+      .catch(() => {
+        if (!cancelled) persist(null)
+      })
+
+    return () => { cancelled = true }
+  }, [persist])
 
   /* Opening the app on a session that survived BOTH gates in readStoredSession
      counts as activity: the owner came back. Mount-only, and deliberately not
@@ -445,12 +517,13 @@ export function AuthProvider({ children }) {
   const value = useMemo(() => {
     // A Circle session wins when both exist: choosing email sign-in is an
     // explicit act, whereas an injected wallet may have auto-reconnected.
-    const walletType = circle ? 'circle-sca' : eoaConnected ? 'eoa' : null
+    const activeCircle = circle && serverSessionState === 'ready' ? circle : null
+    const walletType = activeCircle ? 'circle-sca' : eoaConnected ? 'eoa' : null
     return {
       walletType,
-      address: circle ? circle.address : eoaAddress,
-      walletId: circle?.walletId ?? null,
-      email: circle?.email ?? null,
+      address: activeCircle ? activeCircle.address : eoaAddress,
+      walletId: activeCircle?.walletId ?? null,
+      email: activeCircle?.email ?? null,
       isConnected: !!walletType,
       isSca: walletType === 'circle-sca',
       sdkReady,
@@ -459,13 +532,15 @@ export function AuthProvider({ children }) {
       confirmEmailVerification,
       resendEmailVerification,
       dismissEmailVerification,
+      startDirectoryClaim,
       signOut,
-      executeContractCall
+      executeContractCall,
+      runCanaryPreflight
     }
   }, [
-    circle, eoaConnected, eoaAddress, sdkReady, pendingVerification,
+    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, pendingVerification,
     signInWithEmail, confirmEmailVerification, resendEmailVerification,
-    dismissEmailVerification, signOut, executeContractCall
+    dismissEmailVerification, startDirectoryClaim, signOut, executeContractCall, runCanaryPreflight
   ])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

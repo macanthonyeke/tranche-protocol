@@ -15,7 +15,8 @@
 // email users with an unfundable wallet, so it is passed explicitly.
 
 import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../circle.js'
-import { postRoute, requireString } from '../walletRoute.js'
+import { peekOtpSession } from '../emailWallets.js'
+import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 // Circle's "user already initialized" code. Not an error for us: it means the
 // user is returning on a new device, so we skip the challenge and hand back
@@ -23,9 +24,18 @@ import { postRoute, requireString } from '../walletRoute.js'
 const ALREADY_INITIALIZED = 155106
 
 export default postRoute(async (body) => {
+  const sessionId = requireString(body, 'sessionId', { max: 128 })
   const userToken = requireString(body, 'userToken')
+  const attempt = await peekOtpSession(sessionId)
+  if (!attempt) {
+    throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
+  }
 
   const circle = getCircleClient()
+  const status = await circle.getUserStatus({ userToken })
+  if (!status?.data?.id) {
+    throw new RequestError('Could not verify your Circle sign-in. Please try again.', 401)
+  }
   try {
     const res = await circle.createUserPinWithWallets({
       userToken,

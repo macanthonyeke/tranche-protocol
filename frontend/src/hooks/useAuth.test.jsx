@@ -25,7 +25,11 @@ vi.mock('wagmi', () => ({
 const executeSpy = vi.hoisted(() => vi.fn())
 vi.mock('@circle-fin/w3s-pw-web-sdk', () => ({
   W3SSdk: class {
+    constructor(_config, callback) { this.callback = callback }
     getDeviceId() { return Promise.resolve('device-1') }
+    updateConfigs() {}
+    setOnResendOtpEmail(callback) { this.resendOtpEmail = callback }
+    verifyOtp() { this.callback?.(undefined, { userToken: 'tok-login', encryptionKey: 'key-login' }) }
     setAuthentication() {}
     setLocalizations() {}
     setThemeColor() {}
@@ -70,6 +74,16 @@ beforeEach(() => {
   disconnect.mockReset()
   executeSpy.mockReset()
   accountMock.current = { address: undefined, isConnected: false }
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      authenticated: true,
+      session: {
+        walletId: 'wallet-1',
+        walletAddress: '0x1111111111111111111111111111111111111111'
+      }
+    })
+  }))
   __resetConfirmationForTests()
 })
 
@@ -80,12 +94,12 @@ afterEach(() => {
 })
 
 describe('session restore — the two gates', () => {
-  it('resumes a session inside both the TTL and the ceiling', () => {
+  it('resumes a session inside both the TTL and the ceiling', async () => {
     seed({ issuedDaysAgo: 2, activityDaysAgo: 1 })
 
     const { result } = renderHook(() => useAuth(), { wrapper })
 
-    expect(result.current.isConnected).toBe(true)
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
     expect(result.current.walletType).toBe('circle-sca')
     expect(result.current.isSca).toBe(true)
     expect(result.current.email).toBe('freelancer@example.com')
@@ -142,12 +156,12 @@ describe('session restore — the two gates', () => {
     expect(result.current.isConnected).toBe(false)
   })
 
-  it('still resumes a stamp-less session that is recent by issuedAt', () => {
+  it('still resumes a stamp-less session that is recent by issuedAt', async () => {
     seed({ issuedDaysAgo: 2 })
 
     const { result } = renderHook(() => useAuth(), { wrapper })
 
-    expect(result.current.isConnected).toBe(true)
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
   })
 
   // Opening the app on a live session is itself activity — otherwise a user
@@ -171,17 +185,66 @@ describe('session restore — the two gates', () => {
 })
 
 describe('activity on real use', () => {
+  it('completes UCW login with Circle identity validation and never calls register or Resend', async () => {
+    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
+      calls.push(path)
+      if (path === '/api/wallet/email-token') {
+        return { ok: true, json: async () => ({
+          sessionId: 'attempt-1',
+          deviceToken: 'device-token',
+          deviceEncryptionKey: 'device-key',
+          otpToken: 'otp-token'
+        }) }
+      }
+      if (path === '/api/wallet/initialize') {
+        return { ok: true, json: async () => ({ challengeId: null }) }
+      }
+      if (path === '/api/wallet/complete-login') {
+        return { ok: true, json: async () => ({ session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await act(async () => {
+      await result.current.signInWithEmail('alice@example.com')
+    })
+
+    expect(result.current.walletType).toBe('circle-sca')
+    expect(calls).toEqual([
+      '/api/wallet/email-token',
+      '/api/wallet/initialize',
+      '/api/wallet/complete-login'
+    ])
+    expect(calls).not.toContain('/api/wallet/register')
+    expect(calls).not.toContain('/api/wallet/directory-claim')
+  })
+
   /* The stamp has to land on an approved transaction, or an active user gets
      logged out mid-project by the very ceiling meant to be generous to them. */
   it('stamps activity after a contract call is approved', async () => {
     vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
     seed({ issuedDaysAgo: 3, activityDaysAgo: 6 })
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ challengeId: 'chal-1' })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
+      if (path === '/api/wallet/session') {
+        return {
+          ok: true,
+          json: async () => ({ authenticated: true, session: {
+            walletId: 'wallet-1',
+            walletAddress: '0x1111111111111111111111111111111111111111'
+          } })
+        }
+      }
+      return { ok: true, json: async () => ({ challengeId: 'chal-1' }) }
     }))
 
     const { result } = renderHook(() => ({ auth: useAuth(), coordinator: useTransactionConfirm() }), { wrapper })
+    await waitFor(() => expect(result.current.auth.isSca).toBe(true))
     // The app-open stamp fires first; take it out of the picture so what this
     // asserts is unambiguously the executeContractCall stamp.
     await waitFor(() => expect(localStorage.getItem(ACTIVITY_KEY)).not.toBeNull())
@@ -220,7 +283,6 @@ describe('activity on real use', () => {
     const executeCall = globalThis.fetch.mock.calls.find(([path]) => path === '/api/wallet/execute-contract-call')
     expect(JSON.parse(executeCall[1].body)).toMatchObject({
       userToken: 'tok-1',
-      walletId: 'wallet-1',
       contractAddress: request.address,
       callData: action.callData
     })
@@ -253,7 +315,7 @@ describe('activity on real use', () => {
     await act(async () => {
       await expect(result.current.executeContractCall(action)).rejects.toThrow(/requires confirmation/i)
     })
-    expect(globalThis.fetch).not.toHaveBeenCalled()
+    expect(globalThis.fetch.mock.calls.some(([path]) => path === '/api/wallet/execute-contract-call')).toBe(false)
   })
 })
 
@@ -265,7 +327,7 @@ describe('signOut', () => {
     seed({ issuedDaysAgo: 1, activityDaysAgo: 0 })
 
     const { result } = renderHook(() => useAuth(), { wrapper })
-    expect(result.current.isConnected).toBe(true)
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
 
     await act(async () => { result.current.signOut() })
 
