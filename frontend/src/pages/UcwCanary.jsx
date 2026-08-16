@@ -134,6 +134,8 @@ function CanaryInner() {
 
           <Card eyebrow="01 · identity" title="Canonical Circle wallet">
             <div>
+              <Row label="Tranche session identity" value={report.identity?.matchesSession ? 'matched' : 'not matched'} />
+              <Row label="Canonical Circle user ID" value={report.identity?.circleUserId} mono />
               <Row label="Circle wallet ID" value={report.wallet.id} mono />
               <Row label="Address" value={report.wallet.address} mono />
               <Row label="Blockchain" value={report.wallet.blockchain} />

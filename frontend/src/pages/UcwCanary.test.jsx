@@ -18,6 +18,15 @@ const { default: UcwCanary } = await import('./UcwCanary.jsx')
 const REPORT = {
   status: 'NOT EXECUTED',
   pass: false,
+  identity: {
+    source: 'authenticated Tranche session',
+    circleUserId: 'circle-user-1',
+    walletId: 'wallet-canary-1',
+    walletAddress: '0x1111111111111111111111111111111111111111',
+    blockchain: 'ARC-TESTNET',
+    accountType: 'SCA',
+    matchesSession: true
+  },
   wallet: {
     id: 'wallet-canary-1',
     address: '0x1111111111111111111111111111111111111111',
@@ -81,6 +90,8 @@ describe('UcwCanary', () => {
     expect(screen.getAllByText('NOT EXECUTED')).toHaveLength(2)
     expect(screen.getAllByText('circle_6900_singleowner_v3')).toHaveLength(2)
     expect(screen.getByText('phase2-ucw-atomic-batch-canary-v1')).toBeInTheDocument()
+    expect(screen.getByText('circle-user-1')).toBeInTheDocument()
+    expect(screen.getByText('matched')).toBeInTheDocument()
     expect(screen.getByText('executeBatch')).toBeInTheDocument()
     expect(screen.queryByText('secret-token')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /execute|submit|challenge|approve|deposit/i })).not.toBeInTheDocument()
