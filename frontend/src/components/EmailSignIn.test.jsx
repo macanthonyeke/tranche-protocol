@@ -24,7 +24,7 @@ describe('EmailSignIn', () => {
     render(<EmailSignIn onDone={onDone} />)
 
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
-    expect(screen.getByText(/never creates or initializes a wallet/i)).toBeInTheDocument()
+    expect(screen.getByText(/never creates or initializes an arc wallet/i)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: 'Alice@Example.com' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
 

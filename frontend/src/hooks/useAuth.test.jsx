@@ -294,6 +294,125 @@ describe('activity on real use', () => {
     expect(result.current.onboarding).toBe(false)
   })
 
+  it('refreshes the email-directory binding from the authenticated session', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com', verified: true, boundAt: 123
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.refreshDirectoryBinding() })
+
+    expect(result.current.directoryBindingStatus).toBe('verified')
+    expect(result.current.directoryBinding).toMatchObject({
+      email: 'freelancer@example.com', verified: true, boundAt: 123
+    })
+    const refresh = calls.find(({ path, body }) =>
+      path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'status'
+    )
+    expect(JSON.parse(refresh.body)).toMatchObject({
+      action: 'status', email: 'freelancer@example.com'
+    })
+  })
+
+  it('refreshes binding state immediately after successful verification', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        const body = JSON.parse(options.body)
+        if (body.action === 'status') {
+          return { ok: true, json: async () => ({
+            email: 'freelancer@example.com', verified: true, boundAt: 456
+          }) }
+        }
+        return { ok: true, json: async () => ({
+          verificationRequired: true,
+          verificationId: 'verification-1',
+          email: 'freelancer@example.com',
+          expiresInMinutes: 15
+        }) }
+      }
+      if (path === '/api/wallet/verify-email') {
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com',
+          address: '0x1111111111111111111111111111111111111111',
+          verified: true
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.startDirectoryClaim() })
+    await act(async () => { await result.current.confirmEmailVerification('123456') })
+
+    expect(result.current.pendingVerification).toBeNull()
+    expect(result.current.directoryBindingStatus).toBe('verified')
+    expect(result.current.directoryBinding).toMatchObject({
+      email: 'freelancer@example.com', verified: true, boundAt: 456
+    })
+    expect(calls.some(({ path, body }) =>
+      path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'status'
+    )).toBe(true)
+  })
+
+  it('removes email discoverability through the authenticated binding action', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com', removed: true, verified: false
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.removeDirectoryBinding() })
+
+    expect(result.current.directoryBindingStatus).toBe('unverified')
+    expect(result.current.directoryBinding).toBeNull()
+    const removal = calls.find(({ path, body }) => path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'remove')
+    expect(JSON.parse(removal.body)).toEqual({
+      action: 'remove', email: 'freelancer@example.com'
+    })
+  })
+
   /* The stamp has to land on an approved transaction, or an active user gets
      logged out mid-project by the very ceiling meant to be generous to them. */
   it('stamps activity after a contract call is approved', async () => {

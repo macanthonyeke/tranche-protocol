@@ -39,7 +39,7 @@ export default function ConnectGate({
       <h2 className="text-xl font-semibold mb-2 text-ink">{title}</h2>
       <p className="text-sm text-ink-2 mb-6">{message}</p>
 
-      <div role="tablist" aria-label="Circle wallet account flow" className="grid grid-cols-2 gap-1 p-1 mb-5 rounded-xl bg-sunk border border-rule">
+      <div role="tablist" aria-label="Tranche account flow" className="grid grid-cols-2 gap-1 p-1 mb-5 rounded-xl bg-sunk border border-rule">
         <button
           type="button"
           role="tab"
@@ -62,11 +62,11 @@ export default function ConnectGate({
 
       <div className="mb-4 text-left">
         <h3 className="text-base font-semibold text-ink">
-          {intent === 'signup' ? 'Create a Circle wallet account' : 'Sign in to your Circle wallet'}
+          {intent === 'signup' ? 'Create a Tranche account' : 'Sign in to Tranche'}
         </h3>
         <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
           {intent === 'signup'
-            ? 'Start a new Tranche account with Circle email verification.'
+            ? 'Start a new Tranche account with email verification.'
             : 'Use the email that belongs to your existing Tranche account.'}
         </p>
       </div>
@@ -80,7 +80,7 @@ export default function ConnectGate({
       <EmailSignIn
         intent={intent}
         onAccountNotFound={() => {
-          setAccountNotice('No Tranche account was found after verification. Choose Create account to set one up. If you have an older Circle wallet, Tranche will link it instead of creating another wallet.')
+          setAccountNotice('No Tranche account was found after verification. Choose Create account to set one up. If you have an older Arc wallet, Tranche will link it instead of creating another wallet.')
           setIntent('signup')
         }}
       />

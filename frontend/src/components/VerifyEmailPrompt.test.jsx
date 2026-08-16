@@ -9,10 +9,14 @@ const auth = vi.hoisted(() => ({
   isSca: true,
   email: 'alice@example.com',
   pendingVerification: { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 },
+  directoryBinding: null,
+  directoryBindingStatus: 'unverified',
   confirmEmailVerification: vi.fn().mockResolvedValue({ verified: true }),
   resendEmailVerification: vi.fn().mockResolvedValue({ sent: true }),
   dismissEmailVerification: vi.fn(),
-  startDirectoryClaim: vi.fn().mockResolvedValue({ verificationRequired: true })
+  startDirectoryClaim: vi.fn().mockResolvedValue({ verificationRequired: true }),
+  refreshDirectoryBinding: vi.fn().mockResolvedValue({ verified: false }),
+  removeDirectoryBinding: vi.fn().mockResolvedValue({ removed: true })
 }))
 
 vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => auth }))
@@ -24,9 +28,13 @@ beforeEach(() => {
   auth.resendEmailVerification.mockClear()
   auth.dismissEmailVerification.mockClear()
   auth.startDirectoryClaim.mockClear()
+  auth.refreshDirectoryBinding.mockClear()
+  auth.removeDirectoryBinding.mockClear()
   auth.isSca = true
   auth.email = 'alice@example.com'
   auth.pendingVerification = { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 }
+  auth.directoryBinding = null
+  auth.directoryBindingStatus = 'unverified'
 })
 
 describe('VerifyEmailPrompt framing', () => {
@@ -35,8 +43,9 @@ describe('VerifyEmailPrompt framing', () => {
   it('says up front that the step is optional and who can ignore it', () => {
     render(<VerifyEmailPrompt />)
     expect(screen.getByText(/optional/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /email verification pending/i })).toBeInTheDocument()
     expect(screen.getByText(/skip this if you're just paying someone/i)).toBeInTheDocument()
-    expect(screen.getByText(/find you by email/i)).toBeInTheDocument()
+    expect(screen.getByText(/find your tranche account by email/i)).toBeInTheDocument()
   })
 
   it('still names the address the code went to', () => {
@@ -115,8 +124,22 @@ describe('VerifyEmailPrompt behaviour is unchanged', () => {
   it('offers an explicit directory claim when there is no pending verification', async () => {
     auth.pendingVerification = null
     render(<VerifyEmailPrompt />)
-    fireEvent.click(screen.getByRole('button', { name: /verify for email payments/i }))
+    expect(screen.getByRole('heading', { name: /email discoverability is off/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /enable email discoverability/i }))
     await waitFor(() => expect(auth.startDirectoryClaim).toHaveBeenCalledTimes(1))
+  })
+
+  it('replaces the claim CTA with the verified state and offers removal', async () => {
+    auth.pendingVerification = null
+    auth.directoryBindingStatus = 'verified'
+    auth.directoryBinding = { verified: true, email: 'alice@example.com' }
+    render(<VerifyEmailPrompt />)
+
+    expect(screen.getByRole('heading', { name: /email discoverability is on/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /enable email discoverability/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /remove email discoverability/i }))
+
+    await waitFor(() => expect(auth.removeDirectoryBinding).toHaveBeenCalledTimes(1))
   })
 
   it('renders nothing for an EOA', () => {
