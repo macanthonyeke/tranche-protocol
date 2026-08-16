@@ -38,6 +38,10 @@ describe('vercel.json SPA rewrite', () => {
   })
 
   it.each([
+    '/api/wallet/complete-login',
+    '/api/wallet/directory-claim',
+    '/api/wallet/session',
+    '/api/wallet/logout',
     '/api/wallet/register',
     '/api/wallet/email-token',
     '/api/wallet/verify-email',
@@ -46,6 +50,17 @@ describe('vercel.json SPA rewrite', () => {
     '/api/request-invoice-key',
     '/api/unpin-invoice'
   ])('does not swallow %s', (path) => {
+    expect(matcher().test(path)).toBe(false)
+  })
+
+  it.each([
+    '/src/main.jsx',
+    '/@vite/client',
+    '/@react-refresh',
+    '/node_modules/.vite/deps/react.js',
+    '/assets/index.js',
+    '/fonts/tranche-fonts.css'
+  ])('does not swallow development or static asset %s', (path) => {
     expect(matcher().test(path)).toBe(false)
   })
 
