@@ -22,7 +22,7 @@ vi.mock('../resend.js', async (importOriginal) => ({
 const handler = (await import('./directory-claim.js')).default
 const resendHandler = (await import('./resend-verification.js')).default
 const { createAuthSession } = await import('../authSession.js')
-const { readBinding, writeBinding } = await import('../emailWallets.js')
+const { readBinding, readDirectoryPreference, writeBinding } = await import('../emailWallets.js')
 const { peekVerification } = await import('../emailVerification.js')
 
 let cookie
@@ -74,7 +74,7 @@ describe('POST /api/wallet/directory-claim', () => {
     const res = await invoke({ email: 'alice@example.com', action: 'status' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.payload).toMatchObject({ email: 'alice@example.com', verified: true })
+    expect(res.payload).toMatchObject({ email: 'alice@example.com', verified: true, choice: 'verified' })
     expect(sentMail).toHaveLength(0)
   })
 
@@ -87,8 +87,8 @@ describe('POST /api/wallet/directory-claim', () => {
     const res = await invoke({ email: 'alice@example.com', action: 'status' })
     const other = await invoke({ email: 'elsewhere@example.com', action: 'status' })
 
-    expect(res.payload).toEqual({ email: 'alice@example.com', verified: false })
-    expect(other.payload).toEqual({ email: 'elsewhere@example.com', verified: false })
+    expect(res.payload).toEqual({ email: 'alice@example.com', verified: false, choice: 'undecided' })
+    expect(other.payload).toEqual({ email: 'elsewhere@example.com', verified: false, choice: 'undecided' })
     expect(sentMail).toHaveLength(0)
   })
 
@@ -106,9 +106,28 @@ describe('POST /api/wallet/directory-claim', () => {
     })
 
     expect(res.statusCode).toBe(200)
-    expect(res.payload).toEqual({ email: 'alice@example.com', removed: true, verified: false })
+    expect(res.payload).toEqual({
+      email: 'alice@example.com', removed: true, verified: false, choice: 'removed'
+    })
     expect(await readBinding('alice@example.com')).toBeNull()
     expect(sentMail).toHaveLength(0)
+  })
+
+  it('persists Skip for now without mutating an email binding', async () => {
+    const before = await readBinding('alice@example.com')
+
+    const res = await invoke({ email: 'alice@example.com', action: 'skip' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toEqual({ email: 'alice@example.com', verified: false, choice: 'skipped' })
+    expect(await readBinding('alice@example.com')).toEqual(before)
+    expect(await readDirectoryPreference('circle-user-1')).toMatchObject({ choice: 'skipped' })
+    expect(sentMail).toHaveLength(0)
+
+    // The preference is keyed by the canonical Circle identity, so the next
+    // authenticated status read sees the same choice without another mutation.
+    const refreshed = await invoke({ email: 'alice@example.com', action: 'status' })
+    expect(refreshed.payload).toMatchObject({ verified: false, choice: 'skipped' })
   })
 
   it('rejects removal of a binding owned by a different session', async () => {

@@ -58,6 +58,13 @@ export const LOGIN_INTENTS = Object.freeze({
   SIGNIN: 'signin'
 })
 
+export const DIRECTORY_PREFERENCE_CHOICES = Object.freeze({
+  UNDECIDED: 'undecided',
+  SKIPPED: 'skipped',
+  VERIFIED: 'verified',
+  REMOVED: 'removed'
+})
+
 export function normalizeLoginIntent(intent) {
   if (intent === LOGIN_INTENTS.SIGNUP || intent === LOGIN_INTENTS.SIGNIN) return intent
   return null
@@ -79,6 +86,7 @@ export function normalizeEmail(email) {
 }
 
 const bindingKey = (email) => `wallet:email:${email}`
+const preferenceKey = (circleUserId) => `wallet:email-preference:${circleUserId}`
 const sessionKey = (sessionId) => `wallet:otp:${sessionId}`
 
 // Long enough to read an email and finish wallet setup, short enough that an
@@ -156,6 +164,32 @@ export async function restoreOtpSession(sessionId, session) {
  */
 export async function readBinding(email) {
   return (await kv.get(bindingKey(email))) ?? null
+}
+
+/**
+ * Read the authenticated user's optional email-directory choice. The key is
+ * the canonical Circle user ID, not an email or short-lived session token, so
+ * a refresh and a later sign-in see the same onboarding decision.
+ *
+ * @param {string} circleUserId canonical server-derived identity
+ * @returns {Promise<{ choice: string, updatedAt: number } | null>}
+ */
+export async function readDirectoryPreference(circleUserId) {
+  return (await kv.get(preferenceKey(circleUserId))) ?? null
+}
+
+/**
+ * Persist the user's optional email-directory choice without touching the
+ * email binding itself. Skip and remove are deliberately separate choices:
+ * Settings remains the place where a user can opt in again after removal.
+ */
+export async function setDirectoryPreference(circleUserId, choice) {
+  if (!circleUserId || !Object.values(DIRECTORY_PREFERENCE_CHOICES).includes(choice)) {
+    throw new EmailWalletError('A valid email-directory preference is required.')
+  }
+  const record = { choice, updatedAt: Date.now() }
+  await kv.set(preferenceKey(circleUserId), record)
+  return record
 }
 
 /**

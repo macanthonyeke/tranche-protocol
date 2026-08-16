@@ -17,7 +17,7 @@ vi.mock('../redis.js', () => ({
 
 const handler = (await import('./verify-email.js')).default
 const { createVerification } = await import('../emailVerification.js')
-const { readBinding, writeBinding } = await import('../emailWallets.js')
+const { readBinding, readDirectoryPreference, writeBinding } = await import('../emailWallets.js')
 const { createAuthSession } = await import('../authSession.js')
 
 let cookie
@@ -57,6 +57,7 @@ describe('POST /api/wallet/verify-email', () => {
     expect(res.statusCode).toBe(200)
     expect(res.payload).toMatchObject({ email: 'alice@example.com', address: '0xALICE', verified: true })
     expect((await readBinding('alice@example.com')).address).toBe('0xALICE')
+    expect(await readDirectoryPreference('user-a')).toMatchObject({ choice: 'verified' })
   })
 
   it('writes nothing when the code is wrong', async () => {

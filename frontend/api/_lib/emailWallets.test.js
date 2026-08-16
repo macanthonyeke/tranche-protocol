@@ -17,11 +17,14 @@ const {
   normalizeEmail,
   normalizeLoginIntent,
   LOGIN_INTENTS,
+  DIRECTORY_PREFERENCE_CHOICES,
   putOtpSession,
   takeOtpSession,
   readBinding,
   writeBinding,
   removeBinding,
+  readDirectoryPreference,
+  setDirectoryPreference,
   EmailWalletError
 } = await import('./emailWallets.js')
 
@@ -150,5 +153,23 @@ describe('removeBinding', () => {
     await expect(removeBinding('nobody@example.com', {
       address: '0xAAA', userId: 'user-a'
     })).resolves.toBe(false)
+  })
+})
+
+describe('directory preference', () => {
+  it('stores a choice by canonical Circle user ID', async () => {
+    await setDirectoryPreference('circle-user-1', DIRECTORY_PREFERENCE_CHOICES.SKIPPED)
+
+    expect(await readDirectoryPreference('circle-user-1')).toMatchObject({
+      choice: 'skipped'
+    })
+    expect(await readDirectoryPreference('circle-user-2')).toBeNull()
+  })
+
+  it('accepts only the supported optional-directory choices', async () => {
+    await expect(setDirectoryPreference('circle-user-1', 'claimed'))
+      .rejects.toBeInstanceOf(EmailWalletError)
+    await expect(setDirectoryPreference('', DIRECTORY_PREFERENCE_CHOICES.SKIPPED))
+      .rejects.toBeInstanceOf(EmailWalletError)
   })
 })
