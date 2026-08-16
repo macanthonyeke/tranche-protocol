@@ -6,6 +6,7 @@ import Field from '../components/Field.jsx'
 import Tooltip from '../components/Tooltip.jsx'
 import TxModal from '../components/TxModal.jsx'
 import AddressDisplay from '../components/AddressDisplay.jsx'
+import VerifyEmailPrompt from '../components/VerifyEmailPrompt.jsx'
 import { useRefundBalance } from '../hooks/useEscrows.js'
 import { useTheme } from '../hooks/useTheme.jsx'
 import { useTx, escrowWrite } from '../hooks/useTx.js'
@@ -107,6 +108,12 @@ function SettingsInner() {
       <RefundSection />
       <TransferRefundCreditSection />
       <AppearanceSection />
+      <Section
+        title="Email discoverability"
+        description="Choose whether people can find your Tranche account by email when they create an escrow."
+      >
+        <VerifyEmailPrompt settings />
+      </Section>
       <AccountSection />
     </div>
   )

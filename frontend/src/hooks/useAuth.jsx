@@ -3,6 +3,7 @@ import { useAccount, useDisconnect } from 'wagmi'
 import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleTheme.js'
 import { isTransactionAction } from '../confirm/action.js'
 import { isCircleExecutionLease } from './useTransactionConfirm.js'
+import { useToast } from './useToast.jsx'
 
 /* One source of truth for "who is the current user and how do they sign".
    Both sign-in paths land here, and the rest of the app reads identity from
@@ -134,6 +135,7 @@ async function postJson(path, body) {
 export function AuthProvider({ children }) {
   const { address: eoaAddress, isConnected: eoaConnected } = useAccount()
   const { disconnect } = useDisconnect()
+  const toast = useToast()
 
   const [circle, setCircle] = useState(() => readStoredSession())
   const [sdkReady, setSdkReady] = useState(false)
@@ -148,6 +150,10 @@ export function AuthProvider({ children }) {
   // so the UI can distinguish checking, unverified, pending, and verified.
   const [directoryBinding, setDirectoryBinding] = useState(null)
   const [directoryBindingStatus, setDirectoryBindingStatus] = useState('unknown')
+  // Server-owned onboarding choice. It is intentionally not persisted in the
+  // browser: the authenticated status read is the source of truth across
+  // refreshes, devices, and later Circle sign-ins.
+  const [directoryChoice, setDirectoryChoice] = useState('unknown')
   // A localStorage Circle blob is only a credential cache. The server cookie
   // must validate before the app treats the UCW as connected.
   const [serverSessionState, setServerSessionState] = useState(() => (
@@ -217,6 +223,7 @@ export function AuthProvider({ children }) {
     setServerSessionState('ready')
     setDirectoryBinding(null)
     setDirectoryBindingStatus('unknown')
+    setDirectoryChoice('unknown')
     try {
       if (session) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
@@ -382,6 +389,7 @@ export function AuthProvider({ children }) {
         setDirectoryBinding(null)
         setDirectoryBindingStatus('unverified')
       }
+      setDirectoryChoice(status.choice ?? (status.verified ? 'verified' : 'undecided'))
       return status
     } catch (err) {
       setDirectoryBindingStatus('error')
@@ -417,8 +425,10 @@ export function AuthProvider({ children }) {
       })
       setDirectoryBindingStatus('verified')
     }
+    setDirectoryChoice('verified')
+    toast.success('You can now be found by email for payments.')
     return res
-  }, [pendingVerification, refreshDirectoryBinding])
+  }, [pendingVerification, refreshDirectoryBinding, toast])
 
   const resendEmailVerification = useCallback(async () => {
     if (!pendingVerification) throw new Error('There is nothing waiting to be verified.')
@@ -427,12 +437,27 @@ export function AuthProvider({ children }) {
     })
   }, [pendingVerification])
 
-  // Leaves the user signed in and able to use the app; they simply aren't
-  // listed in the email directory until they verify.
-  const dismissEmailVerification = useCallback(() => {
+  // Leaves the user signed in and records only the optional onboarding choice.
+  // The endpoint intentionally never creates, verifies, or removes a binding.
+  const skipDirectoryPrompt = useCallback(async () => {
+    if (!circle?.email || serverSessionState !== 'ready') {
+      throw new Error('Sign in with Tranche before changing email discoverability.')
+    }
+    const result = await postJson('/api/wallet/directory-claim', {
+      action: 'skip',
+      email: circle.email
+    })
     setPendingVerification(null)
+    setDirectoryBinding(null)
     setDirectoryBindingStatus('unverified')
-  }, [])
+    setDirectoryChoice(result.choice ?? 'skipped')
+    return result
+  }, [circle?.email, serverSessionState])
+
+  // Kept as a compatibility alias for existing prompt consumers. New UI uses
+  // skipDirectoryPrompt so the server persistence is explicit at the call
+  // site, while older callers still receive the same safe behavior.
+  const dismissEmailVerification = skipDirectoryPrompt
 
   /* Explicit product-email opt-in. Circle sign-in never calls this. The
      requested address is only an email-directory alias; the server derives
@@ -453,6 +478,7 @@ export function AuthProvider({ children }) {
     } else if (verification.verified) {
       setDirectoryBinding({ ...verification, email: verification.email ?? circle.email })
       setDirectoryBindingStatus('verified')
+      setDirectoryChoice('verified')
     }
     return verification
   }, [circle, serverSessionState])
@@ -467,6 +493,7 @@ export function AuthProvider({ children }) {
     })
     setDirectoryBinding(null)
     setDirectoryBindingStatus('unverified')
+    setDirectoryChoice(result.choice ?? 'removed')
     return result
   }, [circle?.email, serverSessionState])
 
@@ -639,12 +666,14 @@ export function AuthProvider({ children }) {
       pendingVerification,
       directoryBinding,
       directoryBindingStatus,
+      directoryChoice,
       signInWithEmail,
       createAccountWithEmail,
       completeOnboarding,
       confirmEmailVerification,
       resendEmailVerification,
       dismissEmailVerification,
+      skipDirectoryPrompt,
       startDirectoryClaim,
       refreshDirectoryBinding,
       removeDirectoryBinding,
@@ -655,9 +684,10 @@ export function AuthProvider({ children }) {
   }, [
     circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, onboarding, pendingVerification,
     directoryBinding, directoryBindingStatus,
+    directoryChoice,
     signInWithEmail, createAccountWithEmail, completeOnboarding,
     confirmEmailVerification, resendEmailVerification,
-    dismissEmailVerification, startDirectoryClaim, refreshDirectoryBinding,
+    dismissEmailVerification, skipDirectoryPrompt, startDirectoryClaim, refreshDirectoryBinding,
     removeDirectoryBinding, signOut, executeContractCall, runCanaryPreflight
   ])
 

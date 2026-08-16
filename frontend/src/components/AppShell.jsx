@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Link } from 'react-router-dom'
+import { NavLink, Link, useLocation } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useAccount, useSwitchChain } from 'wagmi'
 import IconButton from './IconButton.jsx'
@@ -475,6 +475,7 @@ function WrongNetworkBanner() {
 }
 
 export default function AppShell({ children, maxWidth = 'content' }) {
+  const { pathname } = useLocation()
   // Mobile bottom padding = BottomNav's own box (min-h-16 = 4rem, plus its
   // safe-area gutter) plus 1rem breathing room — matching the gap-4 already
   // used between the Dashboard stat cards (Dashboard.jsx:235), so the space
@@ -491,7 +492,7 @@ export default function AppShell({ children, maxWidth = 'content' }) {
       <main className={mainCls}>
         {/* The directory card is an explicit optional product action. It is
             never created by Circle authentication itself. */}
-        <VerifyEmailPrompt />
+        {!pathname.startsWith('/settings') && <VerifyEmailPrompt />}
         {children}
       </main>
       <BottomNav />
