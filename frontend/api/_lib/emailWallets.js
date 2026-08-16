@@ -185,3 +185,25 @@ export async function writeBinding(email, { address, userId }) {
   await kv.set(bindingKey(email), binding)
   return binding
 }
+
+/**
+ * Remove an email-directory binding only when it belongs to the authenticated
+ * wallet identity supplied by the caller. The email is a directory alias; it
+ * is never allowed to choose which wallet is revoked.
+ *
+ * @param {string} email already normalized
+ * @param {{ address: string, userId: string }} binding server-derived identity
+ * @returns {Promise<boolean>} whether a binding was removed
+ */
+export async function removeBinding(email, { address, userId }) {
+  const existing = await readBinding(email)
+  if (!existing) return false
+  if (existing.userId !== userId || existing.address !== address) {
+    throw new EmailWalletError(
+      'This email-directory binding does not belong to this Tranche account.',
+      403
+    )
+  }
+  await kv.del(bindingKey(email))
+  return true
+}

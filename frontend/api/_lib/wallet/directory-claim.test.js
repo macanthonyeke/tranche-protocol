@@ -22,7 +22,7 @@ vi.mock('../resend.js', async (importOriginal) => ({
 const handler = (await import('./directory-claim.js')).default
 const resendHandler = (await import('./resend-verification.js')).default
 const { createAuthSession } = await import('../authSession.js')
-const { readBinding } = await import('../emailWallets.js')
+const { readBinding, writeBinding } = await import('../emailWallets.js')
 const { peekVerification } = await import('../emailVerification.js')
 
 let cookie
@@ -65,6 +65,64 @@ beforeEach(async () => {
 })
 
 describe('POST /api/wallet/directory-claim', () => {
+  it('refreshes the authenticated binding state without sending email', async () => {
+    await writeBinding('alice@example.com', {
+      address: '0x1111111111111111111111111111111111111111',
+      userId: 'circle-user-1'
+    })
+
+    const res = await invoke({ email: 'alice@example.com', action: 'status' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toMatchObject({ email: 'alice@example.com', verified: true })
+    expect(sentMail).toHaveLength(0)
+  })
+
+  it('reports an unverified state when the binding is absent or belongs elsewhere', async () => {
+    await writeBinding('elsewhere@example.com', {
+      address: '0x2222222222222222222222222222222222222222',
+      userId: 'different-user'
+    })
+
+    const res = await invoke({ email: 'alice@example.com', action: 'status' })
+    const other = await invoke({ email: 'elsewhere@example.com', action: 'status' })
+
+    expect(res.payload).toEqual({ email: 'alice@example.com', verified: false })
+    expect(other.payload).toEqual({ email: 'elsewhere@example.com', verified: false })
+    expect(sentMail).toHaveLength(0)
+  })
+
+  it('removes only the binding owned by the authenticated session', async () => {
+    await writeBinding('alice@example.com', {
+      address: '0x1111111111111111111111111111111111111111',
+      userId: 'circle-user-1'
+    })
+
+    const res = await invoke({
+      email: 'alice@example.com',
+      action: 'remove',
+      address: '0xATTACKER',
+      userId: 'attacker'
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toEqual({ email: 'alice@example.com', removed: true, verified: false })
+    expect(await readBinding('alice@example.com')).toBeNull()
+    expect(sentMail).toHaveLength(0)
+  })
+
+  it('rejects removal of a binding owned by a different session', async () => {
+    await writeBinding('alice@example.com', {
+      address: '0x2222222222222222222222222222222222222222',
+      userId: 'different-user'
+    })
+
+    const res = await invoke({ email: 'alice@example.com', action: 'remove' })
+
+    expect(res.statusCode).toBe(403)
+    expect(await readBinding('alice@example.com')).toMatchObject({ userId: 'different-user' })
+  })
+
   it('sends Resend only after an explicit authenticated claim', async () => {
     const res = await invoke({ email: 'Alice@example.com' })
 

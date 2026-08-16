@@ -21,6 +21,7 @@ const {
   takeOtpSession,
   readBinding,
   writeBinding,
+  removeBinding,
   EmailWalletError
 } = await import('./emailWallets.js')
 
@@ -123,5 +124,31 @@ describe('writeBinding', () => {
 
   it('reports an unbound email as a miss', async () => {
     expect(await readBinding('nobody@example.com')).toBeNull()
+  })
+})
+
+describe('removeBinding', () => {
+  it('removes a binding only for the matching server identity', async () => {
+    await writeBinding('alice@example.com', { address: '0xAAA', userId: 'user-a' })
+
+    await expect(removeBinding('alice@example.com', {
+      address: '0xAAA', userId: 'user-a'
+    })).resolves.toBe(true)
+    expect(await readBinding('alice@example.com')).toBeNull()
+  })
+
+  it('does not let another identity remove the binding', async () => {
+    await writeBinding('alice@example.com', { address: '0xAAA', userId: 'user-a' })
+
+    await expect(removeBinding('alice@example.com', {
+      address: '0xBAD', userId: 'attacker'
+    })).rejects.toBeInstanceOf(EmailWalletError)
+    expect((await readBinding('alice@example.com')).address).toBe('0xAAA')
+  })
+
+  it('is idempotent for an already-removed binding', async () => {
+    await expect(removeBinding('nobody@example.com', {
+      address: '0xAAA', userId: 'user-a'
+    })).resolves.toBe(false)
   })
 })
