@@ -58,7 +58,7 @@ describe('POST /api/wallet/initialize', () => {
   })
 
   it('validates Circle identity and explicitly requests an SCA Arc wallet', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
 
     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
 
@@ -69,5 +69,15 @@ describe('POST /api/wallet/initialize', () => {
       blockchains: ['ARC-TESTNET'],
       accountType: 'SCA'
     })
+  })
+
+  it('cannot initialize a wallet from a signin attempt', async () => {
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signin' })
+
+    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+
+    expect(res.statusCode).toBe(403)
+    expect(circleMock.getUserStatus).not.toHaveBeenCalled()
+    expect(circleMock.createUserPinWithWallets).not.toHaveBeenCalled()
   })
 })

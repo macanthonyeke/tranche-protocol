@@ -15,7 +15,7 @@
 // email users with an unfundable wallet, so it is passed explicitly.
 
 import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../circle.js'
-import { peekOtpSession } from '../emailWallets.js'
+import { LOGIN_INTENTS, peekOtpSession } from '../emailWallets.js'
 import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 // Circle's "user already initialized" code. Not an error for us: it means the
@@ -29,6 +29,9 @@ export default postRoute(async (body) => {
   const attempt = await peekOtpSession(sessionId)
   if (!attempt) {
     throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
+  }
+  if (attempt.intent !== LOGIN_INTENTS.SIGNUP) {
+    throw new RequestError('Wallet setup is available only while creating an account.', 403)
   }
 
   const circle = getCircleClient()

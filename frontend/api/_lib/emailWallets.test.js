@@ -15,6 +15,8 @@ vi.mock('./redis.js', () => ({
 
 const {
   normalizeEmail,
+  normalizeLoginIntent,
+  LOGIN_INTENTS,
   putOtpSession,
   takeOtpSession,
   readBinding,
@@ -50,17 +52,27 @@ describe('normalizeEmail', () => {
 
 describe('OTP sessions', () => {
   it('round-trips the email the server sent the code to', async () => {
-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', intent: LOGIN_INTENTS.SIGNIN })
     const session = await takeOtpSession('sess-1')
     expect(session.email).toBe('alice@example.com')
     expect(session.deviceId).toBe('dev-1')
+    expect(session.intent).toBe('signin')
   })
 
   // Single-use is what stops one OTP send from seeding more than one binding.
   it('is single-use — a replayed sessionId gets nothing', async () => {
-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', intent: LOGIN_INTENTS.SIGNUP })
     expect(await takeOtpSession('sess-1')).not.toBeNull()
     expect(await takeOtpSession('sess-1')).toBeNull()
+  })
+
+  it('accepts only the two server-owned login intents', async () => {
+    expect(normalizeLoginIntent('signup')).toBe('signup')
+    expect(normalizeLoginIntent('signin')).toBe('signin')
+    expect(normalizeLoginIntent('create')).toBeNull()
+    await expect(putOtpSession('sess-1', {
+      email: 'alice@example.com', deviceId: 'dev-1', intent: 'create'
+    })).rejects.toThrow(/login intent/i)
   })
 
   it('returns null for an unknown session', async () => {

@@ -11,13 +11,15 @@
 
 import { randomUUID } from 'node:crypto'
 import { getCircleClient } from '../circle.js'
-import { normalizeEmail, putOtpSession } from '../emailWallets.js'
+import { normalizeEmail, normalizeLoginIntent, putOtpSession } from '../emailWallets.js'
 import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
 export default postRoute(async (body) => {
   const deviceId = requireString(body, 'deviceId', { max: 256 })
   const email = normalizeEmail(body.email)
   if (!email) throw new RequestError('A valid email address is required.')
+  const intent = normalizeLoginIntent(body.intent)
+  if (!intent) throw new RequestError('A valid login intent is required.')
 
   const circle = getCircleClient()
   const res = await circle.createDeviceTokenForEmailLogin({ deviceId, email })
@@ -28,7 +30,7 @@ export default postRoute(async (body) => {
   }
 
   const sessionId = randomUUID()
-  await putOtpSession(sessionId, { email, deviceId })
+  await putOtpSession(sessionId, { email, deviceId, intent })
 
   // The email is echoed back because the SDK's loginConfigs wants it to
   // label its own dialog. The server does not use this email as an identity

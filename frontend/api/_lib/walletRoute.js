@@ -13,6 +13,7 @@ import { EmailWalletError } from './emailWallets.js'
 import { VerificationError } from './emailVerification.js'
 import { RedisError } from './redis.js'
 import { ResendError } from './resend.js'
+import { IdentityRegistryError } from './identityRegistry.js'
 
 export class RequestError extends Error {
   constructor(message, status = 400) {
@@ -35,7 +36,8 @@ function routeError(res, err) {
     err instanceof VerificationError ||
     err instanceof RedisError ||
     err instanceof ResendError ||
-    err instanceof CircleError
+    err instanceof CircleError ||
+    err instanceof IdentityRegistryError
   ) {
     res.status(err.status).json({ error: err.message })
     return

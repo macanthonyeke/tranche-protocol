@@ -53,6 +53,16 @@ export class EmailWalletError extends Error {
   }
 }
 
+export const LOGIN_INTENTS = Object.freeze({
+  SIGNUP: 'signup',
+  SIGNIN: 'signin'
+})
+
+export function normalizeLoginIntent(intent) {
+  if (intent === LOGIN_INTENTS.SIGNUP || intent === LOGIN_INTENTS.SIGNIN) return intent
+  return null
+}
+
 // Deliberately conservative: trim + lowercase only. No gmail-style dot or
 // plus-tag folding — treating alice+work@ and alice@ as the same person would
 // merge two identities the user may well intend to keep separate, and
@@ -79,12 +89,16 @@ const SESSION_TTL_SECONDS = 15 * 60
  * Record which email an OTP was sent to for the login attempt. Returns the
  * opaque id the client echoes back.
  * @param {string} sessionId
- * @param {{ email: string, deviceId: string }} data
+ * @param {{ email: string, deviceId: string, intent: 'signup' | 'signin' }} data
  */
-export async function putOtpSession(sessionId, { email, deviceId }) {
+export async function putOtpSession(sessionId, { email, deviceId, intent }) {
+  const loginIntent = normalizeLoginIntent(intent)
+  if (!loginIntent) throw new EmailWalletError('A valid login intent is required.')
   await kv.set(
     sessionKey(sessionId),
-    { email, deviceId, createdAt: Date.now() },
+    // The intent is written once with the attempt. Later steps only read it;
+    // no browser field is accepted by initialize or complete-login.
+    { email, deviceId, intent: loginIntent, createdAt: Date.now() },
     { ex: SESSION_TTL_SECONDS }
   )
 }
@@ -102,7 +116,7 @@ export async function peekOtpSession(sessionId) {
  * Consume an OTP session. Single-use: the record is deleted as it's read, so
  * one OTP send can never seed more than one binding.
  * @param {string} sessionId
- * @returns {Promise<{ email: string, deviceId: string } | null>}
+ * @returns {Promise<{ email: string, deviceId: string, intent: string } | null>}
  */
 export async function takeOtpSession(sessionId) {
   const key = sessionKey(sessionId)

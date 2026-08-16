@@ -6,6 +6,7 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { kv } from './redis.js'
+import { backfillIdentityFromSession } from './identityRegistry.js'
 
 export const AUTH_COOKIE_NAME = 'tranche_session'
 export const SESSION_TTL_SECONDS = 13 * 24 * 60 * 60
@@ -122,6 +123,15 @@ export async function getAuthSession(req, { touch = true, now = nowMs() } = {}) 
   if (expired || inactive) {
     await kv.del(key)
     return null
+  }
+
+  // Migration is best effort. A valid server session remains usable if a
+  // registry write is temporarily unavailable; strict registry enforcement is
+  // enabled separately only after coverage has been verified.
+  try {
+    await backfillIdentityFromSession(record)
+  } catch {
+    // Do not turn a migration write failure into an auth outage.
   }
 
   if (touch) {

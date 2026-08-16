@@ -53,7 +53,7 @@ beforeEach(() => {
 
 describe('POST /api/wallet/complete-login', () => {
   it('validates Circle identity and mints one sanitized Tranche session', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
 
     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
 
@@ -70,7 +70,7 @@ describe('POST /api/wallet/complete-login', () => {
   })
 
   it('does not call Resend or bind the OTP email', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
 
     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
 
@@ -79,7 +79,7 @@ describe('POST /api/wallet/complete-login', () => {
   })
 
   it('restores the attempt when Circle wallet indexing is still pending', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
     circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
 
     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
@@ -89,7 +89,7 @@ describe('POST /api/wallet/complete-login', () => {
   })
 
   it('rejects a Circle token that has no verified user', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
     circleMock.getUserStatus.mockResolvedValue({ data: {} })
 
     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
@@ -100,7 +100,7 @@ describe('POST /api/wallet/complete-login', () => {
   })
 
   it('does not allow an attempt to be replayed', async () => {
-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
+    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
 
     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(200)
     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(410)
