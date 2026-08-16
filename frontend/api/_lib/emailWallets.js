@@ -23,10 +23,10 @@
 // freelancer's email to their own address and silently redirect every future
 // escrow addressed to that person. So:
 //
-//   - the email is only ever read from the server's own OTP-send record
-//     (see wallet/email-token.js), never from the register request body;
-//   - the address is only ever read from Circle via the caller's userToken
-//     (see getArcWallet), never from the register request body;
+//   - the email used for a directory claim is explicitly requested and then
+//     independently verified by Resend;
+//   - the address is only ever read from the authenticated server session,
+//     never from a directory-claim request body;
 //   - a binding is pinned to the Circle userId that created it, and a
 //     different userId can never overwrite it (see writeBinding).
 //
@@ -35,7 +35,7 @@
 // a userToken belongs to, so on its own it could not rule out an attacker
 // opening an OTP session for a stranger's address, never reading it, and
 // presenting their own userToken. A first binding is therefore no longer
-// written by register.js at all: it is held pending until the person returns
+// written by the login flow at all: it is held pending until the person returns
 // a code Tranche generates and mails itself over Resend — a separate delivery
 // path from Circle's SMTP, so the proof is genuinely independent. Only
 // wallet/verify-email.js writes a new binding.
@@ -76,8 +76,8 @@ const sessionKey = (sessionId) => `wallet:otp:${sessionId}`
 const SESSION_TTL_SECONDS = 15 * 60
 
 /**
- * Record which email an OTP was sent to, so register can recover it without
- * trusting the client. Returns the opaque id the client echoes back.
+ * Record which email an OTP was sent to for the login attempt. Returns the
+ * opaque id the client echoes back.
  * @param {string} sessionId
  * @param {{ email: string, deviceId: string }} data
  */
@@ -87,6 +87,15 @@ export async function putOtpSession(sessionId, { email, deviceId }) {
     { email, deviceId, createdAt: Date.now() },
     { ex: SESSION_TTL_SECONDS }
   )
+}
+
+/**
+ * Read an OTP login attempt without consuming it. This is only for the
+ * post-OTP wallet-initialization step; complete-login remains the sole
+ * consumer that turns the attempt into an authenticated app session.
+ */
+export async function peekOtpSession(sessionId) {
+  return kv.get(sessionKey(sessionId))
 }
 
 /**
@@ -106,7 +115,7 @@ export async function takeOtpSession(sessionId) {
 /**
  * Put a consumed session back, for the one case that is a retryable race
  * rather than a completed attempt: Circle has accepted the wallet-creation
- * challenge but has not finished indexing the wallet, so register.js has
+ * challenge but has not finished indexing the wallet, so complete-login.js has
  * nothing to bind yet and asks the client to try again shortly.
  *
  * Without this, take-then-fail left the session gone, and the retry that the
