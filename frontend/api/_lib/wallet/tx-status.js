@@ -10,18 +10,15 @@
 //
 // challengeId -> transaction id comes from the challenge's correlationIds.
 
-import { getCircleClient } from '../circle.js'
-import { postRoute, requireString } from '../walletRoute.js'
+import { sessionPostRoute } from './identity.js'
+import { requireString } from '../walletRoute.js'
 
 // Circle transaction states that mean "stop polling".
 const TERMINAL = new Set(['COMPLETE', 'CONFIRMED', 'FAILED', 'CANCELLED', 'DENIED'])
 const FAILED = new Set(['FAILED', 'CANCELLED', 'DENIED'])
 
-export default postRoute(async (body) => {
-  const userToken = requireString(body, 'userToken')
+export default sessionPostRoute(async ({ circle, userToken }, body) => {
   const challengeId = requireString(body, 'challengeId', { max: 128 })
-
-  const circle = getCircleClient()
 
   const challengeRes = await circle.getUserChallenge({ userToken, challengeId })
   const challenge = challengeRes?.data?.challenge ?? challengeRes?.data

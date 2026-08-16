@@ -5,15 +5,10 @@
 // so this exists only because an SCA wallet's id (not its address) is the
 // handle Circle indexes balances by.
 
-import { getCircleClient } from '../circle.js'
-import { postRoute, requireString } from '../walletRoute.js'
+import { sessionPostRoute } from './identity.js'
 
-export default postRoute(async (body) => {
-  const userToken = requireString(body, 'userToken')
-  const walletId = requireString(body, 'walletId', { max: 128 })
-
-  const circle = getCircleClient()
-  const res = await circle.getWalletTokenBalance({ userToken, walletId })
+export default sessionPostRoute(async ({ circle, userToken, wallet }) => {
+  const res = await circle.getWalletTokenBalance({ userToken, walletId: wallet.id })
 
   const tokenBalances = (res?.data?.tokenBalances ?? []).map((b) => ({
     amount: b.amount,

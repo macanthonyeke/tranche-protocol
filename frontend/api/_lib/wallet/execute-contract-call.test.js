@@ -2,7 +2,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const circleMock = vi.hoisted(() => ({
-  createUserTransactionContractExecutionChallenge: vi.fn()
+  createUserTransactionContractExecutionChallenge: vi.fn(),
+  getUserStatus: vi.fn()
+}))
+const store = vi.hoisted(() => new Map())
+
+vi.mock('../redis.js', () => ({
+  kv: {
+    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
+    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
+    del: async (key) => { store.delete(key); return 1 }
+  }
 }))
 
 vi.mock('../circle.js', async (importOriginal) => ({
@@ -11,6 +21,9 @@ vi.mock('../circle.js', async (importOriginal) => ({
 }))
 
 const handler = (await import('./execute-contract-call.js')).default
+const { createAuthSession } = await import('../authSession.js')
+
+let cookie
 
 function invoke(body, method = 'POST') {
   const res = {
@@ -21,25 +34,35 @@ function invoke(body, method = 'POST') {
     status(c) { this.statusCode = c; return this },
     json(p) { this.payload = p; return this }
   }
-  return handler({ method, body }, res).then(() => res)
+  return handler({ method, headers: { cookie }, body }, res).then(() => res)
 }
 
 const VALID = {
   userToken: 'tok',
-  walletId: 'wallet-1',
+  walletId: 'attacker-supplied-wallet-is-ignored',
   contractAddress: '0xCONTRACT',
   callData: '0xdeadbeef'
 }
 
 beforeEach(() => {
+  store.clear()
+  circleMock.getUserStatus.mockReset()
+  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
   circleMock.createUserTransactionContractExecutionChallenge.mockReset()
   circleMock.createUserTransactionContractExecutionChallenge.mockResolvedValue({
     data: { challengeId: 'chal-1' }
   })
+  return createAuthSession({
+    circleUserId: 'circle-user-1',
+    walletId: 'wallet-1',
+    walletAddress: '0x1111111111111111111111111111111111111111',
+    blockchain: 'ARC-TESTNET',
+    accountType: 'SCA'
+  }).then(({ token }) => { cookie = `tranche_session=${token}` })
 })
 
 describe('POST /api/wallet/execute-contract-call', () => {
-  it('documents the current browser-supplied request boundary while forwarding calldata unmodified', async () => {
+  it('requires the server session and forwards calldata with the session wallet', async () => {
     const res = await invoke(VALID)
 
     expect(res.statusCode).toBe(200)
@@ -101,12 +124,32 @@ describe('POST /api/wallet/execute-contract-call', () => {
     expect(res.statusCode).toBe(400)
   })
 
-  it('requires userToken, walletId and contractAddress', async () => {
-    for (const field of ['userToken', 'walletId', 'contractAddress']) {
+  it('requires userToken and contractAddress, while ignoring a client wallet ID', async () => {
+    for (const field of ['userToken', 'contractAddress']) {
       const body = { ...VALID }
       delete body[field]
       expect((await invoke(body)).statusCode).toBe(400)
     }
+    expect((await invoke({ ...VALID, walletId: '' })).statusCode).toBe(200)
+  })
+
+  it('rejects a missing server session before creating a Circle challenge', async () => {
+    const saved = cookie
+    cookie = ''
+    const res = await invoke(VALID)
+    cookie = saved
+
+    expect(res.statusCode).toBe(401)
+    expect(circleMock.createUserTransactionContractExecutionChallenge).not.toHaveBeenCalled()
+  })
+
+  it('rejects a Circle token belonging to a different session user', async () => {
+    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'different-user' } })
+
+    const res = await invoke(VALID)
+
+    expect(res.statusCode).toBe(401)
+    expect(circleMock.createUserTransactionContractExecutionChallenge).not.toHaveBeenCalled()
   })
 
   it('surfaces a missing challenge as an error rather than a success', async () => {

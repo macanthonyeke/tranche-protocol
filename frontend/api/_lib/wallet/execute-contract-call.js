@@ -32,17 +32,16 @@
 // function selectors, and persist an action/challenge audit record. See
 // frontend/src/confirm/native-mode-security.md.
 
-import { getCircleClient } from '../circle.js'
-import { postRoute, requireString, RequestError } from '../walletRoute.js'
+import { sessionPostRoute } from './identity.js'
+import { requireString, RequestError } from '../walletRoute.js'
 
 // Gas Station sponsors the transaction, but Circle's API still requires a fee
 // configuration to size the gas limit. MEDIUM is the level Circle's own
 // examples use for contract execution.
 const FEE = { type: 'level', config: { feeLevel: 'MEDIUM' } }
 
-export default postRoute(async (body) => {
-  const userToken = requireString(body, 'userToken')
-  const walletId = requireString(body, 'walletId', { max: 128 })
+export default sessionPostRoute(async ({ circle, userToken, wallet }, body) => {
+  const walletId = wallet.id
   const contractAddress = requireString(body, 'contractAddress', { max: 128 })
 
   const base = { userToken, walletId, contractAddress, fee: FEE }
@@ -67,7 +66,6 @@ export default postRoute(async (body) => {
     throw new RequestError('Either callData or abiFunctionSignature is required.')
   }
 
-  const circle = getCircleClient()
   const res = await circle.createUserTransactionContractExecutionChallenge(input)
 
   const challengeId = res?.data?.challengeId
