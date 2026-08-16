@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const store = vi.hoisted(() => new Map())
 const circleMock = vi.hoisted(() => ({
@@ -21,8 +21,15 @@ vi.mock('../circle.js', async (importOriginal) => ({
   getCircleClient: () => circleMock,
   getArcWallet: async (userToken) => {
     const response = await circleMock.listWallets({ userToken, blockchain: 'ARC-TESTNET' })
-    const wallet = (response?.data?.wallets ?? []).find((item) => item.state === 'LIVE' && item.address)
-    return wallet ? { id: wallet.id, address: wallet.address } : null
+    const wallet = (response?.data?.wallets ?? []).find((item) =>
+      item.state === 'LIVE' && item.address && item.blockchain === 'ARC-TESTNET' && item.accountType === 'SCA'
+    )
+    return wallet ? {
+      id: wallet.id,
+      address: wallet.address,
+      blockchain: wallet.blockchain,
+      accountType: wallet.accountType
+    } : null
   }
 }))
 
@@ -47,9 +54,18 @@ beforeEach(() => {
   circleMock.listWallets.mockReset()
   circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
   circleMock.listWallets.mockResolvedValue({
-    data: { wallets: [{ id: 'wallet-1', address: '0x1111111111111111111111111111111111111111', state: 'LIVE' }] }
+    data: { wallets: [{
+      id: 'wallet-1',
+      address: '0x1111111111111111111111111111111111111111',
+      blockchain: 'ARC-TESTNET',
+      accountType: 'SCA',
+      state: 'LIVE'
+    }] }
   })
+  vi.stubEnv('TRANCHE_IDENTITY_MODE', 'dual-write')
 })
+
+afterEach(() => vi.unstubAllEnvs())
 
 describe('POST /api/wallet/complete-login', () => {
   it('validates Circle identity and mints one sanitized Tranche session', async () => {
@@ -64,6 +80,7 @@ describe('POST /api/wallet/complete-login', () => {
       walletAddress: '0x1111111111111111111111111111111111111111',
       accountType: 'SCA'
     })
+    expect(res.payload.next).toBe('onboarding')
     expect(res.payload.session).not.toHaveProperty('circleUserId')
     expect(res.headers['Set-Cookie']).toContain('tranche_session=')
     expect(await takeOtpSession('attempt-1')).toBeNull()
@@ -104,5 +121,66 @@ describe('POST /api/wallet/complete-login', () => {
 
     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(200)
     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(410)
+  })
+
+  it('signs in an existing canonical identity without initializing a wallet', async () => {
+    const { registerTrancheIdentity } = await import('../identityRegistry.js')
+    await registerTrancheIdentity({
+      circleUserId: 'circle-user-1',
+      walletId: 'wallet-1',
+      walletAddress: '0x1111111111111111111111111111111111111111',
+      blockchain: 'ARC-TESTNET',
+      accountType: 'SCA'
+    })
+    await putOtpSession('signin-attempt', {
+      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
+    })
+
+    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toMatchObject({ next: 'app', session: { walletId: 'wallet-1' } })
+    expect(res.headers['Set-Cookie']).toContain('tranche_session=')
+  })
+
+  it('returns the safe post-auth not-found response in strict mode', async () => {
+    vi.stubEnv('TRANCHE_IDENTITY_MODE', 'strict')
+    await putOtpSession('signin-attempt', {
+      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
+    })
+
+    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
+    expect(res.headers['Set-Cookie']).toBeUndefined()
+  })
+
+  it('dual-writes a validated legacy wallet during migration', async () => {
+    const { readTrancheIdentity } = await import('../identityRegistry.js')
+    await putOtpSession('signin-attempt', {
+      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
+    })
+
+    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload.next).toBe('app')
+    expect(await readTrancheIdentity('circle-user-1')).toMatchObject({
+      walletId: 'wallet-1', source: 'legacy-signin', status: 'active'
+    })
+  })
+
+  it('does not create a session for signin when Circle has no live Arc SCA wallet', async () => {
+    circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
+    await putOtpSession('signin-attempt', {
+      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
+    })
+
+    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
+    expect(res.headers['Set-Cookie']).toBeUndefined()
   })
 })

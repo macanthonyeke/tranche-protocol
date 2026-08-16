@@ -72,8 +72,21 @@ export async function getArcWallet(userToken) {
   const res = await circle.listWallets({ userToken, blockchain: ARC_BLOCKCHAIN })
   const wallets = res?.data?.wallets ?? []
   // LIVE only: a FROZEN wallet can't transact, so treating it as onboarded
-  // would hand out an address that silently fails to receive an escrow.
-  const wallet = wallets.find((w) => w.state === 'LIVE' && w.address)
+  // would hand out an address that silently fails to receive an escrow. The
+  // account type is checked here too: an Arc EOA is not the sponsored SCA
+  // identity this email flow is allowed to authenticate.
+  const wallet = wallets.find((w) =>
+    w.state === 'LIVE' &&
+    w.id &&
+    w.address &&
+    w.blockchain === ARC_BLOCKCHAIN &&
+    w.accountType === ACCOUNT_TYPE
+  )
   if (!wallet) return null
-  return { id: wallet.id, address: wallet.address }
+  return {
+    id: wallet.id,
+    address: wallet.address,
+    blockchain: wallet.blockchain,
+    accountType: wallet.accountType
+  }
 }
