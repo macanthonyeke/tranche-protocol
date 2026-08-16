@@ -19,6 +19,9 @@
     }
   ],
   "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/((?!api/|@|node_modules/|src/|.*\\.).*)",
+      "destination": "/index.html"
+    }
   ]
 }
