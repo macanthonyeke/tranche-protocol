@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAuth } from '../hooks/useAuth.jsx'
 import EmailSignIn from './EmailSignIn.jsx'
 import WalletButton from './WalletButton.jsx'
+import UcwOnboarding from './UcwOnboarding.jsx'
 
 /* The sign-in wall in front of every authenticated route.
 
@@ -20,17 +21,69 @@ export default function ConnectGate({
   title = 'Sign in to continue',
   message = 'Use your email, or connect a wallet you already have.'
 }) {
-  const { isConnected } = useAuth()
+  const { isConnected, onboarding, completeOnboarding } = useAuth()
   const [showWallet, setShowWallet] = useState(false)
+  const [intent, setIntent] = useState('signin')
+  const [accountNotice, setAccountNotice] = useState(null)
 
+  if (onboarding) return <UcwOnboarding onContinue={completeOnboarding} />
   if (isConnected) return children
+
+  const selectIntent = (nextIntent) => {
+    setIntent(nextIntent)
+    setAccountNotice(null)
+  }
 
   return (
     <div className="card-surface p-10 text-center max-w-md mx-auto">
       <h2 className="text-xl font-semibold mb-2 text-ink">{title}</h2>
       <p className="text-sm text-ink-2 mb-6">{message}</p>
 
-      <EmailSignIn />
+      <div role="tablist" aria-label="Circle wallet account flow" className="grid grid-cols-2 gap-1 p-1 mb-5 rounded-xl bg-sunk border border-rule">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={intent === 'signin'}
+          onClick={() => selectIntent('signin')}
+          className={`rounded-lg px-3 py-2 text-sm transition-colors ${intent === 'signin' ? 'bg-paper text-ink border border-rule' : 'text-ink-2 hover:text-ink'}`}
+        >
+          Sign in
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={intent === 'signup'}
+          onClick={() => selectIntent('signup')}
+          className={`rounded-lg px-3 py-2 text-sm transition-colors ${intent === 'signup' ? 'bg-paper text-ink border border-rule' : 'text-ink-2 hover:text-ink'}`}
+        >
+          Create account
+        </button>
+      </div>
+
+      <div className="mb-4 text-left">
+        <h3 className="text-base font-semibold text-ink">
+          {intent === 'signup' ? 'Create a Circle wallet account' : 'Sign in to your Circle wallet'}
+        </h3>
+        <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
+          {intent === 'signup'
+            ? 'Start a new Tranche account with Circle email verification.'
+            : 'Use the email that belongs to your existing Tranche account.'}
+        </p>
+      </div>
+
+      {accountNotice && (
+        <p role="status" className="mb-4 text-left text-[12.5px] text-ink-2 leading-relaxed">
+          {accountNotice}
+        </p>
+      )}
+
+      <EmailSignIn
+        intent={intent}
+        onAccountNotFound={() => {
+          setAccountNotice('No Tranche account was found after verification. Choose Create account to set one up. If you have an older Circle wallet, Tranche will link it instead of creating another wallet.')
+          setIntent('signup')
+        }}
+      />
 
       <div className="mt-6 pt-5 border-t border-rule">
         {!showWallet ? (

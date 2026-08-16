@@ -185,7 +185,7 @@ describe('session restore — the two gates', () => {
 })
 
 describe('activity on real use', () => {
-  it('completes UCW login with Circle identity validation and never calls register or Resend', async () => {
+  it('signs in without initializing a Circle wallet', async () => {
     vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
     const calls = []
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
@@ -198,11 +198,8 @@ describe('activity on real use', () => {
           otpToken: 'otp-token'
         }) }
       }
-      if (path === '/api/wallet/initialize') {
-        return { ok: true, json: async () => ({ challengeId: null }) }
-      }
       if (path === '/api/wallet/complete-login') {
-        return { ok: true, json: async () => ({ session: {
+        return { ok: true, json: async () => ({ next: 'app', session: {
           walletId: 'wallet-1',
           walletAddress: '0x1111111111111111111111111111111111111111'
         } }) }
@@ -218,11 +215,83 @@ describe('activity on real use', () => {
     expect(result.current.walletType).toBe('circle-sca')
     expect(calls).toEqual([
       '/api/wallet/email-token',
+      '/api/wallet/complete-login'
+    ])
+    expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).intent).toBe('signin')
+    expect(globalThis.fetch.mock.calls.some(([path]) => path === '/api/wallet/initialize')).toBe(false)
+    expect(calls).not.toContain('/api/wallet/register')
+    expect(calls).not.toContain('/api/wallet/directory-claim')
+  })
+
+  it('creates an account through initialization and enters onboarding', async () => {
+    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
+      calls.push(path)
+      if (path === '/api/wallet/email-token') {
+        return { ok: true, json: async () => ({
+          sessionId: 'attempt-1',
+          deviceToken: 'device-token',
+          deviceEncryptionKey: 'device-key',
+          otpToken: 'otp-token'
+        }) }
+      }
+      if (path === '/api/wallet/initialize') {
+        return { ok: true, json: async () => ({ challengeId: null, alreadyInitialized: false }) }
+      }
+      if (path === '/api/wallet/complete-login') {
+        return { ok: true, json: async () => ({ next: 'onboarding', session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await act(async () => {
+      await result.current.createAccountWithEmail('alice@example.com')
+    })
+
+    expect(result.current.walletType).toBe('circle-sca')
+    expect(result.current.onboarding).toBe(true)
+    expect(calls).toEqual([
+      '/api/wallet/email-token',
       '/api/wallet/initialize',
       '/api/wallet/complete-login'
     ])
-    expect(calls).not.toContain('/api/wallet/register')
-    expect(calls).not.toContain('/api/wallet/directory-claim')
+    expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).intent).toBe('signup')
+
+    await act(async () => { result.current.completeOnboarding() })
+    expect(result.current.onboarding).toBe(false)
+  })
+
+  it('surfaces the safe account-not-found response without creating a session', async () => {
+    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
+      if (path === '/api/wallet/email-token') {
+        return { ok: true, json: async () => ({
+          sessionId: 'attempt-1', deviceToken: 'device-token',
+          deviceEncryptionKey: 'device-key', otpToken: 'otp-token'
+        }) }
+      }
+      if (path === '/api/wallet/complete-login') {
+        return { ok: true, json: async () => ({
+          code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup'
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    let response
+    await act(async () => {
+      response = await result.current.signInWithEmail('new@example.com')
+    })
+
+    expect(response).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
+    expect(result.current.isConnected).toBe(false)
+    expect(result.current.onboarding).toBe(false)
   })
 
   /* The stamp has to land on an approved transaction, or an active user gets

@@ -137,6 +137,9 @@ export function AuthProvider({ children }) {
 
   const [circle, setCircle] = useState(() => readStoredSession())
   const [sdkReady, setSdkReady] = useState(false)
+  // Set only after the server returns next: "onboarding" for an explicit
+  // signup. It is intentionally in memory: it is UI state, not a credential.
+  const [onboarding, setOnboarding] = useState(false)
   // Set only by the explicit email-directory claim flow. It is never created
   // as a side effect of Circle sign-in.
   const [pendingVerification, setPendingVerification] = useState(null)
@@ -225,19 +228,23 @@ export function AuthProvider({ children }) {
     }
   }, [])
 
-  /* Full email onboarding: Circle OTP -> wallet provisioning -> canonical
-     Circle identity/wallet validation -> Tranche cookie-backed session.
-     Email-directory binding is deliberately not part of this path. */
-  const signInWithEmail = useCallback(async (rawEmail, { onStage } = {}) => {
+  /* Shared Circle email-OTP transport. The server-owned intent is fixed on
+     /email-token and is the only branch that decides whether initialization
+     may be called. A future social provider can enter the same completion
+     contract without making the browser's intent authoritative. */
+  const authenticateWithEmail = useCallback(async (rawEmail, intent, { onStage } = {}) => {
     const email = String(rawEmail || '').trim().toLowerCase()
     if (!email) throw new Error('Enter your email address.')
+    if (intent !== 'signup' && intent !== 'signin') {
+      throw new Error('A valid account flow is required.')
+    }
 
     const sdk = await getSdk()
     const deviceId = deviceIdRef.current
     if (!deviceId) throw new Error('Could not identify this device. Please reload and try again.')
 
     onStage?.('sending')
-    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email })
+    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email, intent })
 
     sdk.updateConfigs({
       appSettings: { appId: import.meta.env.VITE_CIRCLE_APP_ID },
@@ -268,23 +275,34 @@ export function AuthProvider({ children }) {
       sdk.verifyOtp()
     })
 
-    onStage?.('creating')
-    const init = await postJson('/api/wallet/initialize', {
-      sessionId: otpSession.sessionId,
-      userToken: login.userToken
-    })
-
-    if (init.challengeId) {
-      sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
-      await new Promise((resolve, reject) => {
-        sdk.execute(init.challengeId, (error) => {
-          if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
-          else resolve()
-        })
+    let completionStage = 'linking'
+    if (intent === 'signup') {
+      onStage?.('creating')
+      const init = await postJson('/api/wallet/initialize', {
+        sessionId: otpSession.sessionId,
+        userToken: login.userToken
       })
+
+      if (init.alreadyInitialized) {
+        completionStage = 'recovering'
+        onStage?.('recovering')
+      }
+      if (init.challengeId) {
+        sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
+        await new Promise((resolve, reject) => {
+          sdk.execute(init.challengeId, (error) => {
+            if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
+            else resolve()
+          })
+        })
+      }
+    } else {
+      // This is deliberately the only signin branch: no initialization call,
+      // even when the Circle user has no wallet or no Tranche identity.
+      onStage?.('checking')
     }
 
-    onStage?.('linking')
+    onStage?.(completionStage)
     // Circle needs a moment to index a freshly created wallet, and
     // complete-login 409s until the address exists. Retry rather than
     // dumping that normal race on the user as a failure.
@@ -302,6 +320,11 @@ export function AuthProvider({ children }) {
       }
     }
 
+    if (authenticated?.code === 'TRANCHE_ACCOUNT_NOT_FOUND') {
+      onStage?.('account-not-found')
+      return authenticated
+    }
+
     const wallet = authenticated?.session
     if (!wallet?.walletId || !wallet?.walletAddress) {
       throw new Error('Your wallet was verified but the Tranche session could not be created.')
@@ -317,9 +340,20 @@ export function AuthProvider({ children }) {
     }
     setPendingVerification(null)
     persist(next)
+    if (authenticated.next === 'onboarding') setOnboarding(true)
     onStage?.('done')
-    return next
+    return { ...next, next: authenticated.next }
   }, [getSdk, persist])
+
+  const signInWithEmail = useCallback((rawEmail, options = {}) => (
+    authenticateWithEmail(rawEmail, 'signin', options)
+  ), [authenticateWithEmail])
+
+  const createAccountWithEmail = useCallback((rawEmail, options = {}) => (
+    authenticateWithEmail(rawEmail, 'signup', options)
+  ), [authenticateWithEmail])
+
+  const completeOnboarding = useCallback(() => setOnboarding(false), [])
 
   /* Hand back the code from Tranche's own verification email. Only on
      success does the email -> address binding actually get written, so this
@@ -371,6 +405,7 @@ export function AuthProvider({ children }) {
     // state doesn't re-render, and removeItem on an absent key is a no-op.
     const hadCircleSession = !!circle
     persist(null)
+    setOnboarding(false)
     if (hadCircleSession) {
       // Best effort: local sign-out remains terminal even if the network is
       // unavailable, while the server revocation closes the cookie session.
@@ -527,8 +562,11 @@ export function AuthProvider({ children }) {
       isConnected: !!walletType,
       isSca: walletType === 'circle-sca',
       sdkReady,
+      onboarding,
       pendingVerification,
       signInWithEmail,
+      createAccountWithEmail,
+      completeOnboarding,
       confirmEmailVerification,
       resendEmailVerification,
       dismissEmailVerification,
@@ -538,8 +576,9 @@ export function AuthProvider({ children }) {
       runCanaryPreflight
     }
   }, [
-    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, pendingVerification,
-    signInWithEmail, confirmEmailVerification, resendEmailVerification,
+    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, onboarding, pendingVerification,
+    signInWithEmail, createAccountWithEmail, completeOnboarding,
+    confirmEmailVerification, resendEmailVerification,
     dismissEmailVerification, startDirectoryClaim, signOut, executeContractCall, runCanaryPreflight
   ])
 
