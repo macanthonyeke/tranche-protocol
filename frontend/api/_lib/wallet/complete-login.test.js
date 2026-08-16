@@ -156,6 +156,21 @@ describe('POST /api/wallet/complete-login', () => {
     expect(res.headers['Set-Cookie']).toBeUndefined()
   })
 
+  it('ignores a browser-supplied completion intent and keeps the attempt intent', async () => {
+    vi.stubEnv('TRANCHE_IDENTITY_MODE', 'strict')
+    await putOtpSession('signin-attempt', {
+      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
+    })
+
+    const res = await invoke({
+      sessionId: 'signin-attempt', userToken: 'circle-token', intent: 'signup'
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
+    expect(res.headers['Set-Cookie']).toBeUndefined()
+  })
+
   it('dual-writes a validated legacy wallet during migration', async () => {
     const { readTrancheIdentity } = await import('../identityRegistry.js')
     await putOtpSession('signin-attempt', {
