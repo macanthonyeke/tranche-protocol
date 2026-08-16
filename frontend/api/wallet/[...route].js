@@ -18,14 +18,18 @@
 // "which code runs for this URL" stays answerable by reading one map.
 
 import balances from '../_lib/wallet/balances.js'
+import completeLogin from '../_lib/wallet/complete-login.js'
+import directoryClaim from '../_lib/wallet/directory-claim.js'
 import emailResend from '../_lib/wallet/email-resend.js'
 import emailToken from '../_lib/wallet/email-token.js'
 import executeContractCall from '../_lib/wallet/execute-contract-call.js'
 import initialize from '../_lib/wallet/initialize.js'
 import list from '../_lib/wallet/list.js'
+import logout from '../_lib/wallet/logout.js'
 import register from '../_lib/wallet/register.js'
 import resendVerification from '../_lib/wallet/resend-verification.js'
 import resolveEmail from '../_lib/wallet/resolve-email.js'
+import session from '../_lib/wallet/session.js'
 import txStatus from '../_lib/wallet/tx-status.js'
 import verifyEmail from '../_lib/wallet/verify-email.js'
 
@@ -34,14 +38,18 @@ import verifyEmail from '../_lib/wallet/verify-email.js'
 // influence which module gets loaded, and unknown names can only miss.
 const ROUTES = {
   'balances': balances,
+  'complete-login': completeLogin,
+  'directory-claim': directoryClaim,
   'email-resend': emailResend,
   'email-token': emailToken,
   'execute-contract-call': executeContractCall,
   'initialize': initialize,
   'list': list,
+  'logout': logout,
   'register': register,
   'resend-verification': resendVerification,
   'resolve-email': resolveEmail,
+  'session': session,
   'tx-status': txStatus,
   'verify-email': verifyEmail
 }

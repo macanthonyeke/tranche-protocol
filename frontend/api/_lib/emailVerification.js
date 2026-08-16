@@ -18,7 +18,7 @@
 // independent if it doesn't share a delivery path with the thing it checks.
 //
 // The pending record carries the email, address and userId that were already
-// derived server-side at register time, so confirming a code can only ever
+// derived server-side at directory-claim time, so confirming a code can only ever
 // commit those exact values — the confirm step cannot introduce new ones.
 //
 // Codes are stored as sha256(verificationId:code), not in the clear. The

@@ -489,11 +489,8 @@ export default function AppShell({ children, maxWidth = 'content' }) {
       <TopNav />
       <WrongNetworkBanner />
       <main className={mainCls}>
-        {/* Renders itself to null unless this email is awaiting Tranche's own
-            verification, so it costs nothing on every other page load. Lives
-            here rather than on one page because the user can navigate away
-            from sign-up before finishing, and the binding stays unwritten
-            until they do. */}
+        {/* The directory card is an explicit optional product action. It is
+            never created by Circle authentication itself. */}
         <VerifyEmailPrompt />
         {children}
       </main>

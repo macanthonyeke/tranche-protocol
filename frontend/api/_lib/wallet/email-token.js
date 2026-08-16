@@ -4,11 +4,10 @@
 // under Wallets > User Controlled > Configurator > Email) and hands back the
 // tokens the browser SDK needs to open its OTP dialog.
 //
-// The sessionId returned here is ours, not Circle's. It is the ONLY record of
-// which email this OTP went to: wallet/register.js reads the email back out
-// of it rather than accepting one from the client, so a caller cannot finish
-// a flow for one address and then claim a different one. See the threat model
-// in _lib/emailWallets.js.
+// The sessionId returned here is ours, not Circle's. It is a short-lived login
+// attempt used by initialize.js and complete-login.js; it is not an
+// authenticated Tranche session and it never creates an email-directory
+// binding.
 
 import { randomUUID } from 'node:crypto'
 import { getCircleClient } from '../circle.js'
@@ -32,7 +31,7 @@ export default postRoute(async (body) => {
   await putOtpSession(sessionId, { email, deviceId })
 
   // The email is echoed back because the SDK's loginConfigs wants it to
-  // label its own dialog — it is display state, and register.js pointedly
-  // does not read it back from the client.
+  // label its own dialog. The server does not use this email as an identity
+  // claim when complete-login creates the app session.
   return { sessionId, deviceToken, deviceEncryptionKey, otpToken, email }
 })

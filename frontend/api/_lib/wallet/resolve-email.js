@@ -7,7 +7,7 @@
 // address its owner has not proven control of.
 //
 // Answers only from our own binding store, which is populated exclusively by
-// wallet/register.js. A miss is reported as not-onboarded so CreateEscrow can
+// the explicit directory-claim flow. A miss is reported as not-onboarded so CreateEscrow can
 // say "ask them to sign up first" instead of failing opaquely.
 
 import { normalizeEmail, readBinding } from '../emailWallets.js'

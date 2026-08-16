@@ -1,7 +1,7 @@
 // @vitest-environment node
 //
 // The catch-all is now the single entry point for every /api/wallet/* call,
-// so a mistake here takes down all eleven routes at once rather than one.
+// so a mistake here takes down the wallet routes at once rather than one.
 // Lives under _lib/ so it doesn't itself count against Vercel's function cap
 // — see the header of api/wallet/[...route].js.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -16,9 +16,9 @@ const stub = (name) => vi.fn(async (req, res) => {
 const handlers = vi.hoisted(() => ({}))
 
 for (const name of [
-  'balances', 'email-resend', 'email-token', 'execute-contract-call',
-  'initialize', 'list', 'register', 'resend-verification',
-  'resolve-email', 'tx-status', 'verify-email'
+  'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+  'initialize', 'list', 'logout', 'register', 'resend-verification',
+  'resolve-email', 'session', 'tx-status', 'verify-email'
 ]) {
   vi.doMock(`./${name}.js`, () => ({ default: (handlers[name] ??= stub(name)) }))
 }
@@ -66,9 +66,9 @@ describe('/api/wallet/[...route] dispatch', () => {
   // The consolidation must be invisible from outside: every URL the frontend
   // already calls has to keep resolving to the handler it always did.
   it.each([
-    'balances', 'email-resend', 'email-token', 'execute-contract-call',
-    'initialize', 'list', 'register', 'resend-verification',
-    'resolve-email', 'tx-status', 'verify-email'
+    'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+    'initialize', 'list', 'logout', 'register', 'resend-verification',
+    'resolve-email', 'session', 'tx-status', 'verify-email'
   ])('routes %s to its handler', async (name) => {
     const res = await invoke([name])
     expect(res.statusCode).toBe(200)
@@ -139,9 +139,9 @@ describe('/api/wallet/[...route] dispatch', () => {
     // Every wallet endpoint, by URL alone — the consolidation must not have
     // left any single route behind, which is how this surfaced.
     it.each([
-      'balances', 'email-resend', 'email-token', 'execute-contract-call',
-      'initialize', 'list', 'register', 'resend-verification',
-      'resolve-email', 'tx-status', 'verify-email'
+      'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+      'initialize', 'list', 'logout', 'register', 'resend-verification',
+      'resolve-email', 'session', 'tx-status', 'verify-email'
     ])('resolves %s from the URL alone', async (name) => {
       const res = await invokeByUrl(`/api/wallet/${name}`)
       expect(res.payload).toEqual({ handled: name })

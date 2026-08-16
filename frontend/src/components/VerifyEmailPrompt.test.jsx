@@ -6,10 +6,13 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 afterEach(cleanup)
 
 const auth = vi.hoisted(() => ({
+  isSca: true,
+  email: 'alice@example.com',
   pendingVerification: { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 },
   confirmEmailVerification: vi.fn().mockResolvedValue({ verified: true }),
   resendEmailVerification: vi.fn().mockResolvedValue({ sent: true }),
-  dismissEmailVerification: vi.fn()
+  dismissEmailVerification: vi.fn(),
+  startDirectoryClaim: vi.fn().mockResolvedValue({ verificationRequired: true })
 }))
 
 vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => auth }))
@@ -20,6 +23,9 @@ beforeEach(() => {
   auth.confirmEmailVerification.mockClear()
   auth.resendEmailVerification.mockClear()
   auth.dismissEmailVerification.mockClear()
+  auth.startDirectoryClaim.mockClear()
+  auth.isSca = true
+  auth.email = 'alice@example.com'
   auth.pendingVerification = { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 }
 })
 
@@ -106,8 +112,16 @@ describe('VerifyEmailPrompt behaviour is unchanged', () => {
     await waitFor(() => expect(auth.resendEmailVerification).toHaveBeenCalledTimes(1))
   })
 
-  it('renders nothing when there is no pending verification', () => {
+  it('offers an explicit directory claim when there is no pending verification', async () => {
     auth.pendingVerification = null
+    render(<VerifyEmailPrompt />)
+    fireEvent.click(screen.getByRole('button', { name: /verify for email payments/i }))
+    await waitFor(() => expect(auth.startDirectoryClaim).toHaveBeenCalledTimes(1))
+  })
+
+  it('renders nothing for an EOA', () => {
+    auth.pendingVerification = null
+    auth.isSca = false
     const { container } = render(<VerifyEmailPrompt />)
     expect(container).toBeEmptyDOMElement()
   })

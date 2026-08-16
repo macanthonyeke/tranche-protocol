@@ -18,6 +18,9 @@ vi.mock('../redis.js', () => ({
 const handler = (await import('./verify-email.js')).default
 const { createVerification } = await import('../emailVerification.js')
 const { readBinding, writeBinding } = await import('../emailWallets.js')
+const { createAuthSession } = await import('../authSession.js')
+
+let cookie
 
 function invoke(body, method = 'POST') {
   const res = {
@@ -28,12 +31,22 @@ function invoke(body, method = 'POST') {
     status(c) { this.statusCode = c; return this },
     json(p) { this.payload = p; return this }
   }
-  return handler({ method, body }, res).then(() => res)
+  return handler({ method, headers: { cookie }, body }, res).then(() => res)
 }
 
 const BINDING = { email: 'alice@example.com', address: '0xALICE', userId: 'user-a' }
 
-beforeEach(() => store.clear())
+beforeEach(async () => {
+  store.clear()
+  const { token } = await createAuthSession({
+    circleUserId: 'user-a',
+    walletId: 'wallet-1',
+    walletAddress: '0x1111111111111111111111111111111111111111',
+    blockchain: 'ARC-TESTNET',
+    accountType: 'SCA'
+  })
+  cookie = `tranche_session=${token}`
+})
 
 describe('POST /api/wallet/verify-email', () => {
   it('writes the binding once the correct code is supplied', async () => {
@@ -97,7 +110,7 @@ describe('POST /api/wallet/verify-email', () => {
 
     const res = await invoke({ verificationId, code })
 
-    expect(res.statusCode).toBe(409)
+    expect(res.statusCode).toBe(403)
     expect((await readBinding('alice@example.com')).address).toBe('0xALICE')
   })
 
@@ -107,6 +120,17 @@ describe('POST /api/wallet/verify-email', () => {
 
   it('rejects an unknown verificationId', async () => {
     expect((await invoke({ verificationId: 'nope', code: '000000' })).statusCode).toBe(410)
+  })
+
+  it('rejects a verification owned by a different Circle session', async () => {
+    const { verificationId, code } = await createVerification({
+      email: 'alice@example.com', address: '0xALICE', userId: 'different-user'
+    })
+
+    const res = await invoke({ verificationId, code })
+
+    expect(res.statusCode).toBe(403)
+    expect(await readBinding('alice@example.com')).toBeNull()
   })
 
   it('rejects non-POST', async () => {

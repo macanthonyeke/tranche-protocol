@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { useAuth } from '../hooks/useAuth.jsx'
 
-/* Collects Tranche's own verification code, the last step before an email
-   becomes payable.
+/* Starts and collects Tranche's own directory verification code.
 
    This is deliberately skippable. The user is already signed in and can use
    every part of the app; what's gated is only whether other people can find
@@ -11,10 +10,13 @@ import { useAuth } from '../hooks/useAuth.jsx'
    buys, so skipping is an informed choice rather than a shrug. */
 export default function VerifyEmailPrompt() {
   const {
+    isSca,
+    email,
     pendingVerification,
     confirmEmailVerification,
     resendEmailVerification,
-    dismissEmailVerification
+    dismissEmailVerification,
+    startDirectoryClaim
   } = useAuth()
 
   const [code, setCode] = useState('')
@@ -22,7 +24,40 @@ export default function VerifyEmailPrompt() {
   const [error, setError] = useState(null)
   const [resent, setResent] = useState(false)
 
-  if (!pendingVerification) return null
+  if (!isSca || !email) return null
+
+  if (!pendingVerification) {
+    const start = async () => {
+      if (busy) return
+      setBusy(true)
+      setError(null)
+      try {
+        await startDirectoryClaim()
+      } catch (err) {
+        setError(err.message || 'Could not start email-directory verification.')
+      } finally {
+        setBusy(false)
+      }
+    }
+
+    return (
+      <div className="card-surface p-5 flex flex-col gap-3">
+        <div>
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-sm font-semibold text-ink">Be findable by email</h3>
+            <span className="text-[11px] uppercase tracking-wide text-ink-3">Optional</span>
+          </div>
+          <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
+            Sign-in is complete. Verify your email only if you want people to find this wallet when they create an escrow.
+          </p>
+        </div>
+        <button type="button" onClick={start} disabled={busy} className="btn-secondary text-sm py-2">
+          {busy ? 'Sending…' : 'Verify for email payments'}
+        </button>
+        {error && <p role="alert" className="text-[12.5px] text-danger leading-relaxed">{error}</p>}
+      </div>
+    )
+  }
 
   const submit = async (e) => {
     e.preventDefault()
