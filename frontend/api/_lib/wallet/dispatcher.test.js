@@ -16,7 +16,7 @@ const stub = (name) => vi.fn(async (req, res) => {
 const handlers = vi.hoisted(() => ({}))
 
 for (const name of [
-  'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+  'balances', 'canary-preflight', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
   'initialize', 'list', 'logout', 'register', 'resend-verification',
   'resolve-email', 'session', 'tx-status', 'verify-email'
 ]) {
@@ -66,7 +66,7 @@ describe('/api/wallet/[...route] dispatch', () => {
   // The consolidation must be invisible from outside: every URL the frontend
   // already calls has to keep resolving to the handler it always did.
   it.each([
-    'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+    'balances', 'canary-preflight', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
     'initialize', 'list', 'logout', 'register', 'resend-verification',
     'resolve-email', 'session', 'tx-status', 'verify-email'
   ])('routes %s to its handler', async (name) => {
@@ -139,7 +139,7 @@ describe('/api/wallet/[...route] dispatch', () => {
     // Every wallet endpoint, by URL alone — the consolidation must not have
     // left any single route behind, which is how this surfaced.
     it.each([
-      'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
+      'balances', 'canary-preflight', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
       'initialize', 'list', 'logout', 'register', 'resend-verification',
       'resolve-email', 'session', 'tx-status', 'verify-email'
     ])('resolves %s from the URL alone', async (name) => {

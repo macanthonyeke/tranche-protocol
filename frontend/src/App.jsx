@@ -22,6 +22,8 @@ const Ledger           = lazy(() => import('./pages/Ledger.jsx'))
 const ArbiterPanel     = lazy(() => import('./pages/ArbiterPanel.jsx'))
 const ProtocolSettings = lazy(() => import('./pages/ProtocolSettings.jsx'))
 const NotFound         = lazy(() => import('./pages/NotFound.jsx'))
+const CANARY_UI_ENABLED = import.meta.env.DEV && import.meta.env.VITE_UCW_CANARY === 'true'
+const UcwCanary = CANARY_UI_ENABLED ? lazy(() => import('./pages/UcwCanary.jsx')) : null
 
 function RouteFallback() {
   return (
@@ -79,6 +81,13 @@ export default function App() {
             <Route path="/arbiter" element={<Shelled><ArbiterPanel /></Shelled>} />
             <Route path="/protocol" element={<Shelled><ProtocolSettings /></Shelled>} />
             <Route path="/settings" element={<Shelled><Settings /></Shelled>} />
+
+            {/* Deliberately absent from normal navigation and unreachable in
+                production builds. The server route has its own independent
+                UCW_CANARY_ENABLED gate. */}
+            {CANARY_UI_ENABLED && (
+              <Route path="/__canary/ucw" element={<Shelled maxWidth="full"><UcwCanary /></Shelled>} />
+            )}
 
             <Route path="*" element={<Shelled><NotFound /></Shelled>} />
           </Routes>
