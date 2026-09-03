@@ -1,0 +1,189 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index f78b46d..15a61e0 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -313,4 +313,3 @@ Found during the Circle confirm-descriptor sweep on `feature/confirm-descriptors
+ - `InvoiceCard.jsx:68`: reads `useAccount`/`useSignMessage` directly instead of going through `useAuth`, so it silently no-ops for UCW users.
+ - `EscrowDetail.jsx:1872`: gated on `window.ethereum`, so UCW users get only a copy-calldata fallback for CCTP self-relay recovery.
+ - `EscrowDetail.jsx`'s `ReceivingAddressEditRow` / `SplitAddressEditRow`: the "Receiving chain" dropdown offers every supported EVM domain plus Arc, even when the escrow (or split leg) currently pays on Arc — a direction F3 guarantees will revert, because those milestones were never floor-validated against the CCTP forwarding fee at deposit (`MilestoneBelowForwardFee` at `TrancheProtocol.sol:982` for the escrow-level path, which fires only when no splits are configured, and `:1033` per split leg). Cross-chain → cross-chain and anything → Arc stay allowed. The confirm screen now warns before signing — `redirectPayoutConfirm` / `redirectSplitConfirm`'s blocked branch — but the honest fix is filtering the unreachable domains out of `domainOptions`, built identically at `:859` and `:905`. Not done this round because it is a behaviour change, not copy. The same root cause surfaces a second time in the row's own `help` text — "You can update this anytime before the escrow is completed or cancelled" — which is equally unqualified. Both spots invite the user to commit to a redirect F3 will reject, and neither discloses the restriction until the final confirm screen.
+-- `EscrowDetail.jsx`'s `SettlementPanel.propose()`: a failed live fee quote aborts the whole settlement. The function calls `resolveMaxFee` first and returns early on any throw, so a transient Circle fee-API outage blocks `mutualSettle` entirely — but `mutualSettle` never reads `maxFee`. The parameter is in the signature and absent from the body (`TrancheProtocol.sol:521-559`); the executing branch burns at the `e.escrowCctpForwardFee` snapshot instead, deliberately, so neither party can pick a fee that strands the other (settled decision #7). So the quote is fetched, passed, and discarded, and its only real effect is a failure mode on a transaction that does not depend on it. The fix is to stop gating this path on the quote — `resolveDispute` and the release paths genuinely need it, `mutualSettle` does not. Related: the same function computes its (discarded) burn estimate from the live `config.protocolFeeBps` rather than the escrow's snapshotted `escrowFeeBps`, which is harmless only because the result is thrown away.
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index d8c7332..ff3120e 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -16,10 +16,7 @@ import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } fr
+ // permissionless one added here must not drift.
+ import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
+ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+-import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+-import { useToast } from '../hooks/useToast.jsx'
+-import { resolveMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+ import {
+@@ -2198,10 +2195,15 @@ function DisputeDetails({ dispute }) {
+  * 1. The caller's `maxFee` is dead. It is in the signature and never read in
+  *    the body — the executing branch burns at e.escrowCctpForwardFee, the
+  *    per-escrow snapshot, precisely so one party cannot pick a fee that
+- *    strands the other's payout (:552-556; settled decision #7). The panel
+- *    still quotes Circle live before submitting and passes it, so the number
+- *    the app fetched is not the number the burn uses. Nothing on this screen
+- *    may present it as a cost.
++ *    strands the other's payout (:552-556; settled decision #7). Round 20
++ *    Phase B removed the live Circle quote this used to fetch before
++ *    submitting — a quote the contract was always going to discard could
++ *    still block a valid proposal on a transient fee-API failure, and it was
++ *    computed from the raw escrow.destinationDomain rather than
++ *    settlementIsCrossChain, so it could also misjudge cross-chain status for
++ *    a non-Arc-root escrow with an all-Arc split. The panel now submits a
++ *    fixed floor value with no network call. Nothing on this screen may
++ *    present it as a cost.
+  *
+  * 2. The protocol fee is escrowFeeBps, snapshotted at deposit, an internal
+  *    mapping with no getter. The only bps the frontend can read is the live
+@@ -2314,6 +2316,19 @@ export function releaseMaxFeePlan({ escrow, splits }) {
+   return { maxFee: escrow.escrowCctpForwardFee ?? 0n }
+ }
+ 
++/* Round 20 Phase B #6. Whether a mutualSettle call proposing `bps` will
++   actually execute the settlement (TrancheProtocol.sol:549's
++   dep.bps == rec.bps condition), from this signer's perspective. The
++   signer's own proposal is about to become `bps` — the only unknown is
++   whether the other side's already-loaded proposal already agrees. Shared
++   between the confirm descriptor's "would settle" vs. "settles now" branch
++   and SettlementPanel.propose's decision to start post-submission delivery
++   tracking, so the two can't drift the way the tracker write used to. */
++export function mutualSettleExecutes(theirs, bps) {
++  const theirBps = theirs?.exists ? Number(theirs.bps) : null
++  return theirBps !== null && theirBps === bps
++}
++
+ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+   const n = milestone.index + 1
+   const of = Number(escrow.milestoneCount) || n
+@@ -2329,7 +2344,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   }
+ 
+   const theirBps = theirs?.exists ? Number(theirs.bps) : null
+-  const matches = theirBps !== null && theirBps === bps
++  const matches = mutualSettleExecutes(theirs, bps)
+ 
+   if (!matches) {
+     // Nothing executes. No `amount` — the figures below are what WOULD happen,
+@@ -2528,8 +2543,6 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+   const { depositorProposal, recipientProposal, isLoading: proposalsLoading, refetch } = useSettlementProposals(
+     escrow.id, milestone.index, escrow.depositor, escrow.recipient
+   )
+-  const { config } = useProtocolConfig()
+-  const toast = useToast()
+ 
+   const mine = role === 'payer' ? depositorProposal : recipientProposal
+   const theirs = role === 'payer' ? recipientProposal : depositorProposal
+@@ -2545,23 +2558,18 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
+   const canSubmit = pctValid && !tx.isBusy && !proposalsLoading
+ 
+-  // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
+-  // Circle's live forwarding fee on the recipient's share, quoted at submit time.
++  // Round 20 Phase B #5: the contract never reads this argument at all
++  // (mutualSettleConfirm's VALUE-MOVING comment #1) — the executing branch
++  // always burns at e.escrowCctpForwardFee regardless of what's submitted.
++  // A live Circle quote here was therefore pure risk with no corresponding
++  // benefit: it could block a valid proposal on a transient fee-API failure,
++  // and it was computed from the raw escrow.destinationDomain rather than
++  // settlementIsCrossChain, so it could also misjudge cross-chain status for
++  // a non-Arc-root escrow with an all-Arc split. Submitting the escrow's own
++  // floor is simplest and exactly as safe, since the value is discarded
++  // either way.
+   const propose = async (bps) => {
+-    let maxFee
+-    try {
+-      const recipientAmount = (milestone.amount * BigInt(bps)) / 10_000n
+-      const feeBps = config?.protocolFeeBps ?? 0n
+-      const protocolFee = (recipientAmount * BigInt(feeBps)) / 10_000n
+-      maxFee = await resolveMaxFee({
+-        destinationDomain: escrow.destinationDomain,
+-        escrowCctpForwardFee: escrow.escrowCctpForwardFee,
+-        burnAmount: recipientAmount - protocolFee
+-      })
+-    } catch (err) {
+-      toast.error(err.message || "Couldn't check delivery fees. Please try again.")
+-      return
+-    }
++    const maxFee = escrow.escrowCctpForwardFee ?? 0n
+     const txHash = await tx.run(
+       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+       {
+@@ -2569,9 +2577,18 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+       }
+     )
++    // Round 20 Phase B #6: a proposal call can succeed on-chain without the
++    // settlement actually executing — dep.bps == rec.bps (TrancheProtocol.
++    // sol:549) may not hold yet if the two sides haven't proposed the same
++    // percentage. Recording a tracker entry for a non-executing proposal
++    // would leave a stale hash the detail page polls forever, since no burn
++    // or credit ever happened for it. mutualSettleExecutes mirrors exactly
++    // the same "would settle" vs. "settles now" check the confirm descriptor
++    // above already made before this was signed.
++    const executed = mutualSettleExecutes(theirs, bps)
+     // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
+     // not the raw escrow.destinationDomain this used to read independently.
+-    const trackingDomain = settlementTrackingDomain(escrow, splits)
++    const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
+     if (txHash && trackingDomain != null) {
+       localStorage.setItem(
+         cctpTrackKey(escrow.id, milestone.index),
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettleExecutes.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettleExecutes.test.jsx
+new file mode 100644
+index 0000000..10321e2
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.mutualSettleExecutes.test.jsx
+@@ -0,0 +1,46 @@
++import { describe, it, expect } from 'vitest'
++
++/* mutualSettleExecutes — Round 20 Phase B #6.
++
++   SettlementPanel.propose used to write a post-submission delivery-tracking
++   entry to localStorage whenever the mutualSettle CALL succeeded on-chain,
++   not whenever it actually EXECUTED a settlement. The contract only executes
++   when both sides' proposals match at the moment this call lands
++   (TrancheProtocol.sol:549, dep.bps == rec.bps) — a proposal that doesn't
++   match the other side's still succeeds as a transaction (it just records
++   the proposal) but moves no funds and starts no CCTP delivery. Recording a
++   tracker entry for that case leaves a stale tx hash the detail page polls
++   forever.
++
++   This is the same match check mutualSettleConfirm already used to decide
++   its "would settle" vs. "settles now" copy — extracted so propose() and the
++   confirm descriptor can't independently drift on what "will this execute"
++   means. */
++import { mutualSettleExecutes } from './EscrowDetail.jsx'
++
++describe('mutualSettleExecutes', () => {
++  it('is false when the other side has not proposed anything yet', () => {
++    expect(mutualSettleExecutes({ exists: false }, 5000)).toBe(false)
++    expect(mutualSettleExecutes(undefined, 5000)).toBe(false)
++    expect(mutualSettleExecutes(null, 5000)).toBe(false)
++  })
++
++  it('is false when the other side proposed a different percentage', () => {
++    expect(mutualSettleExecutes({ exists: true, bps: 4000n }, 5000)).toBe(false)
++  })
++
++  it('is true when the other side already proposed the exact same percentage', () => {
++    expect(mutualSettleExecutes({ exists: true, bps: 5000n }, 5000)).toBe(true)
++  })
++
++  it('matches at the boundaries — 0% and 100%', () => {
++    expect(mutualSettleExecutes({ exists: true, bps: 0n }, 0)).toBe(true)
++    expect(mutualSettleExecutes({ exists: true, bps: 10_000n }, 10_000)).toBe(true)
++  })
++
++  it('handles a BigInt bps on the other side matching a Number bps being proposed', () => {
++    // useSettlementProposals reads bps off-chain as a BigInt; propose()'s own
++    // argument is a plain Number — the comparison has to work across both.
++    expect(mutualSettleExecutes({ exists: true, bps: 3333n }, 3333)).toBe(true)
++  })
++})

@@ -1,0 +1,152 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 9b91e0e..e828190 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -982,7 +982,16 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+   return {
+     ...base,
+     title: 'Change where this escrow pays out',
+-    subtitle: 'Redirects your milestone payments to a different address. This takes effect immediately for everything not yet released.',
++    // Round 16 #1: this used to claim completeness on its own — "takes
++    // effect immediately for everything not yet released" — which is the
++    // same blanket claim Round 15 already removed from the leading
++    // parameter below for making a promise the timeout exception breaks.
++    // Fixing the parameter and leaving the subtitle saying something
++    // different about the same fact is not a fix, it is moving the
++    // contradiction one field over. The subtitle now states only what is
++    // unconditionally true (the redirect writes now); scope and the
++    // exception live in exactly one place, the leading parameter.
++    subtitle: 'Redirects your milestone payments to a different address, effective immediately.',
+     parameters: [
+       `Escrow #${escrow.id}`,
+       `Address: ${oldAddress} → ${newAddress}`,
+@@ -1041,7 +1050,23 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
+       `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+-      'Applies to every milestone not yet released, including any currently in review.',
++      // Round 16 #2: this used to be an unqualified "every milestone not yet
++      // released", identical in shape to the blanket claim Round 15 already
++      // fixed on the no-split screen above — with the actual caveat sitting
++      // in a separate line several lines down. Same bug, same fix: the
++      // caveat is a fact about mechanism, not a footnote, so it belongs in
++      // this always-present leading sentence. NOT phrased as "with one
++      // exception" — unlike the no-split screen's clean exclusion (a
++      // timeout pays the ORIGINAL recipient, full stop), a timeout here is a
++      // partial modification: the split loop reads the live, current
++      // s[i].mintRecipient (TrancheProtocol.sol:609), so the address change
++      // DOES still apply, just always credited on Arc rather than the
++      // configured chain, because that same loop never reads
++      // s[i].destinationDomain at all (:594-610). Calling that "an
++      // exception" reads as a full carve-out to anyone who just saw the
++      // no-split screen's genuine one and would pattern-match this the same
++      // way — it is not.
++      "Applies to every milestone not yet released, including any currently in review. If a milestone times out with no arbiter ruling, this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain; changing the chain alone has no effect there.",
+       // The leg's own exposure, not the escrow's: this row moves one share.
+       // Stated as the pool and the share rather than a multiplied-out figure —
+       // the per-leg amount is computed from each release's post-fee remainder
+@@ -1055,15 +1080,6 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       ...(exposure === null
+         ? []
+         : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
+-      // Round 15 #7: unlike the no-split branch, a timeout DOES honor a
+-      // redirected split ADDRESS — the split loop reads the live, current
+-      // s[i].mintRecipient (TrancheProtocol.sol:609). But that same loop
+-      // never reads s[i].destinationDomain at all; every leg's share lands in
+-      // refundBalances (an Arc credit) regardless of what chain it names
+-      // (:594-610). So an address change here does apply to a timeout
+-      // settlement; a chain change does not — two different answers for the
+-      // two things this one screen lets you redirect together.
+-      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit. It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.",
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+diff --git a/frontend/src/pages/EscrowDetail.redirect.test.jsx b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+index 6574929..0012406 100644
+--- a/frontend/src/pages/EscrowDetail.redirect.test.jsx
++++ b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+@@ -69,6 +69,20 @@ describe('redirectPayoutConfirm — an allowed redirect', () => {
+     expect(paramText(d())).toContain('Milestones already released are unaffected and cannot be recalled.')
+   })
+ 
++  /* Round 16 #1: the subtitle used to independently claim "takes effect
++     immediately for everything not yet released" — the same completeness
++     claim the leading parameter above already states, including its
++     timeout exception. Two fields asserting the same fact is exactly how
++     they drifted apart across rounds (the parameter got the Round 15 fix,
++     the subtitle didn't); the subtitle now states only what's
++     unconditionally true — the write happens now — and defers scope
++     entirely to the parameter tested above. */
++  it('does not duplicate the scope/exception claim in the subtitle', () => {
++    const dd = d()
++    expect(dd.subtitle).not.toMatch(/everything not yet released|every milestone/i)
++    expect(dd.subtitle).toBe('Redirects your milestone payments to a different address, effective immediately.')
++  })
++
+   it('names the real function', () => {
+     expect(d().functionName).toBe('updateReceivingAddress')
+   })
+@@ -240,11 +254,32 @@ describe('redirectSplitConfirm', () => {
+      reach a timeout settlement. What it never reads is destinationDomain
+      (:594-610): every leg's timeout share lands in refundBalances (an Arc
+      credit) no matter what chain is configured. Two different answers for
+-     the two things this screen redirects together, so both need saying. */
+-  it('says a timeout honors the updated address but always as an Arc credit, ignoring the chain', () => {
++     the two things this screen redirects together, so both need saying.
++
++     Round 16 #2: this used to be its own separate line, appended after an
++     unqualified "every milestone not yet released" leading sentence — the
++     same split-across-two-fields shape Round 15 already fixed on the
++     no-split screen (see 'does not duplicate the scope/exception claim in
++     the subtitle' above). Now folded into the leading sentence itself: one
++     place states scope, and it is never wrong about what it covers.
++
++     Deliberately NOT phrased as "with one exception" — unlike the no-split
++     screen's clean exclusion (a timeout pays the original recipient, full
++     stop), this is a partial modification: the address change still
++     applies at timeout, only the chain doesn't. "Exception" reads as a full
++     carve-out to anyone who just saw the no-split screen's genuine one. */
++  it('says a timeout still honors the updated address, but always credited on Arc rather than the configured chain', () => {
+     const t = paramText(d())
+-    expect(t).toContain("A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit.")
+-    expect(t).toContain('It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.')
++    expect(t).toContain("If a milestone times out with no arbiter ruling, this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain")
++    expect(t).toContain('changing the chain alone has no effect there.')
++  })
++
++  it('folds the caveat into the SAME parameter as the scope claim, not a separate one, and does not call it an exception', () => {
++    const scopeLine = d().parameters.find((p) => p.startsWith('Applies to every milestone'))
++    expect(scopeLine).toBeDefined()
++    expect(scopeLine).toContain('is still honored')
++    expect(scopeLine).toContain('always credited on Arc')
++    expect(scopeLine).not.toMatch(/exception/i)
+   })
+ })
+ 
+diff --git a/frontend/src/pages/phaseD.test.jsx b/frontend/src/pages/phaseD.test.jsx
+index 462b703..94ae805 100644
+--- a/frontend/src/pages/phaseD.test.jsx
++++ b/frontend/src/pages/phaseD.test.jsx
+@@ -240,10 +240,18 @@ describe('#18.3 — a redirect states what it is worth', () => {
+   /* Round 15 #7: distinct from the address-recipient issue above — this is
+      about the destination CHAIN specifically, and (like the #6/#8 leading
+      sentence) it's a mechanism fact rather than a number, so it stays present
+-     even when the ceiling figure is omitted for lack of milestone data. */
++     even when the ceiling figure is omitted for lack of milestone data.
++
++     Round 16 #2: this used to be its own separate caveat, appended after an
++     unqualified "every milestone" leading sentence — the same
++     scope-in-one-field, caveat-in-another split Round 15 already fixed on
++     the no-split screen. Now folded into the leading sentence itself, so
++     it is checked as part of that unconditional parameter rather than a
++     standalone line — and deliberately not phrased as an "exception", since
++     the address change still applies at timeout; only the chain doesn't. */
+   it('keeps the destination-chain-ignored-at-timeout caveat even when milestones are unavailable', () => {
+-    expect(paramText(split({ milestones: [] }))).toContain(
+-      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit."
+-    )
++    const t = paramText(split({ milestones: [] }))
++    expect(t).toContain("this leg's updated address is still honored — but always credited on Arc, since a timeout never reads the destination chain")
++    expect(t).toContain('changing the chain alone has no effect there.')
+   })
+ })

@@ -12,6 +12,7 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 
 const accountMock = vi.hoisted(() => ({ current: { address: undefined, isConnected: false } }))
 const disconnect = vi.hoisted(() => vi.fn())
+const toastMock = vi.hoisted(() => ({ success: vi.fn() }))
 
 // Full mock, not partial: useAuth.jsx imports 'wagmi' directly and never
 // touches config/wagmi.js, so there is no createConfig side effect to preserve.
@@ -19,6 +20,8 @@ vi.mock('wagmi', () => ({
   useAccount: () => accountMock.current,
   useDisconnect: () => ({ disconnect })
 }))
+
+vi.mock('./useToast.jsx', () => ({ useToast: () => toastMock }))
 
 // Only reached by the executeContractCall test below; the restore tests never
 // construct an SDK.
@@ -72,6 +75,7 @@ function seed({ issuedDaysAgo, activityDaysAgo }) {
 beforeEach(() => {
   localStorage.clear()
   disconnect.mockReset()
+  toastMock.success.mockReset()
   executeSpy.mockReset()
   accountMock.current = { address: undefined, isConnected: false }
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -292,6 +296,170 @@ describe('activity on real use', () => {
     expect(response).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
     expect(result.current.isConnected).toBe(false)
     expect(result.current.onboarding).toBe(false)
+  })
+
+  it('refreshes the email-directory binding from the authenticated session', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com', verified: true, choice: 'verified', boundAt: 123
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.refreshDirectoryBinding() })
+
+    expect(result.current.directoryBindingStatus).toBe('verified')
+    expect(result.current.directoryChoice).toBe('verified')
+    expect(result.current.directoryBinding).toMatchObject({
+      email: 'freelancer@example.com', verified: true, boundAt: 123
+    })
+    const refresh = calls.find(({ path, body }) =>
+      path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'status'
+    )
+    expect(JSON.parse(refresh.body)).toMatchObject({
+      action: 'status', email: 'freelancer@example.com'
+    })
+  })
+
+  it('refreshes binding state immediately after successful verification', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        const body = JSON.parse(options.body)
+        if (body.action === 'status') {
+          return { ok: true, json: async () => ({
+            email: 'freelancer@example.com', verified: true, choice: 'verified', boundAt: 456
+          }) }
+        }
+        return { ok: true, json: async () => ({
+          verificationRequired: true,
+          verificationId: 'verification-1',
+          email: 'freelancer@example.com',
+          expiresInMinutes: 15
+        }) }
+      }
+      if (path === '/api/wallet/verify-email') {
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com',
+          address: '0x1111111111111111111111111111111111111111',
+          verified: true
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.startDirectoryClaim() })
+    await act(async () => { await result.current.confirmEmailVerification('123456') })
+
+    expect(result.current.pendingVerification).toBeNull()
+    expect(result.current.directoryBindingStatus).toBe('verified')
+    expect(result.current.directoryChoice).toBe('verified')
+    expect(result.current.directoryBinding).toMatchObject({
+      email: 'freelancer@example.com', verified: true, boundAt: 456
+    })
+    expect(calls.some(({ path, body }) =>
+      path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'status'
+    )).toBe(true)
+    expect(toastMock.success).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes email discoverability through the authenticated binding action', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        const body = JSON.parse(options.body)
+        if (body.action === 'status') {
+          return { ok: true, json: async () => ({
+            email: 'freelancer@example.com', verified: true, choice: 'verified', boundAt: 456
+          }) }
+        }
+        return { ok: true, json: async () => ({
+          email: 'freelancer@example.com', removed: true, verified: false, choice: 'removed'
+        }) }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.removeDirectoryBinding() })
+
+    expect(result.current.directoryBindingStatus).toBe('unverified')
+    expect(result.current.directoryChoice).toBe('removed')
+    expect(result.current.directoryBinding).toBeNull()
+    const removal = calls.find(({ path, body }) => path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'remove')
+    expect(JSON.parse(removal.body)).toEqual({
+      action: 'remove', email: 'freelancer@example.com'
+    })
+  })
+
+  it('persists Skip for now without calling verification or removal', async () => {
+    seed({ issuedDaysAgo: 1, activityDaysAgo: 1 })
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path, options = {}) => {
+      calls.push({ path, body: options.body })
+      if (path === '/api/wallet/session') {
+        return { ok: true, json: async () => ({ authenticated: true, session: {
+          walletId: 'wallet-1',
+          walletAddress: '0x1111111111111111111111111111111111111111'
+        } }) }
+      }
+      if (path === '/api/wallet/directory-claim') {
+        const body = JSON.parse(options.body)
+        if (body.action === 'skip') {
+          return { ok: true, json: async () => ({
+            email: 'freelancer@example.com', verified: false, choice: 'skipped'
+          }) }
+        }
+      }
+      throw new Error(`unexpected request ${path}`)
+    }))
+
+    const { result } = renderHook(() => useAuth(), { wrapper })
+    await waitFor(() => expect(result.current.isConnected).toBe(true))
+
+    await act(async () => { await result.current.skipDirectoryPrompt() })
+
+    expect(result.current.directoryChoice).toBe('skipped')
+    expect(result.current.directoryBinding).toBeNull()
+    expect(calls.some(({ path, body }) => path === '/api/wallet/verify-email')).toBe(false)
+    expect(calls.some(({ path, body }) => path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'remove')).toBe(false)
+    const skip = calls.find(({ path, body }) => path === '/api/wallet/directory-claim' && JSON.parse(body).action === 'skip')
+    expect(JSON.parse(skip.body)).toEqual({ action: 'skip', email: 'freelancer@example.com' })
   })
 
   /* The stamp has to land on an approved transaction, or an active user gets

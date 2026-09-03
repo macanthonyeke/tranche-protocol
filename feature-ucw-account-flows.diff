@@ -1,0 +1,1530 @@
+diff --git a/frontend/.env.example b/frontend/.env.example
+index 2bc223b..3a8e9b7 100644
+--- a/frontend/.env.example
++++ b/frontend/.env.example
+@@ -62,6 +62,11 @@ VITE_CIRCLE_APP_ID=
+ # including the future native mode, fails closed to circle.
+ VITE_UCW_CONFIRM_MODE=circle
+ 
++# Test/dev-only Phase 2 UCW batch preflight. The page also requires a Vite
++# development build, and the server route independently requires the matching
++# non-VITE flag below. This surface never creates a Circle challenge.
++VITE_UCW_CANARY=false
++
+ # Server-side only (read by api/wallet/* — do NOT prefix with VITE_). Circle
+ # API key for User-Controlled Wallets. This can mint a session token for ANY
+ # user in the app, so leaking it compromises every email-onboarded wallet —
+@@ -69,6 +74,15 @@ VITE_UCW_CONFIRM_MODE=circle
+ # project's environment variables, not just here.
+ CIRCLE_API_KEY=
+ 
++# Canonical Circle-user -> Tranche-wallet registry rollout. Keep the default
++# migration mode until existing-session coverage is verified; switch to strict
++# only as an intentional deployment decision. Supported values: shadow,
++# dual-write, strict.
++TRANCHE_IDENTITY_MODE=dual-write
++
++# Server-side only. Keep false outside an isolated local canary session.
++UCW_CANARY_ENABLED=false
++
+ # Upstash Redis credentials backing the email -> Arc address directory that
+ # lets a payer address an escrow to a freelancer by email, and holding pending
+ # email verifications (api/_lib/redis.js). Injected automatically when you add
+diff --git a/frontend/api/_lib/authSession.js b/frontend/api/_lib/authSession.js
+index 381aa17..5b46142 100644
+--- a/frontend/api/_lib/authSession.js
++++ b/frontend/api/_lib/authSession.js
+@@ -6,6 +6,7 @@
+ 
+ import { createHash, randomBytes } from 'node:crypto'
+ import { kv } from './redis.js'
++import { backfillIdentityFromSession } from './identityRegistry.js'
+ 
+ export const AUTH_COOKIE_NAME = 'tranche_session'
+ export const SESSION_TTL_SECONDS = 13 * 24 * 60 * 60
+@@ -124,6 +125,15 @@ export async function getAuthSession(req, { touch = true, now = nowMs() } = {})
+     return null
+   }
+ 
++  // Migration is best effort. A valid server session remains usable if a
++  // registry write is temporarily unavailable; strict registry enforcement is
++  // enabled separately only after coverage has been verified.
++  try {
++    await backfillIdentityFromSession(record)
++  } catch {
++    // Do not turn a migration write failure into an auth outage.
++  }
++
+   if (touch) {
+     const touched = { ...record, lastSeenAt: now }
+     const remaining = Math.max(1, Math.ceil((record.expiresAt - now) / 1000))
+diff --git a/frontend/api/_lib/circle.js b/frontend/api/_lib/circle.js
+index bf089d6..d009d41 100644
+--- a/frontend/api/_lib/circle.js
++++ b/frontend/api/_lib/circle.js
+@@ -72,8 +72,21 @@ export async function getArcWallet(userToken) {
+   const res = await circle.listWallets({ userToken, blockchain: ARC_BLOCKCHAIN })
+   const wallets = res?.data?.wallets ?? []
+   // LIVE only: a FROZEN wallet can't transact, so treating it as onboarded
+-  // would hand out an address that silently fails to receive an escrow.
+-  const wallet = wallets.find((w) => w.state === 'LIVE' && w.address)
++  // would hand out an address that silently fails to receive an escrow. The
++  // account type is checked here too: an Arc EOA is not the sponsored SCA
++  // identity this email flow is allowed to authenticate.
++  const wallet = wallets.find((w) =>
++    w.state === 'LIVE' &&
++    w.id &&
++    w.address &&
++    w.blockchain === ARC_BLOCKCHAIN &&
++    w.accountType === ACCOUNT_TYPE
++  )
+   if (!wallet) return null
+-  return { id: wallet.id, address: wallet.address }
++  return {
++    id: wallet.id,
++    address: wallet.address,
++    blockchain: wallet.blockchain,
++    accountType: wallet.accountType
++  }
+ }
+diff --git a/frontend/api/_lib/emailWallets.js b/frontend/api/_lib/emailWallets.js
+index 2b4a336..f8a95f6 100644
+--- a/frontend/api/_lib/emailWallets.js
++++ b/frontend/api/_lib/emailWallets.js
+@@ -53,6 +53,16 @@ export class EmailWalletError extends Error {
+   }
+ }
+ 
++export const LOGIN_INTENTS = Object.freeze({
++  SIGNUP: 'signup',
++  SIGNIN: 'signin'
++})
++
++export function normalizeLoginIntent(intent) {
++  if (intent === LOGIN_INTENTS.SIGNUP || intent === LOGIN_INTENTS.SIGNIN) return intent
++  return null
++}
++
+ // Deliberately conservative: trim + lowercase only. No gmail-style dot or
+ // plus-tag folding — treating alice+work@ and alice@ as the same person would
+ // merge two identities the user may well intend to keep separate, and
+@@ -79,12 +89,16 @@ const SESSION_TTL_SECONDS = 15 * 60
+  * Record which email an OTP was sent to for the login attempt. Returns the
+  * opaque id the client echoes back.
+  * @param {string} sessionId
+- * @param {{ email: string, deviceId: string }} data
++ * @param {{ email: string, deviceId: string, intent: 'signup' | 'signin' }} data
+  */
+-export async function putOtpSession(sessionId, { email, deviceId }) {
++export async function putOtpSession(sessionId, { email, deviceId, intent }) {
++  const loginIntent = normalizeLoginIntent(intent)
++  if (!loginIntent) throw new EmailWalletError('A valid login intent is required.')
+   await kv.set(
+     sessionKey(sessionId),
+-    { email, deviceId, createdAt: Date.now() },
++    // The intent is written once with the attempt. Later steps only read it;
++    // no browser field is accepted by initialize or complete-login.
++    { email, deviceId, intent: loginIntent, createdAt: Date.now() },
+     { ex: SESSION_TTL_SECONDS }
+   )
+ }
+@@ -102,7 +116,7 @@ export async function peekOtpSession(sessionId) {
+  * Consume an OTP session. Single-use: the record is deleted as it's read, so
+  * one OTP send can never seed more than one binding.
+  * @param {string} sessionId
+- * @returns {Promise<{ email: string, deviceId: string } | null>}
++ * @returns {Promise<{ email: string, deviceId: string, intent: string } | null>}
+  */
+ export async function takeOtpSession(sessionId) {
+   const key = sessionKey(sessionId)
+diff --git a/frontend/api/_lib/emailWallets.test.js b/frontend/api/_lib/emailWallets.test.js
+index 3d3e7b7..08f988e 100644
+--- a/frontend/api/_lib/emailWallets.test.js
++++ b/frontend/api/_lib/emailWallets.test.js
+@@ -15,6 +15,8 @@ vi.mock('./redis.js', () => ({
+ 
+ const {
+   normalizeEmail,
++  normalizeLoginIntent,
++  LOGIN_INTENTS,
+   putOtpSession,
+   takeOtpSession,
+   readBinding,
+@@ -50,19 +52,29 @@ describe('normalizeEmail', () => {
+ 
+ describe('OTP sessions', () => {
+   it('round-trips the email the server sent the code to', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
++    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', intent: LOGIN_INTENTS.SIGNIN })
+     const session = await takeOtpSession('sess-1')
+     expect(session.email).toBe('alice@example.com')
+     expect(session.deviceId).toBe('dev-1')
++    expect(session.intent).toBe('signin')
+   })
+ 
+   // Single-use is what stops one OTP send from seeding more than one binding.
+   it('is single-use — a replayed sessionId gets nothing', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
++    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', intent: LOGIN_INTENTS.SIGNUP })
+     expect(await takeOtpSession('sess-1')).not.toBeNull()
+     expect(await takeOtpSession('sess-1')).toBeNull()
+   })
+ 
++  it('accepts only the two server-owned login intents', async () => {
++    expect(normalizeLoginIntent('signup')).toBe('signup')
++    expect(normalizeLoginIntent('signin')).toBe('signin')
++    expect(normalizeLoginIntent('create')).toBeNull()
++    await expect(putOtpSession('sess-1', {
++      email: 'alice@example.com', deviceId: 'dev-1', intent: 'create'
++    })).rejects.toThrow(/login intent/i)
++  })
++
+   it('returns null for an unknown session', async () => {
+     expect(await takeOtpSession('never-existed')).toBeNull()
+   })
+diff --git a/frontend/api/_lib/identityRegistry.js b/frontend/api/_lib/identityRegistry.js
+new file mode 100644
+index 0000000..b19ac37
+--- /dev/null
++++ b/frontend/api/_lib/identityRegistry.js
+@@ -0,0 +1,137 @@
++// Canonical Tranche identity records for Circle User-Controlled Wallets.
++//
++// The Circle user id is the authentication subject. Email is deliberately not
++// present here: the optional Resend-backed directory is an address alias, not
++// an identity registry. Wallet fields are written from Circle responses only.
++
++import { kv } from './redis.js'
++
++export const IDENTITY_MODES = Object.freeze({
++  SHADOW: 'shadow',
++  DUAL_WRITE: 'dual-write',
++  STRICT: 'strict'
++})
++
++export const IDENTITY_STATUS = Object.freeze({
++  ACTIVE: 'active',
++  DISABLED: 'disabled'
++})
++
++export class IdentityRegistryError extends Error {
++  constructor(message, status = 503, code = 'TRANCHE_IDENTITY_UNAVAILABLE') {
++    super(message)
++    this.status = status
++    this.code = code
++  }
++}
++
++const identityKey = (circleUserId) => `tranche:identity:${circleUserId}`
++
++function required(value, field) {
++  if (typeof value !== 'string' || !value.trim()) {
++    throw new IdentityRegistryError(`Canonical identity ${field} is missing.`, 502)
++  }
++  return value.trim()
++}
++
++export function getIdentityMode(value = process.env.TRANCHE_IDENTITY_MODE) {
++  const mode = typeof value === 'string' ? value.trim().toLowerCase() : ''
++  if (Object.values(IDENTITY_MODES).includes(mode)) return mode
++  // Migration must remain non-blocking until coverage is explicitly verified.
++  return IDENTITY_MODES.DUAL_WRITE
++}
++
++export async function readTrancheIdentity(circleUserId) {
++  const id = required(circleUserId, 'Circle user ID')
++  const record = await kv.get(identityKey(id))
++  if (!record) return null
++  if (record.circleUserId !== id) {
++    throw new IdentityRegistryError(
++      'The canonical identity registry record is invalid.',
++      503,
++      'TRANCHE_IDENTITY_INVALID'
++    )
++  }
++  return record
++}
++
++function sameWallet(identity, wallet) {
++  return identity?.walletId === wallet?.walletId &&
++    typeof identity?.walletAddress === 'string' &&
++    identity.walletAddress.toLowerCase() === String(wallet?.walletAddress || '').toLowerCase() &&
++    identity.blockchain === wallet?.blockchain &&
++    identity.accountType === wallet?.accountType
++}
++
++export function identityMatchesWallet(identity, { circleUserId, wallet }) {
++  return !!identity &&
++    identity.circleUserId === circleUserId &&
++    identity.status === IDENTITY_STATUS.ACTIVE &&
++    sameWallet(identity, wallet)
++}
++
++/**
++ * Register the Circle subject and the exact Circle wallet it owns.
++ *
++ * Registration is idempotent for the same canonical identity. Wallet fields
++ * are immutable: a later login cannot silently move a Circle user to another
++ * wallet or chain.
++ */
++export async function registerTrancheIdentity({
++  circleUserId,
++  walletId,
++  walletAddress,
++  blockchain,
++  accountType,
++  status = IDENTITY_STATUS.ACTIVE
++}, { now = Date.now(), source = 'signup' } = {}) {
++  const identity = {
++    circleUserId: required(circleUserId, 'Circle user ID'),
++    walletId: required(walletId, 'wallet ID'),
++    walletAddress: required(walletAddress, 'wallet address'),
++    blockchain: required(blockchain, 'blockchain'),
++    accountType: required(accountType, 'account type'),
++    status: required(status, 'status'),
++  }
++  const existing = await readTrancheIdentity(identity.circleUserId)
++
++  if (existing) {
++    if (!sameWallet(existing, identity) || existing.status !== identity.status) {
++      throw new IdentityRegistryError(
++        'This Circle wallet does not match its canonical Tranche identity.',
++        409,
++        'TRANCHE_IDENTITY_CONFLICT'
++      )
++    }
++    return existing
++  }
++
++  const record = {
++    version: 1,
++    ...identity,
++    source: required(source, 'source'),
++    createdAt: now,
++    updatedAt: now
++  }
++  await kv.set(identityKey(record.circleUserId), record)
++  return record
++}
++
++// Existing server sessions were minted only after Circle user/wallet
++// validation. They are therefore the safest migration source available to a
++// stateless serverless deployment. Backfill is intentionally idempotent and
++// never changes an existing record.
++export async function backfillIdentityFromSession(session) {
++  if (!session?.circleUserId || !session?.walletId || !session?.walletAddress) return null
++  return registerTrancheIdentity({
++    circleUserId: session.circleUserId,
++    walletId: session.walletId,
++    walletAddress: session.walletAddress,
++    blockchain: session.blockchain,
++    accountType: session.accountType
++  }, { source: 'session-backfill' })
++}
++
++export function identityStorageKeyForTest(circleUserId) {
++  return identityKey(circleUserId)
++}
+diff --git a/frontend/api/_lib/identityRegistry.test.js b/frontend/api/_lib/identityRegistry.test.js
+new file mode 100644
+index 0000000..dd82135
+--- /dev/null
++++ b/frontend/api/_lib/identityRegistry.test.js
+@@ -0,0 +1,111 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++
++vi.mock('./redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++const {
++  IDENTITY_MODES,
++  IDENTITY_STATUS,
++  getIdentityMode,
++  readTrancheIdentity,
++  registerTrancheIdentity,
++  backfillIdentityFromSession,
++  identityMatchesWallet,
++  identityStorageKeyForTest,
++  IdentityRegistryError
++} = await import('./identityRegistry.js')
++
++const IDENTITY = {
++  circleUserId: 'circle-user-1',
++  walletId: 'wallet-1',
++  walletAddress: '0x1111111111111111111111111111111111111111',
++  blockchain: 'ARC-TESTNET',
++  accountType: 'SCA'
++}
++
++beforeEach(() => {
++  store.clear()
++  vi.unstubAllEnvs()
++})
++
++afterEach(() => vi.unstubAllEnvs())
++
++describe('canonical Tranche identity registry', () => {
++  it('stores the Circle subject and immutable wallet fields', async () => {
++    const record = await registerTrancheIdentity(IDENTITY, { now: 1_000, source: 'signup' })
++
++    expect(record).toMatchObject({
++      version: 1,
++      ...IDENTITY,
++      status: IDENTITY_STATUS.ACTIVE,
++      source: 'signup',
++      createdAt: 1_000,
++      updatedAt: 1_000
++    })
++    expect(await readTrancheIdentity(IDENTITY.circleUserId)).toEqual(record)
++    expect(store.get(identityStorageKeyForTest(IDENTITY.circleUserId))).toEqual(record)
++  })
++
++  it('is idempotent for the same wallet and rejects a wallet change', async () => {
++    const first = await registerTrancheIdentity(IDENTITY, { now: 1_000 })
++    const second = await registerTrancheIdentity(IDENTITY, { now: 2_000 })
++    expect(second).toEqual(first)
++
++    await expect(registerTrancheIdentity({
++      ...IDENTITY,
++      walletId: 'wallet-attacker',
++      walletAddress: '0x2222222222222222222222222222222222222222'
++    })).rejects.toMatchObject({
++      status: 409,
++      code: 'TRANCHE_IDENTITY_CONFLICT'
++    })
++    await expect(registerTrancheIdentity({ ...IDENTITY, walletId: 'wallet-attacker' }))
++      .rejects.toBeInstanceOf(IdentityRegistryError)
++  })
++
++  it('matches only an active canonical identity and its exact wallet tuple', async () => {
++    const record = await registerTrancheIdentity(IDENTITY)
++    expect(identityMatchesWallet(record, { circleUserId: IDENTITY.circleUserId, wallet: IDENTITY })).toBe(true)
++    expect(identityMatchesWallet(record, {
++      circleUserId: IDENTITY.circleUserId,
++      wallet: { ...IDENTITY, walletAddress: IDENTITY.walletAddress.toUpperCase() }
++    })).toBe(true)
++    expect(identityMatchesWallet(record, {
++      circleUserId: 'other-user', wallet: IDENTITY
++    })).toBe(false)
++    expect(identityMatchesWallet(record, {
++      circleUserId: IDENTITY.circleUserId,
++      wallet: { ...IDENTITY, accountType: 'EOA' }
++    })).toBe(false)
++  })
++
++  it('backfills a valid existing server session without changing it later', async () => {
++    const record = await backfillIdentityFromSession({
++      ...IDENTITY,
++      issuedAt: 1_000,
++      lastSeenAt: 1_000
++    })
++    expect(record.source).toBe('session-backfill')
++    expect(await backfillIdentityFromSession({
++      ...IDENTITY,
++      issuedAt: 2_000,
++      lastSeenAt: 2_000
++    })).toEqual(record)
++  })
++
++  it('defaults to migration-safe dual-write and recognizes strict mode', () => {
++    expect(getIdentityMode('unknown')).toBe(IDENTITY_MODES.DUAL_WRITE)
++    expect(getIdentityMode()).toBe(IDENTITY_MODES.DUAL_WRITE)
++    expect(getIdentityMode('strict')).toBe(IDENTITY_MODES.STRICT)
++    expect(getIdentityMode('shadow')).toBe(IDENTITY_MODES.SHADOW)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/complete-login.js b/frontend/api/_lib/wallet/complete-login.js
+index 8a74012..87e5022 100644
+--- a/frontend/api/_lib/wallet/complete-login.js
++++ b/frontend/api/_lib/wallet/complete-login.js
+@@ -1,16 +1,55 @@
+ // POST /api/wallet/complete-login — turn a verified Circle OTP attempt into
+ // a Tranche server session.
+ //
+-// This is the only point where a Tranche auth session is minted. The email in
+-// the OTP attempt is deliberately not used as an identity claim: Circle has
+-// verified the login and this route derives the user ID and Arc wallet from
+-// Circle's token. Email-directory binding is a separate, explicit flow.
++// This is the only point where a Tranche auth session is minted. The browser
++// supplies only the opaque attempt id and Circle user token; the attempt's
++// intent was fixed by /email-token and is never read from the completion body.
+ 
+ import { getArcWallet, getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE } from '../circle.js'
+ import { createAuthSession, publicAuthSession, setAuthCookie } from '../authSession.js'
+-import { restoreOtpSession, takeOtpSession } from '../emailWallets.js'
++import {
++  getIdentityMode,
++  IDENTITY_MODES,
++  identityMatchesWallet,
++  readTrancheIdentity,
++  registerTrancheIdentity
++} from '../identityRegistry.js'
++import { LOGIN_INTENTS, restoreOtpSession, takeOtpSession } from '../emailWallets.js'
+ import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
++export const TRANCHE_ACCOUNT_NOT_FOUND = 'TRANCHE_ACCOUNT_NOT_FOUND'
++
++function accountNotFound() {
++  // This response is intentionally returned only after Circle has accepted the
++  // OTP and the server has validated the Circle user token. Before that point
++  // the email endpoint has no account-existence branch.
++  return { code: TRANCHE_ACCOUNT_NOT_FOUND, next: 'signup' }
++}
++
++function walletIdentity(circleUserId, wallet) {
++  if (
++    !wallet?.id ||
++    !wallet.address ||
++    wallet.blockchain !== ARC_BLOCKCHAIN ||
++    wallet.accountType !== ACCOUNT_TYPE
++  ) {
++    throw new RequestError('Could not verify your Arc wallet. Please try again.', 502)
++  }
++  return {
++    circleUserId,
++    walletId: wallet.id,
++    walletAddress: wallet.address,
++    blockchain: wallet.blockchain,
++    accountType: wallet.accountType
++  }
++}
++
++async function mintSession(identity, res) {
++  const { token, record } = await createAuthSession(identity)
++  setAuthCookie(res, token)
++  return publicAuthSession(record)
++}
++
+ export default postRoute(async (body, _req, res) => {
+   const attemptId = requireString(body, 'sessionId', { max: 128 })
+   const userToken = requireString(body, 'userToken')
+@@ -18,6 +57,9 @@ export default postRoute(async (body, _req, res) => {
+   if (!attempt) {
+     throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
+   }
++  if (attempt.intent !== LOGIN_INTENTS.SIGNUP && attempt.intent !== LOGIN_INTENTS.SIGNIN) {
++    throw new RequestError('This sign-in session is invalid. Please sign in again.', 410)
++  }
+ 
+   const circle = getCircleClient()
+   const status = await circle.getUserStatus({ userToken })
+@@ -27,21 +69,46 @@ export default postRoute(async (body, _req, res) => {
+   }
+ 
+   const wallet = await getArcWallet(userToken)
+-  if (!wallet) {
+-    // Wallet indexing after an initialization challenge is a normal transient
+-    // race. Restore the original attempt TTL so the browser can retry.
+-    await restoreOtpSession(attemptId, attempt)
+-    throw new RequestError('Your wallet is still being created. Please try again in a moment.', 409)
++  const current = wallet ? walletIdentity(circleUserId, wallet) : null
++
++  if (attempt.intent === LOGIN_INTENTS.SIGNUP) {
++    if (!current) {
++      // Wallet indexing after an initialization challenge is a normal
++      // transient race. Restore the original attempt TTL so the browser can
++      // retry without getting a fresh OTP.
++      await restoreOtpSession(attemptId, attempt)
++      throw new RequestError('Your wallet is still being created. Please try again in a moment.', 409)
++    }
++
++    const identity = await registerTrancheIdentity(current, { source: 'signup' })
++    return { session: await mintSession(identity, res), next: 'onboarding' }
+   }
+ 
+-  const { token, record } = await createAuthSession({
+-    circleUserId,
+-    walletId: wallet.id,
+-    walletAddress: wallet.address,
+-    blockchain: ARC_BLOCKCHAIN,
+-    accountType: ACCOUNT_TYPE
+-  })
+-  setAuthCookie(res, token)
++  // Signin never initializes a wallet. No live eligible wallet is the same
++  // safe post-auth outcome as a missing registry record.
++  if (!current) return accountNotFound()
++
++  let identity = await readTrancheIdentity(circleUserId)
++  if (identity && !identityMatchesWallet(identity, { circleUserId, wallet: current })) {
++    throw new RequestError(
++      'Your Circle wallet does not match its Tranche identity. Please contact support.',
++      409
++    )
++  }
++
++  if (!identity) {
++    const mode = getIdentityMode()
++    if (mode === IDENTITY_MODES.STRICT) return accountNotFound()
++
++    // Migration modes preserve access for users created before the registry.
++    // dual-write records the already-live Circle wallet immediately. shadow
++    // leaves the legacy session path intact; the normal session read then
++    // backfills it opportunistically.
++    if (mode === IDENTITY_MODES.DUAL_WRITE) {
++      identity = await registerTrancheIdentity(current, { source: 'legacy-signin' })
++    }
++  }
+ 
+-  return { session: publicAuthSession(record) }
++  const sessionIdentity = identity ?? current
++  return { session: await mintSession(sessionIdentity, res), next: 'app' }
+ })
+diff --git a/frontend/api/_lib/wallet/complete-login.test.js b/frontend/api/_lib/wallet/complete-login.test.js
+index cf7260a..b34217e 100644
+--- a/frontend/api/_lib/wallet/complete-login.test.js
++++ b/frontend/api/_lib/wallet/complete-login.test.js
+@@ -1,6 +1,6 @@
+ // @vitest-environment node
+ 
+-import { describe, it, expect, vi, beforeEach } from 'vitest'
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ 
+ const store = vi.hoisted(() => new Map())
+ const circleMock = vi.hoisted(() => ({
+@@ -21,8 +21,15 @@ vi.mock('../circle.js', async (importOriginal) => ({
+   getCircleClient: () => circleMock,
+   getArcWallet: async (userToken) => {
+     const response = await circleMock.listWallets({ userToken, blockchain: 'ARC-TESTNET' })
+-    const wallet = (response?.data?.wallets ?? []).find((item) => item.state === 'LIVE' && item.address)
+-    return wallet ? { id: wallet.id, address: wallet.address } : null
++    const wallet = (response?.data?.wallets ?? []).find((item) =>
++      item.state === 'LIVE' && item.address && item.blockchain === 'ARC-TESTNET' && item.accountType === 'SCA'
++    )
++    return wallet ? {
++      id: wallet.id,
++      address: wallet.address,
++      blockchain: wallet.blockchain,
++      accountType: wallet.accountType
++    } : null
+   }
+ }))
+ 
+@@ -47,13 +54,22 @@ beforeEach(() => {
+   circleMock.listWallets.mockReset()
+   circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
+   circleMock.listWallets.mockResolvedValue({
+-    data: { wallets: [{ id: 'wallet-1', address: '0x1111111111111111111111111111111111111111', state: 'LIVE' }] }
++    data: { wallets: [{
++      id: 'wallet-1',
++      address: '0x1111111111111111111111111111111111111111',
++      blockchain: 'ARC-TESTNET',
++      accountType: 'SCA',
++      state: 'LIVE'
++    }] }
+   })
++  vi.stubEnv('TRANCHE_IDENTITY_MODE', 'dual-write')
+ })
+ 
++afterEach(() => vi.unstubAllEnvs())
++
+ describe('POST /api/wallet/complete-login', () => {
+   it('validates Circle identity and mints one sanitized Tranche session', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+ 
+     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+ 
+@@ -64,13 +80,14 @@ describe('POST /api/wallet/complete-login', () => {
+       walletAddress: '0x1111111111111111111111111111111111111111',
+       accountType: 'SCA'
+     })
++    expect(res.payload.next).toBe('onboarding')
+     expect(res.payload.session).not.toHaveProperty('circleUserId')
+     expect(res.headers['Set-Cookie']).toContain('tranche_session=')
+     expect(await takeOtpSession('attempt-1')).toBeNull()
+   })
+ 
+   it('does not call Resend or bind the OTP email', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+ 
+     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+ 
+@@ -79,7 +96,7 @@ describe('POST /api/wallet/complete-login', () => {
+   })
+ 
+   it('restores the attempt when Circle wallet indexing is still pending', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+     circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
+ 
+     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+@@ -89,7 +106,7 @@ describe('POST /api/wallet/complete-login', () => {
+   })
+ 
+   it('rejects a Circle token that has no verified user', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+     circleMock.getUserStatus.mockResolvedValue({ data: {} })
+ 
+     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+@@ -100,9 +117,85 @@ describe('POST /api/wallet/complete-login', () => {
+   })
+ 
+   it('does not allow an attempt to be replayed', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+ 
+     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(200)
+     expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(410)
+   })
++
++  it('signs in an existing canonical identity without initializing a wallet', async () => {
++    const { registerTrancheIdentity } = await import('../identityRegistry.js')
++    await registerTrancheIdentity({
++      circleUserId: 'circle-user-1',
++      walletId: 'wallet-1',
++      walletAddress: '0x1111111111111111111111111111111111111111',
++      blockchain: 'ARC-TESTNET',
++      accountType: 'SCA'
++    })
++    await putOtpSession('signin-attempt', {
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
++    })
++
++    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toMatchObject({ next: 'app', session: { walletId: 'wallet-1' } })
++    expect(res.headers['Set-Cookie']).toContain('tranche_session=')
++  })
++
++  it('returns the safe post-auth not-found response in strict mode', async () => {
++    vi.stubEnv('TRANCHE_IDENTITY_MODE', 'strict')
++    await putOtpSession('signin-attempt', {
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
++    })
++
++    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
++    expect(res.headers['Set-Cookie']).toBeUndefined()
++  })
++
++  it('ignores a browser-supplied completion intent and keeps the attempt intent', async () => {
++    vi.stubEnv('TRANCHE_IDENTITY_MODE', 'strict')
++    await putOtpSession('signin-attempt', {
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
++    })
++
++    const res = await invoke({
++      sessionId: 'signin-attempt', userToken: 'circle-token', intent: 'signup'
++    })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
++    expect(res.headers['Set-Cookie']).toBeUndefined()
++  })
++
++  it('dual-writes a validated legacy wallet during migration', async () => {
++    const { readTrancheIdentity } = await import('../identityRegistry.js')
++    await putOtpSession('signin-attempt', {
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
++    })
++
++    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload.next).toBe('app')
++    expect(await readTrancheIdentity('circle-user-1')).toMatchObject({
++      walletId: 'wallet-1', source: 'legacy-signin', status: 'active'
++    })
++  })
++
++  it('does not create a session for signin when Circle has no live Arc SCA wallet', async () => {
++    circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
++    await putOtpSession('signin-attempt', {
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signin'
++    })
++
++    const res = await invoke({ sessionId: 'signin-attempt', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
++    expect(res.headers['Set-Cookie']).toBeUndefined()
++  })
+ })
+diff --git a/frontend/api/_lib/wallet/email-token.js b/frontend/api/_lib/wallet/email-token.js
+index 75efcbf..a152e8c 100644
+--- a/frontend/api/_lib/wallet/email-token.js
++++ b/frontend/api/_lib/wallet/email-token.js
+@@ -11,13 +11,15 @@
+ 
+ import { randomUUID } from 'node:crypto'
+ import { getCircleClient } from '../circle.js'
+-import { normalizeEmail, putOtpSession } from '../emailWallets.js'
++import { normalizeEmail, normalizeLoginIntent, putOtpSession } from '../emailWallets.js'
+ import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
+ export default postRoute(async (body) => {
+   const deviceId = requireString(body, 'deviceId', { max: 256 })
+   const email = normalizeEmail(body.email)
+   if (!email) throw new RequestError('A valid email address is required.')
++  const intent = normalizeLoginIntent(body.intent)
++  if (!intent) throw new RequestError('A valid login intent is required.')
+ 
+   const circle = getCircleClient()
+   const res = await circle.createDeviceTokenForEmailLogin({ deviceId, email })
+@@ -28,7 +30,7 @@ export default postRoute(async (body) => {
+   }
+ 
+   const sessionId = randomUUID()
+-  await putOtpSession(sessionId, { email, deviceId })
++  await putOtpSession(sessionId, { email, deviceId, intent })
+ 
+   // The email is echoed back because the SDK's loginConfigs wants it to
+   // label its own dialog. The server does not use this email as an identity
+diff --git a/frontend/api/_lib/wallet/email-token.test.js b/frontend/api/_lib/wallet/email-token.test.js
+new file mode 100644
+index 0000000..e81bb53
+--- /dev/null
++++ b/frontend/api/_lib/wallet/email-token.test.js
+@@ -0,0 +1,64 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const circleMock = vi.hoisted(() => ({
++  createDeviceTokenForEmailLogin: vi.fn()
++}))
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../circle.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  getCircleClient: () => circleMock
++}))
++
++const handler = (await import('./email-token.js')).default
++
++function invoke(body) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', body }, res).then(() => res)
++}
++
++beforeEach(() => {
++  store.clear()
++  circleMock.createDeviceTokenForEmailLogin.mockReset()
++  circleMock.createDeviceTokenForEmailLogin.mockResolvedValue({ data: {
++    deviceToken: 'device-token', deviceEncryptionKey: 'device-key', otpToken: 'otp-token'
++  } })
++})
++
++describe('POST /api/wallet/email-token', () => {
++  it('stores signup intent server-side with the short-lived OTP attempt', async () => {
++    const res = await invoke({ deviceId: 'device-1', email: 'Alice@example.com', intent: 'signup' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).not.toHaveProperty('intent')
++    expect([...store.values()]).toContainEqual(expect.objectContaining({
++      email: 'alice@example.com', deviceId: 'device-1', intent: 'signup'
++    }))
++  })
++
++  it('rejects an invalid intent before asking Circle to send a code', async () => {
++    const res = await invoke({ deviceId: 'device-1', email: 'alice@example.com', intent: 'create' })
++
++    expect(res.statusCode).toBe(400)
++    expect(res.payload.error).toMatch(/login intent/i)
++    expect(circleMock.createDeviceTokenForEmailLogin).not.toHaveBeenCalled()
++    expect(store).toHaveLength(0)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/initialize.js b/frontend/api/_lib/wallet/initialize.js
+index 9594ae8..836d5a9 100644
+--- a/frontend/api/_lib/wallet/initialize.js
++++ b/frontend/api/_lib/wallet/initialize.js
+@@ -15,7 +15,7 @@
+ // email users with an unfundable wallet, so it is passed explicitly.
+ 
+ import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../circle.js'
+-import { peekOtpSession } from '../emailWallets.js'
++import { LOGIN_INTENTS, peekOtpSession } from '../emailWallets.js'
+ import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
+ // Circle's "user already initialized" code. Not an error for us: it means the
+@@ -30,6 +30,9 @@ export default postRoute(async (body) => {
+   if (!attempt) {
+     throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
+   }
++  if (attempt.intent !== LOGIN_INTENTS.SIGNUP) {
++    throw new RequestError('Wallet setup is available only while creating an account.', 403)
++  }
+ 
+   const circle = getCircleClient()
+   const status = await circle.getUserStatus({ userToken })
+diff --git a/frontend/api/_lib/wallet/initialize.test.js b/frontend/api/_lib/wallet/initialize.test.js
+index 52e4a49..c9dcbe7 100644
+--- a/frontend/api/_lib/wallet/initialize.test.js
++++ b/frontend/api/_lib/wallet/initialize.test.js
+@@ -58,7 +58,7 @@ describe('POST /api/wallet/initialize', () => {
+   })
+ 
+   it('validates Circle identity and explicitly requests an SCA Arc wallet', async () => {
+-    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signup' })
+ 
+     const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
+ 
+@@ -70,4 +70,14 @@ describe('POST /api/wallet/initialize', () => {
+       accountType: 'SCA'
+     })
+   })
++
++  it('cannot initialize a wallet from a signin attempt', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1', intent: 'signin' })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(403)
++    expect(circleMock.getUserStatus).not.toHaveBeenCalled()
++    expect(circleMock.createUserPinWithWallets).not.toHaveBeenCalled()
++  })
+ })
+diff --git a/frontend/api/_lib/walletRoute.js b/frontend/api/_lib/walletRoute.js
+index 97b4c90..f3dee4b 100644
+--- a/frontend/api/_lib/walletRoute.js
++++ b/frontend/api/_lib/walletRoute.js
+@@ -13,6 +13,7 @@ import { EmailWalletError } from './emailWallets.js'
+ import { VerificationError } from './emailVerification.js'
+ import { RedisError } from './redis.js'
+ import { ResendError } from './resend.js'
++import { IdentityRegistryError } from './identityRegistry.js'
+ 
+ export class RequestError extends Error {
+   constructor(message, status = 400) {
+@@ -35,7 +36,8 @@ function routeError(res, err) {
+     err instanceof VerificationError ||
+     err instanceof RedisError ||
+     err instanceof ResendError ||
+-    err instanceof CircleError
++    err instanceof CircleError ||
++    err instanceof IdentityRegistryError
+   ) {
+     res.status(err.status).json({ error: err.message })
+     return
+diff --git a/frontend/src/components/ConnectGate.jsx b/frontend/src/components/ConnectGate.jsx
+index 569e271..456fb9c 100644
+--- a/frontend/src/components/ConnectGate.jsx
++++ b/frontend/src/components/ConnectGate.jsx
+@@ -2,6 +2,7 @@ import { useState } from 'react'
+ import { useAuth } from '../hooks/useAuth.jsx'
+ import EmailSignIn from './EmailSignIn.jsx'
+ import WalletButton from './WalletButton.jsx'
++import UcwOnboarding from './UcwOnboarding.jsx'
+ 
+ /* The sign-in wall in front of every authenticated route.
+ 
+@@ -20,17 +21,69 @@ export default function ConnectGate({
+   title = 'Sign in to continue',
+   message = 'Use your email, or connect a wallet you already have.'
+ }) {
+-  const { isConnected } = useAuth()
++  const { isConnected, onboarding, completeOnboarding } = useAuth()
+   const [showWallet, setShowWallet] = useState(false)
++  const [intent, setIntent] = useState('signin')
++  const [accountNotice, setAccountNotice] = useState(null)
+ 
++  if (onboarding) return <UcwOnboarding onContinue={completeOnboarding} />
+   if (isConnected) return children
+ 
++  const selectIntent = (nextIntent) => {
++    setIntent(nextIntent)
++    setAccountNotice(null)
++  }
++
+   return (
+     <div className="card-surface p-10 text-center max-w-md mx-auto">
+       <h2 className="text-xl font-semibold mb-2 text-ink">{title}</h2>
+       <p className="text-sm text-ink-2 mb-6">{message}</p>
+ 
+-      <EmailSignIn />
++      <div role="tablist" aria-label="Circle wallet account flow" className="grid grid-cols-2 gap-1 p-1 mb-5 rounded-xl bg-sunk border border-rule">
++        <button
++          type="button"
++          role="tab"
++          aria-selected={intent === 'signin'}
++          onClick={() => selectIntent('signin')}
++          className={`rounded-lg px-3 py-2 text-sm transition-colors ${intent === 'signin' ? 'bg-paper text-ink border border-rule' : 'text-ink-2 hover:text-ink'}`}
++        >
++          Sign in
++        </button>
++        <button
++          type="button"
++          role="tab"
++          aria-selected={intent === 'signup'}
++          onClick={() => selectIntent('signup')}
++          className={`rounded-lg px-3 py-2 text-sm transition-colors ${intent === 'signup' ? 'bg-paper text-ink border border-rule' : 'text-ink-2 hover:text-ink'}`}
++        >
++          Create account
++        </button>
++      </div>
++
++      <div className="mb-4 text-left">
++        <h3 className="text-base font-semibold text-ink">
++          {intent === 'signup' ? 'Create a Circle wallet account' : 'Sign in to your Circle wallet'}
++        </h3>
++        <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
++          {intent === 'signup'
++            ? 'Start a new Tranche account with Circle email verification.'
++            : 'Use the email that belongs to your existing Tranche account.'}
++        </p>
++      </div>
++
++      {accountNotice && (
++        <p role="status" className="mb-4 text-left text-[12.5px] text-ink-2 leading-relaxed">
++          {accountNotice}
++        </p>
++      )}
++
++      <EmailSignIn
++        intent={intent}
++        onAccountNotFound={() => {
++          setAccountNotice('No Tranche account was found after verification. Choose Create account to set one up. If you have an older Circle wallet, Tranche will link it instead of creating another wallet.')
++          setIntent('signup')
++        }}
++      />
+ 
+       <div className="mt-6 pt-5 border-t border-rule">
+         {!showWallet ? (
+diff --git a/frontend/src/components/ConnectGate.test.jsx b/frontend/src/components/ConnectGate.test.jsx
+new file mode 100644
+index 0000000..862869f
+--- /dev/null
++++ b/frontend/src/components/ConnectGate.test.jsx
+@@ -0,0 +1,63 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, fireEvent, cleanup } from '@testing-library/react'
++
++const auth = vi.hoisted(() => ({
++  isConnected: false,
++  onboarding: false,
++  completeOnboarding: vi.fn()
++}))
++const emailProps = vi.hoisted(() => ({ current: null }))
++
++vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => auth }))
++vi.mock('./WalletButton.jsx', () => ({ default: () => <button type="button">Connect Wallet</button> }))
++vi.mock('./EmailSignIn.jsx', () => ({
++  default: (props) => {
++    emailProps.current = props
++    return <button type="button" onClick={() => props.onAccountNotFound?.('alice@example.com')}>
++      {props.intent === 'signup' ? 'Create account' : 'Sign in'}
++    </button>
++  }
++}))
++
++const ConnectGate = (await import('./ConnectGate.jsx')).default
++
++beforeEach(() => {
++  auth.isConnected = false
++  auth.onboarding = false
++  auth.completeOnboarding.mockClear()
++  emailProps.current = null
++})
++
++afterEach(() => cleanup())
++
++describe('ConnectGate UCW account choices', () => {
++  it('shows separate Sign in and Create account choices while retaining EOA connect', () => {
++    render(<ConnectGate><p>protected</p></ConnectGate>)
++
++    expect(screen.getByRole('tab', { name: 'Sign in' })).toHaveAttribute('aria-selected', 'true')
++    expect(screen.getByRole('tab', { name: 'Create account' })).toHaveAttribute('aria-selected', 'false')
++    fireEvent.click(screen.getByRole('button', { name: /connect a wallet instead/i }))
++    expect(screen.getByRole('button', { name: 'Connect Wallet' })).toBeInTheDocument()
++
++    fireEvent.click(screen.getByRole('tab', { name: 'Create account' }))
++    expect(emailProps.current.intent).toBe('signup')
++    expect(screen.getByRole('heading', { name: /create a circle wallet account/i })).toBeInTheDocument()
++  })
++
++  it('moves an authenticated not-found result to explicit account setup', () => {
++    render(<ConnectGate><p>protected</p></ConnectGate>)
++    expect(screen.queryByRole('status')).not.toBeInTheDocument()
++    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
++    expect(screen.getByRole('status')).toHaveTextContent(/older circle wallet/i)
++    expect(emailProps.current.intent).toBe('signup')
++  })
++
++  it('shows the onboarding handoff after signup', () => {
++    auth.onboarding = true
++    render(<ConnectGate><p>protected</p></ConnectGate>)
++
++    expect(screen.getByRole('heading', { name: /tranche account is ready/i })).toBeInTheDocument()
++    fireEvent.click(screen.getByRole('button', { name: /continue to tranche/i }))
++    expect(auth.completeOnboarding).toHaveBeenCalledTimes(1)
++  })
++})
+diff --git a/frontend/src/components/EmailSignIn.jsx b/frontend/src/components/EmailSignIn.jsx
+index 35ebf34..85cdbf4 100644
+--- a/frontend/src/components/EmailSignIn.jsx
++++ b/frontend/src/components/EmailSignIn.jsx
+@@ -1,7 +1,7 @@
+ import { useState } from 'react'
+ import { useAuth } from '../hooks/useAuth.jsx'
+ 
+-/* Email sign-in: the default way into the app.
++/* Circle email-OTP entry for either explicit UCW account flow.
+ 
+    Circle owns the dialog that matters (email OTP entry — these wallets have
+    no PIN), so this component is deliberately thin — an email field, a button,
+@@ -13,14 +13,17 @@ import { useAuth } from '../hooks/useAuth.jsx'
+    coming reads the pause as the app having hung. */
+ 
+ const STAGE_LABEL = {
+-  sending: 'Sending your code…',
++  sending: 'Sending your verification code…',
+   verifying: 'Check your email for a code…',
+-  creating: 'Setting up your wallet…',
+-  linking: 'Almost there…'
++  creating: 'Creating your Arc wallet…',
++  recovering: 'Linking your existing Arc wallet…',
++  checking: 'Checking your Tranche account…',
++  linking: 'Almost there…',
++  'account-not-found': 'No Tranche account found'
+ }
+ 
+-export default function EmailSignIn({ onDone }) {
+-  const { signInWithEmail } = useAuth()
++export default function EmailSignIn({ intent = 'signin', onDone, onAccountNotFound }) {
++  const { signInWithEmail, createAccountWithEmail } = useAuth()
+   const [email, setEmail] = useState('')
+   const [stage, setStage] = useState(null)
+   const [error, setError] = useState(null)
+@@ -32,8 +35,11 @@ export default function EmailSignIn({ onDone }) {
+     if (busy) return
+     setError(null)
+     try {
+-      await signInWithEmail(email, { onStage: setStage })
+-      onDone?.()
++      const result = intent === 'signup'
++        ? await createAccountWithEmail(email, { onStage: setStage })
++        : await signInWithEmail(email, { onStage: setStage })
++      if (result?.code === 'TRANCHE_ACCOUNT_NOT_FOUND') onAccountNotFound?.(email)
++      else onDone?.(result)
+     } catch (err) {
+       setError(err.message || 'Could not sign you in. Please try again.')
+     } finally {
+@@ -62,7 +68,7 @@ export default function EmailSignIn({ onDone }) {
+       />
+ 
+       <button type="submit" disabled={busy || !email} className="btn-primary text-sm py-2.5">
+-        {busy ? STAGE_LABEL[stage] ?? 'Working…' : 'Continue with email'}
++        {busy ? STAGE_LABEL[stage] ?? 'Working…' : intent === 'signup' ? 'Create account' : 'Sign in'}
+       </button>
+ 
+       {error && (
+@@ -71,10 +77,18 @@ export default function EmailSignIn({ onDone }) {
+         </p>
+       )}
+ 
+-      <p className="text-[12.5px] text-ink-3 leading-relaxed">
+-        We'll create a wallet you control, secured by a one-time code sent to
+-        your email. Gas is covered — you don't need any crypto to start.
+-      </p>
++      {intent === 'signup' ? (
++        <p className="text-[12.5px] text-ink-3 leading-relaxed">
++          Circle will create an Arc wallet you control after you verify the
++          code. If you already have an older Circle wallet, this flow links it
++          to Tranche instead of creating a second one. Gas is covered.
++        </p>
++      ) : (
++        <p className="text-[12.5px] text-ink-3 leading-relaxed">
++          We’ll verify your Circle account with a one-time code and sign you
++          in. Sign in never creates or initializes a wallet.
++        </p>
++      )}
+     </form>
+   )
+ }
+diff --git a/frontend/src/components/EmailSignIn.test.jsx b/frontend/src/components/EmailSignIn.test.jsx
+new file mode 100644
+index 0000000..7d404e2
+--- /dev/null
++++ b/frontend/src/components/EmailSignIn.test.jsx
+@@ -0,0 +1,65 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
++
++const auth = vi.hoisted(() => ({
++  signInWithEmail: vi.fn(),
++  createAccountWithEmail: vi.fn()
++}))
++
++vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => auth }))
++
++const EmailSignIn = (await import('./EmailSignIn.jsx')).default
++
++beforeEach(() => {
++  auth.signInWithEmail.mockReset()
++  auth.createAccountWithEmail.mockReset()
++})
++
++afterEach(() => cleanup())
++
++describe('EmailSignIn', () => {
++  it('renders a distinct sign-in action and uses the signin transport', async () => {
++    auth.signInWithEmail.mockResolvedValue({ next: 'app', session: { walletId: 'wallet-1' } })
++    const onDone = vi.fn()
++    render(<EmailSignIn onDone={onDone} />)
++
++    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
++    expect(screen.getByText(/never creates or initializes a wallet/i)).toBeInTheDocument()
++    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: 'Alice@Example.com' } })
++    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
++
++    await waitFor(() => expect(auth.signInWithEmail).toHaveBeenCalledWith(
++      'Alice@Example.com', expect.objectContaining({ onStage: expect.any(Function) })
++    ))
++    expect(auth.createAccountWithEmail).not.toHaveBeenCalled()
++    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ next: 'app' }))
++  })
++
++  it('renders a distinct create-account action and uses signup transport', async () => {
++    auth.createAccountWithEmail.mockResolvedValue({ next: 'onboarding', session: { walletId: 'wallet-1' } })
++    const onDone = vi.fn()
++    render(<EmailSignIn intent="signup" onDone={onDone} />)
++
++    expect(screen.getByRole('button', { name: 'Create account' })).toBeInTheDocument()
++    expect(screen.getByText(/create an arc wallet/i)).toBeInTheDocument()
++    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: 'alice@example.com' } })
++    fireEvent.click(screen.getByRole('button', { name: 'Create account' }))
++
++    await waitFor(() => expect(auth.createAccountWithEmail).toHaveBeenCalledWith(
++      'alice@example.com', expect.objectContaining({ onStage: expect.any(Function) })
++    ))
++    expect(auth.signInWithEmail).not.toHaveBeenCalled()
++    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ next: 'onboarding' }))
++  })
++
++  it('hands the post-auth not-found result to the recovery UI', async () => {
++    auth.signInWithEmail.mockResolvedValue({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
++    const onAccountNotFound = vi.fn()
++    render(<EmailSignIn onAccountNotFound={onAccountNotFound} />)
++
++    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: 'new@example.com' } })
++    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
++
++    await waitFor(() => expect(onAccountNotFound).toHaveBeenCalledWith('new@example.com'))
++  })
++})
+diff --git a/frontend/src/components/UcwOnboarding.jsx b/frontend/src/components/UcwOnboarding.jsx
+new file mode 100644
+index 0000000..66e68cd
+--- /dev/null
++++ b/frontend/src/components/UcwOnboarding.jsx
+@@ -0,0 +1,17 @@
++export default function UcwOnboarding({ onContinue }) {
++  return (
++    <section className="card-surface p-8 text-center max-w-md mx-auto" aria-labelledby="ucw-onboarding-title">
++      <p className="eyebrow mb-3">Account ready</p>
++      <h2 id="ucw-onboarding-title" className="display text-2xl text-ink mb-3">
++        Your Tranche account is ready.
++      </h2>
++      <p className="text-sm text-ink-2 leading-relaxed mb-6">
++        Your Circle wallet is linked on Arc Testnet. Continue to the app to
++        create or receive milestone escrows.
++      </p>
++      <button type="button" onClick={onContinue} className="btn-primary text-sm py-2.5 px-5">
++        Continue to Tranche
++      </button>
++    </section>
++  )
++}
+diff --git a/frontend/src/hooks/useAuth.jsx b/frontend/src/hooks/useAuth.jsx
+index 86d30f0..09e5246 100644
+--- a/frontend/src/hooks/useAuth.jsx
++++ b/frontend/src/hooks/useAuth.jsx
+@@ -137,6 +137,9 @@ export function AuthProvider({ children }) {
+ 
+   const [circle, setCircle] = useState(() => readStoredSession())
+   const [sdkReady, setSdkReady] = useState(false)
++  // Set only after the server returns next: "onboarding" for an explicit
++  // signup. It is intentionally in memory: it is UI state, not a credential.
++  const [onboarding, setOnboarding] = useState(false)
+   // Set only by the explicit email-directory claim flow. It is never created
+   // as a side effect of Circle sign-in.
+   const [pendingVerification, setPendingVerification] = useState(null)
+@@ -225,19 +228,23 @@ export function AuthProvider({ children }) {
+     }
+   }, [])
+ 
+-  /* Full email onboarding: Circle OTP -> wallet provisioning -> canonical
+-     Circle identity/wallet validation -> Tranche cookie-backed session.
+-     Email-directory binding is deliberately not part of this path. */
+-  const signInWithEmail = useCallback(async (rawEmail, { onStage } = {}) => {
++  /* Shared Circle email-OTP transport. The server-owned intent is fixed on
++     /email-token and is the only branch that decides whether initialization
++     may be called. A future social provider can enter the same completion
++     contract without making the browser's intent authoritative. */
++  const authenticateWithEmail = useCallback(async (rawEmail, intent, { onStage } = {}) => {
+     const email = String(rawEmail || '').trim().toLowerCase()
+     if (!email) throw new Error('Enter your email address.')
++    if (intent !== 'signup' && intent !== 'signin') {
++      throw new Error('A valid account flow is required.')
++    }
+ 
+     const sdk = await getSdk()
+     const deviceId = deviceIdRef.current
+     if (!deviceId) throw new Error('Could not identify this device. Please reload and try again.')
+ 
+     onStage?.('sending')
+-    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email })
++    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email, intent })
+ 
+     sdk.updateConfigs({
+       appSettings: { appId: import.meta.env.VITE_CIRCLE_APP_ID },
+@@ -268,23 +275,34 @@ export function AuthProvider({ children }) {
+       sdk.verifyOtp()
+     })
+ 
+-    onStage?.('creating')
+-    const init = await postJson('/api/wallet/initialize', {
+-      sessionId: otpSession.sessionId,
+-      userToken: login.userToken
+-    })
++    let completionStage = 'linking'
++    if (intent === 'signup') {
++      onStage?.('creating')
++      const init = await postJson('/api/wallet/initialize', {
++        sessionId: otpSession.sessionId,
++        userToken: login.userToken
++      })
+ 
+-    if (init.challengeId) {
+-      sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
+-      await new Promise((resolve, reject) => {
+-        sdk.execute(init.challengeId, (error) => {
+-          if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
+-          else resolve()
++      if (init.alreadyInitialized) {
++        completionStage = 'recovering'
++        onStage?.('recovering')
++      }
++      if (init.challengeId) {
++        sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
++        await new Promise((resolve, reject) => {
++          sdk.execute(init.challengeId, (error) => {
++            if (error) reject(new Error(error?.message || 'Wallet setup was not completed.'))
++            else resolve()
++          })
+         })
+-      })
++      }
++    } else {
++      // This is deliberately the only signin branch: no initialization call,
++      // even when the Circle user has no wallet or no Tranche identity.
++      onStage?.('checking')
+     }
+ 
+-    onStage?.('linking')
++    onStage?.(completionStage)
+     // Circle needs a moment to index a freshly created wallet, and
+     // complete-login 409s until the address exists. Retry rather than
+     // dumping that normal race on the user as a failure.
+@@ -302,6 +320,11 @@ export function AuthProvider({ children }) {
+       }
+     }
+ 
++    if (authenticated?.code === 'TRANCHE_ACCOUNT_NOT_FOUND') {
++      onStage?.('account-not-found')
++      return authenticated
++    }
++
+     const wallet = authenticated?.session
+     if (!wallet?.walletId || !wallet?.walletAddress) {
+       throw new Error('Your wallet was verified but the Tranche session could not be created.')
+@@ -317,10 +340,21 @@ export function AuthProvider({ children }) {
+     }
+     setPendingVerification(null)
+     persist(next)
++    if (authenticated.next === 'onboarding') setOnboarding(true)
+     onStage?.('done')
+-    return next
++    return { ...next, next: authenticated.next }
+   }, [getSdk, persist])
+ 
++  const signInWithEmail = useCallback((rawEmail, options = {}) => (
++    authenticateWithEmail(rawEmail, 'signin', options)
++  ), [authenticateWithEmail])
++
++  const createAccountWithEmail = useCallback((rawEmail, options = {}) => (
++    authenticateWithEmail(rawEmail, 'signup', options)
++  ), [authenticateWithEmail])
++
++  const completeOnboarding = useCallback(() => setOnboarding(false), [])
++
+   /* Hand back the code from Tranche's own verification email. Only on
+      success does the email -> address binding actually get written, so this
+      is the step that makes someone findable by email. */
+@@ -371,6 +405,7 @@ export function AuthProvider({ children }) {
+     // state doesn't re-render, and removeItem on an absent key is a no-op.
+     const hadCircleSession = !!circle
+     persist(null)
++    setOnboarding(false)
+     if (hadCircleSession) {
+       // Best effort: local sign-out remains terminal even if the network is
+       // unavailable, while the server revocation closes the cookie session.
+@@ -527,8 +562,11 @@ export function AuthProvider({ children }) {
+       isConnected: !!walletType,
+       isSca: walletType === 'circle-sca',
+       sdkReady,
++      onboarding,
+       pendingVerification,
+       signInWithEmail,
++      createAccountWithEmail,
++      completeOnboarding,
+       confirmEmailVerification,
+       resendEmailVerification,
+       dismissEmailVerification,
+@@ -538,8 +576,9 @@ export function AuthProvider({ children }) {
+       runCanaryPreflight
+     }
+   }, [
+-    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, pendingVerification,
+-    signInWithEmail, confirmEmailVerification, resendEmailVerification,
++    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, onboarding, pendingVerification,
++    signInWithEmail, createAccountWithEmail, completeOnboarding,
++    confirmEmailVerification, resendEmailVerification,
+     dismissEmailVerification, startDirectoryClaim, signOut, executeContractCall, runCanaryPreflight
+   ])
+ 
+diff --git a/frontend/src/hooks/useAuth.test.jsx b/frontend/src/hooks/useAuth.test.jsx
+index 684825a..3d82b07 100644
+--- a/frontend/src/hooks/useAuth.test.jsx
++++ b/frontend/src/hooks/useAuth.test.jsx
+@@ -185,7 +185,7 @@ describe('session restore — the two gates', () => {
+ })
+ 
+ describe('activity on real use', () => {
+-  it('completes UCW login with Circle identity validation and never calls register or Resend', async () => {
++  it('signs in without initializing a Circle wallet', async () => {
+     vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+     const calls = []
+     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
+@@ -198,11 +198,8 @@ describe('activity on real use', () => {
+           otpToken: 'otp-token'
+         }) }
+       }
+-      if (path === '/api/wallet/initialize') {
+-        return { ok: true, json: async () => ({ challengeId: null }) }
+-      }
+       if (path === '/api/wallet/complete-login') {
+-        return { ok: true, json: async () => ({ session: {
++        return { ok: true, json: async () => ({ next: 'app', session: {
+           walletId: 'wallet-1',
+           walletAddress: '0x1111111111111111111111111111111111111111'
+         } }) }
+@@ -218,13 +215,85 @@ describe('activity on real use', () => {
+     expect(result.current.walletType).toBe('circle-sca')
+     expect(calls).toEqual([
+       '/api/wallet/email-token',
+-      '/api/wallet/initialize',
+       '/api/wallet/complete-login'
+     ])
++    expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).intent).toBe('signin')
++    expect(globalThis.fetch.mock.calls.some(([path]) => path === '/api/wallet/initialize')).toBe(false)
+     expect(calls).not.toContain('/api/wallet/register')
+     expect(calls).not.toContain('/api/wallet/directory-claim')
+   })
+ 
++  it('creates an account through initialization and enters onboarding', async () => {
++    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
++    const calls = []
++    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
++      calls.push(path)
++      if (path === '/api/wallet/email-token') {
++        return { ok: true, json: async () => ({
++          sessionId: 'attempt-1',
++          deviceToken: 'device-token',
++          deviceEncryptionKey: 'device-key',
++          otpToken: 'otp-token'
++        }) }
++      }
++      if (path === '/api/wallet/initialize') {
++        return { ok: true, json: async () => ({ challengeId: null, alreadyInitialized: false }) }
++      }
++      if (path === '/api/wallet/complete-login') {
++        return { ok: true, json: async () => ({ next: 'onboarding', session: {
++          walletId: 'wallet-1',
++          walletAddress: '0x1111111111111111111111111111111111111111'
++        } }) }
++      }
++      throw new Error(`unexpected request ${path}`)
++    }))
++
++    const { result } = renderHook(() => useAuth(), { wrapper })
++    await act(async () => {
++      await result.current.createAccountWithEmail('alice@example.com')
++    })
++
++    expect(result.current.walletType).toBe('circle-sca')
++    expect(result.current.onboarding).toBe(true)
++    expect(calls).toEqual([
++      '/api/wallet/email-token',
++      '/api/wallet/initialize',
++      '/api/wallet/complete-login'
++    ])
++    expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).intent).toBe('signup')
++
++    await act(async () => { result.current.completeOnboarding() })
++    expect(result.current.onboarding).toBe(false)
++  })
++
++  it('surfaces the safe account-not-found response without creating a session', async () => {
++    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
++    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
++      if (path === '/api/wallet/email-token') {
++        return { ok: true, json: async () => ({
++          sessionId: 'attempt-1', deviceToken: 'device-token',
++          deviceEncryptionKey: 'device-key', otpToken: 'otp-token'
++        }) }
++      }
++      if (path === '/api/wallet/complete-login') {
++        return { ok: true, json: async () => ({
++          code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup'
++        }) }
++      }
++      throw new Error(`unexpected request ${path}`)
++    }))
++
++    const { result } = renderHook(() => useAuth(), { wrapper })
++    let response
++    await act(async () => {
++      response = await result.current.signInWithEmail('new@example.com')
++    })
++
++    expect(response).toEqual({ code: 'TRANCHE_ACCOUNT_NOT_FOUND', next: 'signup' })
++    expect(result.current.isConnected).toBe(false)
++    expect(result.current.onboarding).toBe(false)
++  })
++
+   /* The stamp has to land on an approved transaction, or an active user gets
+      logged out mid-project by the very ceiling meant to be generous to them. */
+   it('stamps activity after a contract call is approved', async () => {
+

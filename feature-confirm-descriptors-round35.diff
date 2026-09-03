@@ -1,0 +1,47 @@
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index f00f9d3..43d5a12 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -151,10 +151,11 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
+   // both real optional-by-design values) — it means the response doesn't
+   // match Circle's documented, required schema at all, which is itself
+   // anomalous and worth failing closed on. This field is also the ONLY
+-  // transaction-unique value available here: cctpMessageFingerprint's five
+-  // fields (destinationDomain/burnToken/mintRecipient/amount/messageSender)
+-  // can be byte-identical across two genuinely different transactions (e.g.
+-  // the same payer re-sending the same amount to the same recipient), so
++  // transaction-unique value available here: cctpMessageFingerprint (Round
++  // 33: a hash of every byte except the 4 established-mutable ranges, not a
++  // named field list) can still be byte-identical across two genuinely
++  // different transactions (e.g. the same payer re-sending the same amount
++  // to the same recipient), so
+   // sourceTxHash is what actually distinguishes them — permissive-on-absence
+   // would reopen exactly the substitution gap this check exists to close.
+   //
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 0d20408..0fd3fa5 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -827,14 +827,14 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+   })
+ })
+ 
+-/* cctpMessageFingerprint — Round 29.
+-   Extracts exactly the four IMMUTABLE fields (destinationDomain, burnToken,
+-   mintRecipient, amount) plus the already-verified messageSender — never
+-   nonce, finalityThresholdExecuted, feeExecuted, or expirationBlock, the
+-   four Round 27 established DO mutate between the source-side log and
+-   Iris's attested response.
+-   Round 32: maxFee and hookData added — also confirmed immutable, see
+-   cctpMessageFingerprint's own doc comment in irisDelivery.js. */
++/* cctpMessageFingerprint — Round 29, redesigned Round 33.
++   No longer a named field list. Hashes every byte of the sanitized message
++   EXCEPT the 4 mutable ranges Round 27 established DO change between the
++   source-side log and Iris's attested response — nonce, finalityThreshold-
++   Executed, feeExecuted, and expirationBlock — so any other byte changing
++   (including fields a field-list design could forget to name) flips the
++   hash by construction. See cctpMessageFingerprint's own doc comment in
++   irisDelivery.js for the full redesign rationale. */
+ // Round 33: flips a single byte (by absolute offset) in an otherwise-valid
+ // message and returns the corrupted hex string — used throughout the
+ // redesigned describe block below to prove a given byte range DOES or DOES

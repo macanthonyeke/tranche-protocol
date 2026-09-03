@@ -1,0 +1,400 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 4256b1d..0b1c5dc 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -37,6 +37,19 @@ const POLL_MS = 15_000
+ // the submitting device has this number; a subgraph-sourced txHash from a
+ // different device has no persisted count and falls back to the
+ // messages.length === 0 heuristic below, same as before this existed.
++//
++// Round 22 Phase B: terminality used to be inferred as "no message is
++// PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
++// treated as done. Circle's forwardState is not a small closed enum; it is
++// an open string field, and CONFIRMED is a real, directly observed,
++// NON-terminal value (a live Arc-testnet tx was seen transitioning
++// CONFIRMED -> COMPLETE between two Iris polls). A mixed FAILED + CONFIRMED
++// response used to satisfy the old check (no PENDING present) and stop
++// polling with phase 'failed', even though the CONFIRMED message could
++// still resolve to COMPLETE. Terminality now requires every message to be
++// EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
++// any value Circle adds later) keeps polling, which is the safe default for
++// an open-ended field.
+ export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
+   const [phase, setPhase]           = useState('idle')
+   const [deliveries, setDeliveries] = useState([])
+@@ -82,17 +95,17 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
+       }))
+       setDeliveries(parsed)
+ 
+-      const anyFailed   = parsed.some((m) => m.forwardState === 'FAILED')
+       const allDelivered = parsed.every((m) => m.forwardState === 'COMPLETE')
+-      const anyPending   = parsed.some(
+-        (m) => !m.forwardState || m.forwardState === 'PENDING'
++      const allTerminal  = parsed.every(
++        (m) => m.forwardState === 'COMPLETE' || m.forwardState === 'FAILED'
+       )
++      const anyFailed    = parsed.some((m) => m.forwardState === 'FAILED')
+ 
+       if (allDelivered) {
+         setPhase('delivered')
+         doneRef.current = true
+         clearInterval(intervalRef.current)
+-      } else if (anyFailed && !anyPending) {
++      } else if (allTerminal && anyFailed) {
+         setPhase('failed')
+         doneRef.current = true
+         clearInterval(intervalRef.current)
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index a4912d6..e1bb71e 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -20,7 +20,7 @@
+ // and the bug agreed with each other, not with Circle's actual API.
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+-import { renderHook, waitFor } from '@testing-library/react'
++import { renderHook, waitFor, act } from '@testing-library/react'
+ 
+ const fetchIrisMessages = vi.hoisted(() => vi.fn())
+ vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages }))
+@@ -155,3 +155,62 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not
+     expect(result.current.deliveries.every((d) => d.forwardState === 'FAILED')).toBe(true)
+   })
+ })
++
++/* Round 22 Phase B — terminality regression guard.
++   CONFIRMED is a real, directly observed forwardState (a live Arc-testnet tx
++   was seen transitioning CONFIRMED -> COMPLETE between two real Iris polls),
++   and it is NOT terminal. The old check inferred "done" from "no PENDING and
++   no missing forwardState" — a mixed FAILED + CONFIRMED response satisfied
++   that (no PENDING present) and stopped polling with phase 'failed', even
++   though the CONFIRMED leg could still resolve to COMPLETE. This exercises
++   exactly that combination, not the COMPLETE + FAILED one the older tests
++   above already cover. */
++describe('useCctpDelivery — terminality requires every message to be explicitly COMPLETE or FAILED', () => {
++  afterEach(() => {
++    vi.useRealTimers()
++  })
++
++  it('keeps polling on a FAILED + CONFIRMED mix — CONFIRMED is not terminal', async () => {
++    vi.useFakeTimers()
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
++    expect(fetchIrisMessages).toHaveBeenCalledTimes(1)
++    expect(result.current.phase).toBe('polling')
++
++    // A second poll with the SAME mixed response must not have latched a
++    // terminal phase — the hook should still be actively polling.
++    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
++    expect(result.current.phase).toBe('polling')
++  })
++
++  it('settles to failed only once the CONFIRMED leg itself reaches an explicit terminal state', async () => {
++    vi.useFakeTimers()
++    fetchIrisMessages
++      .mockResolvedValueOnce([
++        irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
++        irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
++      ])
++      .mockResolvedValueOnce([
++        irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
++        irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null })
++      ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
++    expect(result.current.phase).toBe('polling')
++
++    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
++    expect(result.current.phase).toBe('failed')
++
++    // Terminal now — a third tick must not fire another fetch.
++    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    expect(fetchIrisMessages).toHaveBeenCalledTimes(2)
++  })
++})
+diff --git a/frontend/src/utils/cctpFee.js b/frontend/src/utils/cctpFee.js
+index 31b1326..d37f3b9 100644
+--- a/frontend/src/utils/cctpFee.js
++++ b/frontend/src/utils/cctpFee.js
+@@ -35,17 +35,24 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
+   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
+   const controller = new AbortController()
+   const timeoutId = setTimeout(() => controller.abort(), FEE_QUOTE_TIMEOUT_MS)
+-  let res
++  let data
+   try {
+-    res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
++    // Round 22 Phase B: fetch() resolves once HEADERS arrive, before the
++    // body is read — clearing the timeout here (as this used to) leaves
++    // res.json() completely unprotected. A server that sends headers and
++    // then stalls the body can block past FEE_QUOTE_TIMEOUT_MS indefinitely.
++    // The same AbortController/signal governs the whole request, including
++    // an in-flight body read, so keeping it live through res.json() aborts
++    // a stalled body exactly the same way it aborts a stalled connect.
++    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
++    if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
++    data = await res.json()
+   } catch (err) {
+     if (err.name === 'AbortError') throw new Error("Delivery fee request timed out. Please try again.")
+     throw err
+   } finally {
+     clearTimeout(timeoutId)
+   }
+-  if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
+-  const data = await res.json()
+   if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
+   const tier = data.find((t) => Number(t.finalityThreshold) === STANDARD_FINALITY) ?? data[0]
+   const fwd = tier?.forwardFee
+diff --git a/frontend/src/utils/cctpFee.test.js b/frontend/src/utils/cctpFee.test.js
+index 8f14b58..c3d28e6 100644
+--- a/frontend/src/utils/cctpFee.test.js
++++ b/frontend/src/utils/cctpFee.test.js
+@@ -219,4 +219,42 @@ describe('fetchForwardFee — timeout', () => {
+       expect(opts.signal).toBeInstanceOf(AbortSignal)
+     })
+   })
++
++  /* Round 22 Phase B: fetch() resolves once HEADERS arrive — well before the
++     body is read. The old code cleared the timeout in a `finally` right
++     after that `await fetch(...)` line, so a server that sent headers and
++     then stalled the body was completely unprotected: res.json() had no
++     timeout left to race against and could hang forever. This is
++     deliberately a DIFFERENT failure mode than the hanging-fetch tests
++     above — here `fetch()` itself resolves immediately (`ok: true` synchronously
++     available); only the body-read promise stalls, which is exactly the gap
++     those tests don't exercise. The mock's json() only settles once the
++     same AbortSignal fires, so this can only pass if the timeout is still
++     alive across the res.json() call. */
++  it('keeps the timeout alive through res.json() — a stalled body must time out, not hang forever', async () => {
++    vi.useFakeTimers()
++    const hangingBodyFetch = vi.fn((url, opts) => Promise.resolve({
++      ok: true,
++      json: () => new Promise((resolve, reject) => {
++        opts.signal.addEventListener('abort', () => {
++          const err = new Error('The operation was aborted')
++          err.name = 'AbortError'
++          reject(err)
++        })
++      })
++    }))
++    vi.stubGlobal('fetch', hangingBodyFetch)
++
++    const resultPromise = fetchForwardFee(26, 6)
++    let settled = false
++    resultPromise.catch(() => {}).finally(() => { settled = true })
++
++    // fetch() has already resolved (headers) at this point — only the body
++    // read is stalled. Well before the timeout: still hanging.
++    await vi.advanceTimersByTimeAsync(5_000)
++    expect(settled).toBe(false)
++
++    await vi.advanceTimersByTimeAsync(3_001)
++    await expect(resultPromise).rejects.toThrow(/timed out/i)
++  })
+ })
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 1cb410a..7cac527 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -20,6 +20,27 @@ const RECEIVE_MESSAGE_ABI = [
+ export const cctpTrackKey = (escrowId, milestoneIndex) =>
+   `cctp-track-${escrowId}-${milestoneIndex}`
+ 
++// Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
++// fixed interval regardless of whether the previous call has resolved yet,
++// and Codex directly observed real calls sometimes taking over a minute
++// from their environment — several polling ticks' worth. Unlike
++// fetchForwardFee's FEE_QUOTE_TIMEOUT_MS (8s), this isn't gating a
++// pre-signature UI where a slow response blocks the user from signing; it's
++// a background status poll, so there's no tight UX budget to protect. The
++// risk here is the opposite one: a timeout too close to the fee endpoint's
++// 8s would abort genuinely slow-but-succeeding responses routinely, given
++// they're observed running past a minute. 90s gives real responses ample
++// margin above the observed worst case while still bounding a truly-dead
++// request so it can't hold the in-flight guard below open forever.
++const IRIS_MESSAGES_TIMEOUT_MS = 90_000
++
++// In-flight guard, keyed by the exact request identity (sourceDomain +
++// txHash). Without this, a slow response (see above) doesn't stop the next
++// 15s timer tick from firing a second, overlapping request for the SAME
++// tracked tx — a poll for one escrow's tx never blocks a concurrent poll
++// for a different one, only a re-poll of itself while still pending.
++const inFlightRequests = new Map()
++
+ // Fetch all CCTP messages emitted in a source transaction.
+ // Returns [] if not yet indexed (404 → empty, not an error).
+ //
+@@ -32,11 +53,36 @@ export const cctpTrackKey = (escrowId, milestoneIndex) =>
+ // including a genuine depositForBurnWithHook call (hookData decodes to
+ // "cctp-forward", the same hook this contract uses). Every tracked burn in
+ // this app originates from Arc, so sourceDomain defaults to ARC_DOMAIN.
+-export async function fetchIrisMessages(txHash, sourceDomain = ARC_DOMAIN) {
+-  const res = await fetch(`${IRIS_BASE}/v2/messages/${sourceDomain}?transactionHash=${txHash}`)
+-  if (res.status === 404) return []
+-  if (!res.ok) throw new Error(`Iris HTTP ${res.status}`)
+-  const json = await res.json()
++export function fetchIrisMessages(txHash, sourceDomain = ARC_DOMAIN) {
++  const key = `${sourceDomain}:${txHash}`
++  const existing = inFlightRequests.get(key)
++  if (existing) return existing
++
++  const request = fetchIrisMessagesNow(txHash, sourceDomain).finally(() => {
++    inFlightRequests.delete(key)
++  })
++  inFlightRequests.set(key, request)
++  return request
++}
++
++async function fetchIrisMessagesNow(txHash, sourceDomain) {
++  const controller = new AbortController()
++  const timeoutId = setTimeout(() => controller.abort(), IRIS_MESSAGES_TIMEOUT_MS)
++  let json
++  try {
++    const res = await fetch(
++      `${IRIS_BASE}/v2/messages/${sourceDomain}?transactionHash=${txHash}`,
++      { signal: controller.signal }
++    )
++    if (res.status === 404) return []
++    if (!res.ok) throw new Error(`Iris HTTP ${res.status}`)
++    json = await res.json()
++  } catch (err) {
++    if (err.name === 'AbortError') throw new Error('Iris delivery status request timed out. Please try again.')
++    throw err
++  } finally {
++    clearTimeout(timeoutId)
++  }
+   return json?.messages || []
+ }
+ 
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 8051459..96b9071 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -84,6 +84,119 @@ describe('fetchIrisMessages', () => {
+   })
+ })
+ 
++/* fetchIrisMessages — timeout, Round 22 Phase B.
++
++   Unlike fetchForwardFee (which gained a timeout in Round 21 Phase B), this
++   endpoint previously had none at all — an unprotected await here never
++   resolves and never rejects on a hang, same failure mode Round 21 Phase B
++   closed for the fee quote. Codex's own live observation of real Iris calls
++   sometimes taking over a minute is why this uses a longer budget (90s) than
++   the fee endpoint's 8s — see fetchIrisMessages's own doc comment in
++   irisDelivery.js for the full reasoning. This mock respects AbortSignal the
++   way real fetch does, so it can only resolve this test if the timeout
++   actually aborts it. */
++describe('fetchIrisMessages — timeout', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++    vi.useRealTimers()
++  })
++
++  it('throws a clean, catchable error once the request hangs past the timeout, rather than never resolving', async () => {
++    vi.useFakeTimers()
++    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
++      opts.signal.addEventListener('abort', () => {
++        const err = new Error('The operation was aborted')
++        err.name = 'AbortError'
++        reject(err)
++      })
++    }))
++    vi.stubGlobal('fetch', hangingFetch)
++
++    const resultPromise = fetchIrisMessages('0xhang1')
++    let settled = false
++    resultPromise.catch(() => {}).finally(() => { settled = true })
++
++    // Well before the 90s timeout: still hanging.
++    await vi.advanceTimersByTimeAsync(89_000)
++    expect(settled).toBe(false)
++
++    await vi.advanceTimersByTimeAsync(1_001)
++    await expect(resultPromise).rejects.toThrow(/timed out/i)
++  })
++
++  it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++    return fetchIrisMessages('0xabc999').then(() => {
++      const [, opts] = fetchMock.mock.calls[0]
++      expect(opts.signal).toBeInstanceOf(AbortSignal)
++    })
++  })
++})
++
++/* fetchIrisMessages — in-flight guard, Round 22 Phase B.
++
++   useCctpDelivery polls this on a fixed 15s interval regardless of whether
++   the previous call has resolved yet. Given real calls can take over a
++   minute (see the timeout tests above), an unguarded poll would let requests
++   for the SAME tracked tx pile up across several ticks. Keyed by the exact
++   request identity (sourceDomain + txHash), so a slow poll for one escrow's
++   tx never blocks a concurrent poll for a genuinely different one — only a
++   re-poll of itself while the first is still pending. */
++describe('fetchIrisMessages — in-flight guard', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  it('reuses the in-flight request for the SAME txHash instead of issuing a second fetch', async () => {
++    let resolveFetch
++    const fetchMock = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve }))
++    vi.stubGlobal('fetch', fetchMock)
++
++    const p1 = fetchIrisMessages('0xsame')
++    const p2 = fetchIrisMessages('0xsame')
++
++    expect(fetchMock).toHaveBeenCalledTimes(1)
++
++    resolveFetch(mockOk({ messages: [{ message: '0xshared' }] }))
++    await expect(p1).resolves.toEqual([{ message: '0xshared' }])
++    await expect(p2).resolves.toEqual([{ message: '0xshared' }])
++  })
++
++  it('does NOT dedup a concurrent request for a genuinely different txHash', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await Promise.all([fetchIrisMessages('0xone'), fetchIrisMessages('0xtwo')])
++    expect(fetchMock).toHaveBeenCalledTimes(2)
++  })
++
++  it('does NOT dedup requests for the same txHash on different sourceDomains', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await Promise.all([fetchIrisMessages('0xsametx', 26), fetchIrisMessages('0xsametx', 6)])
++    expect(fetchMock).toHaveBeenCalledTimes(2)
++  })
++
++  it('allows a fresh request for the same txHash once the prior one has settled — the guard is not permanent', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await fetchIrisMessages('0xsequential')
++    await fetchIrisMessages('0xsequential')
++    expect(fetchMock).toHaveBeenCalledTimes(2)
++  })
++
++  it('clears the in-flight slot even when the request throws, so the next poll is not permanently blocked', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 500 })))
++    await expect(fetchIrisMessages('0xerrors')).rejects.toThrow('Iris HTTP 500')
++
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [] }))))
++    await expect(fetchIrisMessages('0xerrors')).resolves.toEqual([])
++  })
++})
++
+ /* receiptEmittedCctpMessage — Round 22 Phase A.
+ 
+    Every prior fix to delivery tracking (Round 20 Phase B/D, Round 21 Phase

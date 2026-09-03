@@ -1,0 +1,627 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 590b242..4256b1d 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -26,7 +26,18 @@ const POLL_MS = 15_000
+ // reliably reports each message's own domain in practice — if it ever
+ // doesn't, `destinationDomain` now comes through as `null` (rendered as an
+ // unknown chain downstream) rather than a wrong guess.
+-export function useCctpDelivery(txHash, isCrossChain) {
++//
++// Round 22 Phase A: `expectedMessageCount`, optional — the number of real
++// MessageSent events the confirming receipt proved should exist for this
++// tx (see receiptEmittedCctpMessage), persisted by the submitting device
++// alongside the tracked txHash. A mixed split can burn several legs to
++// different chains in one transaction, and Iris indexes each message
++// independently — a partial response (fewer messages than the receipt
++// proved) is "not fully indexed yet", not "this is the complete set". Only
++// the submitting device has this number; a subgraph-sourced txHash from a
++// different device has no persisted count and falls back to the
++// messages.length === 0 heuristic below, same as before this existed.
++export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
+   const [phase, setPhase]           = useState('idle')
+   const [deliveries, setDeliveries] = useState([])
+   const intervalRef = useRef(null)
+@@ -37,6 +48,11 @@ export function useCctpDelivery(txHash, isCrossChain) {
+     try {
+       const messages = await fetchIrisMessages(txHash)
+ 
++      if (expectedMessageCount != null && messages.length < expectedMessageCount) {
++        setPhase('polling')
++        return
++      }
++
+       if (messages.length === 0) {
+         setPhase('polling')
+         return
+@@ -88,7 +104,7 @@ export function useCctpDelivery(txHash, isCrossChain) {
+       // so a transient outage doesn't permanently block status.
+       setPhase('unavailable')
+     }
+-  }, [txHash, isCrossChain])
++  }, [txHash, isCrossChain, expectedMessageCount])
+ 
+   useEffect(() => {
+     if (!txHash || !isCrossChain) {
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 63c36cb..6744870 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+ import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+@@ -205,6 +205,7 @@ function DisputeBlock({ detail, index, refetch }) {
+   const e = detail.escrow
+   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+   const [resolveTxHash, setResolveTxHash] = useState(null)
++  const [resolveMessageCount, setResolveMessageCount] = useState(null)
+ 
+   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
+   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
+@@ -221,23 +222,38 @@ function DisputeBlock({ detail, index, refetch }) {
+   // so the contract's timeout fallback settles it as a fixed 50/50 split.
+   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
+ 
+-  const handleResolve = useCallback((txHash) => {
+-    if (txHash && trackingDomain != null) {
+-      setResolveTxHash(txHash)
+-      // Also persist to localStorage so EscrowDetail picks it up on other
+-      // devices. Round 20 Phase D: no `domain` field — no reader ever
+-      // consumed it (both this component and EscrowDetail's MilestoneRow
+-      // recompute the domain live from escrow/splits), and a single stored
+-      // domain couldn't represent a mixed split's several real per-message
+-      // domains anyway. useCctpDelivery gets its per-message domains from
+-      // Iris directly once it has the txHash.
+-      localStorage.setItem(
+-        cctpTrackKey(detail.id, index),
+-        JSON.stringify({ txHash, ts: Date.now() })
+-      )
++  // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
++  // "was this escrow/split CONFIGURED for cross-chain" — a resolveDispute
++  // ruling can execute while rounding every share to zero or diverting
++  // every cross-chain leg to an Arc credit, with no CCTP message ever
++  // created. Receives the full confirmed receipt now (see ResolveForm's own
++  // tx below), not a broadcast-time txHash string — the same
++  // broadcast-vs-mined gap Round 21 Phase D already closed for mutualSettle.
++  // resolveDisputeByTimeout's own onConfirmed still calls this with `null`
++  // (it never goes cross-chain at all, TrancheProtocol.sol:596/:614 —
++  // both halves always become Arc refund credits), which correctly no-ops
++  // here without needing a receipt to prove that.
++  const handleResolve = useCallback((receipt) => {
++    if (receipt) {
++      const { emitted, count } = receiptEmittedCctpMessage(receipt)
++      if (emitted) {
++        setResolveTxHash(receipt.transactionHash)
++        setResolveMessageCount(count)
++        // Also persist to localStorage so EscrowDetail picks it up on other
++        // devices. Round 20 Phase D: no `domain` field — no reader ever
++        // consumed it (both this component and EscrowDetail's MilestoneRow
++        // recompute the domain live from escrow/splits), and a single stored
++        // domain couldn't represent a mixed split's several real per-message
++        // domains anyway. useCctpDelivery gets its per-message domains from
++        // Iris directly once it has the txHash.
++        localStorage.setItem(
++          cctpTrackKey(detail.id, index),
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
++        )
++      }
+     }
+     refetch()
+-  }, [trackingDomain, detail.id, index, refetch])
++  }, [detail.id, index, refetch])
+ 
+   return (
+     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
+@@ -306,6 +322,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         <ArbiterDeliveryStatus
+           txHash={resolveTxHash}
+           isCrossChain={trackingDomain != null}
++          expectedMessageCount={resolveMessageCount}
+         />
+       )}
+     </li>
+@@ -341,8 +358,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
+    CrossChainDelivery for the full citation trail on why a single collapsed
+    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+    leg in the same mixed split failed. */
+-function ArbiterDeliveryStatus({ txHash, isCrossChain }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
++function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessageCount }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
+ 
+   if (phase === 'idle') return null
+ 
+@@ -909,8 +926,16 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
+   const [resolutionUri, setResolutionUri] = useState('')
+   const [resolutionHash, setResolutionHash] = useState('')
+   const [err, setErr] = useState('')
++  // Round 22 Phase A: onResolved now receives the CONFIRMED receipt, not a
++  // broadcast-time txHash string — DisputeBlock.handleResolve needs the
++  // receipt to check receiptEmittedCctpMessage. Moving this into
++  // onConfirmed closes the same broadcast-vs-mined gap Round 21 Phase D
++  // already closed for mutualSettle.
+   const tx = useTx({
+-    onConfirmed: () => { setPct('50'); setResolutionUri(''); setResolutionHash('') }
++    onConfirmed: (receipt) => {
++      setPct('50'); setResolutionUri(''); setResolutionHash('')
++      onResolved?.(receipt)
++    }
+   })
+   const timeoutTx = useTx({ onConfirmed: () => onResolved?.(null) })
+   const { config } = useProtocolConfig()
+@@ -955,7 +980,7 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
+     })
+     const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
+ 
+-    const txHash = await tx.run(
++    await tx.run(
+       escrowWrite('resolveDispute', [
+         BigInt(id), BigInt(index), BigInt(bps), effectiveHash, resolutionUri.trim(), maxFee
+       ]),
+@@ -967,7 +992,6 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
+         })
+       }
+     )
+-    onResolved?.(txHash ?? null)
+   }
+ 
+   return (
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 87279f9..f1feec2 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
+ import {
+   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+@@ -1647,6 +1647,7 @@ function MilestoneRow({
+                   isCrossChain={isHistoricallyCrossChain}
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
++                  expectedMessageCount={cctpTrack?.expectedMessages}
+                 />
+               )}
+ 
+@@ -2434,6 +2435,21 @@ export function mutualSettlementExecuted(receipt) {
+   return false
+ }
+ 
++/* Round 22 Phase A. mutualSettlementExecuted proves the SETTLEMENT
++   happened, not that it happened cross-chain — a partial settlement can
++   round every leg's share to zero, or divert every cross-chain leg to an
++   Arc credit, and still fire MutualSettlementExecuted with no CCTP message
++   ever created. Both facts matter for different reasons and neither implies
++   the other, so SettlementPanel's tracker write requires both: this wraps
++   them into one composite ground-truth check, kept separate from the two
++   simpler write sites (MilestoneAction, DisputeBlock) whose actions either
++   revert or fully execute with no two-sided-match ambiguity, so
++   receiptEmittedCctpMessage alone is already their complete answer. */
++export function mutualSettlementCreatedCctpMessage(receipt) {
++  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0 }
++  return receiptEmittedCctpMessage(receipt)
++}
++
+ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+   const n = milestone.index + 1
+   const of = Number(escrow.milestoneCount) || n
+@@ -2661,11 +2677,16 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+       // own doc comment for why the snapshot this used to reuse here (still
+       // correctly used by mutualSettleConfirm below, for a different
+       // question) can go stale in the window before this transaction lands.
+-      const executed = mutualSettlementExecuted(receipt)
+-      // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
+-      // not the raw escrow.destinationDomain this used to read independently.
+-      const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
+-      if (trackingDomain != null) {
++      //
++      // Round 22 Phase A: mutualSettlementExecuted alone proves the
++      // SETTLEMENT happened, not that it happened cross-chain — a partial
++      // settlement can round every leg's share to zero or divert every
++      // cross-chain leg to an Arc credit and still fire
++      // MutualSettlementExecuted, with no CCTP message ever created.
++      // mutualSettlementCreatedCctpMessage requires both: settlement
++      // executed AND the receipt proves a real message was sent.
++      const { emitted, count } = mutualSettlementCreatedCctpMessage(receipt)
++      if (emitted) {
+         // Round 20 Phase D: no `domain` field — no reader ever consumed it
+         // (both MilestoneRow and DisputeBlock recompute the domain live from
+         // escrow/splits rather than trusting a persisted value), and a single
+@@ -2674,7 +2695,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // domains from Iris directly once it has the txHash.
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now() })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
+         )
+         onCrossChainRelease?.()
+       }
+@@ -2847,8 +2868,8 @@ export function shouldClearCctpTrack(deliveries) {
+    recovery card for one of potentially several simultaneously-failed legs.
+    Exported for direct testing — the same reasoning EscrowDetail exports its
+    other confirm-descriptor and decision functions for. */
+-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
++export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessageCount }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
+   const [copied, setCopied] = useState(false)
+ 
+   // Once every message Iris knows about for this tx has actually completed,
+@@ -3550,7 +3571,29 @@ function MilestoneAction({
+ }) {
+   const [activeKey, setActiveKey] = useState(null)
+   const tx = useTx({
+-    onConfirmed: () => { onChange?.(); setActiveKey(null) },
++    // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
++    // "was this escrow/split CONFIGURED for cross-chain" — MilestoneAction
++    // shares this one run() across all four milestone actions, and two of
++    // them (claim, refund) never touch CCTP at all regardless of the
++    // escrow's domain: claimDelivery moves no funds
++    // (milestoneConfirm: "No funds move on this transaction"),
++    // refundAfterDeadline only ever credits an Arc refund balance
++    // (TrancheProtocol.sol:715). The old gate tracked both anyway whenever
++    // the escrow happened to be cross-chain-configured. Also moved from
++    // right after tx.run() (broadcast time) into onConfirmed (confirmation
++    // time) — the same broadcast-vs-mined gap Round 21 Phase D already
++    // closed for mutualSettle specifically.
++    onConfirmed: (receipt) => {
++      onChange?.(); setActiveKey(null)
++      const { emitted, count } = receiptEmittedCctpMessage(receipt)
++      if (emitted) {
++        localStorage.setItem(
++          cctpTrackKey(escrow.id, milestone.index),
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
++        )
++        onCrossChainRelease?.()
++      }
++    },
+     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
+   })
+   const { config } = useProtocolConfig()
+@@ -3586,23 +3629,10 @@ function MilestoneAction({
+     }
+ 
+     try {
+-      const txHash = await tx.run(escrowWrite(action.fn, args), {
++      await tx.run(escrowWrite(action.fn, args), {
+         loadingMessage: 'Check your wallet.',
+         confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+       })
+-      // Round 19 Phase C: split-aware, same as releaseMaxFeePlan/
+-      // settlementIsCrossChain above — not the raw escrow.destinationDomain
+-      // this used to read independently.
+-      const trackingDomain = settlementTrackingDomain(escrow, splits)
+-      if (txHash && trackingDomain != null) {
+-        // Round 20 Phase D: no `domain` field — see the same note in
+-        // SettlementPanel.propose above.
+-        localStorage.setItem(
+-          cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash, ts: Date.now() })
+-        )
+-        onCrossChainRelease?.()
+-      }
+     } catch {
+       clearOpt(`milestone_${milestone.index}`)
+     }
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+index ebaf2ea..a5be447 100644
+--- a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
++++ b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+@@ -25,7 +25,7 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
+    "proposed but not executed" receipt (just the Proposed log) and an
+    "executed" receipt (both logs) are the two real shapes this function has
+    to tell apart. */
+-import { mutualSettlementExecuted, mutualSettleExecutes } from './EscrowDetail.jsx'
++import { mutualSettlementExecuted, mutualSettleExecutes, mutualSettlementCreatedCctpMessage } from './EscrowDetail.jsx'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const ESCROW_ID = 7n
+@@ -50,6 +50,18 @@ const executedLog = (bps) => buildLog('MutualSettlementExecuted', {
+   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, bps: BigInt(bps)
+ })
+ 
++// Arc's own (source-side) MessageTransmitterV2 — verified live, see
++// receiptEmittedCctpMessage's own doc comment in utils/irisDelivery.js.
++const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++const MESSAGE_SENT_ABI = [
++  { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
++]
++const messageSentLog = (messageHex = '0x1234') => ({
++  address: MESSAGE_TRANSMITTER,
++  topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
++  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
++})
++
+ describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
+   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {
+     const receipt = { transactionHash: '0xtx1', logs: [proposedLog(6000)] }
+@@ -126,3 +138,71 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
+     expect(mutualSettlementExecuted(receiptShowingNoExecution)).toBe(false)
+   })
+ })
++
++/* mutualSettlementCreatedCctpMessage — Round 22 Phase A.
++
++   mutualSettlementExecuted alone proves the SETTLEMENT happened, not that
++   it happened cross-chain — a partial settlement can round every leg's
++   share to zero, or divert every cross-chain leg to an Arc credit, and
++   still fire MutualSettlementExecuted with no CCTP message ever created.
++   SettlementPanel's tracker write requires BOTH facts, wrapped into this
++   one composite check — kept separate from receiptEmittedCctpMessage itself
++   (used directly, unwrapped, by MilestoneAction and DisputeBlock, whose
++   actions either revert or fully execute with no two-sided-match ambiguity)
++   so a regression in EITHER site's gate is caught by tests specific to that
++   site, not a shared one that can't tell them apart. */
++describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just one', () => {
++  /* The one test that guards the property the component actually branches
++     on: SettlementPanel's write is gated purely on `emitted`
++     (`if (emitted) { ...write tracker... }`) — a mutation that drops the
++     message-check and derives `emitted` from mutualSettlementExecuted alone
++     flips this specific assertion's `emitted` from false to true, verified
++     directly (not assumed) by running exactly that mutation in isolation. */
++  it('is false when the settlement executed but every leg rounded to zero or diverted to Arc — no MessageSent at all', () => {
++    // MutualSettlementExecuted fires unconditionally on a matching
++    // settlement — it does not by itself mean a burn happened.
++    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(6000), executedLog(6000)] }
++    expect(mutualSettlementExecuted(receipt)).toBe(true)
++    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  })
++
++  /* Verified independently of the test above: a mutation that drops ONLY
++     the executed short-circuit (leaving the message-detection and emitted
++     derivation otherwise correct) still matches this test's `emitted`
++     expectation exactly (false either way, since no execution ever
++     happened) — it only diverges on `count` (a leaked 1 instead of the
++     correct 0, since the real function never even attempts to count once
++     it knows nothing executed). That divergence has NO production
++     consequence — SettlementPanel never reads `count` when `emitted` is
++     false, the write is skipped entirely — so this test documents a real
++     internal-correctness property (don't compute or leak a count for a
++     call that didn't execute), not a second independent guard against the
++     same regression the test above already covers. */
++  it('is false when a real MessageSent-shaped log is present but the settlement never executed (proposals never matched)', () => {
++    // Should never happen in a real receipt (mutualSettle can't burn without
++    // executing), but proves the executed check is genuinely required, not
++    // redundant with the message check.
++    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(6000), messageSentLog('0xdeadbeef')] }
++    expect(mutualSettlementExecuted(receipt)).toBe(false)
++    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  })
++
++  /* Independently verified to catch a real bug the two tests above cannot
++     reach: a mutation that keeps the executed-gate and emitted-derivation
++     completely correct, but hardcodes `count` to 1 whenever `emitted` is
++     true (instead of the real message count), is caught by THIS test alone
++     — run in isolation against that exact mutation, 1 of 10 tests failed,
++     and it was this one. Neither test above can catch it: the first has no
++     real message at all (count stays 0 either way), the second short-
++     circuits to count 0 before any counting happens. Only a fixture with
++     `emitted: true` AND more than one real message (this one has two)
++     exercises count propagation through the true branch at all — this is
++     that fixture, not a restatement of "requires both facts". */
++  it('is true, with the real count, only when the settlement executed AND a real message was sent', () => {
++    const receipt = {
++      transactionHash: '0xtx10',
++      logs: [proposedLog(6000), executedLog(6000), messageSentLog('0x0001'), messageSentLog('0x0002')]
++    }
++    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: true, count: 2 })
++  })
++})
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 0414957..1cb410a 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,4 +1,4 @@
+-import { encodeFunctionData } from 'viem'
++import { encodeFunctionData, decodeEventLog } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ 
+ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
+@@ -49,3 +49,56 @@ export function encodeReceiveMessage(message, attestation) {
+     args: [message, attestation]
+   })
+ }
++
++// Circle's MessageTransmitterV2 event, emitted whenever a CCTP message is
++// actually created — a single non-indexed `bytes` parameter, nothing else.
++// Signature and shape verified live: decoded a real Arc-testnet
++// depositForBurnWithHook receipt (hookData "cctp-forward") and found this
++// event at address 0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275 — Arc's own
++// (source-side) MessageTransmitterV2, a DIFFERENT contract than both
++// TokenMessenger (which emits DepositForBurn, not this) and the
++// destination-side MESSAGE_TRANSMITTER_V2 addresses in config/chains.js
++// (used for self-relay `receiveMessage` on the OTHER end). The topic0 was
++// independently confirmed to equal keccak256("MessageSent(bytes)").
++const MESSAGE_SENT_ABI = [
++  {
++    name: 'MessageSent',
++    type: 'event',
++    inputs: [{ name: 'message', type: 'bytes', indexed: false }],
++    anonymous: false
++  }
++]
++
++/* Round 22 Phase A. Ground truth for "did a CCTP message actually get
++   created", the question none of claimDelivery succeeding, refundAfterDeadline
++   succeeding, or MutualSettlementExecuted firing actually answers —
++   claimDelivery and refundAfterDeadline never touch CCTP at all regardless of
++   the escrow's configured domain, and a mutualSettle/resolveDispute call can
++   execute while every leg still rounds to zero or diverts to an Arc credit,
++   emitting no CCTP message despite genuinely executing.
++
++   Decodes EVERY log in the confirmed receipt against MESSAGE_SENT_ABI rather
++   than filtering by a hardcoded contract address first — deliberately, since
++   a same-contract-address filter (the pattern mutualSettlementExecuted uses
++   for this contract's OWN events) doesn't apply to an event a DIFFERENT
++   contract emits, and MessageSent's topic0 is Circle's own canonical event
++   signature hash, unique enough that a false match from an unrelated log is
++   not a realistic risk — this also means it keeps working if Circle ever
++   redeploys the MessageTransmitterV2 proxy to a new address, the same
++   caution CLAUDE.md already documents for the TokenMessenger proxy.
++
++   A single call can emit MORE than one MessageSent — a mixed split can burn
++   several legs to different chains in one transaction (bounded by
++   MAX_SPLITS = 10) — so this returns the real count alongside the boolean,
++   for callers to persist as the expected message count (see
++   useCctpDelivery's own comment for why that matters). */
++export function receiptEmittedCctpMessage(receipt) {
++  let count = 0
++  for (const log of receipt.logs) {
++    try {
++      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
++      if (dec.eventName === 'MessageSent') count++
++    } catch {}
++  }
++  return { emitted: count > 0, count }
++}
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index a8d9ef1..8051459 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -15,9 +15,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
+    yet" — so it always surfaced as `phase: 'unavailable'`, never correctly
+    polling for real status. These tests pin the URL shape directly so this
+    can't silently regress back to the never-real one. */
++import { encodeEventTopics, encodeAbiParameters } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
++import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+-const { fetchIrisMessages } = await import('./irisDelivery.js')
++const { fetchIrisMessages, receiptEmittedCctpMessage } = await import('./irisDelivery.js')
+ 
+ afterEach(() => {
+   vi.unstubAllGlobals()
+@@ -81,3 +83,123 @@ describe('fetchIrisMessages', () => {
+     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
+   })
+ })
++
++/* receiptEmittedCctpMessage — Round 22 Phase A.
++
++   Every prior fix to delivery tracking (Round 20 Phase B/D, Round 21 Phase
++   C/D) taught the frontend to correctly check "did the intended
++   business-logic action succeed" — did the ruling actually pay someone, did
++   settlement proposals actually match. A correct answer to that question is
++   still not the same question as "did a CCTP message actually get created":
++   claimDelivery succeeding is real, it's just not a cross-chain delivery;
++   MutualSettlementExecuted firing is real, it's just not proof a burn
++   happened, since the contract emits it even when every leg rounds to zero
++   or diverts to an Arc credit. This is the one shared ground-truth check —
++   a real MessageSent log in the confirmed receipt — that answers the actual
++   question, replacing three separately-reasoned-about "did this execute"
++   checks (MilestoneAction, DisputeBlock, SettlementPanel).
++
++   MESSAGE_TRANSMITTER, the topic0, and the exact "message" field decode
++   were all verified live against a real Arc-testnet depositForBurnWithHook
++   transaction (see receiptEmittedCctpMessage's own doc comment in
++   irisDelivery.js) — these fixtures build the SAME real event shape via
++   viem's encodeEventTopics/encodeAbiParameters, not hand-rolled objects, so
++   a fixture only passes if it would actually decode against the real ABI. */
++const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275' // Arc's own (source-side) MessageTransmitterV2, verified live
++const MESSAGE_SENT_ABI = [
++  { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
++]
++
++const messageSentLog = (messageHex = '0x1234', address = MESSAGE_TRANSMITTER) => ({
++  address,
++  topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
++  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
++})
++
++const escrowLog = (eventName, args, address = CONTRACT_ADDRESS) => {
++  const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
++  const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
++  const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
++  const data = nonIndexed.length > 0
++    ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
++    : '0x'
++  return { address, topics, data }
++}
++
++describe('receiptEmittedCctpMessage', () => {
++  it('is false for a real claimDelivery receipt — no funds move, no CCTP message, regardless of the escrow\'s configured domain', () => {
++    // claimDelivery's own confirm descriptor states this outright: "No
++    // funds move on this transaction." A real receipt for it contains only
++    // DeliveryClaimed, never anything from the MessageTransmitter.
++    const receipt = {
++      transactionHash: '0xtx1',
++      logs: [escrowLog('DeliveryClaimed', { escrowId: 7n, milestoneIndex: 1n, reviewDeadline: 123n })]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  })
++
++  it('is false for a real refundAfterDeadline receipt — credits an Arc refund balance only, never cross-chain', () => {
++    // TrancheProtocol.sol:715: refundBalances[e.refundTo] on Arc, no
++    // transfer, no CCTP burn — true regardless of destinationDomain.
++    const receipt = {
++      transactionHash: '0xtx2',
++      logs: [escrowLog('RefundedAfterDeadline', { escrowId: 7n, milestoneIndex: 1n, amount: 250_000_000n })]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  })
++
++  it('is false for a resolveDispute ruling that executes but rounds to zero or diverts every cross-chain leg to Arc', () => {
++    // DisputeResolved fires unconditionally on a successful resolveDispute
++    // call — it does not by itself mean a burn happened. A ruling whose
++    // recipient share rounds to zero, or whose every cross-chain leg
++    // diverts to an Arc credit (sub-floor), settles with no MessageSent at
++    // all despite genuinely executing.
++    const receipt = {
++      transactionHash: '0xtx3',
++      logs: [escrowLog('DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 6000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' })]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  })
++
++  it('is true, count 1, for a genuine no-split cross-chain approveRelease burn', () => {
++    const receipt = {
++      transactionHash: '0xtx4',
++      logs: [
++        escrowLog('MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n }),
++        messageSentLog('0xdeadbeef')
++      ]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
++  })
++
++  it('is true, count matching the real number, for a mixed split settling multiple cross-chain legs in one transaction', () => {
++    // A mixed split can burn several legs to different chains in a single
++    // call (bounded by MAX_SPLITS = 10) — each is its own MessageSent.
++    const receipt = {
++      transactionHash: '0xtx5',
++      logs: [
++        escrowLog('MutualSettlementProposed', { escrowId: 7n, milestoneIndex: 1n, proposer: '0x179cc4c8f23d257b7f4acb785464025570e3af86', bps: 6000n }),
++        escrowLog('MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n }),
++        messageSentLog('0x0001'),
++        messageSentLog('0x0002'),
++        messageSentLog('0x0003')
++      ]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 3 })
++  })
++
++  it('does not mistake a log from a different contract for MessageSent, and does not crash on one', () => {
++    const receipt = {
++      transactionHash: '0xtx6',
++      logs: [
++        { address: '0x3600000000000000000000000000000000000000', topics: ['0xdeadbeef'], data: '0x' }, // USDC precompile, unrelated topic
++        messageSentLog('0xcafe')
++      ]
++    }
++    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
++  })
++
++  it('returns false, count 0, not throws, for an empty logs array', () => {
++    expect(receiptEmittedCctpMessage({ transactionHash: '0xtx7', logs: [] })).toEqual({ emitted: false, count: 0 })
++  })
++})

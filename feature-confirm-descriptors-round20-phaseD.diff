@@ -1,0 +1,824 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 5afbd1f..b6655df 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -1,26 +1,39 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import { fetchIrisMessages } from '../utils/irisDelivery'
+-import { ARC_DOMAIN } from '../config/chains'
+ 
+ const POLL_MS = 15_000
+ 
+ // Poll Circle's Iris API for cross-chain delivery status of a burn tx.
+-// Only activates for non-Arc destinations. Stops polling on success or failure.
++// Only activates when the settlement is cross-chain at all. Stops polling
++// once every message has reached a terminal forwardState.
+ //
+ // Returns:
+ //   phase: 'idle' | 'polling' | 'delivered' | 'failed' | 'unavailable'
+ //   deliveries: parsed message objects with destinationTxHash, message,
+-//               attestation, errorCode, forwardState per CCTP message
+-//               (one per milestone for plain releases; one per split recipient
+-//               for split milestones).
+-export function useCctpDelivery(txHash, destinationDomain) {
++//               attestation, errorCode, forwardState, destinationDomain per
++//               CCTP message (one per milestone for plain releases; one per
++//               split recipient for split milestones) — each carrying its
++//               OWN real domain from Iris, never a caller-supplied guess.
++//
++// Round 20 Phase D: `destinationDomain` replaced with a plain `isCrossChain`
++// boolean. The old single-domain parameter did two things — gated whether to
++// poll at all, and silently filled in any message Iris didn't label with a
++// domain — but a mixed split settlement can burn to several DIFFERENT chains
++// in one transaction (bounded by MAX_SPLITS = 10, TrancheProtocol.sol:31),
++// so "the caller's one domain" was never a safe stand-in for a message's own
++// domain. The gate only ever needed a boolean; the fallback risked
++// mislabeling a message as a chain it was never actually sent to. Iris
++// reliably reports each message's own domain in practice — if it ever
++// doesn't, `destinationDomain` now comes through as `null` (rendered as an
++// unknown chain downstream) rather than a wrong guess.
++export function useCctpDelivery(txHash, isCrossChain) {
+   const [phase, setPhase]           = useState('idle')
+   const [deliveries, setDeliveries] = useState([])
+   const intervalRef = useRef(null)
+   const doneRef     = useRef(false)
+ 
+   const poll = useCallback(async () => {
+-    if (!txHash || Number(destinationDomain) === ARC_DOMAIN || doneRef.current) return
++    if (!txHash || !isCrossChain || doneRef.current) return
+     try {
+       const messages = await fetchIrisMessages(txHash)
+ 
+@@ -41,7 +54,7 @@ export function useCctpDelivery(txHash, destinationDomain) {
+       const parsed = messages.map((m) => ({
+         message:          m.message,
+         attestation:      m.attestation,
+-        destinationDomain: m.destinationDomain ?? Number(destinationDomain),
++        destinationDomain: m.destinationDomain ?? null,
+         destinationTxHash: m.forward?.destinationTxHash ?? null,
+         forwardState:      m.forward?.forwardState ?? null,
+         errorCode:         m.forward?.forwardErrorCode ?? null,
+@@ -70,10 +83,10 @@ export function useCctpDelivery(txHash, destinationDomain) {
+       // so a transient outage doesn't permanently block status.
+       setPhase('unavailable')
+     }
+-  }, [txHash, destinationDomain])
++  }, [txHash, isCrossChain])
+ 
+   useEffect(() => {
+-    if (!txHash || Number(destinationDomain) === ARC_DOMAIN) {
++    if (!txHash || !isCrossChain) {
+       setPhase('idle')
+       return
+     }
+@@ -83,7 +96,7 @@ export function useCctpDelivery(txHash, destinationDomain) {
+     poll()
+     intervalRef.current = setInterval(poll, POLL_MS)
+     return () => clearInterval(intervalRef.current)
+-  }, [txHash, destinationDomain, poll])
++  }, [txHash, isCrossChain, poll])
+ 
+   return { phase, deliveries }
+ }
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+new file mode 100644
+index 0000000..dd603fc
+--- /dev/null
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -0,0 +1,111 @@
++// useCctpDelivery — Round 20 Phase D.
++//
++// Two properties matter here: (1) the second argument is now a plain
++// isCrossChain boolean, used only to gate polling — not a domain value the
++// hook trusts for anything else; and (2) each parsed delivery keeps ITS OWN
++// destinationDomain from Iris, defaulting to null (never a caller-supplied
++// guess) when Iris omits one. A mixed split settlement can burn to several
++// DIFFERENT chains in one transaction, so collapsing every message's domain
++// to one caller-supplied value was never safe — this is what stops that.
++
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { renderHook, waitFor } from '@testing-library/react'
++
++const fetchIrisMessages = vi.hoisted(() => vi.fn())
++vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages }))
++
++const { useCctpDelivery } = await import('./useCctpDelivery.js')
++
++beforeEach(() => {
++  fetchIrisMessages.mockReset()
++})
++
++afterEach(() => {
++  vi.useRealTimers()
++})
++
++const attested = (overrides = {}) => ({
++  message: '0xmessage',
++  attestation: '0xattestation',
++  destinationDomain: 6,
++  forward: { forwardState: 'COMPLETE', destinationTxHash: '0xdesttx', forwardErrorCode: null },
++  ...overrides
++})
++
++describe('useCctpDelivery — isCrossChain gate', () => {
++  it('stays idle and never fetches when isCrossChain is false', async () => {
++    const { result } = renderHook(() => useCctpDelivery('0xtx', false))
++    expect(result.current.phase).toBe('idle')
++    await waitFor(() => expect(fetchIrisMessages).not.toHaveBeenCalled())
++  })
++
++  it('stays idle and never fetches when there is no txHash yet, even if isCrossChain is true', async () => {
++    const { result } = renderHook(() => useCctpDelivery(null, true))
++    expect(result.current.phase).toBe('idle')
++    await waitFor(() => expect(fetchIrisMessages).not.toHaveBeenCalled())
++  })
++
++  it('polls once isCrossChain is true and a txHash is present', async () => {
++    fetchIrisMessages.mockResolvedValue([attested()])
++    renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xtx'))
++  })
++})
++
++describe('useCctpDelivery — per-message domain, never collapsed to a caller-supplied value', () => {
++  it('keeps each message\'s own destinationDomain from Iris, even when they differ from each other', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      attested({ destinationDomain: 6 }),   // Base Sepolia
++      attested({ destinationDomain: 0 })    // Ethereum Sepolia — genuinely different chain
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
++  })
++
++  it('defaults an Iris-omitted domain to null, never to some other message\'s domain or a guess', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      attested({ destinationDomain: 6 }),
++      attested({ destinationDomain: undefined })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
++    expect(result.current.deliveries[1].destinationDomain).toBeNull()
++  })
++})
++
++describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not collapsed by `phase`', () => {
++  it('keeps the COMPLETE message\'s own data intact even when phase is "failed" because a DIFFERENT message failed', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      attested({ destinationDomain: 6, forward: { forwardState: 'COMPLETE', destinationTxHash: '0xgood', forwardErrorCode: null } }),
++      attested({ destinationDomain: 0, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('failed'))
++
++    // The aggregate phase says "failed", but the actually-delivered message's
++    // own record is still fully present and correct in `deliveries` — a
++    // consumer rendering per-message (not gating on `phase` alone) can still
++    // show it as delivered.
++    const [complete, failed] = result.current.deliveries
++    expect(complete.forwardState).toBe('COMPLETE')
++    expect(complete.destinationDomain).toBe(6)
++    expect(complete.destinationTxHash).toBe('0xgood')
++    expect(failed.forwardState).toBe('FAILED')
++    expect(failed.destinationDomain).toBe(0)
++    expect(failed.errorCode).toBe('INSUFFICIENT_FEE')
++  })
++
++  it('surfaces two independently-failed messages on different domains, both present in `deliveries`', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      attested({ destinationDomain: 6, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } }),
++      attested({ destinationDomain: 0, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('failed'))
++    expect(result.current.deliveries).toHaveLength(2)
++    expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
++    expect(result.current.deliveries.every((d) => d.forwardState === 'FAILED')).toBe(true)
++  })
++})
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 819ecff..63c36cb 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -224,10 +224,16 @@ function DisputeBlock({ detail, index, refetch }) {
+   const handleResolve = useCallback((txHash) => {
+     if (txHash && trackingDomain != null) {
+       setResolveTxHash(txHash)
+-      // Also persist to localStorage so EscrowDetail picks it up on other devices.
++      // Also persist to localStorage so EscrowDetail picks it up on other
++      // devices. Round 20 Phase D: no `domain` field — no reader ever
++      // consumed it (both this component and EscrowDetail's MilestoneRow
++      // recompute the domain live from escrow/splits), and a single stored
++      // domain couldn't represent a mixed split's several real per-message
++      // domains anyway. useCctpDelivery gets its per-message domains from
++      // Iris directly once it has the txHash.
+       localStorage.setItem(
+         cctpTrackKey(detail.id, index),
+-        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
++        JSON.stringify({ txHash, ts: Date.now() })
+       )
+     }
+     refetch()
+@@ -299,7 +305,7 @@ function DisputeBlock({ detail, index, refetch }) {
+       {resolveTxHash && trackingDomain != null && (
+         <ArbiterDeliveryStatus
+           txHash={resolveTxHash}
+-          destinationDomain={trackingDomain}
++          isCrossChain={trackingDomain != null}
+         />
+       )}
+     </li>
+@@ -324,36 +330,55 @@ function Side({ label, who, when, reason, uri }) {
+   )
+ }
+ 
++const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
++
+ /* Shown in the arbiter's DisputeBlock after resolveDispute confirms cross-chain.
+-   Polls Iris so the arbiter can confirm the payment was forwarded. */
+-function ArbiterDeliveryStatus({ txHash, destinationDomain }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
+-  const chainName = getDomainName(destinationDomain)
++   Polls Iris so the arbiter can confirm the payment was forwarded.
++
++   Round 20 Phase D: renders each CCTP message in `deliveries` independently
++   by its OWN forwardState/destinationDomain, instead of gating the whole
++   block on one aggregate `phase` string — see EscrowDetail.jsx's
++   CrossChainDelivery for the full citation trail on why a single collapsed
++   phase/domain silently hid an already-delivered leg whenever a DIFFERENT
++   leg in the same mixed split failed. */
++function ArbiterDeliveryStatus({ txHash, isCrossChain }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
+ 
+   if (phase === 'idle') return null
+ 
+   return (
+     <div className="flex flex-col gap-1.5 pt-2 border-t border-rule mt-1">
+-      {phase === 'polling' && (
++      {phase === 'polling' && deliveries.length === 0 && (
+         <div className="flex items-center gap-2 text-[12px] text-ink-2">
+           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+-          Delivering to {chainName}…
++          Delivering…
+         </div>
+       )}
+-      {phase === 'delivered' && deliveries.map((d, i) => {
+-        const url = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
++      {deliveries.map((d, i) => {
++        const chainName = domainLabel(d.destinationDomain)
++        if (d.forwardState === 'COMPLETE') {
++          const url = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
++          return (
++            <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
++              <span>✓ Delivered to {chainName}</span>
++              {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
++            </div>
++          )
++        }
++        if (d.forwardState === 'FAILED') {
++          return (
++            <p key={i} className="text-[12px] text-warn">
++              Delivery to {chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
++            </p>
++          )
++        }
+         return (
+-          <div key={i} className="flex items-center gap-2 text-[12px] text-ok">
+-            <span>✓ Delivered to {chainName}</span>
+-            {url && <a href={url} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80">View tx ↗</a>}
++          <div key={i} className="flex items-center gap-2 text-[12px] text-ink-2">
++            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
++            Delivering to {chainName}…
+           </div>
+         )
+       })}
+-      {phase === 'failed' && (
+-        <p className="text-[12px] text-warn">
+-          Delivery failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
+-        </p>
+-      )}
+       {phase === 'unavailable' && (
+         <p className="text-[12px] text-ink-3">Delivery status unavailable.</p>
+       )}
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+new file mode 100644
+index 0000000..2419159
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -0,0 +1,50 @@
++import { describe, it, expect } from 'vitest'
++
++/* shouldClearCctpTrack — Round 20 Phase D.
++   The old design cleared the shared cctpTrackKey entry the instant ANY
++   single relay succeeded, even if the same tx had another message still
++   FAILED (or still pending) — a mixed split can burn to several different
++   chains in one transaction, and one leg's fix has nothing to do with
++   another's status. This is the pure decision extracted from
++   CrossChainDelivery's cleanup effect: only clear once every known message
++   has genuinely reached COMPLETE per Iris.
++
++   Critically, a message the user has already self-relayed by hand does NOT
++   flip to COMPLETE here — Iris's own forwardState bookkeeping only tracks
++   its OWN Forwarding Service, not an out-of-band relay a user submitted
++   directly to the destination chain's MessageTransmitterV2. So "two failed
++   legs, one relayed" is indistinguishable from "two failed legs, neither
++   relayed" from this function's point of view — deliberately, since that's
++   exactly what keeps the tracker (and the other leg's recovery card)
++   alive. */
++import { shouldClearCctpTrack } from './EscrowDetail.jsx'
++
++const complete = (overrides = {}) => ({ forwardState: 'COMPLETE', destinationDomain: 6, ...overrides })
++const failed = (overrides = {}) => ({ forwardState: 'FAILED', destinationDomain: 6, ...overrides })
++const pending = (overrides = {}) => ({ forwardState: null, destinationDomain: 6, ...overrides })
++
++describe('shouldClearCctpTrack', () => {
++  it('does not clear when nothing is known yet (deliveries empty)', () => {
++    expect(shouldClearCctpTrack([])).toBe(false)
++  })
++
++  it('clears once the single message is COMPLETE', () => {
++    expect(shouldClearCctpTrack([complete()])).toBe(true)
++  })
++
++  it('clears once every message across a multi-leg split is COMPLETE', () => {
++    expect(shouldClearCctpTrack([complete({ destinationDomain: 6 }), complete({ destinationDomain: 0 })])).toBe(true)
++  })
++
++  it('does not clear when one message is FAILED, even if every other message is COMPLETE', () => {
++    expect(shouldClearCctpTrack([complete(), failed()])).toBe(false)
++  })
++
++  it('does not clear when two legs are FAILED — self-relaying one of them does not change Iris\'s own record for it, so this stays false regardless of which one (or whether either) was manually relayed', () => {
++    expect(shouldClearCctpTrack([failed({ destinationDomain: 6 }), failed({ destinationDomain: 0 })])).toBe(false)
++  })
++
++  it('does not clear while any message is still pending', () => {
++    expect(shouldClearCctpTrack([complete(), pending()])).toBe(false)
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx
+new file mode 100644
+index 0000000..b2ac587
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx
+@@ -0,0 +1,144 @@
++// CrossChainDelivery — Round 20 Phase D.
++//
++// The most severe finding this round: a mixed split settlement can burn
++// multiple CCTP messages to DIFFERENT chains in one transaction, and the old
++// design collapsed all of that down to one aggregate `phase` string and one
++// outer `destinationDomain` value. Two concrete failures followed:
++//   1. If one leg failed while a DIFFERENT leg had already delivered, the
++//      whole block rendered as "failed" and the delivered leg's confirmation
++//      never appeared at all.
++//   2. The recovery card for a failed leg read the OUTER (wrong) domain for
++//      which chain to switch to and which MessageTransmitterV2 to call —
++//      a broken recovery action, not just inaccurate copy.
++// These tests render CrossChainDelivery directly against a controlled
++// `deliveries` fixture (mocking useCctpDelivery) to prove both are fixed,
++// plus the tracker-cleanup interaction: a relay never flips Iris's own
++// forwardState, so the shared tracker key must survive one leg being
++// self-relayed while another is still failed.
++
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, cleanup } from '@testing-library/react'
++
++const cctpDeliveryMock = vi.hoisted(() => ({ current: { phase: 'idle', deliveries: [] } }))
++vi.mock('../hooks/useCctpDelivery.js', () => ({
++  useCctpDelivery: () => cctpDeliveryMock.current
++}))
++vi.mock('../hooks/useAuth.jsx', () => ({
++  useAuth: () => ({ address: '0x179cc4c8f23d257b7f4acb785464025570e3af86' })
++}))
++
++const { CrossChainDelivery } = await import('./EscrowDetail.jsx')
++
++const BASE = 6   // Base Sepolia
++const ETH = 0    // Ethereum Sepolia
++
++const completeMsg = (domain, txHash) => ({
++  message: '0xmsg', attestation: '0xatt',
++  destinationDomain: domain, destinationTxHash: txHash,
++  forwardState: 'COMPLETE', errorCode: null
++})
++const failedMsg = (domain) => ({
++  message: '0xmsg', attestation: '0xatt',
++  destinationDomain: domain, destinationTxHash: null,
++  forwardState: 'FAILED', errorCode: 'INSUFFICIENT_FEE'
++})
++
++const setDeliveries = (phase, deliveries) => { cctpDeliveryMock.current = { phase, deliveries } }
++
++let removeItemSpy
++
++beforeEach(() => {
++  removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem')
++  cctpDeliveryMock.current = { phase: 'idle', deliveries: [] }
++})
++
++afterEach(() => {
++  cleanup()
++  removeItemSpy.mockRestore()
++})
++
++const renderTracker = () => render(
++  <CrossChainDelivery txHash="0xtx" isCrossChain escrowId={7} milestoneIndex={1} />
++)
++
++describe('a delivered leg stays visible even when a DIFFERENT leg in the same settlement failed', () => {
++  it('renders both the delivered confirmation and the failed leg\'s recovery card at once', () => {
++    setDeliveries('failed', [completeMsg(BASE, '0xdesttx'), failedMsg(ETH)])
++    renderTracker()
++
++    expect(screen.getByText(/Delivered to Base Sepolia/)).toBeInTheDocument()
++    expect(screen.getByText(/Delivery failed/)).toBeInTheDocument()
++  })
++})
++
++describe('the recovery card reads the FAILED message\'s own domain, not a different leg\'s domain', () => {
++  it('names the failed leg\'s chain (Ethereum Sepolia), not the delivered leg\'s chain (Base Sepolia)', () => {
++    setDeliveries('failed', [completeMsg(BASE, '0xdesttx'), failedMsg(ETH)])
++    renderTracker()
++
++    expect(screen.getByText(/Switch your wallet to/)).toBeInTheDocument()
++    expect(screen.getByText('Ethereum Sepolia', { selector: 'span' })).toBeInTheDocument()
++    // The delivered leg's own chain name appears too (in its own line), but
++    // the recovery instructions must not also claim Base Sepolia.
++    const switchLine = screen.getByText(/Switch your wallet to/).closest('p')
++    expect(switchLine.textContent).toContain('Ethereum Sepolia')
++    expect(switchLine.textContent).not.toContain('Base Sepolia')
++  })
++
++  it('reverses correctly when the FAILED leg is on Base and the delivered leg is on Ethereum — proving this is not a lucky fixed ordering', () => {
++    setDeliveries('failed', [completeMsg(ETH, '0xdesttx'), failedMsg(BASE)])
++    renderTracker()
++
++    const switchLine = screen.getByText(/Switch your wallet to/).closest('p')
++    expect(switchLine.textContent).toContain('Base Sepolia')
++    expect(switchLine.textContent).not.toContain('Ethereum Sepolia')
++  })
++})
++
++describe('two simultaneously-failed legs on different chains both get their own recovery card', () => {
++  it('renders two independent "Delivery failed" cards, each naming its own chain', () => {
++    setDeliveries('failed', [failedMsg(BASE), failedMsg(ETH)])
++    renderTracker()
++
++    const cards = screen.getAllByText(/Delivery failed/)
++    expect(cards).toHaveLength(2)
++    expect(screen.getAllByText(/Switch your wallet to/)).toHaveLength(2)
++    expect(screen.getByText('Base Sepolia', { selector: 'span' })).toBeInTheDocument()
++    expect(screen.getByText('Ethereum Sepolia', { selector: 'span' })).toBeInTheDocument()
++  })
++})
++
++describe('tracker cleanup: only clears the shared key once every message is genuinely COMPLETE', () => {
++  it('does NOT clear the tracker when two legs are FAILED, even though one may have already been self-relayed by hand', () => {
++    // A manual self-relay never flips Iris's own forwardState — so "one
++    // relayed" is indistinguishable from "neither relayed" at this layer,
++    // by design. The tracker (and the still-failed leg's card) must survive.
++    setDeliveries('failed', [failedMsg(BASE), failedMsg(ETH)])
++    renderTracker()
++
++    expect(removeItemSpy).not.toHaveBeenCalled()
++    // The still-failed leg's card is still reachable — proving the tracker
++    // surviving actually keeps something alive, not just an unused key.
++    expect(screen.getAllByText(/Delivery failed/)).toHaveLength(2)
++  })
++
++  it('does NOT clear the tracker while one leg is still FAILED and another is COMPLETE', () => {
++    setDeliveries('failed', [completeMsg(BASE, '0xdesttx'), failedMsg(ETH)])
++    renderTracker()
++    expect(removeItemSpy).not.toHaveBeenCalled()
++  })
++
++  it('clears the tracker once every leg has genuinely reached COMPLETE', () => {
++    setDeliveries('delivered', [completeMsg(BASE, '0xdesttx1'), completeMsg(ETH, '0xdesttx2')])
++    renderTracker()
++    expect(removeItemSpy).toHaveBeenCalledWith('cctp-track-7-1')
++  })
++})
++
++describe('an Iris-omitted domain renders honestly instead of guessing a wrong chain', () => {
++  it('shows "an unknown chain" rather than defaulting to some other message\'s domain', () => {
++    setDeliveries('failed', [failedMsg(null)])
++    renderTracker()
++    expect(screen.getByText(/Switch your wallet to/).closest('p').textContent).toContain('an unknown chain')
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index fa85acb..b1634fe 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1638,7 +1638,7 @@ function MilestoneRow({
+               {milestone.state === 3 && cctpTxHash && trackingDomain != null && (
+                 <CrossChainDelivery
+                   txHash={cctpTxHash}
+-                  destinationDomain={trackingDomain}
++                  isCrossChain={trackingDomain != null}
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
+                 />
+@@ -2616,9 +2616,15 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+     // not the raw escrow.destinationDomain this used to read independently.
+     const trackingDomain = executed ? settlementTrackingDomain(escrow, splits) : null
+     if (txHash && trackingDomain != null) {
++      // Round 20 Phase D: no `domain` field — no reader ever consumed it
++      // (both MilestoneRow and DisputeBlock recompute the domain live from
++      // escrow/splits rather than trusting a persisted value), and a single
++      // stored domain couldn't represent a mixed split's several real
++      // per-message domains anyway. useCctpDelivery gets its per-message
++      // domains from Iris directly once it has the txHash.
+       localStorage.setItem(
+         cctpTrackKey(escrow.id, milestone.index),
+-        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
++        JSON.stringify({ txHash, ts: Date.now() })
+       )
+       onCrossChainRelease?.()
+     }
+@@ -2733,53 +2739,99 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+   )
+ }
+ 
++const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an unknown chain')
++
++/* Round 20 Phase D. Whether the shared cctpTrackKey entry should be cleared:
++   only once every CCTP message Iris knows about for this tx has actually
++   reached COMPLETE. Extracted as its own pure function so the property is
++   directly testable — a message that stays FAILED (even one the user has
++   since self-relayed; Iris's own bookkeeping never learns about an
++   out-of-band relay) must NOT cause this to return true, since the tracker
++   is the only thing keeping that still-failed message's recovery card
++   reachable on a later visit. */
++export function shouldClearCctpTrack(deliveries) {
++  return deliveries.length > 0 && deliveries.every((d) => d.forwardState === 'COMPLETE')
++}
++
+ /* Cross-chain delivery tracker. Shown on a RELEASED cross-chain milestone when
+-   we have a tracked burn tx hash from this device. Polls Iris every 15s. */
+-function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneIndex }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, destinationDomain)
+-  const chainName = getDomainName(destinationDomain)
++   we have a tracked burn tx hash from this device. Polls Iris every 15s.
++
++   Round 20 Phase D: renders each CCTP message in `deliveries` independently
++   by its OWN forwardState/destinationDomain, instead of gating the whole
++   block on one aggregate `phase` string. A split settlement can burn
++   multiple messages to DIFFERENT chains in one transaction (bounded by
++   MAX_SPLITS = 10, TrancheProtocol.sol:31) — the old single-branch render
++   meant one leg failing made a DIFFERENT, already-delivered leg's
++   confirmation disappear entirely (phase collapsed to 'failed' globally, so
++   the 'delivered' branch never rendered at all), and only ever offered a
++   recovery card for one of potentially several simultaneously-failed legs.
++   Exported for direct testing — the same reasoning EscrowDetail exports its
++   other confirm-descriptor and decision functions for. */
++export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain)
+   const [copied, setCopied] = useState(false)
+ 
++  // Once every message Iris knows about for this tx has actually completed,
++  // there is nothing left to track — clear the shared entry so it doesn't
++  // resurface on a later visit. A message that stays FAILED (even one the
++  // user has since self-relayed — Iris's own bookkeeping never learns about
++  // an out-of-band relay) intentionally keeps the tracker alive; "already
++  // relayed" lives in that message's own SelfRelayCard instance below, not
++  // here, so handling one failed leg never tears down tracking for another.
++  useEffect(() => {
++    if (shouldClearCctpTrack(deliveries)) {
++      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++    }
++  }, [deliveries, escrowId, milestoneIndex])
++
+   if (phase === 'idle') return null
+ 
+   return (
+     <div className="mt-3 pt-3 border-t border-rule flex flex-col gap-2">
+-      {phase === 'polling' && (
++      {phase === 'polling' && deliveries.length === 0 && (
+         <div className="flex items-center gap-2 text-[12.5px] text-ink-2">
+           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
+-          Delivering to {chainName}…
++          Delivering…
+           <span className="text-[11px] text-ink-3">(checking every 15s)</span>
+         </div>
+       )}
+ 
+-      {phase === 'delivered' && deliveries.map((d, i) => {
+-        const explorerUrl = getChainExplorerTx(d.destinationDomain ?? destinationDomain, d.destinationTxHash)
++      {deliveries.map((d, i) => {
++        const chainName = domainLabel(d.destinationDomain)
++        if (d.forwardState === 'COMPLETE') {
++          const explorerUrl = d.destinationDomain != null ? getChainExplorerTx(d.destinationDomain, d.destinationTxHash) : null
++          return (
++            <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
++              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
++                <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
++              </svg>
++              Delivered to {chainName}
++              {explorerUrl && (
++                <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
++                  View tx <ExternalLinkIcon size={11} />
++                </a>
++              )}
++            </div>
++          )
++        }
++        if (d.forwardState === 'FAILED') {
++          return (
++            <SelfRelayCard
++              key={i}
++              delivery={d}
++              copied={copied}
++              onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
++            />
++          )
++        }
+         return (
+-          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ok">
+-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+-              <path d="M3 7.5l3 3 5-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+-            </svg>
+-            Delivered to {chainName}
+-            {explorerUrl && (
+-              <a href={explorerUrl} target="_blank" rel="noreferrer" className="text-clay hover:opacity-80 inline-flex items-center gap-0.5">
+-                View tx <ExternalLinkIcon size={11} />
+-              </a>
+-            )}
++          <div key={i} className="flex items-center gap-2 text-[12.5px] text-ink-2">
++            <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-3/40 border-t-clay animate-spin shrink-0" aria-hidden />
++            Delivering to {chainName}…
+           </div>
+         )
+       })}
+ 
+-      {phase === 'failed' && (
+-        <SelfRelayCard
+-          deliveries={deliveries}
+-          destinationDomain={destinationDomain}
+-          escrowId={escrowId}
+-          milestoneIndex={milestoneIndex}
+-          copied={copied}
+-          onCopied={() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+-        />
+-      )}
+-
+       {phase === 'unavailable' && (
+         <p className="text-[12px] text-ink-3">Delivery status unavailable — check back later.</p>
+       )}
+@@ -2787,27 +2839,37 @@ function CrossChainDelivery({ txHash, destinationDomain, escrowId, milestoneInde
+   )
+ }
+ 
+-/* Recovery card shown when Iris reports forwardState: FAILED.
+-   Explains what happened in plain English and walks the user through relaying
+-   the CCTP message on the destination chain to complete the transfer. */
+-function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex, copied, onCopied }) {
++/* Recovery card shown when Iris reports forwardState: FAILED for one CCTP
++   message. Explains what happened in plain English and walks the user
++   through relaying that SPECIFIC message on ITS OWN destination chain.
++
++   Round 20 Phase D: takes exactly ONE `delivery` object instead of the whole
++   `deliveries` array plus an outer `destinationDomain` prop. A mixed split
++   settlement can burn to several different chains in one transaction — under
++   the old design, picking "the first failed message" (or worse, an outer
++   collapsed domain unrelated to which message actually failed) meant a
++   failed message on chain A could prompt the user to switch to chain B and
++   call chain B's MessageTransmitterV2 — a broken recovery action, not just
++   inaccurate copy. Every lookup here reads `delivery.destinationDomain`, the
++   real domain Iris reported for THIS message, so there is no longer an
++   "outer" value to wrongly prefer. CrossChainDelivery renders one instance
++   of this per failed message, so a settlement with multiple simultaneous
++   failures gets a recovery card for each, not just one. */
++function SelfRelayCard({ delivery, copied, onCopied }) {
+   const { address } = useAuth()
+   const [relayPhase, setRelayPhase] = useState('idle') // idle|switching|relaying|done|error
+   const [relayTxHash, setRelayTxHash] = useState(null)
+   const [relayError, setRelayError] = useState(null)
+   const [calldataOpen, setCalldataOpen] = useState(false)
+-  const chainName = getDomainName(destinationDomain)
+-
+-  // Use the first failed delivery (or all of them for multi-split)
+-  const primary = deliveries.find((d) => d.forwardState === 'FAILED') ?? deliveries[0]
+-  if (!primary) return null
++  const destinationDomain = delivery.destinationDomain
++  const chainName = domainLabel(destinationDomain)
+ 
+-  const transmitter = MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null
+-  const chainParams = EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null
++  const transmitter = destinationDomain != null ? (MESSAGE_TRANSMITTER_V2[Number(destinationDomain)] ?? null) : null
++  const chainParams = destinationDomain != null ? (EVM_CHAIN_PARAMS[Number(destinationDomain)] ?? null) : null
+   const canRelayInApp = !!(transmitter && chainParams && typeof window !== 'undefined' && window.ethereum)
+ 
+-  const calldata = primary.message && primary.attestation
+-    ? encodeReceiveMessage(primary.message, primary.attestation)
++  const calldata = delivery.message && delivery.attestation
++    ? encodeReceiveMessage(delivery.message, delivery.attestation)
+     : null
+ 
+   const copyText = async (text) => {
+@@ -2839,15 +2901,20 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
+       const txHash = await window.ethereum.request({ method: 'eth_sendTransaction', params })
+       setRelayTxHash(txHash)
+       setRelayPhase('done')
+-      // Clean up localStorage so the tracker doesn't restart next visit
+-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++      // Round 20 Phase D: no longer clears the shared tracker here — Iris
++      // keeps reporting this message as FAILED forever (an out-of-band relay
++      // isn't something its own bookkeeping learns about), and other
++      // messages under the same txHash may still be genuinely in flight.
++      // "Done" lives in this card's own relayPhase state instead;
++      // CrossChainDelivery clears the shared entry once every message is
++      // actually COMPLETE per Iris.
+     } catch (err) {
+       setRelayPhase('error')
+       setRelayError(err.message || 'Relay failed. Try again.')
+     }
+   }
+ 
+-  const errorIsInsufficientFee = primary.errorCode === 'INSUFFICIENT_FEE'
++  const errorIsInsufficientFee = delivery.errorCode === 'INSUFFICIENT_FEE'
+ 
+   return (
+     <div className="rounded-xl border border-warn/30 bg-warn/[0.04] px-4 py-4 flex flex-col gap-4">
+@@ -2932,8 +2999,8 @@ function SelfRelayCard({ deliveries, destinationDomain, escrowId, milestoneIndex
+         </button>
+         {calldataOpen && (
+           <div className="rounded-xl bg-sunk px-3 py-3 flex flex-col gap-2">
+-            <CallDataRow label="Message"     value={primary.message}     onCopy={copyText} copied={copied} />
+-            <CallDataRow label="Attestation" value={primary.attestation} onCopy={copyText} copied={copied} />
++            <CallDataRow label="Message"     value={delivery.message}     onCopy={copyText} copied={copied} />
++            <CallDataRow label="Attestation" value={delivery.attestation} onCopy={copyText} copied={copied} />
+             {calldata && <CallDataRow label="Calldata"    value={calldata}           onCopy={copyText} copied={copied} />}
+             <p className="text-[11px] text-ink-3 leading-relaxed pt-1">
+               Call <span className="font-mono">receiveMessage(message, attestation)</span> on {chainName}'s MessageTransmitterV2 to complete the transfer.
+@@ -3447,9 +3514,11 @@ function MilestoneAction({
+       // this used to read independently.
+       const trackingDomain = settlementTrackingDomain(escrow, splits)
+       if (txHash && trackingDomain != null) {
++        // Round 20 Phase D: no `domain` field — see the same note in
++        // SettlementPanel.propose above.
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
++          JSON.stringify({ txHash, ts: Date.now() })
+         )
+         onCrossChainRelease?.()
+       }
+diff --git a/frontend/src/utils/cctpFee.js b/frontend/src/utils/cctpFee.js
+index dcdcc04..b55fa5e 100644
+--- a/frontend/src/utils/cctpFee.js
++++ b/frontend/src/utils/cctpFee.js
+@@ -34,38 +34,6 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
+   return BigInt(Math.ceil(Number(raw)))
+ }
+ 
+-/**
+- * Resolve the `maxFee` to pass to a cross-chain release / settlement / dispute
+- * call. Same-chain (Arc) burns force maxFee = 0 inside the contract. Cross-chain
+- * burns must cover Circle's live forwarding fee, clamped into the band the
+- * contract accepts: [escrowCctpForwardFee snapshot floor, burnAmount).
+- *
+- * @param {object}  p
+- * @param {number}  p.destinationDomain
+- * @param {bigint}  [p.escrowCctpForwardFee]  Per-escrow snapshotted floor.
+- * @param {bigint}  [p.burnAmount]            USDC actually burned for the recipient
+- *                                            (after protocol fee); used to keep
+- *                                            maxFee < burnAmount. Pass 0n / omit
+- *                                            when no recipient burn occurs.
+- * @param {'low'|'med'|'high'} [p.level]
+- * @returns {Promise<bigint>}
+- */
+-export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, burnAmount, level = 'high' }) {
+-  if (Number(destinationDomain) === ARC_DOMAIN) return 0n
+-  // A pure refund / 0% recipient share triggers no recipient burn, so the
+-  // contract skips the cross-chain fee floor — any maxFee (incl. 0) is fine.
+-  if (burnAmount != null && BigInt(burnAmount) === 0n) return 0n
+-
+-  const live = await fetchForwardFee(ARC_DOMAIN, Number(destinationDomain), level)
+-  const floor = BigInt(escrowCctpForwardFee ?? 0n)
+-  const maxFee = live > floor ? live : floor
+-
+-  if (burnAmount != null && maxFee >= BigInt(burnAmount)) {
+-    throw new Error('This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.')
+-  }
+-  return maxFee
+-}
+-
+ /**
+  * A lower bound on what the contract will actually remainder after its
+  * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
+@@ -77,9 +45,10 @@ export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, b
+  * remainder is always >= what this returns.
+  *
+  * Round 20 Phase C: re-added in a different role than Round 18 gave it.
+- * Round 18 fed this straight into {resolveMaxFee}'s `burnAmount` to REJECT a
+- * transaction outright when the estimate looked unsafe — but "conservative
+- * estimate <= floor" and "real remainder <= floor" are different conditions,
++ * Round 18 fed this straight into the (Round 20 Phase D removed) resolveMaxFee
++ * helper's `burnAmount` to REJECT a transaction outright when the estimate
++ * looked unsafe — but "conservative estimate <= floor" and "real remainder
++ * <= floor" are different conditions,
+  * so it could reject transactions the contract would have accepted (Round 19
+  * removed it for exactly this reason). Here it is a pure SAFETY GATE inside
+  * {resolveDominantMaxFee}, deciding whether a live quote is trustworthy

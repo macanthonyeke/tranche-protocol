@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAuth } from '../hooks/useAuth.jsx'
 
-/* Circle email-OTP entry for either explicit UCW account flow.
+/* Tranche email-OTP entry for either explicit UCW account flow.
 
    Circle owns the dialog that matters (email OTP entry — these wallets have
    no PIN), so this component is deliberately thin — an email field, a button,
@@ -79,14 +79,14 @@ export default function EmailSignIn({ intent = 'signin', onDone, onAccountNotFou
 
       {intent === 'signup' ? (
         <p className="text-[12.5px] text-ink-3 leading-relaxed">
-          Circle will create an Arc wallet you control after you verify the
-          code. If you already have an older Circle wallet, this flow links it
+          Tranche will create an Arc wallet you control after you verify the
+          code. If you already have an older Arc wallet, this flow links it
           to Tranche instead of creating a second one. Gas is covered.
         </p>
       ) : (
         <p className="text-[12.5px] text-ink-3 leading-relaxed">
-          We’ll verify your Circle account with a one-time code and sign you
-          in. Sign in never creates or initializes a wallet.
+          We’ll verify your Tranche account with a one-time code and sign you
+          in. Sign in never creates or initializes an Arc wallet.
         </p>
       )}
     </form>

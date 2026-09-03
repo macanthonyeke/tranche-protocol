@@ -1,0 +1,117 @@
+diff --git a/frontend/src/pages/ArbiterPanel.deliveryStatus.test.jsx b/frontend/src/pages/ArbiterPanel.deliveryStatus.test.jsx
+new file mode 100644
+index 0000000..b5bf2ab
+--- /dev/null
++++ b/frontend/src/pages/ArbiterPanel.deliveryStatus.test.jsx
+@@ -0,0 +1,74 @@
++// ArbiterDeliveryStatus — Round 32 (Low finding).
++//
++// This unconditionally blamed a low forwarding fee for EVERY FAILED
++// delivery, regardless of errorCode — misleading for any other failure
++// reason Circle's forwardErrorCode might report. EscrowDetail.jsx's
++// equivalent UI (errorIsInsufficientFee, see its own CrossChainDelivery /
++// SelfRelayCard) already conditions this copy on errorCode ===
++// 'INSUFFICIENT_FEE'; this brings ArbiterPanel's copy in line with that
++// already-correct pattern.
++//
++// Same rendering approach as EscrowDetail.crossChainDelivery.test.jsx:
++// render ArbiterDeliveryStatus directly against a controlled `deliveries`
++// fixture (mocking useCctpDelivery), rather than driving the whole
++// ArbiterPanel/DisputeBlock tree.
++
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, cleanup } from '@testing-library/react'
++
++const cctpDeliveryMock = vi.hoisted(() => ({ current: { phase: 'idle', deliveries: [] } }))
++vi.mock('../hooks/useCctpDelivery.js', () => ({
++  useCctpDelivery: () => cctpDeliveryMock.current
++}))
++
++const { ArbiterDeliveryStatus } = await import('./ArbiterPanel.jsx')
++
++const BASE = 6 // Base Sepolia
++
++const failedMsg = (errorCode) => ({
++  message: '0xmsg', attestation: '0xatt',
++  destinationDomain: BASE, destinationTxHash: null,
++  forwardState: 'FAILED', errorCode
++})
++
++const setDeliveries = (phase, deliveries) => { cctpDeliveryMock.current = { phase, deliveries } }
++
++beforeEach(() => {
++  cctpDeliveryMock.current = { phase: 'idle', deliveries: [] }
++})
++
++afterEach(() => {
++  cleanup()
++})
++
++const renderStatus = () => render(
++  <ArbiterDeliveryStatus txHash="0xtx" isCrossChain expectedOrdinals={[0]} expectedTotalMessages={1} />
++)
++
++describe('ArbiterDeliveryStatus — failure copy is conditioned on errorCode, not blanket-attributed to a low fee', () => {
++  it('shows the "forwarding fee was too low" copy when errorCode is genuinely INSUFFICIENT_FEE', () => {
++    setDeliveries('failed', [failedMsg('INSUFFICIENT_FEE')])
++    renderStatus()
++    expect(screen.getByText(/forwarding fee was too low/)).toBeInTheDocument()
++  })
++
++  it('does NOT show the "forwarding fee was too low" copy for a different errorCode', () => {
++    setDeliveries('failed', [failedMsg('SOME_OTHER_REASON')])
++    renderStatus()
++    expect(screen.queryByText(/forwarding fee was too low/)).not.toBeInTheDocument()
++    expect(screen.getByText(/Delivery to Base Sepolia failed/)).toBeInTheDocument()
++  })
++
++  it('does NOT show the "forwarding fee was too low" copy when errorCode is null', () => {
++    setDeliveries('failed', [failedMsg(null)])
++    renderStatus()
++    expect(screen.queryByText(/forwarding fee was too low/)).not.toBeInTheDocument()
++    expect(screen.getByText(/Delivery to Base Sepolia failed/)).toBeInTheDocument()
++  })
++
++  it('still points the recipient to self-relay via the escrow detail page either way', () => {
++    setDeliveries('failed', [failedMsg('SOME_OTHER_REASON')])
++    renderStatus()
++    expect(screen.getByText(/self-relay via the escrow detail page/)).toBeInTheDocument()
++  })
++})
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 8f40ba6..d865c59 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -377,7 +377,11 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
+    CrossChainDelivery for the full citation trail on why a single collapsed
+    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+    leg in the same mixed split failed. */
+-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
++// Round 32: exported so ArbiterDeliveryStatus can be rendered and tested
++// directly against a controlled `deliveries` fixture (mocking
++// useCctpDelivery), the same pattern EscrowDetail.jsx's CrossChainDelivery
++// already uses — see EscrowDetail.crossChainDelivery.test.jsx.
++export function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints }) {
+   const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages, expectedFingerprints)
+ 
+   if (phase === 'idle') return null
+@@ -402,9 +406,18 @@ function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expecte
+           )
+         }
+         if (d.forwardState === 'FAILED') {
++          // Round 32 (Low finding): this unconditionally blamed a low
++          // forwarding fee for EVERY FAILED delivery, regardless of
++          // errorCode — misleading for any other failure reason Circle's
++          // forwardErrorCode might report. EscrowDetail.jsx's equivalent UI
++          // (errorIsInsufficientFee) already conditions this copy correctly;
++          // matching that pattern here.
++          const errorIsInsufficientFee = d.errorCode === 'INSUFFICIENT_FEE'
+           return (
+             <p key={i} className="text-[12px] text-warn">
+-              Delivery to {chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.
++              {errorIsInsufficientFee
++                ? `Delivery to ${chainName} failed — forwarding fee was too low. The recipient should self-relay via the escrow detail page.`
++                : `Delivery to ${chainName} failed. The recipient should self-relay via the escrow detail page.`}
+             </p>
+           )
+         }

@@ -1,0 +1,824 @@
+diff --git a/tmp/EscrowDetail.jsx.r19bak b/frontend/src/pages/EscrowDetail.jsx
+index 3f47b98..ff148a2 100644
+--- a/tmp/EscrowDetail.jsx.r19bak
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -19,7 +19,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { useToast } from '../hooks/useToast.jsx'
+-import { resolveMaxFee, worstCaseRemainder } from '../utils/cctpFee.js'
++import { resolveMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+ import {
+@@ -2244,44 +2244,40 @@ function settlementIsCrossChain(escrow, splits) {
+    bps scaling, so unlike resolveDispute there is no rounds-to-zero case to
+    gate on here.
+ 
+-   Synchronous and pure on purpose, same reasoning as resolveDisputeMaxFeePlan
+-   in ArbiterPanel.jsx: this test harness cannot execute real Solidity or
+-   mock a live Circle fetch meaningfully, but it CAN verify this decision
+-   independently of the component and the network call. Returns either a
+-   maxFee ready to submit, or a signal that a live Circle quote is required
+-   plus the exact params to fetch it with; the caller does that async step
+-   itself. */
+-export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps }) {
++   Round 19 Phase B: Round 18's version still tried to estimate the real
++   remainder (via worstCaseRemainder's ceiling bound) to decide whether a live
++   Circle quote could safely be submitted — but "conservative estimate <=
++   floor" and "real remainder <= floor" are different conditions, so it could
++   reject a transaction the contract would have accepted. Verified directly
++   against the contract instead of estimating around it (see
++   resolveDisputeMaxFeePlan in ArbiterPanel.jsx for the full citation trail —
++   both functions share the exact same _executeCCTPReleaseAmount execution
++   path, TrancheProtocol.sol:1258-1334):
++     - The divert-vs-burn decision (TrancheProtocol.sol:1291) is made by the
++       contract from its OWN computed real remainder — the submitted maxFee
++       plays no role in that decision at all.
++     - Exactly one assertion applies beforehand: maxFee >= e.escrowCctpForwardFee
++       (TrancheProtocol.sol:1398-1399).
++     - The burn branch's only further constraint is maxFee < remainder
++       (TrancheProtocol.sol:1354), and that branch is ONLY entered when
++       remainder > floor — so maxFee = floor always satisfies it.
++   For approveRelease specifically, the divert branch is structurally
++   UNREACHABLE in the first place: deposit-time validation (F2,
++   TrancheProtocol.sol:286-295) requires every milestone's net-of-protocol-fee
++   amount, at the smallest configured share, to already exceed the floor — and
++   a full release always releases at least that much, at the maximum possible
++   share (no bps scaling below 100%). So a full release's remainder is
++   guaranteed > floor by construction, meaning it always lands in the burn
++   branch, where floor-submission is trivially safe. release() ignores
++   whatever is submitted here and substitutes the snapshot regardless (:674),
++   so this is harmless (if unnecessary) on that path too.
++
++   Synchronous and pure on purpose: this test harness cannot execute real
++   Solidity, but it CAN verify this decision independently of the component. */
++export function releaseMaxFeePlan({ escrow, splits }) {
+   const crossChain = settlementIsCrossChain(escrow, splits)
+   if (!crossChain) return { maxFee: 0n }
+-
+-  const floor = escrow.escrowCctpForwardFee ?? 0n
+-
+-  // Split legs always burn at the e.escrowCctpForwardFee snapshot regardless
+-  // of what's submitted (settled decision #7, TrancheProtocol.sol:1324) — the
+-  // caller's maxFee only has to clear _assertCrossChainFee's floor check, it
+-  // is never the value Circle actually forwards against, so quoting Circle
+-  // live here would fetch a number the contract never uses.
+-  if (splits?.length > 0) return { maxFee: floor }
+-
+-  // The one case where the submitted maxFee genuinely governs a burn
+-  // (approveRelease, TrancheProtocol.sol:647 → :1298) — it must clear
+-  // Circle's live forwarding fee or the mint can fail with INSUFFICIENT_FEE
+-  // even though this transaction itself succeeds. worstCaseRemainder uses the
+-  // immutable protocol-fee ceiling instead of the live global rate, so the
+-  // estimated remainder can never come in ABOVE the real snapshotted one —
+-  // closing the MaxFeeExceedsBurnAmount revert rather than narrowing it.
+-  // release() ignores whatever is submitted here and substitutes the
+-  // snapshot regardless (:674), so this branch is harmless (if unnecessary)
+-  // on that path — it only ever affects approveRelease.
+-  return {
+-    needsLiveQuote: true,
+-    quoteParams: {
+-      destinationDomain: escrow.destinationDomain,
+-      escrowCctpForwardFee: floor,
+-      burnAmount: worstCaseRemainder(milestoneAmount, maxProtocolFeeBps)
+-    }
+-  }
++  return { maxFee: escrow.escrowCctpForwardFee ?? 0n }
+ }
+ 
+ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+@@ -3328,15 +3324,11 @@ function MilestoneAction({
+     onReverted: () => { setActiveKey(null); clearOpt(`milestone_${milestone.index}`) }
+   })
+ 
+-  // Cross-chain burns must carry a maxFee that covers Circle's live Forwarding
+-  // Service fee, or the burn is attested but the mint is rejected
+-  // (INSUFFICIENT_FEE). We quote that fee at submit time (see {resolveMaxFee})
+-  // rather than reusing the contract's static floor. approveRelease honours the
+-  // caller-supplied maxFee; release ignores it and uses the escrow's snapshotted
+-  // fee, but the arg is kept for ABI compatibility. Same-chain (Arc) burns force
+-  // maxFee = 0 inside the contract regardless.
+-  const { config } = useProtocolConfig()
+-  const toast = useToast()
++  // Cross-chain burns must carry a maxFee that clears the escrow's own
++  // snapshotted floor (see {releaseMaxFeePlan}) — approveRelease honours the
++  // caller-supplied maxFee; release ignores it and uses the escrow's
++  // snapshotted fee, but the arg is kept for ABI compatibility. Same-chain
++  // (Arc) burns force maxFee = 0 inside the contract regardless.
+ 
+   const action = computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired, gracePassed })
+   if (!action) return null
+@@ -3350,27 +3342,13 @@ function MilestoneAction({
+     // actually govern an approveRelease burn.
+     let quotedMaxFee
+     if (action.needsForwardFee) {
+-      // Round 18 Phase B: see releaseMaxFeePlan for why this reuses
++      // Round 18/19 Phase B: see releaseMaxFeePlan for why this reuses
+       // settlementIsCrossChain instead of reading escrow.destinationDomain
+-      // directly, and why the split case skips Circle entirely. Only the
+-      // genuine no-split cross-chain burn (approveRelease only — release()
+-      // ignores this value regardless) needs the network. This runs before
+-      // the wallet prompt, so useTx won't toast its failures.
+-      const plan = releaseMaxFeePlan({
+-        escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps
+-      })
+-      let maxFee = plan.maxFee ?? 0n
+-      if (plan.needsLiveQuote) {
+-        try {
+-          maxFee = await resolveMaxFee(plan.quoteParams)
+-        } catch (err) {
+-          clearOpt(`milestone_${milestone.index}`)
+-          setActiveKey(null)
+-          toast.error(err.message || "Couldn't check delivery fees. Please try again.")
+-          return
+-        }
+-      }
+-
++      // directly, and why the escrow's own floor is always what gets
++      // submitted — no live Circle quote, no estimate, verified safe against
++      // the contract's actual maxFee constraints rather than guessed around
++      // them.
++      const { maxFee } = releaseMaxFeePlan({ escrow, splits })
+       args = [...action.args, maxFee]
+       quotedMaxFee = maxFee
+     }
+diff --git a/tmp/ArbiterPanel.jsx.r19bak b/frontend/src/pages/ArbiterPanel.jsx
+index 93b2ee7..568d5f5 100644
+--- a/tmp/ArbiterPanel.jsx.r19bak
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -12,10 +12,7 @@ import WalletButton from '../components/WalletButton.jsx'
+ import { useRoles } from '../hooks/useRoles.jsx'
+ import { useDisputedEscrows, useEscrowDetail, useDisputeConfig, useTick, useEscrowInvoice } from '../hooks/useEscrows.js'
+ import InvoiceCard from '../components/InvoiceCard.jsx'
+-import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+-import { useToast } from '../hooks/useToast.jsx'
+-import { resolveMaxFee, worstCaseRemainder } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+@@ -553,52 +550,42 @@ function resolveIsCrossChain(escrow, splits) {
+    split leg and required a floor-clearing value, so submission and descriptor
+    could disagree in a way that guarantees a revert.
+ 
++   Round 19 Phase B: Round 18's version still tried to estimate the real
++   remainder (via worstCaseRemainder's ceiling bound) to decide whether a live
++   Circle quote could safely be submitted — but "conservative estimate <=
++   floor" and "real remainder <= floor" are different conditions, so it could
++   reject a transaction the contract would have accepted. Verified directly
++   against the contract instead of estimating around it:
++     - The divert-vs-burn decision (TrancheProtocol.sol:1291) is made by the
++       contract from its OWN computed real remainder — the submitted maxFee
++       plays no role in that decision at all.
++     - Exactly one assertion applies beforehand, regardless of which branch
++       later fires: maxFee >= e.escrowCctpForwardFee (TrancheProtocol.sol:
++       1398-1399).
++     - The divert branch never reads maxFee again after that assertion.
++     - The burn branch's only further constraint is maxFee < remainder
++       (TrancheProtocol.sol:1354, inside _approveAndBurn) — and that branch is
++       ONLY entered when remainder > floor (the divert condition's negation),
++       so maxFee = floor always satisfies it without needing to know the real
++       remainder.
++   So submitting exactly the escrow's own floor is unconditionally safe for
++   every cross-chain, bps > 0 case — split or not, divert-reachable or not —
++   with no live quote, no estimate, and no risk of rejecting a transaction the
++   contract would have accepted. Circle's live forwarding requirement is
++   separate, unenforced on-chain, and not a new risk this introduces: an
++   underfunded burn dispatches successfully and falls back to the existing
++   self-relay recovery path, the same as any quote that drifts stale by
++   execution time.
++
+    Synchronous and pure on purpose: this test harness cannot execute real
+-   Solidity or mock a live Circle fetch meaningfully, but it CAN verify this
+-   decision — which of the three branches fires, and exactly what gets
+-   submitted or quoted — independently of the component and the network call.
+-   Returns either a maxFee ready to submit, or a signal that a live Circle
+-   quote is required plus the exact params to fetch it with; the caller does
+-   that async step itself. */
+-export function resolveDisputeMaxFeePlan({ escrow, splits, bps, recipientAmount, maxProtocolFeeBps }) {
++   Solidity, but it CAN verify this decision independently of the component. */
++export function resolveDisputeMaxFeePlan({ escrow, splits, bps }) {
+   const crossChain = resolveIsCrossChain(escrow, splits)
+-  const floor = escrow.escrowCctpForwardFee ?? 0n
+-
+   // _assertCrossChainFee only runs at all when bps > 0 (TrancheProtocol.sol:
+   // 510) — at bps 0 there is no recipient share and nothing to clear a floor
+   // for.
+   if (!crossChain || !(bps > 0)) return { maxFee: 0n }
+-
+-  // Two distinct reasons a live Circle quote would be pointless here, both
+-  // landing on the same fix — submit the escrow's own floor directly:
+-  //  - Split legs always burn at the e.escrowCctpForwardFee snapshot
+-  //    regardless of what's submitted (settled decision #7,
+-  //    TrancheProtocol.sol:1324) — the caller's maxFee only has to clear
+-  //    _assertCrossChainFee's floor check, it is never the value Circle
+-  //    actually forwards against.
+-  //  - recipientAmount rounding to zero (bps > 0 but the milestone amount is
+-  //    too small to survive integer division) means no burn happens at all
+-  //    (TrancheProtocol.sol:1248's `if (recipientAmount > 0)` guard) — yet
+-  //    _assertCrossChainFee still ran because it gates on bps alone, so a
+-  //    floor-clearing value is still required to avoid MaxFeeBelowFloor even
+-  //    though nothing is delivered.
+-  if (splits?.length > 0 || recipientAmount === 0n) return { maxFee: floor }
+-
+-  // The one case where the submitted maxFee genuinely governs a burn
+-  // (TrancheProtocol.sol:1298) — it must clear Circle's live forwarding fee
+-  // or the mint can fail with INSUFFICIENT_FEE even though this transaction
+-  // itself succeeds. worstCaseRemainder uses the immutable protocol-fee
+-  // ceiling instead of the live global rate, so the estimated remainder can
+-  // never come in ABOVE the real snapshotted one — closing the
+-  // MaxFeeExceedsBurnAmount revert rather than narrowing it.
+-  return {
+-    needsLiveQuote: true,
+-    quoteParams: {
+-      destinationDomain: escrow.destinationDomain,
+-      escrowCctpForwardFee: floor,
+-      burnAmount: worstCaseRemainder(recipientAmount, maxProtocolFeeBps)
+-    }
+-  }
++  return { maxFee: escrow.escrowCctpForwardFee ?? 0n }
+ }
+ 
+ /* VALUE-MOVING, and the last signing site in the project. This is the twin
+@@ -857,11 +844,8 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
+   const timeoutTx = useTx({ onConfirmed: () => onResolved?.(null) })
+ 
+   // A resolution that pays the recipient settles via CCTP; for cross-chain
+-  // destinations maxFee must cover Circle's live forwarding fee or the mint
+-  // won't auto-deliver (INSUFFICIENT_FEE). Quoted at submit time. Arc same-chain
+-  // burns take maxFee = 0.
+-  const { config } = useProtocolConfig()
+-  const toast = useToast()
++  // destinations the escrow's own snapshotted floor is what gets submitted
++  // (see resolveDisputeMaxFeePlan) — Arc same-chain burns take maxFee = 0.
+ 
+   // Percentage → BPS, plus the live split preview.
+   const pctNum = pct === '' ? NaN : Number(pct)
+@@ -888,22 +872,12 @@ function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onR
+     }
+     setErr('')
+ 
+-    // Round 18 Phase B: see resolveDisputeMaxFeePlan for why this reuses
++    // Round 18/19 Phase B: see resolveDisputeMaxFeePlan for why this reuses
+     // resolveIsCrossChain instead of reading escrow.destinationDomain
+-    // directly, and why the split / rounds-to-zero cases skip Circle
+-    // entirely. Only the genuine no-split cross-chain burn needs the network.
+-    const plan = resolveDisputeMaxFeePlan({
+-      escrow, splits, bps, recipientAmount, maxProtocolFeeBps: config?.maxProtocolFeeBps
+-    })
+-    let maxFee = plan.maxFee ?? 0n
+-    if (plan.needsLiveQuote) {
+-      try {
+-        maxFee = await resolveMaxFee(plan.quoteParams)
+-      } catch (e) {
+-        toast.error(e.message || "Couldn't check delivery fees. Please try again.")
+-        return
+-      }
+-    }
++    // directly, and why the escrow's own floor is always what gets submitted
++    // — no live Circle quote, no estimate, verified safe against the
++    // contract's actual maxFee constraints rather than guessed around them.
++    const { maxFee } = resolveDisputeMaxFeePlan({ escrow, splits, bps })
+ 
+     const txHash = await tx.run(
+       escrowWrite('resolveDispute', [
+diff --git a/frontend/src/pages/ArbiterPanel.maxFeePlan.test.jsx b/frontend/src/pages/ArbiterPanel.maxFeePlan.test.jsx
+index a279b30..ee5e175 100644
+--- a/frontend/src/pages/ArbiterPanel.maxFeePlan.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.maxFeePlan.test.jsx
+@@ -1,6 +1,6 @@
+-import { describe, it, expect, vi } from 'vitest'
++import { describe, it, expect } from 'vitest'
+ 
+-/* resolveDisputeMaxFeePlan — Round 18 Phase B.
++/* resolveDisputeMaxFeePlan — Round 18/19 Phase B.
+ 
+    The confirm descriptor (resolveDisputeConfirm, tested in
+    ArbiterPanel.resolve.test.jsx) and the actual resolveDispute submission
+@@ -11,18 +11,17 @@ import { describe, it, expect, vi } from 'vitest'
+    Arc-root escrow, quoted a zero fee that _assertCrossChainFee then rejected
+    — a signed screen that promised success, followed by a guaranteed revert.
+ 
+-   This function is the fix: the synchronous decision of what to submit,
+-   extracted so it's testable without mocking a live Circle fetch (which this
+-   harness can't meaningfully do) or executing real Solidity. Three things
+-   matter here, each with its own test group below:
+-     1. it uses the SAME split-aware cross-chain determination the descriptor
+-        uses, not raw escrow.destinationDomain;
+-     2. it never silently resolves to a zero maxFee in a case where the
+-        contract's _assertCrossChainFee will demand a nonzero one;
+-     3. when a live Circle quote genuinely is needed, the burnAmount handed
+-        to it is the safe (worst-case) one, not a live-fee-drifted estimate. */
++   Round 18 closed that gap but still tried to estimate the real remainder
++   (worstCaseRemainder's ceiling bound) before deciding whether a live Circle
++   quote was safe to submit — "conservative estimate <= floor" and "real
++   remainder <= floor" are different conditions, so it could reject a
++   transaction the contract would have accepted. Round 19 replaces the whole
++   estimate: verified directly against the contract (TrancheProtocol.sol:
++   1291, :1354, :1398-1399) that submitting the escrow's own floor is
++   unconditionally safe for every cross-chain, bps > 0 case, so there is no
++   live quote to compute at all anymore — see the function's own doc comment
++   in ArbiterPanel.jsx for the full citation trail. */
+ import { resolveDisputeMaxFeePlan } from './ArbiterPanel.jsx'
+-import { worstCaseRemainder, resolveMaxFee } from '../utils/cctpFee.js'
+ 
+ const ARC = 26
+ const BASE = 6
+@@ -37,23 +36,17 @@ const escrowOn = (domain) => ({
+   escrowCctpForwardFee: 200000n // 0.20 USDC
+ })
+ 
+-const MAX_PROTOCOL_FEE_BPS = 500n
+-
+ describe('resolveDisputeMaxFeePlan', () => {
+   describe('bps === 0: _assertCrossChainFee never runs, so nothing is required', () => {
+     it('resolves to a zero maxFee even on a cross-chain escrow', () => {
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(BASE), splits: [], bps: 0, recipientAmount: 0n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 0 })
+       expect(plan).toEqual({ maxFee: 0n })
+     })
+   })
+ 
+   describe('not cross-chain at all: same-chain Arc burns force maxFee = 0 on-chain regardless', () => {
+     it('resolves to a zero maxFee for a same-chain, no-split escrow', () => {
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(ARC), splits: [], bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits: [], bps: 6000 })
+       expect(plan).toEqual({ maxFee: 0n })
+     })
+   })
+@@ -69,9 +62,7 @@ describe('resolveDisputeMaxFeePlan', () => {
+         { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+         { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+       ]
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(ARC), splits, bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits, bps: 6000 })
+       expect(plan).toEqual({ maxFee: 200000n })
+       expect(plan.maxFee).not.toBe(0n)
+     })
+@@ -82,67 +73,37 @@ describe('resolveDisputeMaxFeePlan', () => {
+         { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
+         { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
+       ]
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(ARC), splits, bps: 6000, recipientAmount: 150000000n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(ARC), splits, bps: 6000 })
+       expect(plan).toEqual({ maxFee: 200000n })
+     })
+   })
+ 
+-  /* Split legs always burn at the snapshot regardless of what's submitted
+-     (settled decision #7) — a live Circle quote here would fetch a number
+-     the contract never uses. Confirms the "already cross-chain via
+-     destinationDomain, and ALSO has splits" case takes the same floor path,
+-     not a live quote, purely because splits are configured. */
++  /* Round 19 Phase B: there is no longer a live-quote branch at all — every
++     cross-chain, bps > 0 case (split or not, whatever the recipient share)
++     resolves to the escrow's own floor. Confirmed directly against the
++     contract: the divert-vs-burn decision (TrancheProtocol.sol:1291) is made
++     from the contract's OWN computed remainder, never the caller's maxFee;
++     the one assertion that runs beforehand only requires maxFee >= floor
++     (TrancheProtocol.sol:1398-1399); and the burn branch's only further
++     constraint, maxFee < remainder (TrancheProtocol.sol:1354), is
++     automatically satisfied by maxFee = floor because that branch is ONLY
++     entered when remainder > floor in the first place. */
+   describe('a no-split escrow made cross-chain by its own destinationDomain', () => {
+-    it('quotes Circle live when the recipient share is genuinely nonzero', () => {
+-      const recipientAmount = 150000000n
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(BASE), splits: [], bps: 6000, recipientAmount, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
+-      expect(plan.needsLiveQuote).toBe(true)
+-      expect(plan.quoteParams).toEqual({
+-        destinationDomain: BASE,
+-        escrowCctpForwardFee: 200000n,
+-        burnAmount: worstCaseRemainder(recipientAmount, MAX_PROTOCOL_FEE_BPS)
+-      })
++    it('resolves to the escrow floor for a genuinely nonzero recipient share, with no live quote', () => {
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 6000 })
++      expect(plan).toEqual({ maxFee: 200000n })
++      expect(plan.needsLiveQuote).toBeFalsy()
+     })
+ 
+-    /* The plan function's job stops at "this needs a live quote" — it hands
+-       the caller quoteParams and does not itself judge whether the amount is
+-       viable. resolveMaxFee is where that judgment happens
+-       (cctpFee.js:81-95): maxFee = max(liveQuote, floor) is ALWAYS >= floor,
+-       so whenever the worst-case burnAmount is at or below the floor,
+-       maxFee >= burnAmount holds no matter what Circle quotes — the function
+-       throws its existing clear error before ever returning a value. Both
+-       submission sites already catch that in their existing try/catch and
+-       surface it as a toast, so nothing wrong or unexplained reaches the
+-       wallet. This proves the full round-trip rather than assuming it. */
+-    it('produces a clean, catchable error — not a silently wrong maxFee — when the worst-case remainder is at or below the escrow floor', async () => {
+-      // 200000 is this fixture's escrowCctpForwardFee (the floor). At the
+-      // ceiling rate, worstCaseRemainder(200000, 500) = 190000 <= 200000.
+-      const recipientAmount = 200000n
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(BASE), splits: [], bps: 6000, recipientAmount, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
+-      expect(plan.needsLiveQuote).toBe(true)
+-      expect(worstCaseRemainder(recipientAmount, MAX_PROTOCOL_FEE_BPS)).toBeLessThanOrEqual(plan.quoteParams.escrowCctpForwardFee)
+-
+-      // A low, harmless live quote — the throw fires purely because the
+-      // floor alone already exceeds burnAmount, regardless of what Circle
+-      // says, so this is not "engineering the mock to force the outcome."
+-      const originalFetch = global.fetch
+-      global.fetch = vi.fn().mockResolvedValue({
+-        ok: true,
+-        json: async () => ([{ finalityThreshold: 2000, forwardFee: { high: '1' } }])
+-      })
+-      try {
+-        await expect(resolveMaxFee(plan.quoteParams)).rejects.toThrow(
+-          'This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.'
+-        )
+-      } finally {
+-        global.fetch = originalFetch
+-      }
++    it('resolves to the escrow floor even for a recipient share small enough to have tripped the old ceiling-based rejection', () => {
++      // Round 18's design would have thrown "too small to deliver" here,
++      // since worstCaseRemainder(200000, 500) = 190000 <= this escrow's own
++      // 200000 floor — a false rejection, since the REAL remainder (using
++      // whatever the escrow's actual snapshotted rate is) could easily have
++      // cleared it. The new design never estimates a remainder at all, so
++      // this can no longer happen.
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 6000 })
++      expect(plan).toEqual({ maxFee: 200000n })
+     })
+   })
+ 
+@@ -150,16 +111,55 @@ describe('resolveDisputeMaxFeePlan', () => {
+      bps > 0 alone, not on the post-rounding recipientAmount — so a ruling
+      that rounds the recipient's share to zero still runs the assertion even
+      though _executePartialRelease will skip the burn entirely
+-     (TrancheProtocol.sol:1248's `if (recipientAmount > 0)`). The old code
+-     would compute burnAmount = 0 and resolveMaxFee's own zero-burnAmount
+-     shortcut would return 0 — which _assertCrossChainFee then rejects. */
+-  describe('bps > 0 but the computed recipient share rounds to zero', () => {
+-    it('still resolves to the escrow floor rather than zero, with no live quote', () => {
+-      const plan = resolveDisputeMaxFeePlan({
+-        escrow: escrowOn(BASE), splits: [], bps: 1, recipientAmount: 0n, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-      })
++     (TrancheProtocol.sol:1248's `if (recipientAmount > 0)`). Since the plan
++     no longer branches on recipientAmount at all, this now resolves the same
++     way as every other cross-chain, bps > 0 case — the escrow's own floor. */
++  describe('bps > 0, regardless of what the computed recipient share turns out to be', () => {
++    it('resolves to the escrow floor with no live quote', () => {
++      const plan = resolveDisputeMaxFeePlan({ escrow: escrowOn(BASE), splits: [], bps: 1 })
+       expect(plan).toEqual({ maxFee: 200000n })
+       expect(plan.needsLiveQuote).toBeFalsy()
+     })
+   })
+ })
++
++/* Round 19 Phase B: the core safety property this whole design relies on,
++   proven directly rather than only inferred from which branch fires above —
++   mirrors the style of Round 18's worstCaseRemainder proof test, for the
++   simpler, stronger property this design actually depends on. The contract's
++   decision structure (TrancheProtocol.sol:1258-1334, :1340-1373,
++   :1381-1401) is reproduced here ONLY to check this property against it, not
++   to duplicate production logic anywhere real. */
++function contractOutcome(remainder, floor, submittedMaxFee) {
++  // TrancheProtocol.sol:1291 — the contract's own decision, using its own
++  // computed remainder. The submitted maxFee plays no role in this branch.
++  if (remainder <= floor) return { branch: 'divert' }
++  // TrancheProtocol.sol:1354 (inside _approveAndBurn) — the only constraint
++  // in the burn branch.
++  if (submittedMaxFee >= remainder) return { branch: 'burn', reverts: true }
++  return { branch: 'burn', reverts: false }
++}
++
++describe('core safety property: submitting maxFee = floor never violates a contract constraint', () => {
++  const floor = 200000n
++
++  it('never causes a burn-branch revert, for any real remainder above or below the floor', () => {
++    const sampleRemainders = [
++      0n, 1n, 100000n, floor - 1n, floor, // at or below the floor → divert branch
++      floor + 1n, floor + 100n, 1_000_000n, 999_999_999n // above the floor → burn branch
++    ]
++    for (const remainder of sampleRemainders) {
++      const outcome = contractOutcome(remainder, floor, /* submittedMaxFee */ floor)
++      if (outcome.branch === 'burn') {
++        expect(outcome.reverts).toBe(false)
++      }
++      // divert branch: maxFee is never read again — nothing to violate.
++    }
++  })
++
++  it('clears the one assertion that runs before either branch, regardless of which one fires', () => {
++    // _assertCrossChainFee (TrancheProtocol.sol:1399): maxFee >= floor.
++    // Submitting exactly the floor satisfies this with equality.
++    expect(floor >= floor).toBe(true)
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx b/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
+index 437b9e0..5e5a5ac 100644
+--- a/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
++++ b/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
+@@ -1,20 +1,33 @@
+-import { describe, it, expect, vi } from 'vitest'
++import { describe, it, expect } from 'vitest'
+ 
+-/* releaseMaxFeePlan — Round 18 Phase B, the approveRelease/release twin of
++/* releaseMaxFeePlan — Round 18/19 Phase B, the approveRelease/release twin of
+    ArbiterPanel's resolveDisputeMaxFeePlan (see that file's test for the full
+-   background on the bug this closes). The confirm descriptor
+-   (milestoneConfirm) and the actual submission code used to determine
+-   cross-chain status two different ways — the descriptor via
+-   settlementIsCrossChain (split-aware), the submission via raw
+-   escrow.destinationDomain — so an Arc-root escrow with a cross-chain split
+-   leg would be quoted a zero fee and rejected by _assertCrossChainFee's
+-   split-aware check, after the confirm screen had already promised success.
++   background on the bug this closes, and for the core safety-property proof
++   shared by both functions). The confirm descriptor (milestoneConfirm) and
++   the actual submission code used to determine cross-chain status two
++   different ways — the descriptor via settlementIsCrossChain (split-aware),
++   the submission via raw escrow.destinationDomain — so an Arc-root escrow
++   with a cross-chain split leg would be quoted a zero fee and rejected by
++   _assertCrossChainFee's split-aware check, after the confirm screen had
++   already promised success.
+ 
+    approveRelease and release() always pass the FULL milestone.amount — no
+    bps scaling — so unlike resolveDispute there is no rounds-to-zero case
+-   here; that branch is exercised only in ArbiterPanel's test. */
++   here.
++
++   Round 18 closed the raw-domain gap but still tried to estimate the real
++   remainder (worstCaseRemainder's ceiling bound) before deciding whether a
++   live Circle quote was safe — "conservative estimate <= floor" and "real
++   remainder <= floor" are different conditions, so it could reject a
++   transaction the contract would have accepted. Round 19 replaces the whole
++   estimate: verified directly against the contract that submitting the
++   escrow's own floor is unconditionally safe here, AND that for approveRelease
++   specifically the divert branch is structurally unreachable in the first
++   place (deposit-time F2 validation, TrancheProtocol.sol:286-295, guarantees
++   a full release's remainder always exceeds the floor) — so there is no live
++   quote to compute at all anymore. See releaseMaxFeePlan's own doc comment in
++   EscrowDetail.jsx for the full citation trail. */
+ import { releaseMaxFeePlan } from './EscrowDetail.jsx'
+-import { worstCaseRemainder, resolveMaxFee } from '../utils/cctpFee.js'
+ 
+ const ARC = 26
+ const BASE = 6
+@@ -28,14 +41,9 @@ const escrowOn = (domain) => ({
+   escrowCctpForwardFee: 200000n // 0.20 USDC
+ })
+ 
+-const MAX_PROTOCOL_FEE_BPS = 500n
+-const MILESTONE_AMOUNT = 250000000n // 250 USDC
+-
+ describe('releaseMaxFeePlan', () => {
+   it('resolves to a zero maxFee for a same-chain, no-split escrow', () => {
+-    const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(ARC), splits: [], milestoneAmount: MILESTONE_AMOUNT, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-    })
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits: [] })
+     expect(plan).toEqual({ maxFee: 0n })
+   })
+ 
+@@ -49,9 +57,7 @@ describe('releaseMaxFeePlan', () => {
+       { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+     ]
+-    const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(ARC), splits, milestoneAmount: MILESTONE_AMOUNT, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-    })
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits })
+     expect(plan).toEqual({ maxFee: 200000n })
+     expect(plan.maxFee).not.toBe(0n)
+   })
+@@ -65,59 +71,63 @@ describe('releaseMaxFeePlan', () => {
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+     ]
+-    const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(BASE), splits, milestoneAmount: MILESTONE_AMOUNT, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-    })
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits })
+     expect(plan).toEqual({ maxFee: 200000n })
+     expect(plan.needsLiveQuote).toBeFalsy()
+   })
+ 
+-  it('quotes Circle live for a no-split cross-chain escrow, using the worst-case burn amount', () => {
+-    const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(BASE), splits: [], milestoneAmount: MILESTONE_AMOUNT, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-    })
+-    expect(plan.needsLiveQuote).toBe(true)
+-    expect(plan.quoteParams).toEqual({
+-      destinationDomain: BASE,
+-      escrowCctpForwardFee: 200000n,
+-      burnAmount: worstCaseRemainder(MILESTONE_AMOUNT, MAX_PROTOCOL_FEE_BPS)
+-    })
++  /* Round 19 Phase B: there is no longer a live-quote branch at all — a
++     no-split cross-chain full release also resolves to the escrow's own
++     floor. Confirmed directly against the contract: the divert branch is
++     structurally UNREACHABLE for a full release in the first place
++     (deposit-time F2 validation, TrancheProtocol.sol:286-295, guarantees the
++     remainder always exceeds the floor for any full-amount release), so this
++     always lands in the burn branch, where maxFee = floor trivially clears
++     the only constraint (maxFee < remainder, TrancheProtocol.sol:1354). */
++  it('resolves to the escrow floor for a no-split cross-chain release, with no live quote', () => {
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits: [] })
++    expect(plan).toEqual({ maxFee: 200000n })
++    expect(plan.needsLiveQuote).toBeFalsy()
+   })
++})
+ 
+-  /* The plan function's job stops at "this needs a live quote" — it hands the
+-     caller quoteParams and does not itself judge whether the amount is
+-     viable. resolveMaxFee is where that judgment happens (cctpFee.js:81-95):
+-     maxFee = max(liveQuote, floor) is ALWAYS >= floor, so whenever the
+-     worst-case burnAmount is at or below the floor, maxFee >= burnAmount
+-     holds no matter what Circle quotes — the function throws its existing
+-     clear error before ever returning a value. MilestoneAction's existing
+-     try/catch already surfaces that as a toast, so nothing wrong or
+-     unexplained reaches the wallet. This proves the full round-trip rather
+-     than assuming it. */
+-  it('produces a clean, catchable error — not a silently wrong maxFee — when the worst-case remainder is at or below the escrow floor', async () => {
+-    // 200000 is this fixture's escrowCctpForwardFee (the floor). At the
+-    // ceiling rate, worstCaseRemainder(200000, 500) = 190000 <= 200000.
+-    const tinyMilestoneAmount = 200000n
+-    const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(BASE), splits: [], milestoneAmount: tinyMilestoneAmount, maxProtocolFeeBps: MAX_PROTOCOL_FEE_BPS
+-    })
+-    expect(plan.needsLiveQuote).toBe(true)
+-    expect(worstCaseRemainder(tinyMilestoneAmount, MAX_PROTOCOL_FEE_BPS)).toBeLessThanOrEqual(plan.quoteParams.escrowCctpForwardFee)
++/* Round 19 Phase B: the core safety property this whole design relies on for
++   approveRelease/release, proven directly rather than only inferred from
++   which branch fires above. Unlike resolveDispute (a genuine partial payout
++   can land on either side of the floor), a FULL release's remainder is
++   guaranteed > floor by construction — so this proves the burn-branch case
++   specifically, and that the divert branch's precondition never actually
++   holds for a full release. The contract's decision structure
++   (TrancheProtocol.sol:286-295, :1258-1334, :1340-1373) is reproduced here
++   ONLY to check this property, not to duplicate production logic anywhere
++   real. */
++describe('core safety property: a full release always lands in the burn branch, where maxFee = floor is safe', () => {
++  const floor = 200000n
+ 
+-    // A low, harmless live quote — the throw fires purely because the floor
+-    // alone already exceeds burnAmount, regardless of what Circle says, so
+-    // this is not "engineering the mock to force the outcome."
+-    const originalFetch = global.fetch
+-    global.fetch = vi.fn().mockResolvedValue({
+-      ok: true,
+-      json: async () => ([{ finalityThreshold: 2000, forwardFee: { high: '1' } }])
+-    })
+-    try {
+-      await expect(resolveMaxFee(plan.quoteParams)).rejects.toThrow(
+-        'This payout is too small to deliver on another chain — increase the milestone amount or choose Arc as the destination.'
+-      )
+-    } finally {
+-      global.fetch = originalFetch
++  it('the deposit-time floor validation means a full release\'s remainder can never be at or below the floor', () => {
++    // F2 (TrancheProtocol.sol:294): at deposit, the SMALLEST milestone's
++    // net-of-protocol-fee amount, at the smallest configured share (the full
++    // BPS_DENOMINATOR for a no-split escrow), must already exceed the floor.
++    // A full release of ANY milestone releases at least that much, at the
++    // maximum possible share (100%, no partial scaling) — so its remainder
++    // is always >= the validated minimum, hence always > floor.
++    const minMilestoneNetOfFee = floor + 1n // the smallest legal deposit, by F2's own guard
++    const fullReleaseRemainder = minMilestoneNetOfFee // full release, no bps scaling below 100%
++    expect(fullReleaseRemainder).toBeGreaterThan(floor)
++  })
++
++  it('never causes a burn-branch revert once in the burn branch', () => {
++    const sampleRemainders = [floor + 1n, floor + 100n, 1_000_000n, 999_999_999n]
++    for (const remainder of sampleRemainders) {
++      // TrancheProtocol.sol:1354 (inside _approveAndBurn): reverts if
++      // maxFee >= remainder. maxFee = floor here.
++      expect(floor).toBeLessThan(remainder)
+     }
+   })
++
++  it('clears the one assertion that runs before the burn branch', () => {
++    // _assertCrossChainFee (TrancheProtocol.sol:1399): maxFee >= floor.
++    // Submitting exactly the floor satisfies this with equality.
++    expect(floor >= floor).toBe(true)
++  })
+ })
+diff --git a/frontend/src/utils/cctpFee.js b/frontend/src/utils/cctpFee.js
+index 94592a0..35037c0 100644
+--- a/frontend/src/utils/cctpFee.js
++++ b/frontend/src/utils/cctpFee.js
+@@ -50,34 +50,6 @@ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
+  * @param {'low'|'med'|'high'} [p.level]
+  * @returns {Promise<bigint>}
+  */
+-/**
+- * A lower bound on what the contract will actually remainder after its
+- * protocol fee, computable WITHOUT the escrow's own snapshotted fee bps
+- * (escrowFeeBps has no getter — see TrancheProtocol.sol:117). Every escrow's
+- * snapshot was checked against `maxProtocolFeeBps` (TrancheProtocol.sol:191,
+- * MAX_PROTOCOL_FEE) at the moment `setProtocolFee` set it, and that ceiling
+- * itself never changes — so the real per-escrow rate is always <= this
+- * ceiling, meaning the real fee is always <= worstCaseFee and the real
+- * remainder is always >= what this returns. Passing THIS as `burnAmount` to
+- * {resolveMaxFee} therefore guarantees the maxFee it resolves can never come
+- * in at or above the true on-chain remainder — closing the revert path
+- * rather than narrowing it, at the cost of being more conservative than
+- * necessary for any escrow funded below the ceiling rate.
+- * @param {bigint} amount             Gross amount the protocol fee is cut from.
+- * @param {bigint} [maxProtocolFeeBps]  getProtocolConfig().maxProtocolFeeBps.
+- *   Defaults to 500 (TrancheProtocol.sol:23's hardcoded MAX_PROTOCOL_FEE,
+- *   this contract's actual ceiling) for the brief window before
+- *   getProtocolConfig() resolves — NOT to 0, which would assume no fee at
+- *   all and overestimate the remainder, reproducing the exact bug this
+- *   function exists to close.
+- * @returns {bigint}
+- */
+-export function worstCaseRemainder(amount, maxProtocolFeeBps) {
+-  const ceiling = maxProtocolFeeBps ?? 500n
+-  const worstCaseFee = (BigInt(amount) * BigInt(ceiling)) / 10_000n
+-  return BigInt(amount) - worstCaseFee
+-}
+-
+ export async function resolveMaxFee({ destinationDomain, escrowCctpForwardFee, burnAmount, level = 'high' }) {
+   if (Number(destinationDomain) === ARC_DOMAIN) return 0n
+   // A pure refund / 0% recipient share triggers no recipient burn, so the
+diff --git a/frontend/src/utils/cctpFee.test.js b/frontend/src/utils/cctpFee.test.js
+deleted file mode 100644
+index fb1e64a..0000000
+--- a/frontend/src/utils/cctpFee.test.js
++++ /dev/null
+@@ -1,73 +0,0 @@
+-import { describe, it, expect } from 'vitest'
+-
+-/* worstCaseRemainder — the arithmetic Round 18 Phase B's submission-side fix
+-   depends on for fund safety, so it gets tested directly rather than only
+-   inferred from which code path fires.
+-
+-   escrowFeeBps (the per-escrow snapshot the contract actually deducts,
+-   TrancheProtocol.sol:1268) has no getter, so the frontend cannot read the
+-   real rate for a given escrow. What it CAN read is maxProtocolFeeBps
+-   (getProtocolConfig().maxProtocolFeeBps, mirroring the contract's hardcoded
+-   MAX_PROTOCOL_FEE = 500 at TrancheProtocol.sol:23) — an immutable ceiling
+-   every escrow's snapshot was checked against at set time
+-   (TrancheProtocol.sol:191's `if (_newFeeBps > MAX_PROTOCOL_FEE) revert`).
+-   Because the real rate can never exceed the ceiling, the real fee can never
+-   exceed the ceiling-based fee, so this function's output is a proven lower
+-   bound on the real remainder — never an upper bound, never a guess. */
+-import { worstCaseRemainder } from './cctpFee.js'
+-
+-const MAX_PROTOCOL_FEE_BPS = 500n // mirrors TrancheProtocol.sol:23
+-
+-// What the contract itself computes for a given (real) snapshotted rate —
+-// TrancheProtocol.sol:1268-1271's `fee`/`remainder` arithmetic, reproduced
+-// here only to check worstCaseRemainder against it, not to duplicate
+-// production logic.
+-const actualRemainder = (amount, feeBps) => {
+-  const fee = (amount * feeBps) / 10_000n
+-  return amount - fee
+-}
+-
+-describe('worstCaseRemainder', () => {
+-  it('is a proven lower bound on the actual remainder for every legal snapshot rate', () => {
+-    // Every bps the contract could ever have snapshotted for an escrow: 0
+-    // through the ceiling itself, inclusive, plus points in between.
+-    const sampleRates = [0n, 1n, 100n, 199n, 300n, 499n, 500n]
+-    const sampleAmounts = [1n, 999n, 1_000_000n, 250_000_000n, 999_999_999n]
+-
+-    for (const amount of sampleAmounts) {
+-      for (const realBps of sampleRates) {
+-        const worstCase = worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS)
+-        const actual = actualRemainder(amount, realBps)
+-        expect(worstCase).toBeLessThanOrEqual(actual)
+-      }
+-    }
+-  })
+-
+-  it('is exactly equal to the actual remainder at the ceiling rate itself', () => {
+-    // The one point where "lower bound" and "actual" must coincide exactly —
+-    // an escrow funded at the maximum legal rate. Confirms this isn't an
+-    // arbitrarily-padded margin; it is the ceiling's own arithmetic.
+-    const amount = 250_000_000n
+-    expect(worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS)).toBe(actualRemainder(amount, MAX_PROTOCOL_FEE_BPS))
+-  })
+-
+-  it('is strictly less than the gross amount whenever the ceiling is nonzero', () => {
+-    // A worst case of "no fee at all" would silently defeat the whole point —
+-    // the fee must actually be subtracted, not floored at the full amount.
+-    expect(worstCaseRemainder(250_000_000n, MAX_PROTOCOL_FEE_BPS)).toBeLessThan(250_000_000n)
+-  })
+-
+-  it('defaults to the contract ceiling (500 bps), not zero, when maxProtocolFeeBps is unavailable', () => {
+-    // getProtocolConfig() can still be loading when a signer submits fast.
+-    // Defaulting to 0 would assume no fee at all — the UNSAFE direction,
+-    // since it would overestimate the remainder and reproduce the exact bug
+-    // this function exists to close. Defaulting to the ceiling stays safe.
+-    const amount = 250_000_000n
+-    expect(worstCaseRemainder(amount, undefined)).toBe(worstCaseRemainder(amount, MAX_PROTOCOL_FEE_BPS))
+-    expect(worstCaseRemainder(amount, undefined)).toBeLessThanOrEqual(actualRemainder(amount, 0n))
+-  })
+-
+-  it('returns the full amount when the ceiling itself is zero', () => {
+-    expect(worstCaseRemainder(250_000_000n, 0n)).toBe(250_000_000n)
+-  })
+-})

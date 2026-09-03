@@ -17,10 +17,14 @@ const {
   normalizeEmail,
   normalizeLoginIntent,
   LOGIN_INTENTS,
+  DIRECTORY_PREFERENCE_CHOICES,
   putOtpSession,
   takeOtpSession,
   readBinding,
   writeBinding,
+  removeBinding,
+  readDirectoryPreference,
+  setDirectoryPreference,
   EmailWalletError
 } = await import('./emailWallets.js')
 
@@ -123,5 +127,49 @@ describe('writeBinding', () => {
 
   it('reports an unbound email as a miss', async () => {
     expect(await readBinding('nobody@example.com')).toBeNull()
+  })
+})
+
+describe('removeBinding', () => {
+  it('removes a binding only for the matching server identity', async () => {
+    await writeBinding('alice@example.com', { address: '0xAAA', userId: 'user-a' })
+
+    await expect(removeBinding('alice@example.com', {
+      address: '0xAAA', userId: 'user-a'
+    })).resolves.toBe(true)
+    expect(await readBinding('alice@example.com')).toBeNull()
+  })
+
+  it('does not let another identity remove the binding', async () => {
+    await writeBinding('alice@example.com', { address: '0xAAA', userId: 'user-a' })
+
+    await expect(removeBinding('alice@example.com', {
+      address: '0xBAD', userId: 'attacker'
+    })).rejects.toBeInstanceOf(EmailWalletError)
+    expect((await readBinding('alice@example.com')).address).toBe('0xAAA')
+  })
+
+  it('is idempotent for an already-removed binding', async () => {
+    await expect(removeBinding('nobody@example.com', {
+      address: '0xAAA', userId: 'user-a'
+    })).resolves.toBe(false)
+  })
+})
+
+describe('directory preference', () => {
+  it('stores a choice by canonical Circle user ID', async () => {
+    await setDirectoryPreference('circle-user-1', DIRECTORY_PREFERENCE_CHOICES.SKIPPED)
+
+    expect(await readDirectoryPreference('circle-user-1')).toMatchObject({
+      choice: 'skipped'
+    })
+    expect(await readDirectoryPreference('circle-user-2')).toBeNull()
+  })
+
+  it('accepts only the supported optional-directory choices', async () => {
+    await expect(setDirectoryPreference('circle-user-1', 'claimed'))
+      .rejects.toBeInstanceOf(EmailWalletError)
+    await expect(setDirectoryPreference('', DIRECTORY_PREFERENCE_CHOICES.SKIPPED))
+      .rejects.toBeInstanceOf(EmailWalletError)
   })
 })

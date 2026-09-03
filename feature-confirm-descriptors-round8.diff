@@ -1,0 +1,531 @@
+diff --git a/frontend/src/pages/EscrowDetail.dispute.test.jsx b/frontend/src/pages/EscrowDetail.dispute.test.jsx
+new file mode 100644
+index 0000000..9ca739a
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.dispute.test.jsx
+@@ -0,0 +1,234 @@
++import { describe, it, expect } from 'vitest'
++
++/* The four EVIDENCE/STATE dispute actions.
++
++   None of them transfers anything except one branch of
++   proposeMilestoneCancel, so the first property every descriptor here has to
++   satisfy is the negative one: no Total row. Beyond that the properties are
++   about disclosure, and they come from the contract rather than from the UI:
++
++   - raiseDispute stores the reason and URI as plain strings (:443-454) and
++     has no withdrawal path anywhere in the contract.
++   - submitCounterEvidence is one-shot (CounterEvidenceAlreadySubmitted, :479).
++   - appendEvidence writes no state at all — it emits and returns (:1098-1106).
++   - proposeMilestoneCancel is two different transactions behind one button
++     (:799 vs :803-817), and unlike the escrow-wide cancel it is irrevocable:
++     retractCancelApproval (:1062) never touches milestoneCancelProposals. */
++import {
++  raiseDisputeConfirm,
++  counterEvidenceConfirm,
++  appendEvidenceConfirm,
++  proposeMilestoneCancelConfirm
++} from './EscrowDetail.jsx'
++import { buildContractInteraction } from '../utils/circleTheme.js'
++
++const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++
++const escrow = { id: 7, milestoneCount: 3, refundTo: REFUND_TO }
++const milestone = { index: 1, amount: 250000000n, state: 1 }
++
++const URI = 'https://ipfs.io/ipfs/bafyEvidence'
++const paramText = (d) => (d.parameters || []).join('\n')
++
++/* Every descriptor in this file describes a call that moves nothing, with the
++   single exception of proposeMilestoneCancel's executing branch. Grouping the
++   check here keeps that invariant visible as one statement rather than three
++   scattered assertions. */
++describe('the evidence actions move no money', () => {
++  const cases = [
++    ['raiseDispute', raiseDisputeConfirm({ escrow, milestone, reason: 'Not delivered', uri: URI })],
++    ['submitCounterEvidence', counterEvidenceConfirm({ escrow, milestone, uri: URI })],
++    ['appendEvidence', appendEvidenceConfirm({ escrow, milestone, uri: URI })]
++  ]
++
++  it.each(cases)('%s carries no amount and renders no currency row', (_name, d) => {
++    expect(d).not.toHaveProperty('amount')
++    expect(buildContractInteraction(d)).not.toHaveProperty('mainCurrency')
++  })
++
++  it.each(cases)('%s says so in words, not only by omission', (_name, d) => {
++    expect(paramText(d)).toContain('No funds move on this transaction.')
++  })
++
++  it.each(cases)('%s names the real function', (name, d) => {
++    expect(d.functionName).toBe(name)
++  })
++})
++
++describe('raiseDisputeConfirm', () => {
++  const d = (over = {}) =>
++    raiseDisputeConfirm({ escrow, milestone, reason: 'Work was never delivered', uri: URI, ...over })
++
++  it('frames the milestone as frozen rather than refunded', () => {
++    // state -> DISPUTED (:456). Nothing is returned to anyone at this point,
++    // and a payer who reads "refunded" will stop chasing the work.
++    expect(paramText(d())).toContain('Milestone 2 of 3: 250.00 USDC — frozen, not refunded')
++  })
++
++  it('quotes the reason back so the signer sees what is being published', () => {
++    expect(paramText(d())).toContain('Reason: "Work was never delivered"')
++  })
++
++  it('warns that the reason and link are public and permanent', () => {
++    expect(paramText(d())).toContain('stored on-chain in the clear, readable by anyone, permanently')
++  })
++
++  /* No withdrawDispute exists; the only exits are the arbiter's resolveDispute
++     or resolveDisputeByTimeout. "Flag for review" would be the wrong mental
++     model and the subtitle has to close it off. */
++  it('says a dispute cannot be withdrawn', () => {
++    expect(d().subtitle).toContain('cannot be withdrawn once raised')
++  })
++
++  it('does not promise the payer gets their money back', () => {
++    expect(paramText(d())).toContain('0 to 100%')
++    expect(paramText(d())).toContain('does not guarantee a refund')
++  })
++
++  it('truncates a reason too long for a confirm screen', () => {
++    const long = 'x'.repeat(400)
++    const text = paramText(d({ reason: long }))
++    expect(text).toContain('…')
++    expect(text).not.toContain('x'.repeat(200))
++  })
++})
++
++describe('counterEvidenceConfirm', () => {
++  const d = () => counterEvidenceConfirm({ escrow, milestone, uri: URI })
++
++  /* :479 rejects a second submission and nothing clears the field, so this is
++     the only response the signer will ever get to make. */
++  it('states the one-shot rule as a rule, not as advice', () => {
++    expect(d().subtitle).toContain('exactly one counter-evidence submission per dispute')
++    expect(d().subtitle).toContain('cannot be edited, replaced, or withdrawn')
++  })
++
++  it('does not imply responding resolves anything', () => {
++    expect(paramText(d())).toContain('waits on the arbiter either way')
++  })
++
++  it('keeps describing the milestone as frozen', () => {
++    expect(paramText(d())).toContain('still frozen')
++  })
++})
++
++describe('appendEvidenceConfirm', () => {
++  const d = () => appendEvidenceConfirm({ escrow, milestone, uri: URI })
++
++  /* The weakest action in the set: emits and returns (:1098-1106). A signer
++     who just paid gas will assume something changed, so the screen has to say
++     that nothing did — including the arbiter clock, which keeps running. */
++  it('says it is a log entry that changes nothing', () => {
++    expect(paramText(d())).toContain('Recorded as a log entry only')
++    expect(paramText(d())).toContain("the arbiter's deadline does not move")
++  })
++
++  it('distinguishes itself from counter-evidence by being repeatable', () => {
++    expect(d().subtitle).toContain('as many as you need')
++  })
++
++  it('still warns the entry is permanent and public', () => {
++    expect(paramText(d())).toContain('it cannot be deleted or edited')
++  })
++})
++
++/* The file-vs-link distinction applies to all three evidence calls: a dropped
++   file is fingerprinted directly, while a bare link is only keccak256(uri), so
++   the hash proves the link text and not the document. */
++describe('evidence fingerprint disclosure', () => {
++  const builders = [
++    ['raiseDispute', (over) => raiseDisputeConfirm({ escrow, milestone, reason: 'r', uri: URI, ...over })],
++    ['submitCounterEvidence', (over) => counterEvidenceConfirm({ escrow, milestone, uri: URI, ...over })],
++    ['appendEvidence', (over) => appendEvidenceConfirm({ escrow, milestone, uri: URI, ...over })]
++  ]
++
++  it.each(builders)('%s names the file when one was dropped', (_n, build) => {
++    expect(paramText(build({ fileName: 'report.pdf' })))
++      .toContain('Fingerprint: the contents of report.pdf')
++  })
++
++  it.each(builders)('%s admits a bare link only hashes the link text', (_n, build) => {
++    expect(paramText(build({})))
++      .toContain('Fingerprint: a hash of the link text, not of the document it points to.')
++  })
++
++  it('shows the evidence link itself', () => {
++    expect(paramText(raiseDisputeConfirm({ escrow, milestone, reason: 'r', uri: URI })))
++      .toContain(`Evidence link: ${URI}`)
++  })
++})
++
++describe('proposeMilestoneCancelConfirm — first proposer', () => {
++  const d = (role = 'payer') =>
++    proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed: false })
++
++  /* Same reasoning as cancelEscrowConfirm's unapproved branch: this call
++     writes one bool. A Total would put the refund figure on the transaction
++     that does not perform the refund. */
++  it('carries no amount', () => {
++    expect(d()).not.toHaveProperty('amount')
++    expect(buildContractInteraction(d())).not.toHaveProperty('mainCurrency')
++    expect(paramText(d())).toContain('No funds move on this transaction.')
++  })
++
++  it('states the refund as conditional on the other party', () => {
++    expect(paramText(d())).toContain(`Would refund 250.00 USDC to ${REFUND_TO} once both parties have proposed.`)
++  })
++
++  /* The point of the whole branch. retractCancelApproval (:1062) clears only
++     the escrow-level flags, so the neighbouring screen's affordance does not
++     exist here. */
++  it('says the proposal cannot be taken back', () => {
++    expect(paramText(d())).toContain('There is no way to withdraw a milestone cancellation proposal once submitted.')
++    expect(d().subtitle).toContain('cannot be taken back')
++  })
++
++  it('tells a freelancer they are giving up the payment', () => {
++    expect(paramText(d('freelancer'))).toContain('This is your payment for this milestone. Proposing gives it up.')
++  })
++
++  it('does not say that to the payer, who is receiving the refund', () => {
++    expect(paramText(d('payer'))).not.toContain('This is your payment')
++  })
++})
++
++describe('proposeMilestoneCancelConfirm — second proposer executes', () => {
++  const d = (role = 'payer') =>
++    proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed: true })
++
++  /* Here the same call falls through to the refund branch (:803-817), so the
++     figure is real and belongs in the Total. */
++  it('carries the milestone amount as the refund total', () => {
++    expect(d().amount).toBe(250000000n)
++    expect(d().amountLabel).toBe('Amount refunded')
++    expect(buildContractInteraction(d())).toHaveProperty('mainCurrency')
++  })
++
++  it('says it happens now and cannot be undone', () => {
++    expect(d().subtitle).toContain('already proposed')
++    expect(d().subtitle).toContain('cannot be undone')
++  })
++
++  it('credits the payer refund address, not the caller', () => {
++    expect(paramText(d())).toContain(`Credited to: ${REFUND_TO}`)
++  })
++
++  /* refundBalances[e.refundTo] += amount (:809) — a credit, not a transfer.
++     Same trap milestoneConfirm's refund branch handles: the payer otherwise
++     goes looking in their wallet. */
++  it('says credited on Arc rather than sent', () => {
++    expect(paramText(d())).toContain('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
++  })
++
++  it('takes no protocol fee', () => {
++    expect(paramText(d())).toContain('No protocol fee is taken.')
++  })
++
++  it('scopes the damage to this milestone only', () => {
++    expect(paramText(d())).toContain('The rest of the escrow carries on')
++  })
++
++  it('tells a freelancer they will not be paid for it', () => {
++    expect(paramText(d('freelancer'))).toContain('You will not be paid for it.')
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 933ad16..7ce4c6a 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1388,7 +1388,7 @@ function MilestoneRow({
+                 (milestone.state === 0 || milestone.state === 1) && (
+                   <MilestoneCancelControl
+                     escrow={escrow}
+-                    milestoneIndex={milestone.index}
++                    milestone={milestone}
+                     role={role}
+                     onChange={onChange}
+                   />
+@@ -1415,13 +1415,73 @@ function ChevronIcon({ open }) {
+   )
+ }
+ 
++/* EVIDENCE/STATE: proposeMilestoneCancel is two transactions wearing one
++ * button. With the counterparty not yet on board it writes a single bool
++ * (:799); with them already on board the same call falls straight through to
++ * the refund branch (:803-817) — REFUNDED, credited to e.refundTo, possibly
++ * completing the escrow. So the screen has to be told which one it is, the
++ * way cancelEscrowConfirm is told via otherApproved.
++ *
++ * The asymmetry worth stating out loud: the escrow-wide cancellation can be
++ * taken back with retractCancelApproval (:1062), but that function only
++ * clears the escrow-level flags. Nothing clears milestoneCancelProposals
++ * except the refund branch itself or a completed escrow-wide mutualCancel
++ * (:761-762). A milestone proposal is therefore irrevocable, which is exactly
++ * the sort of thing a user assumes carries over from the screen next door. */
++export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed }) {
++  const line = milestoneLineFor(escrow, milestone)
++  const base = {
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'proposeMilestoneCancel'
++  }
++  // The refund always goes to the payer's refund address, never to the
++  // caller. For the freelancer that makes this a giving-up-payment action,
++  // and it should not take reading an address to work that out.
++  const givingUp = role === 'freelancer'
++
++  if (!otherProposed) {
++    // No `amount`: this call only writes a bool. A Total here would put the
++    // refund figure on the one call that does not perform the refund.
++    return {
++      ...base,
++      title: 'Propose cancelling this milestone',
++      subtitle: 'Records your proposal. The milestone is only cancelled once the other party proposes it too — but unlike cancelling the whole escrow, this proposal cannot be taken back.',
++      parameters: [
++        line,
++        `Would refund ${formatUSDC(milestone.amount)} to ${escrow.refundTo} once both parties have proposed.`,
++        ...(givingUp ? ['This is your payment for this milestone. Proposing gives it up.'] : []),
++        'There is no way to withdraw a milestone cancellation proposal once submitted.',
++        'No funds move on this transaction.'
++      ]
++    }
++  }
++
++  return {
++    ...base,
++    title: 'Cancel this milestone and refund the payer',
++    subtitle: 'The other party has already proposed this, so signing cancels the milestone and refunds it now. This cannot be undone.',
++    amount: milestone.amount,
++    amountLabel: 'Amount refunded',
++    parameters: [
++      line,
++      `Credited to: ${escrow.refundTo}`,
++      ...(givingUp ? ['This is your payment for this milestone. You will not be paid for it.'] : []),
++      'No protocol fee is taken.',
++      'Credited as a withdrawable refund balance on Arc, not sent to a wallet.',
++      'The rest of the escrow carries on — only this milestone is cancelled.'
++    ]
++  }
++}
++
+ /* ---------- Per-milestone mutual cancel ----------
+    Cancels a single milestone (refunds its amount to the payer) once both
+    parties have proposed — the milestone-level analogue of {mutualCancel}. The
+    public `milestoneCancelProposals` mapping is read directly for both parties
+    so each side sees the live approval state. */
+-function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
++function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
+   const [open, setOpen] = useState(false)
++  const milestoneIndex = milestone.index
+ 
+   const baseArgs = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'milestoneCancelProposals' }
+   const { data: payerProposedRaw, refetch: refetchPayer } = useReadContract({
+@@ -1443,9 +1503,14 @@ function MilestoneCancelControl({ escrow, milestoneIndex, role, onChange }) {
+   const freelancerProposed = !!freelancerProposedRaw
+   const iProposed = role === 'payer' ? payerProposed : freelancerProposed
+ 
++  const otherProposed = role === 'payer' ? freelancerProposed : payerProposed
++
+   const submit = () => tx.run(
+     escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
+-    { loadingMessage: 'Submitting. Check your wallet.' }
++    {
++      loadingMessage: 'Submitting. Check your wallet.',
++      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed })
++    }
+   )
+ 
+   if (!open) {
+@@ -2590,8 +2655,8 @@ function RaiseDisputeButton({ escrow, milestone, role, reviewWindowExpired, onCh
+       <EvidenceModal
+         open={modal}
+         mode="raise"
+-        escrowId={escrow.id}
+-        milestoneIndex={milestone.index}
++        escrow={escrow}
++        milestone={milestone}
+         onClose={() => setModal(false)}
+         onConfirmed={() => { setModal(false); onChange?.() }}
+       />
+@@ -2636,8 +2701,8 @@ function EvidenceTabActions({ escrow, milestone, dispute, role, userAddress, onC
+       <EvidenceModal
+         open={!!modal}
+         mode={modal}
+-        escrowId={escrow.id}
+-        milestoneIndex={milestone.index}
++        escrow={escrow}
++        milestone={milestone}
+         onClose={() => setModal(null)}
+         onConfirmed={() => { setModal(null); onChange?.() }}
+       />
+@@ -2645,10 +2710,120 @@ function EvidenceTabActions({ escrow, milestone, dispute, role, userAddress, onC
+   )
+ }
+ 
++/* ---------- Dispute evidence (EVIDENCE/STATE) ----------
++ *
++ * Three calls that move no money, so none of them carries an `amount` — a
++ * Total row on a transaction that transfers nothing is the mistake the
++ * claimDelivery branch avoids at :2362.
++ *
++ * What they cost is disclosure instead, and it is the same two things every
++ * time: the text goes on-chain in the clear and stays there, and two of the
++ * three are one-shot. The in-app modal blurbs say some of this already, but
++ * a UCW user signs on Circle's screen — for them the blurb is a screen they
++ * have already left behind by the time anything is irreversible.
++ */
++
++// Long reasons are capped at 500 chars by the textarea; a confirm screen is
++// not the place to render all of them.
++function truncateText(s, max = 140) {
++  const t = (s || '').trim()
++  return t.length > max ? `${t.slice(0, max - 1)}…` : t
++}
++
++/* The on-chain hash is the dropped file's fingerprint, falling back to
++ * keccak256(uri) when only a link was given (:2700). That fallback is worth
++ * naming out loud: a hash of the link text proves the *link* is unchanged
++ * and says nothing about the file, so if the host rots or quietly swaps the
++ * document, the hash still verifies while the evidence is gone. */
++function evidenceLines({ uri, fileName }) {
++  return [
++    `Evidence link: ${truncateText(uri, 90)}`,
++    fileName
++      ? `Fingerprint: the contents of ${fileName} — still provable if the link later changes.`
++      : 'Fingerprint: a hash of the link text, not of the document it points to.'
++  ]
++}
++
++function milestoneLineFor(escrow, milestone) {
++  const n = milestone.index + 1
++  const of = Number(escrow.milestoneCount) || n
++  return `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
++}
++
++const EVIDENCE_BASE = {
++  contractName: 'Tranche Protocol Escrow',
++  contractAddress: CONTRACT_ADDRESS
++}
++
++/* raiseDispute freezes the milestone into DISPUTED (:456) and writes the
++ * reason and URI into DisputeData as plain strings (:443-454). There is no
++ * withdrawDispute anywhere in the contract — once raised, the only exits are
++ * the arbiter's resolveDispute or resolveDisputeByTimeout. Both facts belong
++ * on the screen: this is not a reversible "flag for review". */
++export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName }) {
++  return {
++    ...EVIDENCE_BASE,
++    functionName: 'raiseDispute',
++    title: 'Dispute this milestone',
++    subtitle: 'Freezes the milestone and hands it to the arbiter, who decides how much of it each side receives. A dispute cannot be withdrawn once raised.',
++    parameters: [
++      `${milestoneLineFor(escrow, milestone)} — frozen, not refunded`,
++      `Reason: "${truncateText(reason)}"`,
++      ...evidenceLines({ uri, fileName }),
++      'Your reason and link are stored on-chain in the clear, readable by anyone, permanently.',
++      'The arbiter can award any split from 0 to 100% — disputing does not guarantee a refund.',
++      'No funds move on this transaction.'
++    ]
++  }
++}
++
++/* submitCounterEvidence is genuinely one-shot: CounterEvidenceAlreadySubmitted
++ * at :479 rejects a second attempt, and nothing anywhere clears the field. The
++ * modal blurb calls it "your one opportunity to respond" — the confirm screen
++ * has to carry that too, because it is the screen a UCW user is actually
++ * looking at when it becomes true. */
++export function counterEvidenceConfirm({ escrow, milestone, uri, fileName }) {
++  return {
++    ...EVIDENCE_BASE,
++    functionName: 'submitCounterEvidence',
++    title: 'Respond to this dispute',
++    subtitle: 'Your one opportunity to respond. The contract accepts exactly one counter-evidence submission per dispute — it cannot be edited, replaced, or withdrawn afterwards.',
++    parameters: [
++      `${milestoneLineFor(escrow, milestone)} — still frozen`,
++      ...evidenceLines({ uri, fileName }),
++      'Stored on-chain in the clear, readable by anyone, permanently.',
++      'The milestone stays disputed and waits on the arbiter either way.',
++      'No funds move on this transaction.'
++    ]
++  }
++}
++
++/* appendEvidence writes NO state — it emits and returns (:1098-1106), as its
++ * own docstring says. That makes it the weakest action in the set and the one
++ * most likely to be over-read: a user who has just paid gas reasonably assumes
++ * something happened. Nothing did, beyond the log entry, and in particular the
++ * arbiter window keeps running. */
++export function appendEvidenceConfirm({ escrow, milestone, uri, fileName }) {
++  return {
++    ...EVIDENCE_BASE,
++    functionName: 'appendEvidence',
++    title: 'Add evidence to this dispute',
++    subtitle: 'Publishes one more evidence link to the dispute record. Unlike counter-evidence, you can add as many as you need while the dispute stays open.',
++    parameters: [
++      `${milestoneLineFor(escrow, milestone)} — still frozen`,
++      ...evidenceLines({ uri, fileName }),
++      'Published on-chain in the clear, readable by anyone, permanently — it cannot be deleted or edited.',
++      "Recorded as a log entry only: nothing about the dispute or the milestone changes, and the arbiter's deadline does not move.",
++      'No funds move on this transaction.'
++    ]
++  }
++}
++
+ const EVIDENCE_MODES = {
+   raise: {
+     title: 'Raise a dispute',
+     fn: 'raiseDispute',
++    confirm: raiseDisputeConfirm,
+     needsReason: true,
+     submitLabel: 'Submit dispute',
+     evidenceLabel: 'Evidence link',
+@@ -2657,6 +2832,7 @@ const EVIDENCE_MODES = {
+   counter: {
+     title: 'Submit counter-evidence',
+     fn: 'submitCounterEvidence',
++    confirm: counterEvidenceConfirm,
+     needsReason: false,
+     submitLabel: 'Submit counter-evidence',
+     evidenceLabel: 'Counter-evidence link',
+@@ -2665,6 +2841,7 @@ const EVIDENCE_MODES = {
+   append: {
+     title: 'Add evidence',
+     fn: 'appendEvidence',
++    confirm: appendEvidenceConfirm,
+     needsReason: false,
+     submitLabel: 'Add evidence',
+     evidenceLabel: 'Evidence link',
+@@ -2676,7 +2853,7 @@ const EVIDENCE_MODES = {
+    The on-chain hash is the file fingerprint when a file is dropped, falling
+    back to keccak256(uri) when only a link is provided. The URI is always
+    stored separately so the arbiter can fetch the content. */
+-function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfirmed }) {
++function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed }) {
+   const meta = mode ? EVIDENCE_MODES[mode] : null
+   const [reason, setReason] = useState('')
+   const [uri, setUri] = useState('')
+@@ -2716,12 +2893,15 @@ function EvidenceModal({ open, mode, escrowId, milestoneIndex, onClose, onConfir
+ 
+   const submit = () => {
+     if (!canSubmit) return
+-    const id = BigInt(escrowId)
+-    const idx = BigInt(milestoneIndex)
++    const id = BigInt(escrow.id)
++    const idx = BigInt(milestone.index)
+     const args = meta.needsReason
+       ? [id, idx, reason.trim(), evidenceHash, uri]
+       : [id, idx, evidenceHash, uri]
+-    tx.run(escrowWrite(meta.fn, args), { loadingMessage: 'Check your wallet.' })
++    tx.run(escrowWrite(meta.fn, args), {
++      loadingMessage: 'Check your wallet.',
++      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName })
++    })
+   }
+ 
+   return (

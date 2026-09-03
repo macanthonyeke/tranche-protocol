@@ -1,0 +1,531 @@
+diff --git a/frontend/src/pages/ArbiterPanel.confirm.test.jsx b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+index 442ea30..f409bc5 100644
+--- a/frontend/src/pages/ArbiterPanel.confirm.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+@@ -196,10 +196,16 @@ describe('timeoutCreditLines', () => {
+ 
+   /* On a split escrow the freelancer's half fans out across the legs, so
+      naming escrow.recipient would be wrong — but the dust and non-EVM
+-     mechanics stay off the signing screen. */
+-  it('describes the fan-out for a split escrow without naming one recipient', () => {
++     mechanics stay off the signing screen.
++
++     Round 16 #1: "divided across N split recipients" was itself an outcome
++     claim contradicted by the very next line's rounding exception — same
++     shape as payoutLines/resolveDisputeConfirm's split branches. Reframed
++     around the escrow's configuration instead. */
++  it('describes the split as a CONFIGURATION fact, not a headcount of who got credited', () => {
+     const lines = timeoutCreditLines(escrow, SPLITS)
+-    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients by their configured percentages")
++    expect(lines[0]).toBe('2 configured split entries, by their configured percentages')
++    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bpaid\b|\bcredit\w*\b|%|\d+ of \d+/i)
+     expect(lines.join('\n')).not.toContain(RECIPIENT)
+   })
+ 
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index b752b28..c96e55c 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -440,11 +440,16 @@ function EvidenceHashRow({ label, hash }) {
+ export function timeoutCreditLines(escrow, splits) {
+   return [
+     ...(splits?.length > 0
+-      // Not every configured recipient necessarily gets something: the credit
+-      // loop is guarded by `share > 0` (:608), so a leg whose proportional
+-      // share rounds down to zero is skipped entirely.
++      // Round 16 #1: found via the same grep #4 asked for, not itself named
++      // in scope, but the identical shape — "divided across N split
++      // recipients" is an outcome claim the very next line's exception
++      // already contradicts. Not every configured recipient necessarily
++      // gets something: the credit loop is guarded by `share > 0` (:608),
++      // so a leg whose proportional share rounds down to zero is skipped
++      // entirely. Reframed around the CONFIGURATION, same as payoutLines
++      // and resolveDisputeConfirm's split branches.
+       ? [
+-        `Freelancer's share is divided across ${splits.length} split recipients by their configured percentages`,
++        `${splits.length} configured split entries, by their configured percentages`,
+         'A recipient whose share rounds down to zero is credited nothing.'
+       ]
+       : [`Freelancer's share goes to ${escrow.recipient}`]),
+@@ -579,6 +584,14 @@ export function resolveDisputeConfirm({
+   const crossChain = resolveIsCrossChain(escrow, splits)
+   const floor = escrow.escrowCctpForwardFee ?? 0n
+   const partial = bps > 0 && bps < 10_000
++  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
++  // division can floor a small enough milestone amount times a small enough
++  // bps to zero even though the arbiter's ruling assigned a genuinely
++  // nonzero percentage. Distinct from a per-leg rounding-to-zero (still
++  // disclosed below when it applies): here nothing reaches the freelancer
++  // at all, so it gets its own branch rather than walking through
++  // delivery/chain/fee copy for a transfer that never happens.
++  const recipientGetsPaid = bps > 0 && recipientShare > 0n
+ 
+   const params = [
+     `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)} in dispute`,
+@@ -592,20 +605,18 @@ export function resolveDisputeConfirm({
+     params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+   }
+ 
+-  if (bps > 0) {
++  if (recipientGetsPaid) {
+     params.push(
+       splits?.length > 0
+-        // Round 15 #11: "most delivered" was still a quantified claim
+-        // nothing in the contract backs — no invariant guarantees a majority
+-        // of legs clear the rounding/floor thresholds, that was a
+-        // typical-case assumption dressed up as a description. Describes the
+-        // mechanism instead (paid per their configured shares/destinations)
+-        // and asserts no fraction at all: a leg rounding to zero is skipped
+-        // (:1312), and on a partial ruling a sub-floor cross-chain leg is
+-        // credited on Arc instead (:1319) — both detailed in the lines
+-        // pushed below, which state the actual exceptions rather than the
+-        // leading claim guessing how many recipients they affect.
+-        ? `Freelancer's share is divided across ${splits.length} split recipients, according to their configured shares and destinations`
++        // Round 15 #11 / Round 16 #1: "most delivered" was a quantified
++        // claim nothing in the contract backs, and "divided across N split
++        // recipients" (what Round 15 replaced it with) is itself still an
++        // outcome claim — it implies N recipients receive something, which
++        // rounding and the sub-floor divert below can both make false.
++        // Describes the escrow's CONFIGURATION instead — N split entries,
++        // each with its own percentage and chain — and leaves what actually
++        // happens to the caveats pushed below rather than a headcount here.
++        ? `${splits.length} configured split entries, by their configured share and destination chain`
+         // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
+         // updateReceivingAddress rewrites mintRecipient and leaves recipient
+         // untouched (:986-990), so the two diverge the moment a freelancer
+@@ -625,6 +636,8 @@ export function resolveDisputeConfirm({
+         : "The freelancer's share is transferred on Arc as this transaction executes."
+     )
+     params.push("The protocol fee is taken from the freelancer's share only.")
++  } else if (bps > 0) {
++    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
+   } else {
+     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+   }
+@@ -633,7 +646,7 @@ export function resolveDisputeConfirm({
+     params.push(`Payer's share is credited to ${escrow.refundTo} as a withdrawable balance on Arc, not sent to a wallet.`)
+   }
+ 
+-  if (crossChain && bps > 0) {
++  if (crossChain && recipientGetsPaid) {
+     // Settled #7: the caller's maxFee governs a no-split burn; split legs burn
+     // at the snapshot floor regardless of what was quoted. Name the one that
+     // actually applies rather than both.
+diff --git a/frontend/src/pages/ArbiterPanel.resolve.test.jsx b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+index d407618..02f2d15 100644
+--- a/frontend/src/pages/ArbiterPanel.resolve.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+@@ -188,20 +188,23 @@ describe('the maxFee asymmetry between split and no-split', () => {
+     expect(t).not.toContain('0.45 USDC')
+   })
+ 
+-  it('describes a split payout as a fan-out rather than one address, with no quantified delivery claim', () => {
++  it('describes a split payout as a CONFIGURATION fact, not a headcount of who got paid', () => {
+     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+     // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
+-    // unsupported quantifier — no invariant guarantees a majority of legs
+-    // clear the rounding/floor thresholds, that was a typical-case
+-    // assumption dressed up as a description. The leading line is isolated
+-    // rather than scanned for across the whole screen: this same escrow's
+-    // output legitimately contains "Each cross-chain split leg pays..." a
+-    // few lines down (the fee-cap disclosure), which is not the claim under
+-    // test — checking the whole paramText for "each" would false-positive
+-    // on it.
+-    const fanOutLine = t.split('\n').find((line) => line.startsWith("Freelancer's share is divided across"))
+-    expect(fanOutLine).toBe("Freelancer's share is divided across 2 split recipients, according to their configured shares and destinations")
+-    expect(fanOutLine).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
++    // unsupported quantifier. Round 16 #1: "divided across N split
++    // recipients" (what Round 15 replaced it with) was STILL an outcome
++    // claim — it implies N recipients receive something, which rounding and
++    // the sub-floor divert can both make false. The leading line now states
++    // only the escrow's configuration (N split entries exist, with their own
++    // share/chain) and leaves what actually happens to the caveats that
++    // follow. The leading line is isolated rather than scanned for across
++    // the whole screen: this same escrow's output legitimately contains
++    // "Each cross-chain split leg pays..." a few lines down (the fee-cap
++    // disclosure), which is not the claim under test — checking the whole
++    // paramText for "each" would false-positive on it.
++    const fanOutLine = t.split('\n').find((line) => line.startsWith(`${splits.length} configured split entries`))
++    expect(fanOutLine).toBe('2 configured split entries, by their configured share and destination chain')
++    expect(fanOutLine).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
+     expect(t).not.toContain(`sent to ${RECIPIENT}`)
+   })
+ })
+@@ -238,6 +241,46 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
+   })
+ })
+ 
++/* Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
++   division can floor a small enough milestone amount times a small enough
++   ruling to zero even though the arbiter assigned a genuinely nonzero
++   percentage. Before this fix the code branched purely on `bps > 0` and
++   would still walk through payout/chain/fee copy for a transfer that never
++   happens. Distinct from a per-split-leg rounding-to-zero (still disclosed
++   when applicable): this is the WHOLE freelancer amount, before any split
++   division even runs. */
++describe('Round 16 #3 — a nonzero bps can still round the whole share to zero', () => {
++  // 9999 base units (0.009999 USDC): small enough that a 0.01% ruling floors
++  // to exactly 0n, while what's left for the payer (9999n) is comfortably
++  // nonzero at 2-decimal display precision.
++  const tinyMilestone = { index: 1, amount: 9999n, state: 2 }
++  const at = (bps, over = {}) => build({ milestone: tinyMilestone, bps, ...over })
++
++  it('says nothing is paid despite the nonzero ruling, distinctly from a 0% ruling', () => {
++    // bps=1 (0.01%): floor(9999 * 1 / 10000) = 0.
++    const t = paramText(at(1))
++    expect(t).toContain("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero ruling.")
++    expect(t).not.toContain('Nothing is paid to the freelancer. The milestone is refunded in full.')
++    expect(t).toContain("Freelancer's share: 0.00 USDC before the protocol fee")
++    expect(t).toContain("Payer's share: 0.01 USDC — no protocol fee is taken on this half")
++  })
++
++  it('does not describe a payout destination, chain, or delivery fee for the zero transfer', () => {
++    const t = paramText(at(1, { escrow: escrowOn(BASE) }))
++    expect(t).not.toMatch(/share is sent to|forwarding fee|Circle's cross-chain delivery|transferred on Arc/)
++  })
++
++  it('rules normally once the share clears zero', () => {
++    // bps=5000 (50%): floor(9999 * 5000 / 10000) = 4999 — nonzero, so this
++    // takes the normal ruling path. The property under test is the BRANCH,
++    // not the formatted dollar string (4999 base units still displays as
++    // "0.00 USDC" at 2-decimal precision).
++    const t = paramText(at(5000, { escrow: escrowOn(BASE) }))
++    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
++    expect(t).not.toContain('rounds down to zero USDC')
++  })
++})
++
+ /* Once ARBITER_WINDOW elapses the permissionless 50/50 is available to anyone,
+    so a late ruling is in a race it can lose. */
+ describe('racing the timeout', () => {
+diff --git a/frontend/src/pages/EscrowDetail.confirm.test.jsx b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+index ce8ff76..a2883fa 100644
+--- a/frontend/src/pages/EscrowDetail.confirm.test.jsx
++++ b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+@@ -46,27 +46,61 @@ describe('payoutLines', () => {
+   /* A split escrow pays each leg to its own address on its own domain. Naming
+      escrow.mintRecipient there would put a single address on the screen that
+      is not where the money goes. */
+-  it('describes the fan-out for a split escrow and names no individual recipient', () => {
++  it('describes the split as a CONFIGURATION fact, not a headcount of who got paid', () => {
+     const lines = payoutLines(escrow, SPLITS)
+ 
+     // Round 15 #11: "most delivered" was itself still an unsupported
+     // quantifier — nothing in the contract guarantees a majority of legs
+-    // clear the rounding/floor thresholds. Reworded to describe the
+-    // mechanism (paid per configured shares/destinations) without asserting
+-    // any fraction, and the rounding caveat below it stays a plain fact
+-    // rather than something the leading line has to avoid contradicting.
++    // clear the rounding/floor thresholds. Round 16 #1: "Paid to: N split
++    // recipients" (what Round 15 replaced it with) was STILL an outcome
++    // claim — it asserts N recipients were paid, which rounding and the
++    // sub-floor divert can both make false. The leading line now states only
++    // the escrow's configuration (N split entries exist, with their own
++    // share/chain), leaving what actually happens to the caveats below.
+     expect(lines).toEqual([
+-      'Paid to: 2 split recipients, according to their configured shares and destinations',
++      '2 configured split entries, by their configured share and destination chain',
+       'A recipient whose share rounds down to zero is paid nothing.'
+     ])
+-    // No quantifier at all in the leading line — checked for absence, not
+-    // just replaced with new exact wording, so a future rewrite can't
+-    // reintroduce "most"/"each"/a fraction without this catching it.
+-    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
++    // No claim of who got paid, or how many, at all in the leading line —
++    // checked for absence, not just replaced with new exact wording, so a
++    // future rewrite can't reintroduce "most"/"each"/"paid to N" without
++    // this catching it.
++    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
+     expect(lines.join('\n')).not.toContain(RECIPIENT)
+     expect(lines.join('\n')).not.toContain(FALLBACK_RECIPIENT)
+   })
+ 
++  /* Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero caveat
++     above — a nonzero cross-chain share that still can't clear this
++     escrow's forwarding-fee floor lands as an Arc credit instead of its
++     configured chain (TrancheProtocol.sol:1291, :1319). Only surfaces when
++     the caller says the sub-floor divert is actually reachable (`partial`
++     AND `crossChain`) — a full release can never hit it (see the function's
++     own doc comment), so omitting the options must not silently print a
++     caveat that does not apply to that call. */
++  describe('the sub-floor divert-to-Arc caveat', () => {
++    it('is absent by default (a full release cannot reach it)', () => {
++      expect(payoutLines(escrow, SPLITS).join('\n')).not.toMatch(/credited on Arc/i)
++      expect(payoutLines(escrow, []).join('\n')).not.toMatch(/credited on Arc/i)
++    })
++
++    it('is present, and distinct from the rounds-to-zero caveat, for a reachable split payout', () => {
++      const lines = payoutLines(escrow, SPLITS, { partial: true, crossChain: true, floor: 200000n })
++      expect(lines).toContain('A recipient whose share rounds down to zero is paid nothing.')
++      expect(lines).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
++    })
++
++    it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
++      const lines = payoutLines(escrow, [], { partial: true, crossChain: true, floor: 200000n })
++      expect(lines).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
++    })
++
++    it('stays absent when crossChain is false even if partial is true (an Arc leg is never diverted)', () => {
++      expect(payoutLines(escrow, SPLITS, { partial: true, crossChain: false, floor: 200000n }).join('\n'))
++        .not.toMatch(/credited on Arc/i)
++    })
++  })
++
+   it('decodes mintRecipient and names the destination chain when there is no split', () => {
+     for (const splits of [undefined, null, []]) {
+       expect(payoutLines(escrow, splits)).toEqual([
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index e828190..5997f73 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1185,13 +1185,24 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
+ /* ---------- Split recipients ----------
+    Only present when the escrow was created with a multi-party split. Each
+    released milestone's remainder (after the protocol fee) is divided across
+-   these recipients by their bps share, each on its own CCTP destination. */
++   these recipients by their bps share, each configured with its own CCTP
++   destination.
++
++   Round 16 #4: the caption used to claim the outcome directly — "each on
++   its own destination chain" — the same shape as #11's "paid to N
++   recipients": true of the configuration, not guaranteed of any one
++   release. A share can round to zero (nothing paid) or land at-or-below
++   the forwarding-fee floor (credited on Arc instead of its configured
++   chain) — see payoutLines' caveats on the actual release/settle screens.
++   This caption now states only the configuration fact and points at where
++   the real disclosure lives, rather than repeating it here at a length a
++   caption card can't hold. */
+ function SplitRecipients({ splits }) {
+   return (
+     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
+       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Split recipients</h3>
+       <p className="text-xs text-ink-2 leading-relaxed">
+-        Released funds are divided across these wallets by share, each on its own destination chain.
++        These wallets are configured with their own share and destination chain. A share can round to zero or fall below the delivery floor — see the payout details when a milestone releases or settles.
+       </p>
+       <div className="flex flex-col">
+         {splits.map((s, i) => {
+@@ -2272,6 +2283,14 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   const crossChain = settlementIsCrossChain(escrow, splits)
+   const floor = escrow.escrowCctpForwardFee ?? 0n
+   const partial = bps > 0 && bps < 10_000
++  // Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
++  // division can floor a small enough milestone amount times a small enough
++  // bps to zero even though a genuinely nonzero percentage was agreed.
++  // Distinct from a per-leg rounding-to-zero (payoutLines already discloses
++  // that one when it applies): here NOTHING reaches the freelancer at all,
++  // so this gets its own branch below rather than walking through
++  // delivery/chain/fee copy for a transfer that never happens.
++  const recipientGetsPaid = bps > 0 && recipientShare > 0n
+ 
+   const params = [
+     milestoneLine,
+@@ -2284,8 +2303,8 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   if (bps < 10_000) {
+     params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
+   }
+-  if (bps > 0) {
+-    params.push(...payoutLines(escrow, splits))
++  if (recipientGetsPaid) {
++    params.push(...payoutLines(escrow, splits, { partial, crossChain, floor }))
+     // Three different arrival behaviours hide behind "pays out": an Arc leg is
+     // a safeTransfer inside this transaction (:1343-1346), a cross-chain leg is
+     // a burn that Circle mints minutes later, and the payer's half is a credit
+@@ -2297,6 +2316,8 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+         : "The freelancer's share is transferred on Arc as this transaction executes."
+     )
+     params.push("The protocol fee is taken from the freelancer's share only.")
++  } else if (bps > 0) {
++    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
+   } else {
+     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+   }
+@@ -2306,18 +2327,11 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     params.push(...refundToLines(escrow))
+     params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
+   }
+-  if (crossChain && bps > 0) {
++  if (crossChain && recipientGetsPaid) {
+     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
+     // Circle deducts its actual forwarding fee — which may be less — from the
+     // burned amount on the destination (TrancheProtocol.sol:874-877).
+     params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
+-    if (partial) {
+-      params.push(
+-        splits?.length > 0
+-          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
+-          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
+-      )
+-    }
+   }
+   params.push('This cannot be undone.')
+ 
+@@ -2906,27 +2920,64 @@ export function refundToLines(escrow) {
+  * mapping with no getter. The only bps the frontend can see is the live global
+  * from getProtocolConfig(), which drifts from the snapshot the moment an admin
+  * calls setProtocolFee. A wrong number on a confirm screen is worse than none —
+- * same reasoning as networkFee in utils/circleTheme.js. */
+-export function payoutLines(escrow, splits) {
++ * same reasoning as networkFee in utils/circleTheme.js.
++ *
++ * `partial`/`crossChain`/`floor` are optional context from a caller that
++ * knows whether Finding 3's sub-floor divert-to-Arc is reachable for THIS
++ * call (TrancheProtocol.sol:1291, :1319) — a full release (approveRelease /
++ * release) can never hit it, by construction of the deposit-time F2 floor
++ * check plus the F3 redirect guard, so callers that only ever pay the full
++ * amount simply omit them and get the plain description. Round 16 #2: this
++ * caveat used to be hand-rolled separately by mutualSettleConfirm after
++ * calling this function, duplicating logic resolveDisputeConfirm also
++ * hand-rolls independently — the exact "same fact, two places" shape Phase B
++ * of this round fixed for the redirect screens. Owning it here means no
++ * future caller can forget it. */
++export function payoutLines(escrow, splits, { partial = false, crossChain = false, floor = 0n } = {}) {
+   if (splits?.length > 0) {
+-    // Round 15 #11: "most delivered" was still a quantified claim nothing in
+-    // the contract backs — no invariant guarantees a majority of legs clear
+-    // the rounding floor, that was a typical-case assumption dressed up as a
+-    // description. Describes the mechanism instead and asserts no fraction
+-    // at all: a leg whose share rounds down to zero is skipped outright by
+-    // the `share > 0` guard (:1312), so it is paid nothing and reaches no
+-    // chain at all — detailed in the line below, which states the actual
+-    // exception rather than the leading claim guessing how many it affects.
+-    return [
+-      `Paid to: ${splits.length} split recipients, according to their configured shares and destinations`,
++    // Round 15 #11 / Round 16 #1: "most delivered" was still a quantified
++    // claim nothing in the contract backs, and even "Paid to: N split
++    // recipients" (what Round 15 replaced it with) is itself an outcome
++    // claim — it asserts N recipients were paid, which rounding and the
++    // sub-floor divert below can both make false. Describes the escrow's
++    // CONFIGURATION instead — it has N split entries, each with its own
++    // percentage and chain — and leaves what actually happens to each to
++    // the caveats that follow, rather than asserting a headcount up front.
++    const lines = [
++      `${splits.length} configured split entries, by their configured share and destination chain`,
+       'A recipient whose share rounds down to zero is paid nothing.'
+     ]
++    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
++    // above — a nonzero share that still can't clear this escrow's CCTP
++    // forwarding-fee floor lands as an Arc credit instead of reaching its
++    // configured chain (:1319). Conflating the two would itself be
++    // inaccurate: one is integer rounding, the other is the forwarding
++    // floor, and they can fire independently of each other.
++    // Round 16 #2: a DIFFERENT failure mode from the rounds-to-zero line
++    // above — a nonzero share that still can't clear this escrow's CCTP
++    // forwarding-fee floor lands as an Arc credit instead of reaching its
++    // configured chain (:1319). Conflating the two would itself be
++    // inaccurate: one is integer rounding, the other is the forwarding
++    // floor, and they can fire independently of each other.
++    if (partial && crossChain) {
++      lines.push(`Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
++    }
++    return lines
+   }
+   const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+-  return [
++  const lines = [
+     `Paid to: ${addr}`,
+     `Paid on: ${getDomainName(Number(escrow.destinationDomain))}`
+   ]
++  if (partial && crossChain) {
++    // Credited to escrow.recipient specifically, NOT `addr` above — the
++    // divert targets refundBalances[e.recipient] on-chain (:1292), the
++    // pre-redirect authorization identity, even when mintRecipient has since
++    // been redirected elsewhere. See ArbiterPanel.jsx's payoutAddress() for
++    // the same distinction on the no-split path.
++    lines.push(`If the amount after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`)
++  }
++  return lines
+ }
+ 
+ // Picks the single highest-priority action available to a given caller role
+diff --git a/frontend/src/pages/EscrowDetail.settle.test.jsx b/frontend/src/pages/EscrowDetail.settle.test.jsx
+index fc57f47..bdd8562 100644
+--- a/frontend/src/pages/EscrowDetail.settle.test.jsx
++++ b/frontend/src/pages/EscrowDetail.settle.test.jsx
+@@ -170,8 +170,12 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+     expect(paramText(cross(5000))).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+   })
+ 
++  /* Round 16 #2: this caveat now lives inside payoutLines() itself rather
++     than being hand-rolled by this function — and payoutLines names
++     escrow.recipient explicitly as the divert destination, not the
++     redirectable mintRecipient (TrancheProtocol.sol:1292). */
+   it('warns that a small share is credited on Arc instead of delivered', () => {
+-    expect(paramText(cross(5000))).toContain("If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc instead of being delivered cross-chain.")
++    expect(paramText(cross(5000))).toContain(`If the amount after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
+   })
+ 
+   /* Per-leg on a split escrow (:1319), so the wording has to change with it. */
+@@ -221,3 +225,48 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+     expect(t).not.toContain('forwarding fee')
+   })
+ })
++
++/* Round 16 #3: bps > 0 does not guarantee recipientShare > 0 — integer
++   division can floor a small enough milestone amount times a small enough
++   bps to zero even though a genuinely nonzero percentage was agreed. Before
++   this fix, the code branched purely on `bps > 0` and would still walk
++   through payoutLines/chain/fee copy for a transfer that never happens,
++   showing "Freelancer's share: 0.00 USDC" alongside delivery details for a
++   $0 delivery. Distinct from a per-split-leg rounding-to-zero (still
++   disclosed via payoutLines when applicable): this is the WHOLE freelancer
++   amount, before any split division even runs. */
++describe('Round 16 #3 — a nonzero bps can still round the whole share to zero', () => {
++  // 9999 base units (0.009999 USDC): small enough that a 0.01% ruling floors
++  // to exactly 0n in integer division, while what's LEFT for the payer
++  // (9999n) is comfortably nonzero at 2-decimal display precision.
++  const tinyMilestone = { index: 1, amount: 9999n, state: 2 }
++  const at = (bps, over = {}) => mutualSettleConfirm({
++    escrow: escrowOn(BASE), milestone: tinyMilestone, splits: [], bps, theirs: agreed(bps), ...over
++  })
++
++  it('says nothing is paid despite the nonzero share, distinctly from the 0% ruling', () => {
++    // bps=1 (0.01%): floor(9999 * 1 / 10000) = 0.
++    const t = paramText(at(1))
++    expect(t).toContain("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
++    expect(t).not.toContain('Nothing is paid to the freelancer. The milestone is refunded in full.')
++    expect(t).toContain("Freelancer's share: 0.00 USDC before the protocol fee")
++    expect(t).toContain("Payer's share: 0.01 USDC — no protocol fee is taken on this half")
++  })
++
++  it('does not describe a payout destination, chain, or delivery fee for the zero transfer', () => {
++    const t = paramText(at(1, { escrow: escrowOn(BASE) }))
++    expect(t).not.toMatch(/Paid to:|Paid on:|forwarding fee|Circle's cross-chain delivery|transferred on Arc/)
++  })
++
++  it('pays the freelancer normally once the share clears zero', () => {
++    // bps=5000 (50%): floor(9999 * 5000 / 10000) = 4999 — nonzero, so this
++    // takes the normal payout path. The property under test is which BRANCH
++    // runs, not the formatted dollar string (4999 base units still displays
++    // as "0.00 USDC" at 2-decimal precision, which is exactly why the
++    // branch condition checks the real recipientShare, not the display).
++    const t = paramText(at(5000))
++    expect(t).toContain('Paid to:')
++    expect(t).toContain('Paid on:')
++    expect(t).not.toContain('rounds down to zero USDC')
++  })
++})
+diff --git a/frontend/src/pages/phaseC.test.jsx b/frontend/src/pages/phaseC.test.jsx
+index d3d1853..a669c4c 100644
+--- a/frontend/src/pages/phaseC.test.jsx
++++ b/frontend/src/pages/phaseC.test.jsx
+@@ -223,11 +223,14 @@ describe('#11 — a configured split recipient does not always receive value', (
+   it('drops the "each on their own chain" promise from the payout line', () => {
+     const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
+     // Round 15 #11: "most delivered" (Round 14's fix) was itself still an
+-    // unsupported quantifier — no invariant guarantees a majority of legs
+-    // clear the rounding/floor thresholds. The leading line now describes
+-    // the mechanism instead and asserts no fraction at all.
+-    expect(lines[0]).toBe('Paid to: 2 split recipients, according to their configured shares and destinations')
+-    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|%|\d+ of \d+/i)
++    // unsupported quantifier. Round 16 #1: "Paid to: N split recipients"
++    // (what Round 15 replaced it with) was STILL an outcome claim — it
++    // asserts N recipients were paid, which rounding and the sub-floor
++    // divert can both make false. The leading line now states only the
++    // escrow's CONFIGURATION (N split entries exist, with their own
++    // share/chain), not a headcount of who got paid.
++    expect(lines[0]).toBe('2 configured split entries, by their configured share and destination chain')
++    expect(lines[0]).not.toMatch(/\beach\b|\bmost\b|\ball\b|\bevery\b|\bsome\b|\bhalf\b|\bmajority\b|\bpaid\b|\breceiv\w*\b|%|\d+ of \d+/i)
+     expect(lines.join('\n')).not.toMatch(/each (on their own|to their configured) chain/)
+   })
+ 

@@ -1,0 +1,605 @@
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 61ea4b2..faf2d1d 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -17,6 +17,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { safeSetItem } from '../utils/safeStorage.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+ import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+@@ -260,7 +261,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         // `messages` array Round 26 persisted here — see useCctpDelivery's
+         // own doc comment for why content matching against Iris never
+         // actually worked.
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(detail.id, index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+index a31006d..a9619b0 100644
+--- a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -1,4 +1,4 @@
+-import { describe, it, expect, afterEach } from 'vitest'
++import { describe, it, expect, afterEach, vi } from 'vitest'
+ 
+ /* shouldClearCctpTrack — Round 20 Phase D.
+    The old design cleared the shared cctpTrackKey entry the instant ANY
+@@ -19,6 +19,7 @@ import { describe, it, expect, afterEach } from 'vitest'
+    alive. */
+ import { shouldClearCctpTrack, readCctpTrack } from './EscrowDetail.jsx'
+ import { cctpTrackKey } from '../utils/irisDelivery.js'
++import { CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const complete = (overrides = {}) => ({ forwardState: 'COMPLETE', destinationDomain: 6, ...overrides })
+ const failed = (overrides = {}) => ({ forwardState: 'FAILED', destinationDomain: 6, ...overrides })
+@@ -68,6 +69,8 @@ describe('readCctpTrack', () => {
+   const ESCROW_ID = 7
+   const MILESTONE_INDEX = 1
+   const KEY = cctpTrackKey(ESCROW_ID, MILESTONE_INDEX)
++  // Round 29: a real tx hash shape — isValidCctpTrackRecord now checks this.
++  const REAL_TX_HASH = '0x' + '1234abcd'.repeat(8)
+ 
+   afterEach(() => {
+     localStorage.clear()
+@@ -78,34 +81,34 @@ describe('readCctpTrack', () => {
+   })
+ 
+   it('returns a well-formed Round 27 record unchanged', () => {
+-    const record = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2 }
++    const record = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(record))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(record)
+   })
+ 
+   it('discards and removes an aged-out record (older than 24h), same as before this round', () => {
+-    const record = { txHash: '0xtx', ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
+     localStorage.setItem(KEY, JSON.stringify(record))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards and removes a Round 26 legacy record — expectedMessages (raw hex array), no expectedOrdinals at all — rather than treating it as usable', () => {
+-    const legacy = { txHash: '0xtx', ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
++    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
+     localStorage.setItem(KEY, JSON.stringify(legacy))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards and removes a pre-Round-26 legacy record — expectedMessages as a bare numeric count — rather than treating it as usable', () => {
+-    const legacy = { txHash: '0xtx', ts: Date.now(), expectedMessages: 2 }
++    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(legacy))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record whose expectedOrdinals is an array but expectedTotalMessages is missing/non-numeric', () => {
+-    const malformed = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0] }
++    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0] }
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+@@ -117,43 +120,154 @@ describe('readCctpTrack', () => {
+   // useCctpDelivery, which has no way to detect an incoherent ordinal set on
+   // its own.
+   it('discards a vacuous record — expectedOrdinals empty, expectedTotalMessages zero', () => {
+-    const vacuous = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
++    const vacuous = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
+     localStorage.setItem(KEY, JSON.stringify(vacuous))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with an out-of-range ordinal (ordinal 3 against a total of 2)', () => {
+-    const outOfRange = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
++    const outOfRange = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(outOfRange))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a negative ordinal', () => {
+-    const negative = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
++    const negative = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(negative))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a fractional ordinal', () => {
+-    const fractional = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
++    const fractional = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(fractional))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a duplicate ordinal', () => {
+-    const duplicate = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
++    const duplicate = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
+     localStorage.setItem(KEY, JSON.stringify(duplicate))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
++  // Round 29 — Medium finding: a valid-shaped record wasn't actually bound
++  // to its context. isValidCctpTrackRecord checked types/ranges but not
++  // whether txHash is a real tx hash shape, or whether ts is finite/past.
++  it('discards a record with an empty-string txHash', () => {
++    const malformed = { txHash: '', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    localStorage.setItem(KEY, JSON.stringify(malformed))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a malformed txHash (right prefix, wrong length)', () => {
++    const malformed = { txHash: '0xdeadbeef', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    localStorage.setItem(KEY, JSON.stringify(malformed))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a txHash missing the 0x prefix', () => {
++    const malformed = { txHash: REAL_TX_HASH.slice(2), ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    localStorage.setItem(KEY, JSON.stringify(malformed))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a future timestamp', () => {
++    const future = { txHash: REAL_TX_HASH, ts: Date.now() + 24 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++    localStorage.setItem(KEY, JSON.stringify(future))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a non-finite ts (a JSON number literal large enough to overflow to Infinity — valid JSON syntax, but typeof "number" alone would have let it through)', () => {
++    localStorage.setItem(KEY, `{"txHash":"${REAL_TX_HASH}","ts":1e400,"expectedOrdinals":[0],"expectedTotalMessages":1}`)
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++  })
++
+   it('returns null and removes the entry on unparseable JSON — discarded the same way as any other invalid record, not left behind', () => {
+     localStorage.setItem(KEY, 'not json')
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
++
++  // Round 29 — Medium finding: readCctpTrack's own catch block called
++  // localStorage.removeItem unguarded. If localStorage itself is throwing
++  // (privacy settings, a SecurityError on a denied origin), that removeItem
++  // could throw a SECOND time and escape the catch entirely — readCctpTrack
++  // runs inside MilestoneRow's useState initializer, so an escaped throw
++  // there breaks render, not just the tracker. Now routed through
++  // safeStorage, which swallows internally at every step.
++  describe('storage itself throwing', () => {
++    afterEach(() => {
++      vi.restoreAllMocks()
++    })
++
++    it('does not throw, and returns null, when getItem throws', () => {
++      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++
++    it('does not throw when the record is aged-out AND removeItem itself throws', () => {
++      const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++      localStorage.setItem(KEY, JSON.stringify(record))
++      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++
++    it('does not throw when the record is malformed AND removeItem itself throws', () => {
++      localStorage.setItem(KEY, 'not json')
++      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++  })
++
++  // Round 29 — Medium finding: cctpTrackKey namespaced only by
++  // escrowId+milestoneIndex, not by deployment. A redeploy (routine in this
++  // repo — see CLAUDE.md's deployment history) reuses the same escrow ID
++  // space from scratch, so a coherent-looking leftover record from a
++  // PREVIOUS contract's escrow #7 milestone #1 would collide on the exact
++  // same key as the current contract's own escrow #7 milestone #1.
++  describe('cctpTrackKey namespacing by CONTRACT_ADDRESS', () => {
++    it('includes the current CONTRACT_ADDRESS in the key', () => {
++      expect(cctpTrackKey(ESCROW_ID, MILESTONE_INDEX)).toContain(CONTRACT_ADDRESS.toLowerCase())
++    })
++
++    it('two records with the same escrowId/milestoneIndex but different CONTRACT_ADDRESS do not collide', () => {
++      // Simulates a leftover record from a previous deployment: same
++      // escrowId/milestoneIndex tail, a different contract address swapped
++      // into the key where CONTRACT_ADDRESS.toLowerCase() would sit.
++      const otherDeploymentKey = KEY.replace(CONTRACT_ADDRESS.toLowerCase(), '0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead')
++      expect(otherDeploymentKey).not.toBe(KEY)
++
++      const otherDeploymentRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++      localStorage.setItem(otherDeploymentKey, JSON.stringify(otherDeploymentRecord))
++
++      // Nothing under the CURRENT deployment's key yet — the other
++      // deployment's record must not leak into this read.
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++
++      // Writing the CURRENT deployment's own record still works normally,
++      // independent of the other key's presence.
++      const ownRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1], expectedTotalMessages: 2 }
++      localStorage.setItem(KEY, JSON.stringify(ownRecord))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(ownRecord)
++      // The other deployment's key is untouched by that read.
++      expect(localStorage.getItem(otherDeploymentKey)).not.toBeNull()
++    })
++  })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx
+index b2ac587..5c63167 100644
+--- a/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.crossChainDelivery.test.jsx
+@@ -18,6 +18,7 @@
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { render, screen, cleanup } from '@testing-library/react'
++import { cctpTrackKey } from '../utils/irisDelivery.js'
+ 
+ const cctpDeliveryMock = vi.hoisted(() => ({ current: { phase: 'idle', deliveries: [] } }))
+ vi.mock('../hooks/useCctpDelivery.js', () => ({
+@@ -131,7 +132,7 @@ describe('tracker cleanup: only clears the shared key once every message is genu
+   it('clears the tracker once every leg has genuinely reached COMPLETE', () => {
+     setDeliveries('delivered', [completeMsg(BASE, '0xdesttx1'), completeMsg(ETH, '0xdesttx2')])
+     renderTracker()
+-    expect(removeItemSpy).toHaveBeenCalledWith('cctp-track-7-1')
++    expect(removeItemSpy).toHaveBeenCalledWith(cctpTrackKey(7, 1))
+   })
+ })
+ 
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 5448776..2719b3b 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -22,6 +22,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
+ import {
+   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+@@ -1448,6 +1449,13 @@ function useMilestoneReleaseTxs(escrowId) {
+ 
+ const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
+ 
++// Round 29: a real transaction hash shape — 0x + 64 hex chars — not just
++// "some string". Round 28's `typeof === 'string'` check let an empty string,
++// a truncated hash, or any other non-hash string through as a "valid"
++// record, which readCctpTrack would then hand to CrossChainDelivery as a
++// txHash to poll Iris with.
++const CCTP_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
++
+ // Round 28: expectedOrdinals/expectedTotalMessages being the right TYPES
+ // (array / number) doesn't mean they're COHERENT — an out-of-range, negative,
+ // fractional, or duplicate ordinal, or a vacuous {ordinals: [], total: 0}
+@@ -1455,8 +1463,19 @@ const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
+ // useCctpDelivery a broken selection key. Every field the record actually
+ // needs gets checked here, once, so an incoherent record is discarded the
+ // same way a malformed or aged-out one already is.
++//
++// Round 29: also rejects a non-finite ts (NaN/Infinity — `typeof === 'number'`
++// alone lets both through, since typeof NaN is 'number') and a FUTURE ts.
++// A future ts matters specifically because it defeats the aged-out check
++// above readCctpTrack's own call site: `Date.now() - parsed.ts` goes
++// negative for a future ts, which is never `> CCTP_TRACK_MAX_AGE_MS`, so
++// nothing else in readCctpTrack would ever catch it. No clock-skew
++// tolerance: this ts is always stamped with Date.now() on the same device
++// that later reads it, so a genuinely future value only ever means a
++// tampered/foreign record, not ordinary drift.
+ function isValidCctpTrackRecord(parsed) {
+-  if (typeof parsed.txHash !== 'string' || typeof parsed.ts !== 'number') return false
++  if (typeof parsed.txHash !== 'string' || !CCTP_TX_HASH_RE.test(parsed.txHash)) return false
++  if (!Number.isFinite(parsed.ts) || parsed.ts > Date.now()) return false
+   if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
+   if (!Array.isArray(parsed.expectedOrdinals) || parsed.expectedOrdinals.length === 0) return false
+   const seen = new Set()
+@@ -1468,14 +1487,41 @@ function isValidCctpTrackRecord(parsed) {
+   return true
+ }
+ 
++// Round 29 — scope note on the reviewer's further suggestion (reconciling a
++// local record against the subgraph's own releaseTx once indexed, or
++// reverifying its receipt outright instead of trusting the persisted record
++// for its full 24h life): deliberately NOT done here. The hash-format check
++// and CONTRACT_ADDRESS namespacing above already close the concrete gap —
++// "coherent-looking garbage from a stale/foreign source" — that made a
++// persisted record risky to trust in the first place. What's left after
++// those fixes is trusting a record that (a) has a real tx hash shape, (b)
++// belongs to this exact deployment, (c) is at most 24h old, and (d) per
++// Round 22 Phase A, was ONLY ever written by this app's own
++// receipt-verified code paths (every write site gates on
++// receiptEmittedCctpMessageForMilestone(receipt, ...).emitted first) — not
++// arbitrary tamper-resistance. Reconciling against the subgraph on every
++// read would add a Goldsky round-trip (and its own failure/staleness modes)
++// to a value that's already provably correct at write time; reverifying the
++// receipt outright is exactly what FallbackCrossChainDelivery already does
++// as the fallback path when there's no local record — duplicating it here
++// would just run the expensive path unconditionally instead of only when
++// needed. If a live incident ever surfaces cross-deployment or stale-record
++// bugs in practice despite these fixes, that would justify revisiting this;
++// nothing in the current threat model does.
+ export function readCctpTrack(escrowId, milestoneIndex) {
+   const key = cctpTrackKey(escrowId, milestoneIndex)
++  // Round 29: getItem/removeItem go through safeStorage — storage itself can
++  // throw (privacy mode, denied origin), and an unguarded removeItem inside
++  // this function's own catch block used to be able to throw a SECOND time
++  // and escape entirely, breaking MilestoneRow's useState initializer during
++  // render. safeStorage swallows internally, so every branch below degrades
++  // to "no local record" the same way, never propagates.
++  const raw = safeGetItem(key)
++  if (!raw) return null
+   try {
+-    const raw = localStorage.getItem(key)
+-    if (!raw) return null
+     const parsed = JSON.parse(raw)
+     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
+-      localStorage.removeItem(key)
++      safeRemoveItem(key)
+       return null
+     }
+     // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
+@@ -1493,7 +1539,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
+     // reverifies straight from the receipt instead. Round 28: this check now
+     // also covers coherence, not just shape — see isValidCctpTrackRecord.
+     if (!isValidCctpTrackRecord(parsed)) {
+-      localStorage.removeItem(key)
++      safeRemoveItem(key)
+       return null
+     }
+     return parsed
+@@ -1501,7 +1547,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
+     // Round 28: unparseable JSON is exactly as unusable as a malformed
+     // record — discard it the same way, instead of leaving a dead key that
+     // getItem/JSON.parse will keep failing on for the rest of its 24h life.
+-    localStorage.removeItem(key)
++    safeRemoveItem(key)
+     return null
+   }
+ }
+@@ -2729,7 +2775,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // `messages` array Round 26 persisted here — see useCctpDelivery's
+         // own doc comment for why content matching against Iris never
+         // actually worked.
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+@@ -2917,7 +2963,7 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
+   // here, so handling one failed leg never tears down tracking for another.
+   useEffect(() => {
+     if (shouldClearCctpTrack(deliveries)) {
+-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++      safeRemoveItem(cctpTrackKey(escrowId, milestoneIndex))
+     }
+   }, [deliveries, escrowId, milestoneIndex])
+ 
+@@ -3767,7 +3813,7 @@ function MilestoneAction({
+       onChange?.(); setActiveKey(null)
+       const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+       if (emitted) {
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index ce57ab5..eca6cf1 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -19,8 +19,24 @@ const RECEIVE_MESSAGE_ABI = [
+ ]
+ 
+ // localStorage key for a single cross-chain release tx.
++//
++// Round 29: namespaced by CONTRACT_ADDRESS, not just escrowId+milestoneIndex.
++// Without this, a coherent-looking record left over from a PREVIOUS
++// deployment (redeploys are routine in this repo — see CLAUDE.md's
++// deployment history) would collide on the same key under a new contract
++// whose escrow #7 milestone #1 is a completely unrelated escrow, and
++// readCctpTrack's shape/coherence checks alone can't tell the difference —
++// a garbage-but-well-shaped record would wrongly suppress
++// FallbackCrossChainDelivery's receipt-reverifying fallback path.
++// CONTRACT_ADDRESS alone is sufficient here, not CONTRACT_ADDRESS+chain: it
++// is a single build-time env value (config/wagmi.js) — exactly one
++// deployment is ever active per running app instance, and a redeploy always
++// changes it, so it already uniquely identifies "this build's own contract"
++// without a separate domain/chain component. The wallet's own connected
++// chain is orthogonal — this key is about which TrancheProtocol instance
++// the record belongs to, not which chain the signer happens to be on.
+ export const cctpTrackKey = (escrowId, milestoneIndex) =>
+-  `cctp-track-${escrowId}-${milestoneIndex}`
++  `cctp-track-${CONTRACT_ADDRESS.toLowerCase()}-${escrowId}-${milestoneIndex}`
+ 
+ // Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
+ // fixed interval regardless of whether the previous call has resolved yet,
+@@ -85,7 +101,25 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
+   } finally {
+     clearTimeout(timeoutId)
+   }
+-  return json?.messages || []
++  const messages = json?.messages || []
++  // Round 29 (fixing the Round 29 review's Medium finding): equal cardinality
++  // doesn't prove equal membership. useCctpDelivery's completeness gate
++  // (allMessages.length === expectedTotalMessages) only checks the COUNT —
++  // a response missing one real message but containing one unrelated extra
++  // entry would have the same length and still get ordinal-selected as
++  // though it were this transaction's own verified set. Circle's Iris
++  // response carries each message's own sourceTxHash; filtering out any
++  // entry whose sourceTxHash is present and does NOT match the transaction
++  // actually requested catches exactly that substitution — cheaply, before
++  // the entry ever reaches ordinal selection. Filters out only a POSITIVE
++  // mismatch, not entries missing the field entirely: this endpoint is
++  // already scoped by `transactionHash` in the request URL above, so
++  // sourceTxHash should be redundant on every real entry, but requiring its
++  // presence would silently break every poll if some response shape omits
++  // it — this stays a defensive check, not a new hard dependency.
++  return messages.filter(
++    (m) => typeof m.sourceTxHash !== 'string' || m.sourceTxHash.toLowerCase() === txHash.toLowerCase()
++  )
+ }
+ 
+ // Encode `receiveMessage(message, attestation)` calldata for the destination
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 3643739..0571c96 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -97,6 +97,54 @@ describe('fetchIrisMessages', () => {
+   })
+ })
+ 
++/* fetchIrisMessages — sourceTxHash membership check, Round 29 (fixing the
++   Round 29 review's Medium finding: "equal cardinality doesn't prove equal
++   membership"). useCctpDelivery's completeness gate only checks
++   allMessages.length === expectedTotalMessages — a response missing one
++   real message but padded with one unrelated foreign entry has the same
++   length and would previously sail through untouched, then get
++   ordinal-selected as if it were this transaction's own verified set. Each
++   message's own sourceTxHash — when Iris includes it — is checked against
++   the transaction actually requested. */
++describe('fetchIrisMessages — sourceTxHash membership', () => {
++  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
++
++  it('keeps a message whose sourceTxHash matches the requested tx', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++  })
++
++  it('matches sourceTxHash case-insensitively', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own({ sourceTxHash: '0xABC123' })] }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own({ sourceTxHash: '0xABC123' })])
++  })
++
++  it('keeps a message with no sourceTxHash field at all — a defensive check, not a new hard requirement on every response shape', async () => {
++    const noField = { message: '0xown', attestation: '0xatt' }
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField] }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
++  })
++
++  it('drops a message whose sourceTxHash belongs to a DIFFERENT transaction', async () => {
++    const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign] }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
++  })
++
++  it('regression: right length, wrong membership — one real message present plus one foreign substitute at the same count Iris "should" have returned, and the foreign entry is dropped rather than selected', async () => {
++    const real = own({ message: '0xreal' })
++    const foreign = own({ sourceTxHash: '0xnottherequestedtx', message: '0xforeign' })
++    // Same length (2) as a caller expecting expectedTotalMessages === 2 would
++    // require — without the sourceTxHash check, both would previously have
++    // passed the completeness gate and the foreign entry could be selected
++    // by ordinal as if it were this milestone's own second message.
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [real, foreign] }))))
++    const result = await fetchIrisMessages('0xabc123')
++    expect(result).toEqual([real])
++    expect(result).toHaveLength(1)
++  })
++})
++
+ /* fetchIrisMessages — timeout, Round 22 Phase B.
+ 
+    Unlike fetchForwardFee (which gained a timeout in Round 21 Phase B), this
+diff --git a/frontend/src/utils/safeStorage.js b/frontend/src/utils/safeStorage.js
+new file mode 100644
+index 0000000..d7e23b3
+--- /dev/null
++++ b/frontend/src/utils/safeStorage.js
+@@ -0,0 +1,27 @@
++// Best-effort localStorage wrapper for the cctp delivery tracker. localStorage
++// itself can throw on get/set/remove — privacy-mode browsers, a denied
++// origin, quota exhaustion all raise a real SecurityError/DOMException, not
++// just return undefined. The cctp tracking data is disposable (a 24h-lived
++// local echo, always re-derivable from the chain via
++// FallbackCrossChainDelivery), so every failure mode here degrades to
++// "no local record" rather than throwing into a render or a tx-confirmation
++// callback (onChange, setActiveKey, onCrossChainRelease) and breaking it.
++export function safeGetItem(key) {
++  try {
++    return localStorage.getItem(key)
++  } catch {
++    return null
++  }
++}
++
++export function safeSetItem(key, value) {
++  try {
++    localStorage.setItem(key, value)
++  } catch {}
++}
++
++export function safeRemoveItem(key) {
++  try {
++    localStorage.removeItem(key)
++  } catch {}
++}
+diff --git a/frontend/src/utils/safeStorage.test.js b/frontend/src/utils/safeStorage.test.js
+new file mode 100644
+index 0000000..fbe5b52
+--- /dev/null
++++ b/frontend/src/utils/safeStorage.test.js
+@@ -0,0 +1,44 @@
++import { describe, it, expect, afterEach, vi } from 'vitest'
++import { safeGetItem, safeSetItem, safeRemoveItem } from './safeStorage.js'
++
++/* Round 29 — Medium finding: an unguarded localStorage call can throw
++   uncaught. Privacy settings, a SecurityError on a denied origin, or quota
++   exhaustion can make getItem/setItem/removeItem throw for real, not just
++   return undefined. Every caller in this app treats the cctp tracker as
++   disposable (re-derivable from the chain), so a storage failure must
++   degrade to "no local record" — never propagate into a render (readCctpTrack
++   runs inside a useState initializer) or a tx-confirmation callback. */
++describe('safeStorage', () => {
++  afterEach(() => {
++    vi.restoreAllMocks()
++  })
++
++  it('safeGetItem returns null instead of throwing when localStorage.getItem throws', () => {
++    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeGetItem('k')).not.toThrow()
++    expect(safeGetItem('k')).toBeNull()
++  })
++
++  it('safeSetItem does not throw when localStorage.setItem throws', () => {
++    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeSetItem('k', 'v')).not.toThrow()
++  })
++
++  it('safeRemoveItem does not throw when localStorage.removeItem throws', () => {
++    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeRemoveItem('k')).not.toThrow()
++  })
++
++  it('safeGetItem/safeSetItem/safeRemoveItem still work normally when storage is healthy', () => {
++    safeSetItem('k', 'v')
++    expect(safeGetItem('k')).toBe('v')
++    safeRemoveItem('k')
++    expect(safeGetItem('k')).toBeNull()
++  })
++})

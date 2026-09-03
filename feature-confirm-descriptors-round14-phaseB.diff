@@ -1,0 +1,221 @@
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 99b4303..7ac831a 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -586,11 +586,12 @@ export function resolveDisputeConfirm({
+   if (bps > 0) {
+     params.push(
+       splits?.length > 0
+-        // "each on their own chain" promises delivery this call cannot
+-        // guarantee: a leg rounding to zero is skipped (:1312), and on a
+-        // partial ruling a sub-floor cross-chain leg is credited on Arc
+-        // instead (:1319) — the caveat pushed below.
+-        ? `Freelancer's share is divided across ${splits.length} split recipients, each to their configured chain`
++        // Hedged rather than "each to their configured chain": a leg rounding
++        // to zero is skipped (:1312), and on a partial ruling a sub-floor
++        // cross-chain leg is credited on Arc instead (:1319) — both detailed
++        // in the lines pushed below, so the leading claim should not promise
++        // what those lines then have to walk back.
++        ? `Freelancer's share is divided across ${splits.length} split recipients, most delivered to their configured chain`
+         // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
+         // updateReceivingAddress rewrites mintRecipient and leaves recipient
+         // untouched (:986-990), so the two diverge the moment a freelancer
+diff --git a/frontend/src/pages/ArbiterPanel.resolve.test.jsx b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+index db6d3df..4edc852 100644
+--- a/frontend/src/pages/ArbiterPanel.resolve.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+@@ -190,7 +190,11 @@ describe('the maxFee asymmetry between split and no-split', () => {
+ 
+   it('describes a split payout as a fan-out rather than one address', () => {
+     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+-    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each to their configured chain")
++    // Round 14 #11: "each to their configured chain" over-promised delivery
++    // the rounding and below-floor caveats then had to walk back — hedged so
++    // the leading claim doesn't contradict the lines that follow it.
++    expect(t).toContain("Freelancer's share is divided across 2 split recipients, most delivered to their configured chain")
++    expect(t).not.toMatch(/each (on their own|to their configured) chain/)
+     expect(t).not.toContain(`sent to ${RECIPIENT}`)
+   })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.confirm.test.jsx b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+index 8ea3686..06de7ed 100644
+--- a/frontend/src/pages/EscrowDetail.confirm.test.jsx
++++ b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+@@ -49,10 +49,12 @@ describe('payoutLines', () => {
+   it('describes the fan-out for a split escrow and names no individual recipient', () => {
+     const lines = payoutLines(escrow, SPLITS)
+ 
+-    // Phase C #11: "each on their own chain" became "each to their configured
+-    // chain", plus a rounding caveat — a leg rounding to zero reaches nobody.
++    // Round 14 #11: "each to their configured chain" over-promised delivery
++    // the very next line then had to walk back (a leg rounding to zero
++    // reaches nobody) — hedged to "most delivered" so the leading claim and
++    // the rounding caveat below it don't contradict each other.
+     expect(lines).toEqual([
+-      'Paid to: 2 split recipients, each to their configured chain',
++      'Paid to: 2 split recipients, most delivered to their configured chain',
+       'A recipient whose share rounds down to zero is paid nothing.'
+     ])
+     expect(lines.join('\n')).not.toContain(RECIPIENT)
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index ae84009..4b1cbff 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -2854,11 +2854,12 @@ export function refundToLines(escrow) {
+  * same reasoning as networkFee in utils/circleTheme.js. */
+ export function payoutLines(escrow, splits) {
+   if (splits?.length > 0) {
+-    // Not "each on their own chain": a leg whose share rounds down to zero is
+-    // skipped outright by the `share > 0` guard (:1312), so it is paid nothing
+-    // and reaches no chain at all.
++    // Hedged rather than "each to their configured chain": a leg whose share
++    // rounds down to zero is skipped outright by the `share > 0` guard
++    // (:1312), so it is paid nothing and reaches no chain at all — detailed
++    // in the line below, which the leading claim should not have to walk back.
+     return [
+-      `Paid to: ${splits.length} split recipients, each to their configured chain`,
++      `Paid to: ${splits.length} split recipients, most delivered to their configured chain`,
+       'A recipient whose share rounds down to zero is paid nothing.'
+     ]
+   }
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index 5fbe1d1..ebaf97a 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -215,39 +215,55 @@ export function cctpForwardFeeConfirm({ currentFee, newFee }) {
+  * (:255, :264), cross-chain refund withdrawals to it (:866), and redirecting a
+  * payout to it (:975, :1027). Someone holding a refund credit they meant to
+  * withdraw there loses that route with no warning anywhere else in the UI. */
+-/* Three carve-outs where the blanket "blocks/restores everything" reading is
+-   simply false, and each has to be said on the screen for the domain it
+-   applies to:
++/* What removing a domain actually blocks, stated as one accurate sentence per
++   case rather than a blanket "blocks everything" bullet followed by a bullet
++   that walks part of it back. Two of the three gated paths — new escrows
++   (:255, :264) and cross-chain refund withdrawals (:866) and payout redirects
++   (:975, :1027) — are each exempted for exactly one domain number, so each
++   exempt case gets its own sentence instead of sharing the general one:
+ 
+    1. Domain 0 is withdrawRefund's Arc sentinel. That path returns before any
+       supportedDomains lookup (:854-859), so removing domain 0 blocks no
+-      withdrawal — and enabling it grants no cross-chain route either, since 0
+-      can never reach the cross-chain branch at all.
++      withdrawal — new escrows and redirects to it are still blocked normally.
+    2. ARC_DOMAIN is exempt by construction in both redirects: the guard reads
+       `newDestinationDomain != ARC_DOMAIN && !supportedDomains[...]` (:975,
+-      :1027), so an Arc redirect works whether or not Arc is on the list.
++      :1027), so an Arc redirect works whether or not Arc is on the list —
++      new escrows and cross-chain refund withdrawals to it are still blocked
++      normally. */
++function domainRemovalBlocks(domain) {
++  if (Number(domain) === 0) {
++    return 'Blocks new escrows to this chain and redirecting a payout to it. Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
++  }
++  if (Number(domain) === ARC_DOMAIN) {
++    return 'Blocks new escrows to this chain and cross-chain refund withdrawals to it. Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
++  }
++  return 'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
++}
++
++/* Two carve-outs that still belong on the ADD screen. Neither corrects a
++   claim the leading sentence made — "new escrows may name this chain, and
++   payouts may be redirected to it" says nothing about refund-withdrawal
++   routes or about redirects having already worked before this change — so
++   these stay appended facts rather than needing to move up into that
++   sentence:
++
++   1. Domain 0 doubles as withdrawRefund's Arc sentinel, so adding it to
++      supportedDomains does not create a new withdrawal route through it.
++   2. ARC_DOMAIN is exempt from both redirect guards by construction (:975,
++      :1027), so re-adding it does not change redirect availability — it was
++      already reachable.
+    3. Enabling a domain does not make it reachable for every escrow. An
+       Arc-funded escrow (or Arc split leg) still cannot be redirected
+       cross-chain — F3 rejects it independently of supportedDomains (:982,
+       :1033). */
+-function domainCarveOuts(domain, enabled) {
++function domainAdditionCaveats(domain) {
+   if (Number(domain) === 0) {
+-    return [
+-      enabled
+-        ? 'Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
+-        : 'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.'
+-    ]
++    return ['This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.']
+   }
+   if (Number(domain) === ARC_DOMAIN) {
+-    return [
+-      enabled
+-        ? 'Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
+-        : 'Arc was already always available for redirects; the contract exempts it from this list.'
+-    ]
++    return ['Arc was already always available for redirects; the contract exempts it from this list.']
+   }
+-  return enabled
+-    ? []
+-    : ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
++  return ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
+ }
+ 
+ export function domainConfirm({ domain, domainName, enabled }) {
+@@ -260,8 +276,7 @@ export function domainConfirm({ domain, domainName, enabled }) {
+       parameters: [
+         `${domainName} (domain ${domain}): Accepted → Not accepted`,
+         'Escrows already heading to this chain still release and deliver normally.',
+-        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.',
+-        ...domainCarveOuts(domain, true)
++        domainRemovalBlocks(domain)
+       ]
+     }
+   }
+@@ -274,7 +289,7 @@ export function domainConfirm({ domain, domainName, enabled }) {
+     parameters: [
+       `${domainName} (domain ${domain}): Not accepted → Accepted`,
+       'New escrows may name this chain, and payouts may be redirected to it.',
+-      ...domainCarveOuts(domain, false)
++      ...domainAdditionCaveats(domain)
+     ]
+   }
+ }
+diff --git a/frontend/src/pages/phaseB.test.jsx b/frontend/src/pages/phaseB.test.jsx
+index 957b89a..63a8119 100644
+--- a/frontend/src/pages/phaseB.test.jsx
++++ b/frontend/src/pages/phaseB.test.jsx
+@@ -147,6 +147,19 @@ describe('#7 — domain toggles have three carve-outs', () => {
+     expect(paramText(build(ARC, false))).not.toContain('still cannot be redirected here')
+   })
+ 
++  /* Round 14 #7: the removal screen used to state a blanket "blocks
++     everything" bullet and then correct part of it in a second, separate
++     bullet — the screen arguing with itself. The leading sentence itself now
++     has to be accurate, so neither exempt path should be named as blocked
++     anywhere in the same sentence as "Blocks". */
++  it('does not claim removing domain 0 blocks refund withdrawals (the self-contradiction it used to state)', () => {
++    expect(paramText(build(0, true))).not.toMatch(/blocks[^.]*refund withdrawals/i)
++  })
++
++  it('does not claim removing Arc blocks redirecting a payout (the self-contradiction it used to state)', () => {
++    expect(paramText(build(ARC, true))).not.toMatch(/blocks[^.]*redirect/i)
++  })
++
+   it('keeps the ordinary consequences on an ordinary domain', () => {
+     expect(paramText(build(BASE, true)))
+       .toContain('Escrows already heading to this chain still release and deliver normally.')
+diff --git a/frontend/src/pages/phaseC.test.jsx b/frontend/src/pages/phaseC.test.jsx
+index 502f660..563feb0 100644
+--- a/frontend/src/pages/phaseC.test.jsx
++++ b/frontend/src/pages/phaseC.test.jsx
+@@ -191,8 +191,11 @@ describe('#10 — credit, transfer and pending delivery are three different thin
+ describe('#11 — a configured split recipient does not always receive value', () => {
+   it('drops the "each on their own chain" promise from the payout line', () => {
+     const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
+-    expect(lines[0]).toBe('Paid to: 2 split recipients, each to their configured chain')
+-    expect(lines.join('\n')).not.toMatch(/each on their own chain/)
++    // Round 14 #11: "each to their configured chain" still over-promised —
++    // the very next line has to walk it back for a zero-rounded leg — so the
++    // leading claim is hedged rather than asserting all N reach their chain.
++    expect(lines[0]).toBe('Paid to: 2 split recipients, most delivered to their configured chain')
++    expect(lines.join('\n')).not.toMatch(/each (on their own|to their configured) chain/)
+   })
+ 
+   it('states the rounding case on the payout line', () => {

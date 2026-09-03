@@ -1,0 +1,382 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index bac1909..933ad16 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -638,7 +638,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+           const last = i === rows.length - 1
+           if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+           if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+-          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
++          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} onChange={onChange} last={last} />
+           if (key === 'split') {
+             const s = splits[mySplitIndex]
+             return (
+@@ -731,7 +731,125 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
+   )
+ }
+ 
+-function ReceivingAddressEditRow({ escrow, onChange, last }) {
++/* ---------- Payout redirects ----------
++ *
++ * Nominally CONFIG-CHANGE, but these decide WHERE money later goes, so they
++ * get the scrutiny of a value-moving site. Three things separate them from
++ * Round 6's protocol setters:
++ *
++ * 1. No snapshot. e.mintRecipient / e.destinationDomain are read at release
++ *    time, not captured at deposit — the exact opposite of protocolFeeBps and
++ *    protocolTreasury. So a redirect takes effect on every milestone that has
++ *    not settled yet, including one already claimed and sitting in review.
++ *    Round 6's screens reassure that in-flight escrows are untouched; these
++ *    have to say the opposite, and say it plainly.
++ *
++ * 2. F3 makes some redirects revert. An escrow (or split leg) currently paying
++ *    on Arc cannot be redirected to a cross-chain domain: its milestones were
++ *    never floor-validated against the CCTP forwarding fee at deposit
++ *    (TrancheProtocol.sol:982 and :1033, both reverting MilestoneBelowForwardFee).
++ *    Cross-chain -> cross-chain and anything -> Arc stay allowed. The chain
++ *    dropdown does not filter these out, so the user can pick one and the
++ *    transaction reverts under an error name that does not hint at the cause.
++ *    Same treatment as Round 3's blocked mutualCancel: no promise, say why.
++ *
++ * 3. ARC_DOMAIN is 26 here, and a plain CCTP domain number otherwise — domain
++ *    0 means Ethereum Sepolia. That is NOT the domain-0 sentinel from
++ *    Settings.jsx's withdrawRefund, where 0 means "stay on Arc". Same number,
++ *    opposite meaning, two screens apart; getDomainName is correct here and
++ *    would have been wrong there.
++ */
++
++const REDIRECT_BLOCKED_REASON =
++  'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
++
++export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain }) {
++  const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
++  const oldDomain = Number(escrow.destinationDomain)
++  const domain = Number(newDomain)
++  // Mirrors :982 exactly, including the splits carve-out: with splits
++  // configured, e.destinationDomain is not what the burn uses, so the guard
++  // does not apply.
++  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN && !hasSplits
++
++  const base = {
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'updateReceivingAddress'
++  }
++
++  if (blocked) {
++    return {
++      ...base,
++      title: 'Change where this escrow pays out',
++      subtitle: 'This transaction will not go through.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++        REDIRECT_BLOCKED_REASON,
++        'You can still change the address while staying on Arc.'
++      ]
++    }
++  }
++
++  return {
++    ...base,
++    title: 'Change where this escrow pays out',
++    subtitle: 'Redirects your milestone payments to a different address. This takes effect immediately for everything not yet released.',
++    parameters: [
++      `Escrow #${escrow.id}`,
++      `Address: ${oldAddress} → ${newAddress}`,
++      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++      'Applies to every milestone not yet released, including any currently in review.',
++      'Milestones already released are unaffected and cannot be recalled.'
++    ]
++  }
++}
++
++export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain }) {
++  const oldDomain = Number(currentDomain)
++  const domain = Number(newDomain)
++  // Mirrors :1033 — no splits carve-out here; this leg's own domain is what
++  // the burn uses.
++  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN
++
++  const base = {
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'updateSplitReceivingAddress'
++  }
++
++  const shareLabel = `${pct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% share`
++
++  if (blocked) {
++    return {
++      ...base,
++      title: 'Change where your split share pays out',
++      subtitle: 'This transaction will not go through.',
++      parameters: [
++        `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
++        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++        REDIRECT_BLOCKED_REASON,
++        'You can still change the address while staying on Arc.'
++      ]
++    }
++  }
++
++  return {
++    ...base,
++    title: 'Change where your split share pays out',
++    subtitle: 'Redirects your share of this escrow to a different address. Other recipients are not affected.',
++    parameters: [
++      `Escrow #${escrow.id}, split ${splitIndex + 1} — your ${shareLabel}`,
++      `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
++      `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++      'Applies to every milestone not yet released, including any currently in review.',
++      'Milestones already released are unaffected and cannot be recalled.'
++    ]
++  }
++}
++
++function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+   const [saveNonce, setSaveNonce] = useState(0)
+   const [successInfo, setSuccessInfo] = useState(null)
+   const { supported } = useSupportedDomains()
+@@ -766,7 +884,12 @@ function ReceivingAddressEditRow({ escrow, onChange, last }) {
+         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
+         tx.run(
+           escrowWrite('updateReceivingAddress', [BigInt(escrow.id), addressToBytes32(d.addr), Number(d.domain)]),
+-          { loadingMessage: 'Updating. Check your wallet.' }
++          {
++            loadingMessage: 'Updating. Check your wallet.',
++            confirm: redirectPayoutConfirm({
++              escrow, hasSplits, newAddress: d.addr, newDomain: Number(d.domain)
++            })
++          }
+         )
+       }}
+       last={last}
+@@ -809,7 +932,13 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
+         setSuccessInfo({ address: d.addr, domain: Number(d.domain) })
+         tx.run(
+           escrowWrite('updateSplitReceivingAddress', [BigInt(escrow.id), BigInt(splitIndex), addressToBytes32(d.addr), Number(d.domain)]),
+-          { loadingMessage: 'Updating. Check your wallet.' }
++          {
++            loadingMessage: 'Updating. Check your wallet.',
++            confirm: redirectSplitConfirm({
++              escrow, splitIndex, currentAddress, currentDomain, pct,
++              newAddress: d.addr, newDomain: Number(d.domain)
++            })
++          }
+         )
+       }}
+       last={last}
+diff --git a/frontend/src/pages/EscrowDetail.redirect.test.jsx b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+new file mode 100644
+index 0000000..69d85c2
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+@@ -0,0 +1,207 @@
++import { describe, it, expect } from 'vitest'
++
++/* The two payout redirects. Nominally CONFIG-CHANGE, but they decide where
++   money later goes, so the properties under test are the ones a value-moving
++   site would get.
++
++   Two things drive nearly all of these: the redirect is NOT snapshotted (it
++   takes effect on everything unsettled, unlike Round 6's protocol setters),
++   and F3 makes an Arc → cross-chain redirect revert while the dropdown still
++   offers it. */
++import { redirectPayoutConfirm, redirectSplitConfirm } from './EscrowDetail.jsx'
++import { buildContractInteraction } from '../utils/circleTheme.js'
++
++const OLD_ADDR = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const NEW_ADDR = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const ARC = 26
++const BASE = 6          // Base Sepolia
++const ETH = 0           // Ethereum Sepolia — see the sentinel test below
++const OP = 2            // OP Sepolia
++
++const escrowOn = (domain) => ({
++  id: 7,
++  recipient: OLD_ADDR,
++  mintRecipient: B32(OLD_ADDR),
++  destinationDomain: domain,
++  milestoneCount: 3
++})
++
++const paramText = (d) => (d.parameters || []).join('\n')
++
++describe('redirectPayoutConfirm — an allowed redirect', () => {
++  const d = () => redirectPayoutConfirm({
++    escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: OP
++  })
++
++  it('carries no amount and renders no currency row', () => {
++    expect(d()).not.toHaveProperty('amount')
++    expect(buildContractInteraction(d())).not.toHaveProperty('mainCurrency')
++  })
++
++  it('states both the address and the chain as old → new', () => {
++    expect(paramText(d())).toContain(`Address: ${OLD_ADDR} → ${NEW_ADDR}`)
++    expect(paramText(d())).toContain('Chain: Base Sepolia → OP Sepolia')
++  })
++
++  /* The opposite of Round 6's protocol setters. mintRecipient and
++     destinationDomain are read at release time, never snapshotted, so this
++     reaches milestones that already exist — including one already claimed and
++     waiting on the payer. */
++  it('says it applies to everything unsettled, including milestones in review', () => {
++    expect(paramText(d())).toContain('Applies to every milestone not yet released, including any currently in review.')
++  })
++
++  it('does not claim in-flight milestones are protected', () => {
++    expect(paramText(d())).not.toMatch(/not affected|unaffected by this|keep the value they snapshotted/)
++    expect(paramText(d())).toContain('Milestones already released are unaffected and cannot be recalled.')
++  })
++
++  it('names the real function', () => {
++    expect(d().functionName).toBe('updateReceivingAddress')
++  })
++
++  it('falls back to escrow.recipient when mintRecipient is unset', () => {
++    const e = { ...escrowOn(BASE), mintRecipient: null }
++    expect(paramText(redirectPayoutConfirm({ escrow: e, hasSplits: false, newAddress: NEW_ADDR, newDomain: OP })))
++      .toContain(`Address: ${OLD_ADDR} → ${NEW_ADDR}`)
++  })
++})
++
++/* F3 (TrancheProtocol.sol:982): an Arc escrow cannot become cross-chain after
++   deposit, because its milestones were never floor-validated against the
++   forwarding fee. The chain dropdown does not filter this out. */
++describe('redirectPayoutConfirm — F3-blocked Arc → cross-chain', () => {
++  const d = () => redirectPayoutConfirm({
++    escrow: escrowOn(ARC), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE
++  })
++
++  it('says the transaction will not go through', () => {
++    expect(d().subtitle).toBe('This transaction will not go through.')
++  })
++
++  it('explains why, in terms of the escrow rather than the error name', () => {
++    expect(paramText(d())).toMatch(/cannot be moved to another chain after deposit/)
++    expect(paramText(d())).not.toMatch(/MilestoneBelowForwardFee/)
++  })
++
++  it('offers the redirect that would work', () => {
++    expect(paramText(d())).toContain('You can still change the address while staying on Arc.')
++  })
++
++  /* A blocked call changes nothing, so it must not describe a change as if it
++     will happen. */
++  it('does not promise the address change', () => {
++    expect(paramText(d())).not.toMatch(/^Address: /m)
++    expect(paramText(d())).not.toMatch(/Applies to every milestone/)
++  })
++})
++
++describe('redirectPayoutConfirm — the directions F3 allows', () => {
++  const build = (from, to, hasSplits = false) => redirectPayoutConfirm({
++    escrow: escrowOn(from), hasSplits, newAddress: NEW_ADDR, newDomain: to
++  })
++
++  it('allows cross-chain → cross-chain', () => {
++    expect(build(BASE, OP).subtitle).not.toBe('This transaction will not go through.')
++  })
++
++  it('allows cross-chain → Arc', () => {
++    expect(build(BASE, ARC).subtitle).not.toBe('This transaction will not go through.')
++  })
++
++  it('allows Arc → Arc', () => {
++    expect(build(ARC, ARC).subtitle).not.toBe('This transaction will not go through.')
++  })
++
++  /* The carve-out at :982: with splits configured, e.destinationDomain is not
++     what the burn uses, so the guard does not apply and Arc → cross-chain is
++     permitted on this path. */
++  it('allows Arc → cross-chain when the escrow has splits', () => {
++    expect(build(ARC, BASE, true).subtitle).not.toBe('This transaction will not go through.')
++    expect(build(ARC, BASE, false).subtitle).toBe('This transaction will not go through.')
++  })
++})
++
++/* Domain 0 is Ethereum Sepolia HERE. In Settings.jsx's withdrawRefund, 0 is
++   the sentinel meaning "stay on Arc". Same number, opposite meaning, so this
++   pins that getDomainName is right on this screen and that Arc is never
++   silently substituted. */
++describe('redirectPayoutConfirm — domain 0 is a real chain here, not the Arc sentinel', () => {
++  it('renders domain 0 as Ethereum Sepolia', () => {
++    const d = redirectPayoutConfirm({
++      escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: ETH
++    })
++    expect(paramText(d)).toContain('Chain: Base Sepolia → Ethereum Sepolia')
++    expect(paramText(d)).not.toMatch(/→ Arc/)
++  })
++
++  it('treats a move to domain 0 as cross-chain, so Arc → 0 is blocked', () => {
++    const d = redirectPayoutConfirm({
++      escrow: escrowOn(ARC), hasSplits: false, newAddress: NEW_ADDR, newDomain: ETH
++    })
++    expect(d.subtitle).toBe('This transaction will not go through.')
++  })
++})
++
++describe('redirectSplitConfirm', () => {
++  const d = (over = {}) => redirectSplitConfirm({
++    escrow: escrowOn(BASE), splitIndex: 1, currentAddress: OLD_ADDR, currentDomain: BASE,
++    pct: 60, newAddress: NEW_ADDR, newDomain: OP, ...over
++  })
++
++  it('identifies which split leg and share is moving', () => {
++    expect(paramText(d())).toContain('Escrow #7, split 2 — your 60% share')
++  })
++
++  it('states both the address and the chain as old → new', () => {
++    expect(paramText(d())).toContain(`Address: ${OLD_ADDR} → ${NEW_ADDR}`)
++    expect(paramText(d())).toContain('Chain: Base Sepolia → OP Sepolia')
++  })
++
++  it('says other recipients are untouched', () => {
++    expect(d().subtitle).toMatch(/Other recipients are not affected/)
++  })
++
++  it('names the real function, not the single-recipient one', () => {
++    expect(d().functionName).toBe('updateSplitReceivingAddress')
++    expect(d().functionName).not.toBe('updateReceivingAddress')
++  })
++
++  /* :1033 has no splits carve-out — this leg's own domain is what its burn
++     uses, so an Arc leg can never go cross-chain. */
++  it('blocks Arc → cross-chain for the leg regardless of the escrow', () => {
++    expect(d({ currentDomain: ARC, newDomain: BASE }).subtitle).toBe('This transaction will not go through.')
++  })
++
++  it('allows the same directions F3 permits', () => {
++    expect(d({ currentDomain: BASE, newDomain: OP }).subtitle).not.toBe('This transaction will not go through.')
++    expect(d({ currentDomain: BASE, newDomain: ARC }).subtitle).not.toBe('This transaction will not go through.')
++    expect(d({ currentDomain: ARC, newDomain: ARC }).subtitle).not.toBe('This transaction will not go through.')
++  })
++
++  it('survives an unknown current address', () => {
++    expect(paramText(d({ currentAddress: null }))).toContain(`Address: unknown → ${NEW_ADDR}`)
++  })
++})
++
++describe('the two redirects are not interchangeable', () => {
++  const single = redirectPayoutConfirm({
++    escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: OP
++  })
++  const split = redirectSplitConfirm({
++    escrow: escrowOn(BASE), splitIndex: 1, currentAddress: OLD_ADDR, currentDomain: BASE,
++    pct: 60, newAddress: NEW_ADDR, newDomain: OP
++  })
++
++  it('differ in title and function', () => {
++    expect(single.title).not.toBe(split.title)
++    expect(single.functionName).not.toBe(split.functionName)
++  })
++
++  it('only the split one scopes itself to one share', () => {
++    expect(paramText(split)).toMatch(/your 60% share/)
++    expect(paramText(single)).not.toMatch(/share/)
++  })
++})

@@ -1,0 +1,312 @@
+diff --git a/frontend/src/pages/ArbiterPanel.confirm.test.jsx b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+new file mode 100644
+index 0000000..568fe62
+--- /dev/null
++++ b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+@@ -0,0 +1,186 @@
++import { describe, it, expect } from 'vitest'
++
++/* resolveDisputeByTimeout is the contract's automatic fallback for a dispute
++   no arbiter ruled on inside ARBITER_WINDOW. It is permissionless and takes no
++   caller input — defaultBps is hardcoded to 5000 — and it never routes through
++   CCTP: both halves land as Arc refund credits.
++
++   The panel offers the arbiter's discretionary resolve right above it, so the
++   properties under test are mostly about keeping those two apart and about not
++   implying a payout that does not happen. */
++import { timeoutSettlementConfirm, timeoutCreditLines, timeoutShares } from './ArbiterPanel.jsx'
++import { buildContractInteraction } from '../utils/circleTheme.js'
++
++const RECIPIENT = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const REFUND_TO = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++
++// destinationDomain 6 (Base Sepolia) on purpose: a timeout settlement stays on
++// Arc regardless, so nothing here may name the escrow's CCTP destination.
++const escrow = {
++  id: 7,
++  recipient: RECIPIENT,
++  refundTo: REFUND_TO,
++  destinationDomain: 6,
++  milestoneCount: 3
++}
++
++const milestone = { index: 1, amount: 250000000n, state: 2 }
++const TIMEOUT_AT = 1785633037
++const SPLITS = [{ bps: 6000n }, { bps: 4000n }]
++
++const d = (over = {}) => timeoutSettlementConfirm({
++  escrow, milestone, index: 1, splits: [], timeoutAt: TIMEOUT_AT, bpsDenominator: 10000n, ...over
++})
++
++const paramText = (x) => (x.parameters || []).join('\n')
++
++describe('timeoutSettlementConfirm — the split itself', () => {
++  it('reports the whole milestone as the amount settled', () => {
++    expect(d().amount).toBe(milestone.amount)
++    expect(d().amountLabel).toBe('Amount settled')
++    expect(buildContractInteraction(d()).total).toEqual(['250.00 USDC'])
++  })
++
++  it('states both halves', () => {
++    expect(paramText(d())).toContain("Freelancer's half: 125.00 USDC")
++    expect(paramText(d())).toContain("Payer's half: 125.00 USDC")
++  })
++
++  it('falls back to a 10,000 denominator when the config has not loaded', () => {
++    expect(paramText(d({ bpsDenominator: 0n }))).toContain("Freelancer's half: 125.00 USDC")
++  })
++})
++
++/* Checked directly rather than through the copy: the remainder is at most one
++   base unit and formatUSDC rounds to two decimals, so a correct split and a
++   naive amount/2 render identically. The invariant is what matters — the two
++   shares must account for the milestone exactly, inventing and losing nothing. */
++describe('timeoutShares', () => {
++  it('splits an even amount down the middle', () => {
++    expect(timeoutShares(250000000n, 10000n)).toEqual({
++      recipientShare: 125000000n, depositorShare: 125000000n
++    })
++  })
++
++  /* TrancheProtocol.sol:577-578 — recipientShare rounds down, depositorShare
++     is the subtraction, so the payer absorbs the odd unit. */
++  it('gives the odd base unit to the payer', () => {
++    expect(timeoutShares(7n, 10000n)).toEqual({ recipientShare: 3n, depositorShare: 4n })
++  })
++
++  it('always accounts for the whole milestone', () => {
++    for (const amount of [0n, 1n, 7n, 999999n, 250000001n, 10n ** 18n]) {
++      const { recipientShare, depositorShare } = timeoutShares(amount, 10000n)
++      expect(recipientShare + depositorShare).toBe(amount)
++      expect(depositorShare - recipientShare).toBeLessThanOrEqual(1n)
++    }
++  })
++
++  it('falls back to 10,000 when the denominator has not loaded', () => {
++    expect(timeoutShares(250000000n, 0n)).toEqual(timeoutShares(250000000n, 10000n))
++    expect(timeoutShares(250000000n, undefined)).toEqual(timeoutShares(250000000n, 10000n))
++  })
++})
++
++describe('timeoutSettlementConfirm — not an arbiter ruling', () => {
++  /* The discretionary resolve sits directly above this button in the same
++     panel. Whoever signs this may not be the arbiter at all, and cannot change
++     the outcome either way. */
++  it('says the split is fixed and not adjustable', () => {
++    expect(paramText(d())).toContain('Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.')
++  })
++
++  it('says anyone can submit it', () => {
++    expect(paramText(d())).toMatch(/Anyone can submit this/)
++    expect(d().subtitle).toMatch(/Anyone can trigger this/)
++  })
++
++  it('explains why it is callable now — the window has closed', () => {
++    expect(paramText(d())).toMatch(/Arbitration window closed/)
++    expect(d().subtitle).toMatch(/arbitration window closed/i)
++  })
++
++  it('names the real function, not the discretionary one', () => {
++    expect(d().functionName).toBe('resolveDisputeByTimeout')
++    expect(d().functionName).not.toBe('resolveDispute')
++  })
++})
++
++describe('timeoutSettlementConfirm — credited, not sent', () => {
++  /* Both halves are refund credits on Arc (TrancheProtocol.sol:596, :614).
++     Neither side is transferred and neither goes cross-chain. */
++  it('says both halves are withdrawable Arc credits', () => {
++    expect(paramText(d())).toContain('Both halves are credited as withdrawable balances on Arc, not sent to a wallet.')
++  })
++
++  /* A timeout settlement never routes through CCTP, so the escrow's
++     destinationDomain must not appear — reusing EscrowDetail's payoutLines
++     here would have printed "Paid on: Base Sepolia" for money that stays on
++     Arc. */
++  it('never names the escrow CCTP destination chain', () => {
++    const text = `${d().title}\n${d().subtitle}\n${paramText(d())}`
++    expect(text).not.toMatch(/Base/i)
++    expect(text).not.toMatch(/Sepolia/i)
++    expect(text).not.toMatch(/Paid on:/)
++  })
++
++  it('names both destinations', () => {
++    expect(paramText(d())).toContain(`Freelancer's share goes to ${RECIPIENT}`)
++    expect(paramText(d())).toContain(`Payer's share goes to ${REFUND_TO}`)
++  })
++})
++
++describe('timeoutSettlementConfirm — the fee asymmetry', () => {
++  /* escrowFeeBps is snapshotted at deposit and has no getter, so the net is
++     not computable. The asymmetry holds at any rate and is worth stating
++     without one. */
++  it('says the fee comes off the freelancer half only', () => {
++    expect(paramText(d())).toContain("The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.")
++  })
++
++  /* Gross-only enforcement, same pattern as Round 1: the only USDC figures on
++     the screen are the milestone total and the two halves. Anything else would
++     have been derived from the live global fee rate and could be wrong. */
++  it('quotes no figure beyond the milestone total and the two halves', () => {
++    const amounts = paramText(d()).match(/[\d,]+\.\d\d USDC/g) || []
++    expect(amounts).toEqual(['250.00 USDC', '125.00 USDC', '125.00 USDC'])
++  })
++
++  it('states no fee rate or net figure', () => {
++    expect(paramText(d())).not.toMatch(/\d+(\.\d+)?\s?%/)
++    expect(paramText(d())).not.toMatch(/\bnet\b/i)
++  })
++})
++
++describe('timeoutCreditLines', () => {
++  it('names the freelancer directly when there is no split', () => {
++    expect(timeoutCreditLines(escrow, [])).toEqual([
++      `Freelancer's share goes to ${RECIPIENT}`,
++      `Payer's share goes to ${REFUND_TO}`
++    ])
++  })
++
++  /* On a split escrow the freelancer's half fans out across the legs, so
++     naming escrow.recipient would be wrong — but the dust and non-EVM
++     mechanics stay off the signing screen. */
++  it('describes the fan-out for a split escrow without naming one recipient', () => {
++    const lines = timeoutCreditLines(escrow, SPLITS)
++    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients")
++    expect(lines.join('\n')).not.toContain(RECIPIENT)
++  })
++
++  it('still names the payer destination on a split escrow', () => {
++    expect(timeoutCreditLines(escrow, SPLITS)[1]).toBe(`Payer's share goes to ${REFUND_TO}`)
++  })
++
++  it('keeps split dust mechanics off the screen', () => {
++    const text = paramText(d({ splits: SPLITS }))
++    expect(text).not.toMatch(/dust/i)
++    expect(text).not.toMatch(/proportional/i)
++    expect(text).not.toMatch(/bps/i)
++  })
++
++  it('treats absent splits the same as none', () => {
++    expect(timeoutCreditLines(escrow, undefined)).toEqual(timeoutCreditLines(escrow, []))
++  })
++})
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index e9ed49b..aca251c 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -21,6 +21,7 @@ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+ import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
++import { CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
+ 
+@@ -283,6 +284,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         id={detail.id} index={index}
+         escrow={e}
+         milestone={m}
++        splits={detail.splits}
+         bpsDenominator={bpsDenominator}
+         onResolved={handleResolve}
+         canTimeout={canTimeout}
+@@ -423,7 +425,84 @@ function EvidenceHashRow({ label, hash }) {
+   )
+ }
+ 
+-function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
++/* Where each half of a timeout settlement lands.
++ *
++ * Deliberately NOT EscrowDetail's payoutLines(): that one describes a CCTP
++ * payout ("Paid on: Base"), and a timeout settlement never routes through
++ * CCTP. Both halves become Arc refund credits regardless of the escrow's
++ * destinationDomain (TrancheProtocol.sol:596, :614), so borrowing that helper
++ * would name a chain the money never reaches.
++ *
++ * Split escrows fan the freelancer's half across the split legs, credited to
++ * each leg's decoded Arc address. The proportional/last-absorbs-dust mechanics
++ * and the SE-4 non-EVM caveat are real but belong in the docs, not on a
++ * signing screen — same level of abstraction as Round 1's split handling. */
++export function timeoutCreditLines(escrow, splits) {
++  return [
++    splits?.length > 0
++      ? `Freelancer's share is divided across ${splits.length} split recipients`
++      : `Freelancer's share goes to ${escrow.recipient}`,
++    `Payer's share goes to ${escrow.refundTo}`
++  ]
++}
++
++/* The 50/50 shares, mirroring TrancheProtocol.sol:576-578 exactly — including
++   the remainder. recipientShare rounds down and depositorShare is the
++   subtraction, so on an odd amount the payer absorbs the odd base unit and the
++   two shares always sum to the milestone amount.
++ *
++ * Split out and exported because that invariant cannot be checked through the
++ * rendered copy: the remainder is at most one base unit (0.000001 USDC) and
++ * formatUSDC rounds to two decimals, so both a correct implementation and a
++ * naive amount/2 print the same string. */
++export function timeoutShares(amount, bpsDenominator) {
++  const denom = bpsDenominator > 0n ? bpsDenominator : 10_000n
++  const recipientShare = (amount * 5000n) / denom
++  return { recipientShare, depositorShare: amount - recipientShare }
++}
++
++/* VALUE-MOVING. resolveDisputeByTimeout is the contract's automatic fallback
++   for a dispute no arbiter ruled on within ARBITER_WINDOW (14 days). It is
++   permissionless and takes no caller input: defaultBps is hardcoded to 5000
++   (TrancheProtocol.sol:576).
++
++   Two things the copy has to keep apart, because the same panel offers both
++   and they are easy to conflate — the arbiter's discretionary resolve (a
++   percentage the arbiter chooses, settled via CCTP) and this, a fixed 50/50
++   that nobody chooses and that never leaves Arc. Whoever signs this may not
++   be the arbiter at all.
++
++   Gross figures only. The two halves are exact — computed the way the
++   contract computes them, with the remainder going to the payer — but the
++   protocol fee is escrowFeeBps, snapshotted at deposit and unreadable from
++   the frontend, so the freelancer's net is not stated. The asymmetry is,
++   because it holds regardless of the rate: the fee comes off the
++   freelancer's half only (:583). */
++export function timeoutSettlementConfirm({ escrow, milestone, index, splits, timeoutAt, bpsDenominator }) {
++  const { recipientShare, depositorShare } = timeoutShares(milestone.amount, bpsDenominator)
++
++  return {
++    title: 'Settle this dispute by timeout',
++    subtitle: 'The arbitration window closed with no arbiter ruling, so the contract settles it automatically. Anyone can trigger this, and the outcome is fixed.',
++    amount: milestone.amount,
++    amountLabel: 'Amount settled',
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'resolveDisputeByTimeout',
++    parameters: [
++      `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)}`,
++      'Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.',
++      `Freelancer's half: ${formatUSDC(recipientShare)}`,
++      `Payer's half: ${formatUSDC(depositorShare)}`,
++      ...timeoutCreditLines(escrow, splits),
++      "The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.",
++      'Both halves are credited as withdrawable balances on Arc, not sent to a wallet.',
++      `Arbitration window closed ${formatTimestamp(timeoutAt)}. Anyone can submit this.`
++    ]
++  }
++}
++
++function ResolveForm({ id, index, escrow, milestone, splits, bpsDenominator, onResolved, canTimeout, timeoutAt, timeoutOutcome }) {
+   // User works in whole percent (0–100); the contract receives BPS (0–10,000).
+   const [pct, setPct] = useState('50')
+   const [resolutionUri, setResolutionUri] = useState('')
+@@ -578,7 +657,12 @@ function ResolveForm({ id, index, escrow, milestone, bpsDenominator, onResolved,
+               className="btn-quiet"
+               onClick={() => timeoutTx.run(
+                 escrowWrite('resolveDisputeByTimeout', [BigInt(id), BigInt(index)]),
+-                { loadingMessage: 'Settling by timeout.' }
++                {
++                  loadingMessage: 'Settling by timeout.',
++                  confirm: timeoutSettlementConfirm({
++                    escrow, milestone, index, splits, timeoutAt, bpsDenominator
++                  })
++                }
+               )}
+               disabled={timeoutTx.isBusy}
+             >

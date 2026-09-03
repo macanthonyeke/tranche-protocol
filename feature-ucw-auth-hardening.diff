@@ -1,0 +1,2809 @@
+diff --git a/frontend/api/_lib/authSession.js b/frontend/api/_lib/authSession.js
+new file mode 100644
+index 0000000..381aa17
+--- /dev/null
++++ b/frontend/api/_lib/authSession.js
+@@ -0,0 +1,148 @@
++// Cookie-backed Tranche sessions for Circle UCW users.
++//
++// The browser still needs Circle's SDK credentials for hosted Circle dialogs;
++// this cookie is the application's authenticated identity, not a replacement
++// for those SDK credentials. Only a hash of the cookie is stored in Redis.
++
++import { createHash, randomBytes } from 'node:crypto'
++import { kv } from './redis.js'
++
++export const AUTH_COOKIE_NAME = 'tranche_session'
++export const SESSION_TTL_SECONDS = 13 * 24 * 60 * 60
++export const INACTIVITY_TTL_SECONDS = 7 * 24 * 60 * 60
++
++export class AuthSessionError extends Error {
++  constructor(message, status = 401) {
++    super(message)
++    this.status = status
++  }
++}
++
++const sessionKey = (token) => `auth:session:${createHash('sha256').update(token).digest('hex')}`
++
++function nowMs() {
++  return Date.now()
++}
++
++function requireIdentity(value, field) {
++  if (typeof value !== 'string' || !value.trim()) {
++    throw new AuthSessionError(`Authenticated Circle ${field} is missing.`, 502)
++  }
++  return value.trim()
++}
++
++export function parseCookieHeader(header) {
++  if (typeof header !== 'string') return null
++  for (const part of header.split(';')) {
++    const [name, ...rest] = part.trim().split('=')
++    if (name === AUTH_COOKIE_NAME) {
++      const value = rest.join('=').trim()
++      return value || null
++    }
++  }
++  return null
++}
++
++function requestCookie(req) {
++  return parseCookieHeader(req?.headers?.cookie ?? req?.headers?.Cookie)
++}
++
++export function assertSameOrigin(req) {
++  const origin = req?.headers?.origin ?? req?.headers?.Origin
++  if (!origin) return
++  const host = req?.headers?.host ?? req?.headers?.Host
++  if (!host || origin === 'null') {
++    throw new AuthSessionError('The request origin could not be verified.', 403)
++  }
++  try {
++    if (new URL(origin).host !== host) {
++      throw new AuthSessionError('The request origin could not be verified.', 403)
++    }
++  } catch (err) {
++    if (err instanceof AuthSessionError) throw err
++    throw new AuthSessionError('The request origin could not be verified.', 403)
++  }
++}
++
++function cookieHeader(value, maxAge) {
++  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
++  if (!value || maxAge <= 0) {
++    return `${AUTH_COOKIE_NAME}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; SameSite=Lax${secure}`
++  }
++  return `${AUTH_COOKIE_NAME}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Lax${secure}`
++}
++
++export function setAuthCookie(res, token, maxAge = SESSION_TTL_SECONDS) {
++  res.setHeader('Set-Cookie', cookieHeader(token, maxAge))
++}
++
++export function publicAuthSession(record) {
++  if (!record) return null
++  return {
++    authType: record.authType,
++    walletId: record.walletId,
++    walletAddress: record.walletAddress,
++    blockchain: record.blockchain,
++    accountType: record.accountType,
++    issuedAt: record.issuedAt,
++    lastSeenAt: record.lastSeenAt,
++    expiresAt: record.expiresAt
++  }
++}
++
++export async function createAuthSession({ circleUserId, walletId, walletAddress, blockchain, accountType }, { now = nowMs() } = {}) {
++  const record = {
++    version: 1,
++    authType: 'circle-sca',
++    circleUserId: requireIdentity(circleUserId, 'user ID'),
++    walletId: requireIdentity(walletId, 'wallet ID'),
++    walletAddress: requireIdentity(walletAddress, 'wallet address'),
++    blockchain: requireIdentity(blockchain, 'blockchain'),
++    accountType: requireIdentity(accountType, 'account type'),
++    issuedAt: now,
++    lastSeenAt: now,
++    expiresAt: now + SESSION_TTL_SECONDS * 1000
++  }
++  const token = randomBytes(32).toString('base64url')
++  await kv.set(sessionKey(token), record, { ex: SESSION_TTL_SECONDS })
++  return { token, record }
++}
++
++export async function getAuthSession(req, { touch = true, now = nowMs() } = {}) {
++  const token = requestCookie(req)
++  if (!token) return null
++
++  const key = sessionKey(token)
++  const record = await kv.get(key)
++  if (!record) return null
++
++  const expired = !Number.isFinite(record.expiresAt) || now >= record.expiresAt
++  const inactive = !Number.isFinite(record.lastSeenAt) ||
++    now - record.lastSeenAt > INACTIVITY_TTL_SECONDS * 1000
++  if (expired || inactive) {
++    await kv.del(key)
++    return null
++  }
++
++  if (touch) {
++    const touched = { ...record, lastSeenAt: now }
++    const remaining = Math.max(1, Math.ceil((record.expiresAt - now) / 1000))
++    await kv.set(key, touched, { ex: remaining })
++    return touched
++  }
++  return record
++}
++
++export async function requireAuthSession(req, options) {
++  if (req?.method === 'POST') assertSameOrigin(req)
++  const session = await getAuthSession(req, options)
++  if (!session) throw new AuthSessionError('A signed-in Circle wallet session is required.', 401)
++  return session
++}
++
++export async function revokeAuthSession(req, res) {
++  assertSameOrigin(req)
++  const token = requestCookie(req)
++  if (token) await kv.del(sessionKey(token))
++  setAuthCookie(res, null, 0)
++}
+diff --git a/frontend/api/_lib/authSession.test.js b/frontend/api/_lib/authSession.test.js
+new file mode 100644
+index 0000000..38d6747
+--- /dev/null
++++ b/frontend/api/_lib/authSession.test.js
+@@ -0,0 +1,99 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++
++vi.mock('./redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++const {
++  createAuthSession,
++  assertSameOrigin,
++  getAuthSession,
++  publicAuthSession,
++  revokeAuthSession,
++  setAuthCookie
++} = await import('./authSession.js')
++
++function response() {
++  return { headers: {}, setHeader(key, value) { this.headers[key] = value } }
++}
++
++function request(cookie = '') {
++  return { headers: { cookie } }
++}
++
++const IDENTITY = {
++  circleUserId: 'circle-user-1',
++  walletId: 'wallet-1',
++  walletAddress: '0x1111111111111111111111111111111111111111',
++  blockchain: 'ARC-TESTNET',
++  accountType: 'SCA'
++}
++
++beforeEach(() => {
++  store.clear()
++  vi.stubEnv('NODE_ENV', 'development')
++})
++
++afterEach(() => vi.unstubAllEnvs())
++
++describe('cookie-backed auth sessions', () => {
++  it('stores only a hashed cookie token and returns sanitized identity', async () => {
++    const { token, record } = await createAuthSession(IDENTITY, { now: 1_000 })
++
++    expect(token).toMatch(/^[A-Za-z0-9_-]{40,}$/)
++    expect([...store.keys()][0]).toMatch(/^auth:session:[a-f0-9]{64}$/)
++    expect([...store.values()][0]).not.toHaveProperty('token')
++    expect(publicAuthSession(record)).toEqual(expect.objectContaining({
++      walletId: IDENTITY.walletId,
++      walletAddress: IDENTITY.walletAddress,
++      accountType: 'SCA'
++    }))
++    expect(publicAuthSession(record)).not.toHaveProperty('circleUserId')
++  })
++
++  it('reads and touches a live session from the request cookie', async () => {
++    const { token } = await createAuthSession(IDENTITY, { now: 1_000 })
++
++    const session = await getAuthSession(request(`tranche_session=${token}`), { now: 2_000 })
++
++    expect(session).toMatchObject({ circleUserId: 'circle-user-1', lastSeenAt: 2_000 })
++  })
++
++  it('expires an inactive session and removes it', async () => {
++    const { token } = await createAuthSession(IDENTITY, { now: 1_000 })
++
++    expect(await getAuthSession(request(`tranche_session=${token}`), {
++      now: 1_000 + 7 * 24 * 60 * 60 * 1000 + 1
++    })).toBeNull()
++    expect(store).toHaveLength(0)
++  })
++
++  it('sets an HttpOnly same-site cookie and clears it on revoke', async () => {
++    const res = response()
++    setAuthCookie(res, 'opaque-token', 60)
++    expect(res.headers['Set-Cookie']).toContain('tranche_session=opaque-token')
++    expect(res.headers['Set-Cookie']).toContain('HttpOnly')
++    expect(res.headers['Set-Cookie']).toContain('SameSite=Lax')
++
++    const { token } = await createAuthSession(IDENTITY)
++    const logoutRes = response()
++    await revokeAuthSession(request(`tranche_session=${token}`), logoutRes)
++    expect(logoutRes.headers['Set-Cookie']).toContain('Max-Age=0')
++    expect(store).toHaveLength(0)
++  })
++
++  it('rejects a cross-origin state-changing request', () => {
++    expect(() => assertSameOrigin({
++      headers: { origin: 'https://evil.example', host: 'tranche.example' },
++      method: 'POST'
++    })).toThrow(/origin/i)
++  })
++})
+diff --git a/frontend/api/_lib/emailVerification.js b/frontend/api/_lib/emailVerification.js
+index 775b217..49a8189 100644
+--- a/frontend/api/_lib/emailVerification.js
++++ b/frontend/api/_lib/emailVerification.js
+@@ -18,7 +18,7 @@
+ // independent if it doesn't share a delivery path with the thing it checks.
+ //
+ // The pending record carries the email, address and userId that were already
+-// derived server-side at register time, so confirming a code can only ever
++// derived server-side at directory-claim time, so confirming a code can only ever
+ // commit those exact values — the confirm step cannot introduce new ones.
+ //
+ // Codes are stored as sha256(verificationId:code), not in the clear. The
+diff --git a/frontend/api/_lib/emailWallets.js b/frontend/api/_lib/emailWallets.js
+index c652f4b..2b4a336 100644
+--- a/frontend/api/_lib/emailWallets.js
++++ b/frontend/api/_lib/emailWallets.js
+@@ -23,10 +23,10 @@
+ // freelancer's email to their own address and silently redirect every future
+ // escrow addressed to that person. So:
+ //
+-//   - the email is only ever read from the server's own OTP-send record
+-//     (see wallet/email-token.js), never from the register request body;
+-//   - the address is only ever read from Circle via the caller's userToken
+-//     (see getArcWallet), never from the register request body;
++//   - the email used for a directory claim is explicitly requested and then
++//     independently verified by Resend;
++//   - the address is only ever read from the authenticated server session,
++//     never from a directory-claim request body;
+ //   - a binding is pinned to the Circle userId that created it, and a
+ //     different userId can never overwrite it (see writeBinding).
+ //
+@@ -35,7 +35,7 @@
+ // a userToken belongs to, so on its own it could not rule out an attacker
+ // opening an OTP session for a stranger's address, never reading it, and
+ // presenting their own userToken. A first binding is therefore no longer
+-// written by register.js at all: it is held pending until the person returns
++// written by the login flow at all: it is held pending until the person returns
+ // a code Tranche generates and mails itself over Resend — a separate delivery
+ // path from Circle's SMTP, so the proof is genuinely independent. Only
+ // wallet/verify-email.js writes a new binding.
+@@ -76,8 +76,8 @@ const sessionKey = (sessionId) => `wallet:otp:${sessionId}`
+ const SESSION_TTL_SECONDS = 15 * 60
+ 
+ /**
+- * Record which email an OTP was sent to, so register can recover it without
+- * trusting the client. Returns the opaque id the client echoes back.
++ * Record which email an OTP was sent to for the login attempt. Returns the
++ * opaque id the client echoes back.
+  * @param {string} sessionId
+  * @param {{ email: string, deviceId: string }} data
+  */
+@@ -89,6 +89,15 @@ export async function putOtpSession(sessionId, { email, deviceId }) {
+   )
+ }
+ 
++/**
++ * Read an OTP login attempt without consuming it. This is only for the
++ * post-OTP wallet-initialization step; complete-login remains the sole
++ * consumer that turns the attempt into an authenticated app session.
++ */
++export async function peekOtpSession(sessionId) {
++  return kv.get(sessionKey(sessionId))
++}
++
+ /**
+  * Consume an OTP session. Single-use: the record is deleted as it's read, so
+  * one OTP send can never seed more than one binding.
+@@ -106,7 +115,7 @@ export async function takeOtpSession(sessionId) {
+ /**
+  * Put a consumed session back, for the one case that is a retryable race
+  * rather than a completed attempt: Circle has accepted the wallet-creation
+- * challenge but has not finished indexing the wallet, so register.js has
++ * challenge but has not finished indexing the wallet, so complete-login.js has
+  * nothing to bind yet and asks the client to try again shortly.
+  *
+  * Without this, take-then-fail left the session gone, and the retry that the
+diff --git a/frontend/api/_lib/vercelRewrites.test.js b/frontend/api/_lib/vercelRewrites.test.js
+index 3dafa37..705f81a 100644
+--- a/frontend/api/_lib/vercelRewrites.test.js
++++ b/frontend/api/_lib/vercelRewrites.test.js
+@@ -38,6 +38,10 @@ describe('vercel.json SPA rewrite', () => {
+   })
+ 
+   it.each([
++    '/api/wallet/complete-login',
++    '/api/wallet/directory-claim',
++    '/api/wallet/session',
++    '/api/wallet/logout',
+     '/api/wallet/register',
+     '/api/wallet/email-token',
+     '/api/wallet/verify-email',
+@@ -49,6 +53,17 @@ describe('vercel.json SPA rewrite', () => {
+     expect(matcher().test(path)).toBe(false)
+   })
+ 
++  it.each([
++    '/src/main.jsx',
++    '/@vite/client',
++    '/@react-refresh',
++    '/node_modules/.vite/deps/react.js',
++    '/assets/index.js',
++    '/fonts/tranche-fonts.css'
++  ])('does not swallow development or static asset %s', (path) => {
++    expect(matcher().test(path)).toBe(false)
++  })
++
+   // The rewrite still has to do its actual job: deep links into client-side
+   // routes must reach index.html rather than 404.
+   it.each(['/', '/dashboard', '/create', '/escrow/12', '/settings', '/arbiter'])(
+diff --git a/frontend/api/_lib/wallet/balances.js b/frontend/api/_lib/wallet/balances.js
+index 647848d..14578a5 100644
+--- a/frontend/api/_lib/wallet/balances.js
++++ b/frontend/api/_lib/wallet/balances.js
+@@ -5,15 +5,10 @@
+ // so this exists only because an SCA wallet's id (not its address) is the
+ // handle Circle indexes balances by.
+ 
+-import { getCircleClient } from '../circle.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { sessionPostRoute } from './identity.js'
+ 
+-export default postRoute(async (body) => {
+-  const userToken = requireString(body, 'userToken')
+-  const walletId = requireString(body, 'walletId', { max: 128 })
+-
+-  const circle = getCircleClient()
+-  const res = await circle.getWalletTokenBalance({ userToken, walletId })
++export default sessionPostRoute(async ({ circle, userToken, wallet }) => {
++  const res = await circle.getWalletTokenBalance({ userToken, walletId: wallet.id })
+ 
+   const tokenBalances = (res?.data?.tokenBalances ?? []).map((b) => ({
+     amount: b.amount,
+diff --git a/frontend/api/_lib/wallet/complete-login.js b/frontend/api/_lib/wallet/complete-login.js
+new file mode 100644
+index 0000000..8a74012
+--- /dev/null
++++ b/frontend/api/_lib/wallet/complete-login.js
+@@ -0,0 +1,47 @@
++// POST /api/wallet/complete-login — turn a verified Circle OTP attempt into
++// a Tranche server session.
++//
++// This is the only point where a Tranche auth session is minted. The email in
++// the OTP attempt is deliberately not used as an identity claim: Circle has
++// verified the login and this route derives the user ID and Arc wallet from
++// Circle's token. Email-directory binding is a separate, explicit flow.
++
++import { getArcWallet, getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE } from '../circle.js'
++import { createAuthSession, publicAuthSession, setAuthCookie } from '../authSession.js'
++import { restoreOtpSession, takeOtpSession } from '../emailWallets.js'
++import { postRoute, requireString, RequestError } from '../walletRoute.js'
++
++export default postRoute(async (body, _req, res) => {
++  const attemptId = requireString(body, 'sessionId', { max: 128 })
++  const userToken = requireString(body, 'userToken')
++  const attempt = await takeOtpSession(attemptId)
++  if (!attempt) {
++    throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
++  }
++
++  const circle = getCircleClient()
++  const status = await circle.getUserStatus({ userToken })
++  const circleUserId = status?.data?.id
++  if (!circleUserId) {
++    throw new RequestError('Could not verify your Circle sign-in. Please try again.', 401)
++  }
++
++  const wallet = await getArcWallet(userToken)
++  if (!wallet) {
++    // Wallet indexing after an initialization challenge is a normal transient
++    // race. Restore the original attempt TTL so the browser can retry.
++    await restoreOtpSession(attemptId, attempt)
++    throw new RequestError('Your wallet is still being created. Please try again in a moment.', 409)
++  }
++
++  const { token, record } = await createAuthSession({
++    circleUserId,
++    walletId: wallet.id,
++    walletAddress: wallet.address,
++    blockchain: ARC_BLOCKCHAIN,
++    accountType: ACCOUNT_TYPE
++  })
++  setAuthCookie(res, token)
++
++  return { session: publicAuthSession(record) }
++})
+diff --git a/frontend/api/_lib/wallet/complete-login.test.js b/frontend/api/_lib/wallet/complete-login.test.js
+new file mode 100644
+index 0000000..cf7260a
+--- /dev/null
++++ b/frontend/api/_lib/wallet/complete-login.test.js
+@@ -0,0 +1,108 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const circleMock = vi.hoisted(() => ({
++  getUserStatus: vi.fn(),
++  listWallets: vi.fn()
++}))
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../circle.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  getCircleClient: () => circleMock,
++  getArcWallet: async (userToken) => {
++    const response = await circleMock.listWallets({ userToken, blockchain: 'ARC-TESTNET' })
++    const wallet = (response?.data?.wallets ?? []).find((item) => item.state === 'LIVE' && item.address)
++    return wallet ? { id: wallet.id, address: wallet.address } : null
++  }
++}))
++
++const handler = (await import('./complete-login.js')).default
++const { putOtpSession, takeOtpSession } = await import('../emailWallets.js')
++
++function invoke(body) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', body }, res).then(() => res)
++}
++
++beforeEach(() => {
++  store.clear()
++  circleMock.getUserStatus.mockReset()
++  circleMock.listWallets.mockReset()
++  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
++  circleMock.listWallets.mockResolvedValue({
++    data: { wallets: [{ id: 'wallet-1', address: '0x1111111111111111111111111111111111111111', state: 'LIVE' }] }
++  })
++})
++
++describe('POST /api/wallet/complete-login', () => {
++  it('validates Circle identity and mints one sanitized Tranche session', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload.session).toMatchObject({
++      authType: 'circle-sca',
++      walletId: 'wallet-1',
++      walletAddress: '0x1111111111111111111111111111111111111111',
++      accountType: 'SCA'
++    })
++    expect(res.payload.session).not.toHaveProperty('circleUserId')
++    expect(res.headers['Set-Cookie']).toContain('tranche_session=')
++    expect(await takeOtpSession('attempt-1')).toBeNull()
++  })
++
++  it('does not call Resend or bind the OTP email', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(JSON.stringify(res.payload)).not.toContain('alice@example.com')
++  })
++
++  it('restores the attempt when Circle wallet indexing is still pending', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(409)
++    expect(await takeOtpSession('attempt-1')).toMatchObject({ email: 'alice@example.com' })
++  })
++
++  it('rejects a Circle token that has no verified user', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++    circleMock.getUserStatus.mockResolvedValue({ data: {} })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(401)
++    expect(res.headers['Set-Cookie']).toBeUndefined()
++    expect(await takeOtpSession('attempt-1')).toBeNull()
++  })
++
++  it('does not allow an attempt to be replayed', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++
++    expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(200)
++    expect((await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })).statusCode).toBe(410)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/directory-claim.js b/frontend/api/_lib/wallet/directory-claim.js
+new file mode 100644
+index 0000000..8106bec
+--- /dev/null
++++ b/frontend/api/_lib/wallet/directory-claim.js
+@@ -0,0 +1,50 @@
++// POST /api/wallet/directory-claim — explicitly opt into being findable by
++// email in Create Escrow.
++//
++// This is a product feature, not authentication. The wallet identity comes
++// only from the authenticated Tranche session. The requested email is an
++// alias chosen for the directory and is committed only after the independent
++// Resend code is verified.
++
++import { requireAuthSession } from '../authSession.js'
++import { readBinding, normalizeEmail, writeBinding } from '../emailWallets.js'
++import { createVerification, CODE_TTL_MINUTES } from '../emailVerification.js'
++import { sendEmail, verificationMessage } from '../resend.js'
++import { postRoute, RequestError } from '../walletRoute.js'
++
++export default postRoute(async (body, req) => {
++  const session = await requireAuthSession(req)
++  const email = normalizeEmail(body.email)
++  if (!email) throw new RequestError('A valid email address is required.')
++
++  const existing = await readBinding(email)
++  if (existing) {
++    if (existing.userId !== session.circleUserId) {
++      throw new RequestError('This email is already linked to a different wallet.', 409)
++    }
++    const binding = await writeBinding(email, {
++      address: session.walletAddress,
++      userId: session.circleUserId
++    })
++    return {
++      email,
++      address: binding.address,
++      verificationRequired: false,
++      verified: true
++    }
++  }
++
++  const { verificationId, code } = await createVerification({
++    email,
++    address: session.walletAddress,
++    userId: session.circleUserId
++  })
++  await sendEmail({ to: email, ...verificationMessage(code, CODE_TTL_MINUTES) })
++
++  return {
++    email,
++    verificationRequired: true,
++    verificationId,
++    expiresInMinutes: CODE_TTL_MINUTES
++  }
++})
+diff --git a/frontend/api/_lib/wallet/directory-claim.test.js b/frontend/api/_lib/wallet/directory-claim.test.js
+new file mode 100644
+index 0000000..b91c983
+--- /dev/null
++++ b/frontend/api/_lib/wallet/directory-claim.test.js
+@@ -0,0 +1,115 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const sentMail = vi.hoisted(() => [])
++
++vi.mock('../redis.js', () => ({
++  RedisError: class RedisError extends Error {},
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../resend.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  sendEmail: async (message) => { sentMail.push(message) }
++}))
++
++const handler = (await import('./directory-claim.js')).default
++const resendHandler = (await import('./resend-verification.js')).default
++const { createAuthSession } = await import('../authSession.js')
++const { readBinding } = await import('../emailWallets.js')
++const { peekVerification } = await import('../emailVerification.js')
++
++let cookie
++
++function invoke(body, cookieOverride = cookie) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', headers: { cookie: cookieOverride }, body }, res).then(() => res)
++}
++
++function invokeResend(body, cookieOverride = cookie) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return resendHandler({ method: 'POST', headers: { cookie: cookieOverride }, body }, res).then(() => res)
++}
++
++beforeEach(async () => {
++  store.clear()
++  sentMail.length = 0
++  const { token } = await createAuthSession({
++    circleUserId: 'circle-user-1',
++    walletId: 'wallet-1',
++    walletAddress: '0x1111111111111111111111111111111111111111',
++    blockchain: 'ARC-TESTNET',
++    accountType: 'SCA'
++  })
++  cookie = `tranche_session=${token}`
++})
++
++describe('POST /api/wallet/directory-claim', () => {
++  it('sends Resend only after an explicit authenticated claim', async () => {
++    const res = await invoke({ email: 'Alice@example.com' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toMatchObject({
++      email: 'alice@example.com',
++      verificationRequired: true
++    })
++    expect(sentMail).toHaveLength(1)
++    expect(sentMail[0].to).toBe('alice@example.com')
++    expect(await readBinding('alice@example.com')).toBeNull()
++    expect(await peekVerification(res.payload.verificationId)).toMatchObject({
++      email: 'alice@example.com',
++      address: '0x1111111111111111111111111111111111111111',
++      userId: 'circle-user-1'
++    })
++  })
++
++  it('rejects a claim without the server session', async () => {
++    const res = await invoke({ email: 'alice@example.com' }, '')
++
++    expect(res.statusCode).toBe(401)
++    expect(sentMail).toHaveLength(0)
++  })
++
++  it('does not accept a client-supplied wallet identity', async () => {
++    const res = await invoke({
++      email: 'alice@example.com',
++      address: '0xATTACKER',
++      userId: 'attacker'
++    })
++
++    const pending = await peekVerification(res.payload.verificationId)
++    expect(pending).toMatchObject({
++      address: '0x1111111111111111111111111111111111111111',
++      userId: 'circle-user-1'
++    })
++  })
++
++  it('keeps resend inside the authenticated directory flow', async () => {
++    const claim = await invoke({ email: 'alice@example.com' })
++    const res = await invokeResend({ verificationId: claim.payload.verificationId })
++
++    expect(res.statusCode).toBe(200)
++    expect(sentMail).toHaveLength(2)
++    expect((await invokeResend({ verificationId: claim.payload.verificationId }, '')).statusCode).toBe(401)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/dispatcher.test.js b/frontend/api/_lib/wallet/dispatcher.test.js
+index daca849..c14c25f 100644
+--- a/frontend/api/_lib/wallet/dispatcher.test.js
++++ b/frontend/api/_lib/wallet/dispatcher.test.js
+@@ -1,7 +1,7 @@
+ // @vitest-environment node
+ //
+ // The catch-all is now the single entry point for every /api/wallet/* call,
+-// so a mistake here takes down all eleven routes at once rather than one.
++// so a mistake here takes down the wallet routes at once rather than one.
+ // Lives under _lib/ so it doesn't itself count against Vercel's function cap
+ // — see the header of api/wallet/[...route].js.
+ import { describe, it, expect, vi, beforeEach } from 'vitest'
+@@ -16,9 +16,9 @@ const stub = (name) => vi.fn(async (req, res) => {
+ const handlers = vi.hoisted(() => ({}))
+ 
+ for (const name of [
+-  'balances', 'email-resend', 'email-token', 'execute-contract-call',
+-  'initialize', 'list', 'register', 'resend-verification',
+-  'resolve-email', 'tx-status', 'verify-email'
++  'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
++  'initialize', 'list', 'logout', 'register', 'resend-verification',
++  'resolve-email', 'session', 'tx-status', 'verify-email'
+ ]) {
+   vi.doMock(`./${name}.js`, () => ({ default: (handlers[name] ??= stub(name)) }))
+ }
+@@ -66,9 +66,9 @@ describe('/api/wallet/[...route] dispatch', () => {
+   // The consolidation must be invisible from outside: every URL the frontend
+   // already calls has to keep resolving to the handler it always did.
+   it.each([
+-    'balances', 'email-resend', 'email-token', 'execute-contract-call',
+-    'initialize', 'list', 'register', 'resend-verification',
+-    'resolve-email', 'tx-status', 'verify-email'
++    'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
++    'initialize', 'list', 'logout', 'register', 'resend-verification',
++    'resolve-email', 'session', 'tx-status', 'verify-email'
+   ])('routes %s to its handler', async (name) => {
+     const res = await invoke([name])
+     expect(res.statusCode).toBe(200)
+@@ -139,9 +139,9 @@ describe('/api/wallet/[...route] dispatch', () => {
+     // Every wallet endpoint, by URL alone — the consolidation must not have
+     // left any single route behind, which is how this surfaced.
+     it.each([
+-      'balances', 'email-resend', 'email-token', 'execute-contract-call',
+-      'initialize', 'list', 'register', 'resend-verification',
+-      'resolve-email', 'tx-status', 'verify-email'
++      'balances', 'complete-login', 'directory-claim', 'email-resend', 'email-token', 'execute-contract-call',
++      'initialize', 'list', 'logout', 'register', 'resend-verification',
++      'resolve-email', 'session', 'tx-status', 'verify-email'
+     ])('resolves %s from the URL alone', async (name) => {
+       const res = await invokeByUrl(`/api/wallet/${name}`)
+       expect(res.payload).toEqual({ handled: name })
+diff --git a/frontend/api/_lib/wallet/email-token.js b/frontend/api/_lib/wallet/email-token.js
+index 509724d..75efcbf 100644
+--- a/frontend/api/_lib/wallet/email-token.js
++++ b/frontend/api/_lib/wallet/email-token.js
+@@ -4,11 +4,10 @@
+ // under Wallets > User Controlled > Configurator > Email) and hands back the
+ // tokens the browser SDK needs to open its OTP dialog.
+ //
+-// The sessionId returned here is ours, not Circle's. It is the ONLY record of
+-// which email this OTP went to: wallet/register.js reads the email back out
+-// of it rather than accepting one from the client, so a caller cannot finish
+-// a flow for one address and then claim a different one. See the threat model
+-// in _lib/emailWallets.js.
++// The sessionId returned here is ours, not Circle's. It is a short-lived login
++// attempt used by initialize.js and complete-login.js; it is not an
++// authenticated Tranche session and it never creates an email-directory
++// binding.
+ 
+ import { randomUUID } from 'node:crypto'
+ import { getCircleClient } from '../circle.js'
+@@ -32,7 +31,7 @@ export default postRoute(async (body) => {
+   await putOtpSession(sessionId, { email, deviceId })
+ 
+   // The email is echoed back because the SDK's loginConfigs wants it to
+-  // label its own dialog — it is display state, and register.js pointedly
+-  // does not read it back from the client.
++  // label its own dialog. The server does not use this email as an identity
++  // claim when complete-login creates the app session.
+   return { sessionId, deviceToken, deviceEncryptionKey, otpToken, email }
+ })
+diff --git a/frontend/api/_lib/wallet/execute-contract-call.js b/frontend/api/_lib/wallet/execute-contract-call.js
+index 570f5d2..d7bda0a 100644
+--- a/frontend/api/_lib/wallet/execute-contract-call.js
++++ b/frontend/api/_lib/wallet/execute-contract-call.js
+@@ -32,17 +32,16 @@
+ // function selectors, and persist an action/challenge audit record. See
+ // frontend/src/confirm/native-mode-security.md.
+ 
+-import { getCircleClient } from '../circle.js'
+-import { postRoute, requireString, RequestError } from '../walletRoute.js'
++import { sessionPostRoute } from './identity.js'
++import { requireString, RequestError } from '../walletRoute.js'
+ 
+ // Gas Station sponsors the transaction, but Circle's API still requires a fee
+ // configuration to size the gas limit. MEDIUM is the level Circle's own
+ // examples use for contract execution.
+ const FEE = { type: 'level', config: { feeLevel: 'MEDIUM' } }
+ 
+-export default postRoute(async (body) => {
+-  const userToken = requireString(body, 'userToken')
+-  const walletId = requireString(body, 'walletId', { max: 128 })
++export default sessionPostRoute(async ({ circle, userToken, wallet }, body) => {
++  const walletId = wallet.id
+   const contractAddress = requireString(body, 'contractAddress', { max: 128 })
+ 
+   const base = { userToken, walletId, contractAddress, fee: FEE }
+@@ -67,7 +66,6 @@ export default postRoute(async (body) => {
+     throw new RequestError('Either callData or abiFunctionSignature is required.')
+   }
+ 
+-  const circle = getCircleClient()
+   const res = await circle.createUserTransactionContractExecutionChallenge(input)
+ 
+   const challengeId = res?.data?.challengeId
+diff --git a/frontend/api/_lib/wallet/execute-contract-call.test.js b/frontend/api/_lib/wallet/execute-contract-call.test.js
+index 1eb37d8..8d5d362 100644
+--- a/frontend/api/_lib/wallet/execute-contract-call.test.js
++++ b/frontend/api/_lib/wallet/execute-contract-call.test.js
+@@ -2,7 +2,17 @@
+ import { describe, it, expect, vi, beforeEach } from 'vitest'
+ 
+ const circleMock = vi.hoisted(() => ({
+-  createUserTransactionContractExecutionChallenge: vi.fn()
++  createUserTransactionContractExecutionChallenge: vi.fn(),
++  getUserStatus: vi.fn()
++}))
++const store = vi.hoisted(() => new Map())
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
+ }))
+ 
+ vi.mock('../circle.js', async (importOriginal) => ({
+@@ -11,6 +21,9 @@ vi.mock('../circle.js', async (importOriginal) => ({
+ }))
+ 
+ const handler = (await import('./execute-contract-call.js')).default
++const { createAuthSession } = await import('../authSession.js')
++
++let cookie
+ 
+ function invoke(body, method = 'POST') {
+   const res = {
+@@ -21,25 +34,35 @@ function invoke(body, method = 'POST') {
+     status(c) { this.statusCode = c; return this },
+     json(p) { this.payload = p; return this }
+   }
+-  return handler({ method, body }, res).then(() => res)
++  return handler({ method, headers: { cookie }, body }, res).then(() => res)
+ }
+ 
+ const VALID = {
+   userToken: 'tok',
+-  walletId: 'wallet-1',
++  walletId: 'attacker-supplied-wallet-is-ignored',
+   contractAddress: '0xCONTRACT',
+   callData: '0xdeadbeef'
+ }
+ 
+ beforeEach(() => {
++  store.clear()
++  circleMock.getUserStatus.mockReset()
++  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
+   circleMock.createUserTransactionContractExecutionChallenge.mockReset()
+   circleMock.createUserTransactionContractExecutionChallenge.mockResolvedValue({
+     data: { challengeId: 'chal-1' }
+   })
++  return createAuthSession({
++    circleUserId: 'circle-user-1',
++    walletId: 'wallet-1',
++    walletAddress: '0x1111111111111111111111111111111111111111',
++    blockchain: 'ARC-TESTNET',
++    accountType: 'SCA'
++  }).then(({ token }) => { cookie = `tranche_session=${token}` })
+ })
+ 
+ describe('POST /api/wallet/execute-contract-call', () => {
+-  it('documents the current browser-supplied request boundary while forwarding calldata unmodified', async () => {
++  it('requires the server session and forwards calldata with the session wallet', async () => {
+     const res = await invoke(VALID)
+ 
+     expect(res.statusCode).toBe(200)
+@@ -101,12 +124,32 @@ describe('POST /api/wallet/execute-contract-call', () => {
+     expect(res.statusCode).toBe(400)
+   })
+ 
+-  it('requires userToken, walletId and contractAddress', async () => {
+-    for (const field of ['userToken', 'walletId', 'contractAddress']) {
++  it('requires userToken and contractAddress, while ignoring a client wallet ID', async () => {
++    for (const field of ['userToken', 'contractAddress']) {
+       const body = { ...VALID }
+       delete body[field]
+       expect((await invoke(body)).statusCode).toBe(400)
+     }
++    expect((await invoke({ ...VALID, walletId: '' })).statusCode).toBe(200)
++  })
++
++  it('rejects a missing server session before creating a Circle challenge', async () => {
++    const saved = cookie
++    cookie = ''
++    const res = await invoke(VALID)
++    cookie = saved
++
++    expect(res.statusCode).toBe(401)
++    expect(circleMock.createUserTransactionContractExecutionChallenge).not.toHaveBeenCalled()
++  })
++
++  it('rejects a Circle token belonging to a different session user', async () => {
++    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'different-user' } })
++
++    const res = await invoke(VALID)
++
++    expect(res.statusCode).toBe(401)
++    expect(circleMock.createUserTransactionContractExecutionChallenge).not.toHaveBeenCalled()
+   })
+ 
+   it('surfaces a missing challenge as an error rather than a success', async () => {
+diff --git a/frontend/api/_lib/wallet/identity.js b/frontend/api/_lib/wallet/identity.js
+new file mode 100644
+index 0000000..621329c
+--- /dev/null
++++ b/frontend/api/_lib/wallet/identity.js
+@@ -0,0 +1,37 @@
++// Shared UCW request boundary.
++//
++// A browser may still provide Circle's userToken because the current public
++// Circle API methods use it as their bearer credential. It may not provide the
++// wallet identity. Every sensitive route requires the Tranche cookie, checks
++// that the token belongs to the Circle user pinned in that session, and uses
++// the session's canonical wallet ID/address.
++
++import { getCircleClient } from '../circle.js'
++import { requireAuthSession } from '../authSession.js'
++import { postRoute, requireString, RequestError } from '../walletRoute.js'
++
++export async function requireCircleIdentity(req, body) {
++  const session = await requireAuthSession(req)
++  const userToken = requireString(body, 'userToken')
++  const circle = getCircleClient()
++  const status = await circle.getUserStatus({ userToken })
++  const circleUserId = status?.data?.id
++
++  if (!circleUserId || circleUserId !== session.circleUserId) {
++    throw new RequestError('Circle credentials do not match the signed-in wallet session.', 401)
++  }
++
++  return {
++    circle,
++    session,
++    userToken,
++    wallet: {
++      id: session.walletId,
++      address: session.walletAddress
++    }
++  }
++}
++
++export function sessionPostRoute(fn) {
++  return postRoute(async (body, req, res) => fn(await requireCircleIdentity(req, body), body, req, res))
++}
+diff --git a/frontend/api/_lib/wallet/identity.test.js b/frontend/api/_lib/wallet/identity.test.js
+new file mode 100644
+index 0000000..ff432a2
+--- /dev/null
++++ b/frontend/api/_lib/wallet/identity.test.js
+@@ -0,0 +1,66 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const circleMock = vi.hoisted(() => ({ getUserStatus: vi.fn() }))
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../circle.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  getCircleClient: () => circleMock
++}))
++
++const { createAuthSession } = await import('../authSession.js')
++const { requireCircleIdentity } = await import('./identity.js')
++
++let req
++
++beforeEach(async () => {
++  store.clear()
++  circleMock.getUserStatus.mockReset()
++  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
++  const { token } = await createAuthSession({
++    circleUserId: 'circle-user-1',
++    walletId: 'wallet-1',
++    walletAddress: '0x1111111111111111111111111111111111111111',
++    blockchain: 'ARC-TESTNET',
++    accountType: 'SCA'
++  })
++  req = { headers: { cookie: `tranche_session=${token}` } }
++})
++
++describe('requireCircleIdentity', () => {
++  it('uses the cookie session wallet and ignores client wallet fields', async () => {
++    const auth = await requireCircleIdentity(req, {
++      userToken: 'circle-token',
++      walletId: 'attacker-wallet',
++      address: '0x2222222222222222222222222222222222222222'
++    })
++
++    expect(auth.wallet).toEqual({
++      id: 'wallet-1',
++      address: '0x1111111111111111111111111111111111111111'
++    })
++  })
++
++  it('rejects missing cookies before calling Circle', async () => {
++    await expect(requireCircleIdentity({ headers: {} }, { userToken: 'circle-token' }))
++      .rejects.toMatchObject({ status: 401 })
++    expect(circleMock.getUserStatus).not.toHaveBeenCalled()
++  })
++
++  it('rejects a token whose Circle user differs from the cookie session', async () => {
++    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'other-user' } })
++
++    await expect(requireCircleIdentity(req, { userToken: 'circle-token' }))
++      .rejects.toMatchObject({ status: 401 })
++  })
++})
+diff --git a/frontend/api/_lib/wallet/initialize.js b/frontend/api/_lib/wallet/initialize.js
+index edea81d..9594ae8 100644
+--- a/frontend/api/_lib/wallet/initialize.js
++++ b/frontend/api/_lib/wallet/initialize.js
+@@ -15,7 +15,8 @@
+ // email users with an unfundable wallet, so it is passed explicitly.
+ 
+ import { getCircleClient, ARC_BLOCKCHAIN, ACCOUNT_TYPE, getArcWallet, circleErrorInfo } from '../circle.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { peekOtpSession } from '../emailWallets.js'
++import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
+ // Circle's "user already initialized" code. Not an error for us: it means the
+ // user is returning on a new device, so we skip the challenge and hand back
+@@ -23,9 +24,18 @@ import { postRoute, requireString } from '../walletRoute.js'
+ const ALREADY_INITIALIZED = 155106
+ 
+ export default postRoute(async (body) => {
++  const sessionId = requireString(body, 'sessionId', { max: 128 })
+   const userToken = requireString(body, 'userToken')
++  const attempt = await peekOtpSession(sessionId)
++  if (!attempt) {
++    throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
++  }
+ 
+   const circle = getCircleClient()
++  const status = await circle.getUserStatus({ userToken })
++  if (!status?.data?.id) {
++    throw new RequestError('Could not verify your Circle sign-in. Please try again.', 401)
++  }
+   try {
+     const res = await circle.createUserPinWithWallets({
+       userToken,
+diff --git a/frontend/api/_lib/wallet/initialize.test.js b/frontend/api/_lib/wallet/initialize.test.js
+new file mode 100644
+index 0000000..52e4a49
+--- /dev/null
++++ b/frontend/api/_lib/wallet/initialize.test.js
+@@ -0,0 +1,73 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const circleMock = vi.hoisted(() => ({
++  getUserStatus: vi.fn(),
++  createUserPinWithWallets: vi.fn(),
++  listWallets: vi.fn()
++}))
++
++vi.mock('../redis.js', () => ({
++  RedisError: class RedisError extends Error {},
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../circle.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  getCircleClient: () => circleMock,
++  getArcWallet: async () => ({ id: 'wallet-1', address: '0x1111111111111111111111111111111111111111' })
++}))
++
++const handler = (await import('./initialize.js')).default
++const { putOtpSession } = await import('../emailWallets.js')
++
++function invoke(body) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', body }, res).then(() => res)
++}
++
++beforeEach(() => {
++  store.clear()
++  circleMock.getUserStatus.mockReset()
++  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
++  circleMock.createUserPinWithWallets.mockReset()
++  circleMock.createUserPinWithWallets.mockResolvedValue({ data: { challengeId: 'init-1' } })
++  circleMock.listWallets.mockReset()
++})
++
++describe('POST /api/wallet/initialize', () => {
++  it('requires a live OTP attempt before provisioning', async () => {
++    const res = await invoke({ sessionId: 'missing', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(410)
++    expect(circleMock.getUserStatus).not.toHaveBeenCalled()
++    expect(circleMock.createUserPinWithWallets).not.toHaveBeenCalled()
++  })
++
++  it('validates Circle identity and explicitly requests an SCA Arc wallet', async () => {
++    await putOtpSession('attempt-1', { email: 'alice@example.com', deviceId: 'device-1' })
++
++    const res = await invoke({ sessionId: 'attempt-1', userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ challengeId: 'init-1', alreadyInitialized: false })
++    expect(circleMock.createUserPinWithWallets).toHaveBeenCalledWith({
++      userToken: 'circle-token',
++      blockchains: ['ARC-TESTNET'],
++      accountType: 'SCA'
++    })
++  })
++})
+diff --git a/frontend/api/_lib/wallet/list.js b/frontend/api/_lib/wallet/list.js
+index 1dcb22c..be293a6 100644
+--- a/frontend/api/_lib/wallet/list.js
++++ b/frontend/api/_lib/wallet/list.js
+@@ -4,18 +4,15 @@
+ // no business sitting in a URL, where it would land in access logs and
+ // Referer headers.
+ 
+-import { getCircleClient, ARC_BLOCKCHAIN } from '../circle.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { ARC_BLOCKCHAIN } from '../circle.js'
++import { sessionPostRoute } from './identity.js'
+ 
+-export default postRoute(async (body) => {
+-  const userToken = requireString(body, 'userToken')
+-
+-  const circle = getCircleClient()
++export default sessionPostRoute(async ({ circle, userToken, wallet }) => {
+   const res = await circle.listWallets({ userToken, blockchain: ARC_BLOCKCHAIN })
+ 
+   // Project down to what the UI needs. The raw Circle wallet object carries
+   // walletSetId and other account-structure detail the browser has no use for.
+-  const wallets = (res?.data?.wallets ?? []).map((w) => ({
++  const wallets = (res?.data?.wallets ?? []).filter((w) => w.id === wallet.id).map((w) => ({
+     id: w.id,
+     address: w.address,
+     blockchain: w.blockchain,
+diff --git a/frontend/api/_lib/wallet/logout.js b/frontend/api/_lib/wallet/logout.js
+new file mode 100644
+index 0000000..9c57984
+--- /dev/null
++++ b/frontend/api/_lib/wallet/logout.js
+@@ -0,0 +1,9 @@
++// POST /api/wallet/logout — revoke the cookie-backed Tranche session.
++
++import { revokeAuthSession } from '../authSession.js'
++import { postRoute } from '../walletRoute.js'
++
++export default postRoute(async (_body, req, res) => {
++  await revokeAuthSession(req, res)
++  return { loggedOut: true }
++})
+diff --git a/frontend/api/_lib/wallet/logout.test.js b/frontend/api/_lib/wallet/logout.test.js
+new file mode 100644
+index 0000000..d7eb906
+--- /dev/null
++++ b/frontend/api/_lib/wallet/logout.test.js
+@@ -0,0 +1,49 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++const { createAuthSession } = await import('../authSession.js')
++const handler = (await import('./logout.js')).default
++
++function invoke(cookie = '') {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', headers: { cookie }, body: {} }, res).then(() => res)
++}
++
++beforeEach(() => store.clear())
++
++describe('POST /api/wallet/logout', () => {
++  it('revokes the server session and expires the cookie', async () => {
++    const { token } = await createAuthSession({
++      circleUserId: 'circle-user-1',
++      walletId: 'wallet-1',
++      walletAddress: '0x1111111111111111111111111111111111111111',
++      blockchain: 'ARC-TESTNET',
++      accountType: 'SCA'
++    })
++
++    const res = await invoke(`tranche_session=${token}`)
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ loggedOut: true })
++    expect(res.headers['Set-Cookie']).toContain('Max-Age=0')
++    expect(store).toHaveLength(0)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/register.js b/frontend/api/_lib/wallet/register.js
+index e5a6e83..122778f 100644
+--- a/frontend/api/_lib/wallet/register.js
++++ b/frontend/api/_lib/wallet/register.js
+@@ -1,98 +1,10 @@
+-// POST /api/wallet/register — begin recording this user's email -> Arc
+-// address, so a payer can address an escrow to them by email.
+-//
+-// Called once, after the wallet-creation challenge completes. Both halves of
+-// the pair are sourced by the server:
+-//
+-//   email   <- our own OTP-send record, keyed by the single-use sessionId
+-//   address <- Circle, via listWallets on the caller's userToken
+-//
+-// Neither is read from the request body. The client supplies only two opaque
+-// tokens, and cannot state who it is or where it wants to be paid.
+-//
+-// A FIRST binding is not written here. Circle's OTP proves inbox control to
+-// Circle, but nothing in Circle's API lets us verify which email a userToken
+-// belongs to — so on its own it cannot rule out someone opening an OTP
+-// session for a stranger's address, never reading it, and presenting their
+-// own token. This route therefore hands off to Tranche's own verification
+-// (_lib/emailVerification.js): a code we generate and mail ourselves, which
+-// must come back before anything is committed. Returning users whose binding
+-// already exists skip all of that — they proved this email once already.
++// POST /api/wallet/register is retired. Authentication completion now lives
++// in complete-login.js and email-directory binding is an explicit claim in
++// directory-claim.js. Keeping this compatibility endpoint closed prevents a
++// stale client from reintroducing Resend into the sign-in critical path.
+ 
+-import { getArcWallet, getCircleClient } from '../circle.js'
+-import { readBinding, restoreOtpSession, takeOtpSession, writeBinding } from '../emailWallets.js'
+-import { createVerification, CODE_TTL_MINUTES } from '../emailVerification.js'
+-import { sendEmail, verificationMessage } from '../resend.js'
+-import { postRoute, requireString, RequestError } from '../walletRoute.js'
++import { postRoute, RequestError } from '../walletRoute.js'
+ 
+-export default postRoute(async (body) => {
+-  const sessionId = requireString(body, 'sessionId', { max: 128 })
+-  const userToken = requireString(body, 'userToken')
+-
+-  // Single-use: consumed here whether or not the rest succeeds, so a replayed
+-  // sessionId can't be used to attempt a second binding.
+-  const session = await takeOtpSession(sessionId)
+-  if (!session) {
+-    throw new RequestError('This sign-in session has expired. Please sign in again.', 410)
+-  }
+-
+-  // Proves the userToken is a live Circle session and gives us the userId the
+-  // binding is pinned to. Doing this via the token (not a client-sent userId)
+-  // is what makes the pin meaningful.
+-  const circle = getCircleClient()
+-  const status = await circle.getUserStatus({ userToken })
+-  const userId = status?.data?.id
+-  if (!userId) {
+-    throw new RequestError('Could not verify your sign-in. Please try again.', 401)
+-  }
+-
+-  const wallet = await getArcWallet(userToken)
+-  if (!wallet) {
+-    // The challenge hasn't finished indexing, or the user abandoned setup.
+-    // Nothing to bind yet — the client retries after its post-execute delay.
+-    //
+-    // Uniquely among the failures here, this one is a transient race and not
+-    // a verdict, so the session goes back: we are explicitly asking the
+-    // client to call again, and it would otherwise find the session consumed
+-    // and report "sign-in expired" for what is a normal indexing delay. The
+-    // 401 above is deliberately NOT restored — a userToken Circle won't
+-    // vouch for is an answer, not a race.
+-    await restoreOtpSession(sessionId, session)
+-    throw new RequestError('Your wallet is still being created. Please try again in a moment.', 409)
+-  }
+-
+-  const existing = await readBinding(session.email)
+-
+-  if (existing) {
+-    // Already proven by this same person: writeBinding still refuses to move
+-    // it to a different Circle user, so this is safe to run straight through
+-    // and keeps re-onboarding on a new device friction-free.
+-    const binding = await writeBinding(session.email, { address: wallet.address, userId })
+-    return {
+-      email: session.email,
+-      address: binding.address,
+-      walletId: wallet.id,
+-      verificationRequired: false
+-    }
+-  }
+-
+-  // First time for this email. Nothing is written to the directory yet.
+-  const { verificationId, code } = await createVerification({
+-    email: session.email,
+-    address: wallet.address,
+-    userId
+-  })
+-
+-  await sendEmail({
+-    to: session.email,
+-    ...verificationMessage(code, CODE_TTL_MINUTES)
+-  })
+-
+-  return {
+-    email: session.email,
+-    walletId: wallet.id,
+-    verificationRequired: true,
+-    verificationId,
+-    expiresInMinutes: CODE_TTL_MINUTES
+-  }
++export default postRoute(async () => {
++  throw new RequestError('This sign-in route has been retired. Please sign in again.', 410)
+ })
+diff --git a/frontend/api/_lib/wallet/register.test.js b/frontend/api/_lib/wallet/register.test.js
+index 7fa7912..c52fcd0 100644
+--- a/frontend/api/_lib/wallet/register.test.js
++++ b/frontend/api/_lib/wallet/register.test.js
+@@ -1,235 +1,40 @@
+ // @vitest-environment node
+-//
+-// register.js is where an email becomes payable, so these tests exist to pin
+-// down that neither half of the pair can be dictated by the caller.
+-import { describe, it, expect, vi, beforeEach } from 'vitest'
+ 
+-const store = vi.hoisted(() => new Map())
+-const circleMock = vi.hoisted(() => ({
+-  getUserStatus: vi.fn(),
+-  listWallets: vi.fn()
+-}))
+-const sentMail = vi.hoisted(() => [])
+-
+-vi.mock('../resend.js', async (importOriginal) => ({
+-  ...(await importOriginal()),
+-  sendEmail: async (msg) => { sentMail.push(msg) }
+-}))
+-
+-vi.mock('../redis.js', () => ({
+-  kv: {
+-    get: async (k) => (store.has(k) ? structuredClone(store.get(k)) : null),
+-    set: async (k, v) => { store.set(k, structuredClone(v)) },
+-    del: async (k) => { store.delete(k) }
+-  }
+-}))
+-
+-vi.mock('../circle.js', async (importOriginal) => {
+-  const actual = await importOriginal()
+-  return {
+-    ...actual,
+-    getCircleClient: () => circleMock,
+-    getArcWallet: async (userToken) => {
+-      const res = await circleMock.listWallets({ userToken })
+-      const w = (res?.data?.wallets ?? []).find((x) => x.state === 'LIVE' && x.address)
+-      return w ? { id: w.id, address: w.address } : null
+-    }
+-  }
+-})
++import { describe, it, expect, vi } from 'vitest'
+ 
+ const handler = (await import('./register.js')).default
+-const { putOtpSession, readBinding, writeBinding } = await import('../emailWallets.js')
+ 
+-function invoke(body) {
++function invoke(body = {}) {
+   const res = {
+     statusCode: null,
+     payload: null,
+     headers: {},
+-    setHeader(k, v) { this.headers[k] = v },
+-    status(c) { this.statusCode = c; return this },
+-    json(p) { this.payload = p; return this }
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
+   }
+   return handler({ method: 'POST', body }, res).then(() => res)
+ }
+ 
+-function walletsFor(address) {
+-  return { data: { wallets: [{ id: 'wallet-1', address, state: 'LIVE' }] } }
+-}
+-
+-beforeEach(() => {
+-  store.clear()
+-  sentMail.length = 0
+-  circleMock.getUserStatus.mockReset()
+-  circleMock.listWallets.mockReset()
+-})
+-
+-/** Arrange a valid first-time registration and run it. */
+-async function registerFirstTime({ email = 'alice@example.com', address = '0xALICE', userId = 'user-a' } = {}) {
+-  await putOtpSession('sess-1', { email, deviceId: 'dev-1' })
+-  circleMock.getUserStatus.mockResolvedValue({ data: { id: userId } })
+-  circleMock.listWallets.mockResolvedValue(walletsFor(address))
+-  return invoke({ sessionId: 'sess-1', userToken: 'tok-a' })
+-}
+-
+-describe('POST /api/wallet/register — first time on an email', () => {
+-  // THE core guarantee. Circle's OTP alone is not enough to make an email
+-  // payable, because nothing in Circle's API tells us which email a userToken
+-  // belongs to. Nothing may reach the directory until Tranche's own code
+-  // comes back.
+-  it('does NOT write a binding — it only opens a verification', async () => {
+-    const res = await registerFirstTime()
+-
+-    expect(res.statusCode).toBe(200)
+-    expect(res.payload).toMatchObject({ verificationRequired: true, email: 'alice@example.com' })
+-    expect(res.payload.verificationId).toEqual(expect.any(String))
+-    // The address is withheld too — there is nothing to look up yet.
+-    expect(res.payload.address).toBeUndefined()
+-    expect(await readBinding('alice@example.com')).toBeNull()
+-  })
+-
+-  it('mails the code to the session email, not to anything the caller sent', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    circleMock.listWallets.mockResolvedValue(walletsFor('0xALICE'))
+-
+-    await invoke({ sessionId: 'sess-1', userToken: 'tok-a', email: 'victim@example.com' })
+-
+-    expect(sentMail).toHaveLength(1)
+-    expect(sentMail[0].to).toBe('alice@example.com')
+-  })
+-
+-  it('never returns the code to the caller', async () => {
+-    const res = await registerFirstTime()
+-    const code = sentMail[0].subject.match(/(\d{6})/)[1]
+-
+-    expect(JSON.stringify(res.payload)).not.toContain(code)
+-  })
+-
+-  // Likewise for the address: only Circle decides where this user gets paid.
+-  it('ignores an address supplied in the request body', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    circleMock.listWallets.mockResolvedValue(walletsFor('0xALICE'))
++describe('POST /api/wallet/register', () => {
++  it('is retired and cannot trigger Circle, Redis, or Resend work', async () => {
++    const res = await invoke({ sessionId: 'old', userToken: 'old-token' })
+ 
+-    const res = await invoke({ sessionId: 'sess-1', userToken: 'tok-a', address: '0xATTACKER' })
+-
+-    const { peekVerification } = await import('../emailVerification.js')
+-    expect((await peekVerification(res.payload.verificationId)).address).toBe('0xALICE')
+-  })
+-})
+-
+-describe('POST /api/wallet/register — returning user', () => {
+-  // Already proved this email once; re-verifying on every new device would be
+-  // friction for no gain, and writeBinding's userId pin keeps it safe.
+-  it('re-binds without demanding verification again', async () => {
+-    await writeBinding('alice@example.com', { address: '0xALICE', userId: 'user-a' })
+-
+-    const res = await registerFirstTime()
+-
+-    expect(res.payload).toMatchObject({
+-      verificationRequired: false,
+-      address: '0xALICE'
+-    })
+-    expect(sentMail).toHaveLength(0)
+-  })
+-
+-  // An attacker holding a stale sessionId for someone else's email must not
+-  // be able to point it at their own wallet — this is the path that skips
+-  // verification, so the pin has to hold it.
+-  it('refuses to repoint an email already bound to another Circle user', async () => {
+-    await writeBinding('alice@example.com', { address: '0xALICE', userId: 'user-a' })
+-    await putOtpSession('sess-evil', { email: 'alice@example.com', deviceId: 'dev-9' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'attacker' } })
+-    circleMock.listWallets.mockResolvedValue(walletsFor('0xATTACKER'))
+-
+-    const res = await invoke({ sessionId: 'sess-evil', userToken: 'tok-evil' })
+-
+-    expect(res.statusCode).toBe(409)
+-    expect((await readBinding('alice@example.com')).address).toBe('0xALICE')
+-    expect(sentMail).toHaveLength(0)
+-  })
+-})
+-
+-describe('POST /api/wallet/register — session handling', () => {
+-  it('consumes the session so it cannot be replayed', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    circleMock.listWallets.mockResolvedValue(walletsFor('0xALICE'))
+-
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })).statusCode).toBe(200)
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })).statusCode).toBe(410)
+-  })
+-
+-  it('rejects an unknown or expired session', async () => {
+-    const res = await invoke({ sessionId: 'nope', userToken: 'tok-a' })
+     expect(res.statusCode).toBe(410)
+-  })
+-
+-  it('rejects a userToken Circle will not vouch for, and sends no mail', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: {} })
+-
+-    const res = await invoke({ sessionId: 'sess-1', userToken: 'bogus' })
+-
+-    expect(res.statusCode).toBe(401)
+-    expect(await readBinding('alice@example.com')).toBeNull()
+-    expect(sentMail).toHaveLength(0)
+-  })
+-
+-  // The 409 tells the client to call again, so the session it needs to do
+-  // that has to survive. Leaving it consumed turned a normal indexing delay
+-  // into "sign-in expired" on the very retry we asked for.
+-  it('keeps the session usable across the retry it asks for', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', createdAt: Date.now() })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    // First call: Circle hasn't indexed the wallet yet.
+-    circleMock.listWallets.mockResolvedValueOnce({ data: { wallets: [] } })
+-
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })).statusCode).toBe(409)
+-
+-    // Second call: it has. The same sessionId must still work.
+-    circleMock.listWallets.mockResolvedValue(walletsFor('0xALICE'))
+-    const retry = await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })
+-
+-    expect(retry.statusCode).toBe(200)
+-    expect(retry.payload).toMatchObject({ email: 'alice@example.com', verificationRequired: true })
+-  })
+-
+-  // Only the transient race is forgiven. A userToken Circle won't vouch for
+-  // is a verdict, and must still burn the session.
+-  it('does NOT restore the session when the userToken is rejected', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1', createdAt: Date.now() })
+-    circleMock.getUserStatus.mockResolvedValue({ data: {} })
+-
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'bogus' })).statusCode).toBe(401)
+-    // Session is gone: a second attempt finds nothing.
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'bogus' })).statusCode).toBe(410)
+-  })
+-
+-  it('asks the caller to retry while the wallet is still being created', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    circleMock.listWallets.mockResolvedValue({ data: { wallets: [] } })
+-
+-    const res = await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })
+-    expect(res.statusCode).toBe(409)
+-  })
+-
+-  // A FROZEN wallet cannot receive, so treating it as onboarded would hand
+-  // out an address that silently fails.
+-  it('does not treat a FROZEN wallet as onboarded', async () => {
+-    await putOtpSession('sess-1', { email: 'alice@example.com', deviceId: 'dev-1' })
+-    circleMock.getUserStatus.mockResolvedValue({ data: { id: 'user-a' } })
+-    circleMock.listWallets.mockResolvedValue({
+-      data: { wallets: [{ id: 'w1', address: '0xFROZEN', state: 'FROZEN' }] }
++    expect(res.payload).toEqual({
++      error: 'This sign-in route has been retired. Please sign in again.'
+     })
+-
+-    expect((await invoke({ sessionId: 'sess-1', userToken: 'tok-a' })).statusCode).toBe(409)
+   })
+ 
+-  it('rejects non-POST', async () => {
+-    const res = { statusCode: null, payload: null, headers: {}, setHeader(k, v) { this.headers[k] = v }, status(c) { this.statusCode = c; return this }, json(p) { this.payload = p; return this } }
+-    await handler({ method: 'GET' }, res)
++  it('rejects non-POST requests', async () => {
++    const res = {
++      statusCode: null,
++      payload: null,
++      setHeader() {},
++      status(code) { this.statusCode = code; return this },
++      json(payload) { this.payload = payload; return this }
++    }
++    await handler({ method: 'GET', body: {} }, res)
+     expect(res.statusCode).toBe(405)
+   })
+ })
+diff --git a/frontend/api/_lib/wallet/resend-verification.js b/frontend/api/_lib/wallet/resend-verification.js
+index 2647156..7100545 100644
+--- a/frontend/api/_lib/wallet/resend-verification.js
++++ b/frontend/api/_lib/wallet/resend-verification.js
+@@ -6,12 +6,23 @@
+ // hand back exactly the redirect this whole mechanism exists to prevent.
+ 
+ import { rotateVerificationCode, CODE_TTL_MINUTES } from '../emailVerification.js'
++import { peekVerification } from '../emailVerification.js'
+ import { sendEmail, verificationMessage } from '../resend.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { requireAuthSession } from '../authSession.js'
++import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
+-export default postRoute(async (body) => {
++export default postRoute(async (body, req) => {
++  const session = await requireAuthSession(req)
+   const verificationId = requireString(body, 'verificationId', { max: 128 })
+ 
++  const pending = await peekVerification(verificationId)
++  if (!pending) {
++    throw new RequestError('That request has expired. Please sign in again.', 410)
++  }
++  if (pending.userId !== session.circleUserId) {
++    throw new RequestError('That email-directory request does not belong to this session.', 403)
++  }
++
+   const { email, code } = await rotateVerificationCode(verificationId)
+   await sendEmail({ to: email, ...verificationMessage(code, CODE_TTL_MINUTES) })
+ 
+diff --git a/frontend/api/_lib/wallet/resolve-email.js b/frontend/api/_lib/wallet/resolve-email.js
+index 89c036b..84ba022 100644
+--- a/frontend/api/_lib/wallet/resolve-email.js
++++ b/frontend/api/_lib/wallet/resolve-email.js
+@@ -7,7 +7,7 @@
+ // address its owner has not proven control of.
+ //
+ // Answers only from our own binding store, which is populated exclusively by
+-// wallet/register.js. A miss is reported as not-onboarded so CreateEscrow can
++// the explicit directory-claim flow. A miss is reported as not-onboarded so CreateEscrow can
+ // say "ask them to sign up first" instead of failing opaquely.
+ 
+ import { normalizeEmail, readBinding } from '../emailWallets.js'
+diff --git a/frontend/api/_lib/wallet/sensitive-routes.test.js b/frontend/api/_lib/wallet/sensitive-routes.test.js
+new file mode 100644
+index 0000000..3ed1922
+--- /dev/null
++++ b/frontend/api/_lib/wallet/sensitive-routes.test.js
+@@ -0,0 +1,109 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++const circleMock = vi.hoisted(() => ({
++  getUserStatus: vi.fn(),
++  listWallets: vi.fn(),
++  getWalletTokenBalance: vi.fn(),
++  getUserChallenge: vi.fn(),
++  getTransaction: vi.fn()
++}))
++
++vi.mock('../redis.js', () => ({
++  RedisError: class RedisError extends Error {},
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++vi.mock('../circle.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  getCircleClient: () => circleMock
++}))
++
++const listHandler = (await import('./list.js')).default
++const balancesHandler = (await import('./balances.js')).default
++const txStatusHandler = (await import('./tx-status.js')).default
++const { createAuthSession } = await import('../authSession.js')
++
++let cookie
++
++function invoke(handler, body, cookieOverride = cookie) {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method: 'POST', headers: { cookie: cookieOverride }, body }, res).then(() => res)
++}
++
++beforeEach(async () => {
++  store.clear()
++  circleMock.getUserStatus.mockReset()
++  circleMock.getUserStatus.mockResolvedValue({ data: { id: 'circle-user-1' } })
++  circleMock.listWallets.mockReset()
++  circleMock.listWallets.mockResolvedValue({ data: { wallets: [
++    { id: 'wallet-1', address: '0x1111111111111111111111111111111111111111', state: 'LIVE', blockchain: 'ARC-TESTNET', accountType: 'SCA' },
++    { id: 'wallet-2', address: '0x2222222222222222222222222222222222222222', state: 'LIVE', blockchain: 'ARC-TESTNET', accountType: 'SCA' }
++  ] } })
++  circleMock.getWalletTokenBalance.mockReset()
++  circleMock.getWalletTokenBalance.mockResolvedValue({ data: { tokenBalances: [] } })
++  circleMock.getUserChallenge.mockReset()
++  circleMock.getUserChallenge.mockResolvedValue({ data: { challenge: { correlationIds: [] } } })
++  const { token } = await createAuthSession({
++    circleUserId: 'circle-user-1',
++    walletId: 'wallet-1',
++    walletAddress: '0x1111111111111111111111111111111111111111',
++    blockchain: 'ARC-TESTNET',
++    accountType: 'SCA'
++  })
++  cookie = `tranche_session=${token}`
++})
++
++describe('sensitive UCW routes', () => {
++  it('rejects list, balances, and tx status without the server session', async () => {
++    for (const [handler, body] of [
++      [listHandler, { userToken: 'circle-token' }],
++      [balancesHandler, { userToken: 'circle-token', walletId: 'attacker-wallet' }],
++      [txStatusHandler, { userToken: 'circle-token', challengeId: 'challenge-1' }]
++    ]) {
++      const res = await invoke(handler, body, '')
++      expect(res.statusCode).toBe(401)
++    }
++    expect(circleMock.getUserStatus).not.toHaveBeenCalled()
++  })
++
++  it('filters list results to the session wallet', async () => {
++    const res = await invoke(listHandler, { userToken: 'circle-token' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload.wallets).toHaveLength(1)
++    expect(res.payload.wallets[0].id).toBe('wallet-1')
++  })
++
++  it('uses the session wallet ID for balances', async () => {
++    const res = await invoke(balancesHandler, { userToken: 'circle-token', walletId: 'attacker-wallet' })
++
++    expect(res.statusCode).toBe(200)
++    expect(circleMock.getWalletTokenBalance).toHaveBeenCalledWith({
++      userToken: 'circle-token', walletId: 'wallet-1'
++    })
++  })
++
++  it('binds transaction status lookup to the verified Circle user', async () => {
++    const res = await invoke(txStatusHandler, { userToken: 'circle-token', challengeId: 'challenge-1' })
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toMatchObject({ state: 'PENDING', done: false })
++    expect(circleMock.getUserChallenge).toHaveBeenCalledWith({
++      userToken: 'circle-token', challengeId: 'challenge-1'
++    })
++  })
++})
+diff --git a/frontend/api/_lib/wallet/session.js b/frontend/api/_lib/wallet/session.js
+new file mode 100644
+index 0000000..5dc9f21
+--- /dev/null
++++ b/frontend/api/_lib/wallet/session.js
+@@ -0,0 +1,12 @@
++// GET /api/wallet/session — return the sanitized cookie-backed app session.
++
++import { getAuthSession, publicAuthSession } from '../authSession.js'
++import { getRoute } from '../walletRoute.js'
++
++export default getRoute(async (_body, req) => {
++  const session = await getAuthSession(req)
++  return {
++    authenticated: !!session,
++    session: publicAuthSession(session)
++  }
++})
+diff --git a/frontend/api/_lib/wallet/session.test.js b/frontend/api/_lib/wallet/session.test.js
+new file mode 100644
+index 0000000..048ae0b
+--- /dev/null
++++ b/frontend/api/_lib/wallet/session.test.js
+@@ -0,0 +1,58 @@
++// @vitest-environment node
++
++import { describe, it, expect, vi, beforeEach } from 'vitest'
++
++const store = vi.hoisted(() => new Map())
++
++vi.mock('../redis.js', () => ({
++  kv: {
++    get: async (key) => (store.has(key) ? structuredClone(store.get(key)) : null),
++    set: async (key, value) => { store.set(key, structuredClone(value)); return 'OK' },
++    del: async (key) => { store.delete(key); return 1 }
++  }
++}))
++
++const { createAuthSession } = await import('../authSession.js')
++const handler = (await import('./session.js')).default
++
++function invoke(cookie = '', method = 'GET') {
++  const res = {
++    statusCode: null,
++    payload: null,
++    headers: {},
++    setHeader(key, value) { this.headers[key] = value },
++    status(code) { this.statusCode = code; return this },
++    json(payload) { this.payload = payload; return this }
++  }
++  return handler({ method, headers: { cookie } }, res).then(() => res)
++}
++
++beforeEach(() => store.clear())
++
++describe('GET /api/wallet/session', () => {
++  it('returns unauthenticated without a cookie', async () => {
++    const res = await invoke()
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toEqual({ authenticated: false, session: null })
++  })
++
++  it('returns only the sanitized session identity', async () => {
++    const { token } = await createAuthSession({
++      circleUserId: 'circle-user-1',
++      walletId: 'wallet-1',
++      walletAddress: '0x1111111111111111111111111111111111111111',
++      blockchain: 'ARC-TESTNET',
++      accountType: 'SCA'
++    })
++
++    const res = await invoke(`tranche_session=${token}`)
++
++    expect(res.statusCode).toBe(200)
++    expect(res.payload).toMatchObject({ authenticated: true, session: { walletId: 'wallet-1' } })
++    expect(res.payload.session).not.toHaveProperty('circleUserId')
++  })
++
++  it('rejects non-GET methods', async () => {
++    expect((await invoke('', 'POST')).statusCode).toBe(405)
++  })
++})
+diff --git a/frontend/api/_lib/wallet/tx-status.js b/frontend/api/_lib/wallet/tx-status.js
+index efbe39b..f5dbf54 100644
+--- a/frontend/api/_lib/wallet/tx-status.js
++++ b/frontend/api/_lib/wallet/tx-status.js
+@@ -10,19 +10,16 @@
+ //
+ // challengeId -> transaction id comes from the challenge's correlationIds.
+ 
+-import { getCircleClient } from '../circle.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { sessionPostRoute } from './identity.js'
++import { requireString } from '../walletRoute.js'
+ 
+ // Circle transaction states that mean "stop polling".
+ const TERMINAL = new Set(['COMPLETE', 'CONFIRMED', 'FAILED', 'CANCELLED', 'DENIED'])
+ const FAILED = new Set(['FAILED', 'CANCELLED', 'DENIED'])
+ 
+-export default postRoute(async (body) => {
+-  const userToken = requireString(body, 'userToken')
++export default sessionPostRoute(async ({ circle, userToken }, body) => {
+   const challengeId = requireString(body, 'challengeId', { max: 128 })
+ 
+-  const circle = getCircleClient()
+-
+   const challengeRes = await circle.getUserChallenge({ userToken, challengeId })
+   const challenge = challengeRes?.data?.challenge ?? challengeRes?.data
+   const transactionId = challenge?.correlationIds?.[0]
+diff --git a/frontend/api/_lib/wallet/verify-email.js b/frontend/api/_lib/wallet/verify-email.js
+index e2997ed..b89c1a9 100644
+--- a/frontend/api/_lib/wallet/verify-email.js
++++ b/frontend/api/_lib/wallet/verify-email.js
+@@ -2,22 +2,33 @@
+ // binding, once the person has produced the code we mailed them.
+ //
+ // This is the only place a brand-new binding is written. The email, address
+-// and userId all come out of the pending record created by register.js, which
+-// derived them server-side from the OTP session and from Circle — so a caller
++// and userId all come out of the pending record created by directory-claim.js,
++// which derived them server-side from the authenticated session — so a caller
+ // holding a verificationId still cannot influence what gets committed. The
+ // code is the single thing they contribute, and it is exactly the thing only
+ // the real owner of the inbox can have.
+ 
+ import { confirmVerification } from '../emailVerification.js'
++import { peekVerification } from '../emailVerification.js'
+ import { writeBinding } from '../emailWallets.js'
+-import { postRoute, requireString } from '../walletRoute.js'
++import { requireAuthSession } from '../authSession.js'
++import { postRoute, requireString, RequestError } from '../walletRoute.js'
+ 
+-export default postRoute(async (body) => {
++export default postRoute(async (body, req) => {
++  const session = await requireAuthSession(req)
+   const verificationId = requireString(body, 'verificationId', { max: 128 })
+   // Not requireString: a code of "000000" is legitimate, and trimming is the
+   // kindness that lets someone paste it with a stray space.
+   const code = String(body.code ?? '').trim()
+ 
++  const pending = await peekVerification(verificationId)
++  if (!pending) {
++    throw new RequestError('That code has expired. Please request a new one.', 410)
++  }
++  if (pending.userId !== session.circleUserId) {
++    throw new RequestError('That email-directory request does not belong to this session.', 403)
++  }
++
+   const { email, address, userId } = await confirmVerification(verificationId, code)
+   const binding = await writeBinding(email, { address, userId })
+ 
+diff --git a/frontend/api/_lib/wallet/verify-email.test.js b/frontend/api/_lib/wallet/verify-email.test.js
+index bd049da..6164e96 100644
+--- a/frontend/api/_lib/wallet/verify-email.test.js
++++ b/frontend/api/_lib/wallet/verify-email.test.js
+@@ -18,6 +18,9 @@ vi.mock('../redis.js', () => ({
+ const handler = (await import('./verify-email.js')).default
+ const { createVerification } = await import('../emailVerification.js')
+ const { readBinding, writeBinding } = await import('../emailWallets.js')
++const { createAuthSession } = await import('../authSession.js')
++
++let cookie
+ 
+ function invoke(body, method = 'POST') {
+   const res = {
+@@ -28,12 +31,22 @@ function invoke(body, method = 'POST') {
+     status(c) { this.statusCode = c; return this },
+     json(p) { this.payload = p; return this }
+   }
+-  return handler({ method, body }, res).then(() => res)
++  return handler({ method, headers: { cookie }, body }, res).then(() => res)
+ }
+ 
+ const BINDING = { email: 'alice@example.com', address: '0xALICE', userId: 'user-a' }
+ 
+-beforeEach(() => store.clear())
++beforeEach(async () => {
++  store.clear()
++  const { token } = await createAuthSession({
++    circleUserId: 'user-a',
++    walletId: 'wallet-1',
++    walletAddress: '0x1111111111111111111111111111111111111111',
++    blockchain: 'ARC-TESTNET',
++    accountType: 'SCA'
++  })
++  cookie = `tranche_session=${token}`
++})
+ 
+ describe('POST /api/wallet/verify-email', () => {
+   it('writes the binding once the correct code is supplied', async () => {
+@@ -97,7 +110,7 @@ describe('POST /api/wallet/verify-email', () => {
+ 
+     const res = await invoke({ verificationId, code })
+ 
+-    expect(res.statusCode).toBe(409)
++    expect(res.statusCode).toBe(403)
+     expect((await readBinding('alice@example.com')).address).toBe('0xALICE')
+   })
+ 
+@@ -109,6 +122,17 @@ describe('POST /api/wallet/verify-email', () => {
+     expect((await invoke({ verificationId: 'nope', code: '000000' })).statusCode).toBe(410)
+   })
+ 
++  it('rejects a verification owned by a different Circle session', async () => {
++    const { verificationId, code } = await createVerification({
++      email: 'alice@example.com', address: '0xALICE', userId: 'different-user'
++    })
++
++    const res = await invoke({ verificationId, code })
++
++    expect(res.statusCode).toBe(403)
++    expect(await readBinding('alice@example.com')).toBeNull()
++  })
++
+   it('rejects non-POST', async () => {
+     expect((await invoke({}, 'GET')).statusCode).toBe(405)
+   })
+diff --git a/frontend/api/_lib/walletRoute.js b/frontend/api/_lib/walletRoute.js
+index 914799c..97b4c90 100644
+--- a/frontend/api/_lib/walletRoute.js
++++ b/frontend/api/_lib/walletRoute.js
+@@ -8,8 +8,10 @@
+ // rather than remembered seven times.
+ 
+ import { CircleError, circleErrorInfo } from './circle.js'
++import { AuthSessionError } from './authSession.js'
+ import { EmailWalletError } from './emailWallets.js'
+ import { VerificationError } from './emailVerification.js'
++import { RedisError } from './redis.js'
+ import { ResendError } from './resend.js'
+ 
+ export class RequestError extends Error {
+@@ -25,44 +27,44 @@ export class RequestError extends Error {
+  *
+  * @param {(body: object, req: object) => Promise<object>} fn resolves to the JSON body to send
+  */
+-export function postRoute(fn) {
++function routeError(res, err) {
++  if (
++    err instanceof RequestError ||
++    err instanceof AuthSessionError ||
++    err instanceof EmailWalletError ||
++    err instanceof VerificationError ||
++    err instanceof RedisError ||
++    err instanceof ResendError ||
++    err instanceof CircleError
++  ) {
++    res.status(err.status).json({ error: err.message })
++    return
++  }
++  const info = circleErrorInfo(err)
++  console.error('wallet route failed:', info.code, info.message)
++  res.status(502).json({ error: 'Wallet service is unavailable. Please try again.', code: info.code })
++}
++
++export function methodRoute(method, fn) {
+   return async function handler(req, res) {
+-    if (req.method !== 'POST') {
+-      res.setHeader('Allow', 'POST')
++    if (req.method !== method) {
++      res.setHeader('Allow', method)
+       res.status(405).json({ error: 'Method not allowed.' })
+       return
+     }
+     try {
+       const body = req.body && typeof req.body === 'object' ? req.body : {}
+-      const result = await fn(body, req)
++      const result = await fn(body, req, res)
+       res.status(200).json(result ?? {})
+     } catch (err) {
+-      // Every error type carrying its own .status is deliberately listed:
+-      // these are the ones whose status codes the client branches on — 401
+-      // for a wrong verification code, 429 for a burnt one, 409 for a wallet
+-      // still indexing. Falling through to the 502 below would collapse all
+-      // of them into "wallet service unavailable" and strand the user.
+-      if (
+-        err instanceof RequestError ||
+-        err instanceof EmailWalletError ||
+-        err instanceof VerificationError ||
+-        err instanceof ResendError ||
+-        err instanceof CircleError
+-      ) {
+-        res.status(err.status).json({ error: err.message })
+-        return
+-      }
+-      // Anything else here is an unmapped Circle/axios rejection. Log the
+-      // detail server-side; return only the numeric code, which the frontend
+-      // legitimately branches on (155106 = user already initialized) and
+-      // which carries no user data.
+-      const info = circleErrorInfo(err)
+-      console.error('wallet route failed:', info.code, info.message)
+-      res.status(502).json({ error: 'Wallet service is unavailable. Please try again.', code: info.code })
++      routeError(res, err)
+     }
+   }
+ }
+ 
++export const postRoute = (fn) => methodRoute('POST', fn)
++export const getRoute = (fn) => methodRoute('GET', fn)
++
+ /** @returns {string} a non-empty string field, or throws RequestError */
+ export function requireString(body, field, { max = 4096 } = {}) {
+   const value = body[field]
+diff --git a/frontend/api/wallet/[...route].js b/frontend/api/wallet/[...route].js
+index 7135a06..a0f1e21 100644
+--- a/frontend/api/wallet/[...route].js
++++ b/frontend/api/wallet/[...route].js
+@@ -18,14 +18,18 @@
+ // "which code runs for this URL" stays answerable by reading one map.
+ 
+ import balances from '../_lib/wallet/balances.js'
++import completeLogin from '../_lib/wallet/complete-login.js'
++import directoryClaim from '../_lib/wallet/directory-claim.js'
+ import emailResend from '../_lib/wallet/email-resend.js'
+ import emailToken from '../_lib/wallet/email-token.js'
+ import executeContractCall from '../_lib/wallet/execute-contract-call.js'
+ import initialize from '../_lib/wallet/initialize.js'
+ import list from '../_lib/wallet/list.js'
++import logout from '../_lib/wallet/logout.js'
+ import register from '../_lib/wallet/register.js'
+ import resendVerification from '../_lib/wallet/resend-verification.js'
+ import resolveEmail from '../_lib/wallet/resolve-email.js'
++import session from '../_lib/wallet/session.js'
+ import txStatus from '../_lib/wallet/tx-status.js'
+ import verifyEmail from '../_lib/wallet/verify-email.js'
+ 
+@@ -34,14 +38,18 @@ import verifyEmail from '../_lib/wallet/verify-email.js'
+ // influence which module gets loaded, and unknown names can only miss.
+ const ROUTES = {
+   'balances': balances,
++  'complete-login': completeLogin,
++  'directory-claim': directoryClaim,
+   'email-resend': emailResend,
+   'email-token': emailToken,
+   'execute-contract-call': executeContractCall,
+   'initialize': initialize,
+   'list': list,
++  'logout': logout,
+   'register': register,
+   'resend-verification': resendVerification,
+   'resolve-email': resolveEmail,
++  'session': session,
+   'tx-status': txStatus,
+   'verify-email': verifyEmail
+ }
+diff --git a/frontend/src/components/AppShell.jsx b/frontend/src/components/AppShell.jsx
+index f854b93..b0fb130 100644
+--- a/frontend/src/components/AppShell.jsx
++++ b/frontend/src/components/AppShell.jsx
+@@ -489,11 +489,8 @@ export default function AppShell({ children, maxWidth = 'content' }) {
+       <TopNav />
+       <WrongNetworkBanner />
+       <main className={mainCls}>
+-        {/* Renders itself to null unless this email is awaiting Tranche's own
+-            verification, so it costs nothing on every other page load. Lives
+-            here rather than on one page because the user can navigate away
+-            from sign-up before finishing, and the binding stays unwritten
+-            until they do. */}
++        {/* The directory card is an explicit optional product action. It is
++            never created by Circle authentication itself. */}
+         <VerifyEmailPrompt />
+         {children}
+       </main>
+diff --git a/frontend/src/components/VerifyEmailPrompt.jsx b/frontend/src/components/VerifyEmailPrompt.jsx
+index 97a1c44..02062cd 100644
+--- a/frontend/src/components/VerifyEmailPrompt.jsx
++++ b/frontend/src/components/VerifyEmailPrompt.jsx
+@@ -1,8 +1,7 @@
+ import { useState } from 'react'
+ import { useAuth } from '../hooks/useAuth.jsx'
+ 
+-/* Collects Tranche's own verification code, the last step before an email
+-   becomes payable.
++/* Starts and collects Tranche's own directory verification code.
+ 
+    This is deliberately skippable. The user is already signed in and can use
+    every part of the app; what's gated is only whether other people can find
+@@ -11,10 +10,13 @@ import { useAuth } from '../hooks/useAuth.jsx'
+    buys, so skipping is an informed choice rather than a shrug. */
+ export default function VerifyEmailPrompt() {
+   const {
++    isSca,
++    email,
+     pendingVerification,
+     confirmEmailVerification,
+     resendEmailVerification,
+-    dismissEmailVerification
++    dismissEmailVerification,
++    startDirectoryClaim
+   } = useAuth()
+ 
+   const [code, setCode] = useState('')
+@@ -22,7 +24,40 @@ export default function VerifyEmailPrompt() {
+   const [error, setError] = useState(null)
+   const [resent, setResent] = useState(false)
+ 
+-  if (!pendingVerification) return null
++  if (!isSca || !email) return null
++
++  if (!pendingVerification) {
++    const start = async () => {
++      if (busy) return
++      setBusy(true)
++      setError(null)
++      try {
++        await startDirectoryClaim()
++      } catch (err) {
++        setError(err.message || 'Could not start email-directory verification.')
++      } finally {
++        setBusy(false)
++      }
++    }
++
++    return (
++      <div className="card-surface p-5 flex flex-col gap-3">
++        <div>
++          <div className="flex items-baseline gap-2">
++            <h3 className="text-sm font-semibold text-ink">Be findable by email</h3>
++            <span className="text-[11px] uppercase tracking-wide text-ink-3">Optional</span>
++          </div>
++          <p className="text-[12.5px] text-ink-2 leading-relaxed mt-1">
++            Sign-in is complete. Verify your email only if you want people to find this wallet when they create an escrow.
++          </p>
++        </div>
++        <button type="button" onClick={start} disabled={busy} className="btn-secondary text-sm py-2">
++          {busy ? 'Sending…' : 'Verify for email payments'}
++        </button>
++        {error && <p role="alert" className="text-[12.5px] text-danger leading-relaxed">{error}</p>}
++      </div>
++    )
++  }
+ 
+   const submit = async (e) => {
+     e.preventDefault()
+diff --git a/frontend/src/components/VerifyEmailPrompt.test.jsx b/frontend/src/components/VerifyEmailPrompt.test.jsx
+index 15a73b7..79ee363 100644
+--- a/frontend/src/components/VerifyEmailPrompt.test.jsx
++++ b/frontend/src/components/VerifyEmailPrompt.test.jsx
+@@ -6,10 +6,13 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
+ afterEach(cleanup)
+ 
+ const auth = vi.hoisted(() => ({
++  isSca: true,
++  email: 'alice@example.com',
+   pendingVerification: { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 },
+   confirmEmailVerification: vi.fn().mockResolvedValue({ verified: true }),
+   resendEmailVerification: vi.fn().mockResolvedValue({ sent: true }),
+-  dismissEmailVerification: vi.fn()
++  dismissEmailVerification: vi.fn(),
++  startDirectoryClaim: vi.fn().mockResolvedValue({ verificationRequired: true })
+ }))
+ 
+ vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => auth }))
+@@ -20,6 +23,9 @@ beforeEach(() => {
+   auth.confirmEmailVerification.mockClear()
+   auth.resendEmailVerification.mockClear()
+   auth.dismissEmailVerification.mockClear()
++  auth.startDirectoryClaim.mockClear()
++  auth.isSca = true
++  auth.email = 'alice@example.com'
+   auth.pendingVerification = { verificationId: 'v1', email: 'alice@example.com', expiresInMinutes: 15 }
+ })
+ 
+@@ -106,8 +112,16 @@ describe('VerifyEmailPrompt behaviour is unchanged', () => {
+     await waitFor(() => expect(auth.resendEmailVerification).toHaveBeenCalledTimes(1))
+   })
+ 
+-  it('renders nothing when there is no pending verification', () => {
++  it('offers an explicit directory claim when there is no pending verification', async () => {
+     auth.pendingVerification = null
++    render(<VerifyEmailPrompt />)
++    fireEvent.click(screen.getByRole('button', { name: /verify for email payments/i }))
++    await waitFor(() => expect(auth.startDirectoryClaim).toHaveBeenCalledTimes(1))
++  })
++
++  it('renders nothing for an EOA', () => {
++    auth.pendingVerification = null
++    auth.isSca = false
+     const { container } = render(<VerifyEmailPrompt />)
+     expect(container).toBeEmptyDOMElement()
+   })
+diff --git a/frontend/src/confirm/ucw-auth-storage-follow-up.md b/frontend/src/confirm/ucw-auth-storage-follow-up.md
+new file mode 100644
+index 0000000..2fb5b81
+--- /dev/null
++++ b/frontend/src/confirm/ucw-auth-storage-follow-up.md
+@@ -0,0 +1,37 @@
++# UCW browser credential storage follow-up
++
++This auth-hardening change does **not** delete, rename, or migrate the Circle
++SDK storage keys. The Tranche cookie is now the authoritative application
++session, but the browser still needs Circle credentials for the current hosted
++SDK flow.
++
++## What the browser SDK currently requires
++
++- `VITE_CIRCLE_APP_ID` at build time to construct `W3SSdk`.
++- `deviceId` from `sdk.getDeviceId()` before requesting or using the email OTP
++  configuration.
++- The values returned by `/api/wallet/email-token`:
++  `deviceToken`, `deviceEncryptionKey`, and `otpToken`, plus the entered email,
++  for `sdk.updateConfigs()` and `sdk.verifyOtp()`.
++- The Circle login result's `userToken` and `encryptionKey` for
++  `sdk.setAuthentication()` before `sdk.execute(challengeId)` completes wallet
++  initialization or a Circle-hosted transaction challenge.
++- The current browser-to-server Circle API calls still carry `userToken` as a
++  bearer credential. The server now checks it against the HttpOnly Tranche
++  session and derives the wallet identity from that session; it never trusts a
++  browser wallet ID or address.
++
++The current `tranche.circleSession` localStorage record contains the Circle
++`userToken` and `encryptionKey`, along with the wallet display metadata. The
++separate `tranche.circleActivity` record supports the existing client-side
++inactivity compatibility check. Both remain unchanged in this change.
++
++## Separate follow-up before changing storage
++
++Do not remove or move these values until a separate change proves, in a real
++browser, how the SDK can re-authenticate after reload and how an approved
++Circle challenge remains executable. That follow-up must cover token expiry,
++logout/revocation, multiple tabs, initialization challenges, Phase 1 compare
++mode, and the remaining XSS exposure. A possible direction is an in-memory
++SDK credential lease or a server-side token broker, but this document does not
++select or implement one.
+diff --git a/frontend/src/hooks/useAuth.jsx b/frontend/src/hooks/useAuth.jsx
+index 5c89458..86d30f0 100644
+--- a/frontend/src/hooks/useAuth.jsx
++++ b/frontend/src/hooks/useAuth.jsx
+@@ -112,6 +112,7 @@ function readStoredSession() {
+ async function postJson(path, body) {
+   const res = await fetch(path, {
+     method: 'POST',
++    credentials: 'same-origin',
+     headers: { 'Content-Type': 'application/json' },
+     body: JSON.stringify(body)
+   })
+@@ -136,11 +137,14 @@ export function AuthProvider({ children }) {
+ 
+   const [circle, setCircle] = useState(() => readStoredSession())
+   const [sdkReady, setSdkReady] = useState(false)
+-  // Set when this email has never been bound to an address before and is
+-  // waiting on Tranche's own verification code. Held in memory only: it
+-  // guards a write, so letting it survive a reload would be handing the
+-  // pending binding to whoever next opens the browser.
++  // Set only by the explicit email-directory claim flow. It is never created
++  // as a side effect of Circle sign-in.
+   const [pendingVerification, setPendingVerification] = useState(null)
++  // A localStorage Circle blob is only a credential cache. The server cookie
++  // must validate before the app treats the UCW as connected.
++  const [serverSessionState, setServerSessionState] = useState(() => (
++    readStoredSession() ? 'checking' : 'ready'
++  ))
+   const sdkRef = useRef(null)
+   const deviceIdRef = useRef(null)
+   // Resolves the in-flight OTP dialog. Circle reports the login result through
+@@ -202,6 +206,7 @@ export function AuthProvider({ children }) {
+ 
+   const persist = useCallback((session) => {
+     setCircle(session)
++    setServerSessionState('ready')
+     try {
+       if (session) {
+         localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
+@@ -220,9 +225,9 @@ export function AuthProvider({ children }) {
+     }
+   }, [])
+ 
+-  /* Full email onboarding: OTP -> verify -> wallet -> directory entry.
+-     Safe to call for a returning user; Circle reports the wallet already
+-     exists and we skip straight to looking it up. */
++  /* Full email onboarding: Circle OTP -> wallet provisioning -> canonical
++     Circle identity/wallet validation -> Tranche cookie-backed session.
++     Email-directory binding is deliberately not part of this path. */
+   const signInWithEmail = useCallback(async (rawEmail, { onStage } = {}) => {
+     const email = String(rawEmail || '').trim().toLowerCase()
+     if (!email) throw new Error('Enter your email address.')
+@@ -232,14 +237,14 @@ export function AuthProvider({ children }) {
+     if (!deviceId) throw new Error('Could not identify this device. Please reload and try again.')
+ 
+     onStage?.('sending')
+-    const session = await postJson('/api/wallet/email-token', { deviceId, email })
++    const otpSession = await postJson('/api/wallet/email-token', { deviceId, email })
+ 
+     sdk.updateConfigs({
+       appSettings: { appId: import.meta.env.VITE_CIRCLE_APP_ID },
+       loginConfigs: {
+-        deviceToken: session.deviceToken,
+-        deviceEncryptionKey: session.deviceEncryptionKey,
+-        otpToken: session.otpToken,
++        deviceToken: otpSession.deviceToken,
++        deviceEncryptionKey: otpSession.deviceEncryptionKey,
++        otpToken: otpSession.otpToken,
+         email: { email }
+       }
+     })
+@@ -249,7 +254,7 @@ export function AuthProvider({ children }) {
+         await postJson('/api/wallet/email-resend', {
+           deviceId,
+           email,
+-          otpToken: session.otpToken
++          otpToken: otpSession.otpToken
+         })
+       } catch {
+         // Circle's dialog owns this interaction; surfacing our own error on
+@@ -264,7 +269,10 @@ export function AuthProvider({ children }) {
+     })
+ 
+     onStage?.('creating')
+-    const init = await postJson('/api/wallet/initialize', { userToken: login.userToken })
++    const init = await postJson('/api/wallet/initialize', {
++      sessionId: otpSession.sessionId,
++      userToken: login.userToken
++    })
+ 
+     if (init.challengeId) {
+       sdk.setAuthentication({ userToken: login.userToken, encryptionKey: login.encryptionKey })
+@@ -277,14 +285,14 @@ export function AuthProvider({ children }) {
+     }
+ 
+     onStage?.('linking')
+-    // Circle needs a moment to index a freshly created wallet, and register
+-    // 409s until the address exists. Retry rather than dumping that race on
+-    // the user as a failure.
+-    let registered = null
++    // Circle needs a moment to index a freshly created wallet, and
++    // complete-login 409s until the address exists. Retry rather than
++    // dumping that normal race on the user as a failure.
++    let authenticated = null
+     for (let attempt = 0; attempt < 5; attempt++) {
+       try {
+-        registered = await postJson('/api/wallet/register', {
+-          sessionId: session.sessionId,
++        authenticated = await postJson('/api/wallet/complete-login', {
++          sessionId: otpSession.sessionId,
+           userToken: login.userToken
+         })
+         break
+@@ -294,34 +302,20 @@ export function AuthProvider({ children }) {
+       }
+     }
+ 
+-    // First time on this email: the wallet exists and the user is signed in,
+-    // but they are not in the payable-by-email directory until they return
+-    // the code we just mailed them. Deliberately not fatal — they can use the
+-    // whole app meanwhile; the only thing gated is other people being able to
+-    // find them by email.
+-    if (registered?.verificationRequired) {
+-      setPendingVerification({
+-        verificationId: registered.verificationId,
+-        email: registered.email,
+-        expiresInMinutes: registered.expiresInMinutes
+-      })
++    const wallet = authenticated?.session
++    if (!wallet?.walletId || !wallet?.walletAddress) {
++      throw new Error('Your wallet was verified but the Tranche session could not be created.')
+     }
+ 
+-    const { wallets } = await postJson('/api/wallet/list', { userToken: login.userToken })
+-    const wallet = wallets?.find((w) => w.state === 'LIVE') ?? wallets?.[0]
+-    if (!wallet?.address) throw new Error('Your wallet was created but could not be loaded.')
+-
+     const next = {
+       userToken: login.userToken,
+       encryptionKey: login.encryptionKey,
+-      // registered.address is absent while verification is pending — the
+-      // directory entry is what's withheld, not the wallet itself, so the
+-      // user still signs in at their real Circle address.
+-      address: registered?.address ?? wallet.address,
+-      walletId: wallet.id,
++      address: wallet.walletAddress,
++      walletId: wallet.walletId,
+       email,
+       issuedAt: Date.now()
+     }
++    setPendingVerification(null)
+     persist(next)
+     onStage?.('done')
+     return next
+@@ -351,16 +345,40 @@ export function AuthProvider({ children }) {
+   // listed in the email directory until they verify.
+   const dismissEmailVerification = useCallback(() => setPendingVerification(null), [])
+ 
++  /* Explicit product-email opt-in. Circle sign-in never calls this. The
++     requested address is only an email-directory alias; the server derives
++     the wallet and Circle user from the cookie session before sending code. */
++  const startDirectoryClaim = useCallback(async () => {
++    if (!circle?.email || serverSessionState !== 'ready') {
++      throw new Error('Sign in with Circle before claiming an email address.')
++    }
++    const verification = await postJson('/api/wallet/directory-claim', { email: circle.email })
++    if (verification.verificationRequired) {
++      setPendingVerification({
++        verificationId: verification.verificationId,
++        email: verification.email,
++        expiresInMinutes: verification.expiresInMinutes
++      })
++    }
++    return verification
++  }, [circle, serverSessionState])
++
+   const signOut = useCallback(() => {
+     // Unconditional, where this used to be guarded on `circle`: persist(null)
+     // is what clears the activity stamp as well, and logout has to be terminal
+     // — leaving a stamp behind would be leaving a session half-revived.
+     // Harmless when there was no Circle session; setCircle(null) on already-null
+     // state doesn't re-render, and removeItem on an absent key is a no-op.
++    const hadCircleSession = !!circle
+     persist(null)
++    if (hadCircleSession) {
++      // Best effort: local sign-out remains terminal even if the network is
++      // unavailable, while the server revocation closes the cookie session.
++      void postJson('/api/wallet/logout', {}).catch(() => {})
++    }
+     if (eoaConnected) disconnect()
+     setPendingVerification(null)
+-  }, [eoaConnected, persist, disconnect])
++  }, [circle, eoaConnected, persist, disconnect])
+ 
+   /* The only Circle contract-write boundary in the intended React call graph.
+      useTx supplies an immutable action plus the private lease minted by
+@@ -368,8 +386,9 @@ export function AuthProvider({ children }) {
+      no normal production React call-site bypass exists. A raw request, stale
+      descriptor, or invalid lease is rejected before the server challenge
+      endpoint is reached. The lease is JavaScript-only, not server-verifiable;
+-     the current endpoint still receives browser-supplied userToken, walletId,
+-     contractAddress, and callData. Native mode must add the server-side
++     the current endpoint still receives a browser-supplied userToken plus
++     contractAddress and callData; the server derives wallet identity from the
++     cookie session. Native mode must add the server-side
+      intent and identity controls documented in confirm/native-mode-security.md. */
+   const executeContractCall = useCallback(async (action, { lease } = {}) => {
+     if (!circle) return null
+@@ -384,7 +403,6 @@ export function AuthProvider({ children }) {
+ 
+     const { challengeId } = await postJson('/api/wallet/execute-contract-call', {
+       userToken: circle.userToken,
+-      walletId: circle.walletId,
+       contractAddress: action.request.address,
+       callData: action.callData
+     })
+@@ -409,7 +427,61 @@ export function AuthProvider({ children }) {
+     writeActivityAt()
+ 
+     return { challengeId, userToken: circle.userToken }
+-  }, [circle, getSdk])
++  }, [circle, serverSessionState, getSdk])
++
++  /* Test-only read path. The canary page receives only the sanitized report;
++     the Circle bearer token stays inside this auth closure and is never part
++     of the page's props, route state, or rendered data. This deliberately
++     does not stamp activity: inspecting a preflight is not approving a
++     transaction. */
++  const runCanaryPreflight = useCallback(async () => {
++    if (!circle?.userToken || serverSessionState !== 'ready') {
++      throw new Error('Sign in with a Circle UCW before opening the canary.')
++    }
++    return postJson('/api/wallet/canary-preflight', { userToken: circle.userToken })
++  }, [circle, serverSessionState])
++
++  // Validate the app session on reload. This deliberately does not alter or
++  // delete the Circle SDK storage; that credential-lifecycle change is a
++  // separate follow-up documented in confirm/ucw-auth-storage-follow-up.md.
++  useEffect(() => {
++    const stored = readStoredSession()
++    if (!stored) {
++      setServerSessionState('ready')
++      return undefined
++    }
++
++    let cancelled = false
++    Promise.resolve()
++      .then(() => fetch('/api/wallet/session', { credentials: 'same-origin' }))
++      .then(async (res) => {
++        let data = {}
++        try {
++          if (typeof res?.json === 'function') data = await res.json()
++        } catch {
++          // Treat an unreadable response as an invalid server session.
++        }
++        return { ok: res?.ok === true, data }
++      })
++      .then(({ ok, data }) => {
++        if (cancelled) return
++        if (!ok || !data.authenticated || !data.session) {
++          persist(null)
++          return
++        }
++        setCircle((current) => current ? {
++          ...current,
++          address: data.session.walletAddress,
++          walletId: data.session.walletId
++        } : current)
++        setServerSessionState('ready')
++      })
++      .catch(() => {
++        if (!cancelled) persist(null)
++      })
++
++    return () => { cancelled = true }
++  }, [persist])
+ 
+   /* Opening the app on a session that survived BOTH gates in readStoredSession
+      counts as activity: the owner came back. Mount-only, and deliberately not
+@@ -445,12 +517,13 @@ export function AuthProvider({ children }) {
+   const value = useMemo(() => {
+     // A Circle session wins when both exist: choosing email sign-in is an
+     // explicit act, whereas an injected wallet may have auto-reconnected.
+-    const walletType = circle ? 'circle-sca' : eoaConnected ? 'eoa' : null
++    const activeCircle = circle && serverSessionState === 'ready' ? circle : null
++    const walletType = activeCircle ? 'circle-sca' : eoaConnected ? 'eoa' : null
+     return {
+       walletType,
+-      address: circle ? circle.address : eoaAddress,
+-      walletId: circle?.walletId ?? null,
+-      email: circle?.email ?? null,
++      address: activeCircle ? activeCircle.address : eoaAddress,
++      walletId: activeCircle?.walletId ?? null,
++      email: activeCircle?.email ?? null,
+       isConnected: !!walletType,
+       isSca: walletType === 'circle-sca',
+       sdkReady,
+@@ -459,13 +532,15 @@ export function AuthProvider({ children }) {
+       confirmEmailVerification,
+       resendEmailVerification,
+       dismissEmailVerification,
++      startDirectoryClaim,
+       signOut,
+-      executeContractCall
++      executeContractCall,
++      runCanaryPreflight
+     }
+   }, [
+-    circle, eoaConnected, eoaAddress, sdkReady, pendingVerification,
++    circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, pendingVerification,
+     signInWithEmail, confirmEmailVerification, resendEmailVerification,
+-    dismissEmailVerification, signOut, executeContractCall
++    dismissEmailVerification, startDirectoryClaim, signOut, executeContractCall, runCanaryPreflight
+   ])
+ 
+   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+diff --git a/frontend/src/hooks/useAuth.test.jsx b/frontend/src/hooks/useAuth.test.jsx
+index 369a0fa..684825a 100644
+--- a/frontend/src/hooks/useAuth.test.jsx
++++ b/frontend/src/hooks/useAuth.test.jsx
+@@ -25,7 +25,11 @@ vi.mock('wagmi', () => ({
+ const executeSpy = vi.hoisted(() => vi.fn())
+ vi.mock('@circle-fin/w3s-pw-web-sdk', () => ({
+   W3SSdk: class {
++    constructor(_config, callback) { this.callback = callback }
+     getDeviceId() { return Promise.resolve('device-1') }
++    updateConfigs() {}
++    setOnResendOtpEmail(callback) { this.resendOtpEmail = callback }
++    verifyOtp() { this.callback?.(undefined, { userToken: 'tok-login', encryptionKey: 'key-login' }) }
+     setAuthentication() {}
+     setLocalizations() {}
+     setThemeColor() {}
+@@ -70,6 +74,16 @@ beforeEach(() => {
+   disconnect.mockReset()
+   executeSpy.mockReset()
+   accountMock.current = { address: undefined, isConnected: false }
++  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
++    ok: true,
++    json: async () => ({
++      authenticated: true,
++      session: {
++        walletId: 'wallet-1',
++        walletAddress: '0x1111111111111111111111111111111111111111'
++      }
++    })
++  }))
+   __resetConfirmationForTests()
+ })
+ 
+@@ -80,12 +94,12 @@ afterEach(() => {
+ })
+ 
+ describe('session restore — the two gates', () => {
+-  it('resumes a session inside both the TTL and the ceiling', () => {
++  it('resumes a session inside both the TTL and the ceiling', async () => {
+     seed({ issuedDaysAgo: 2, activityDaysAgo: 1 })
+ 
+     const { result } = renderHook(() => useAuth(), { wrapper })
+ 
+-    expect(result.current.isConnected).toBe(true)
++    await waitFor(() => expect(result.current.isConnected).toBe(true))
+     expect(result.current.walletType).toBe('circle-sca')
+     expect(result.current.isSca).toBe(true)
+     expect(result.current.email).toBe('freelancer@example.com')
+@@ -142,12 +156,12 @@ describe('session restore — the two gates', () => {
+     expect(result.current.isConnected).toBe(false)
+   })
+ 
+-  it('still resumes a stamp-less session that is recent by issuedAt', () => {
++  it('still resumes a stamp-less session that is recent by issuedAt', async () => {
+     seed({ issuedDaysAgo: 2 })
+ 
+     const { result } = renderHook(() => useAuth(), { wrapper })
+ 
+-    expect(result.current.isConnected).toBe(true)
++    await waitFor(() => expect(result.current.isConnected).toBe(true))
+   })
+ 
+   // Opening the app on a live session is itself activity — otherwise a user
+@@ -171,17 +185,66 @@ describe('session restore — the two gates', () => {
+ })
+ 
+ describe('activity on real use', () => {
++  it('completes UCW login with Circle identity validation and never calls register or Resend', async () => {
++    vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
++    const calls = []
++    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
++      calls.push(path)
++      if (path === '/api/wallet/email-token') {
++        return { ok: true, json: async () => ({
++          sessionId: 'attempt-1',
++          deviceToken: 'device-token',
++          deviceEncryptionKey: 'device-key',
++          otpToken: 'otp-token'
++        }) }
++      }
++      if (path === '/api/wallet/initialize') {
++        return { ok: true, json: async () => ({ challengeId: null }) }
++      }
++      if (path === '/api/wallet/complete-login') {
++        return { ok: true, json: async () => ({ session: {
++          walletId: 'wallet-1',
++          walletAddress: '0x1111111111111111111111111111111111111111'
++        } }) }
++      }
++      throw new Error(`unexpected request ${path}`)
++    }))
++
++    const { result } = renderHook(() => useAuth(), { wrapper })
++    await act(async () => {
++      await result.current.signInWithEmail('alice@example.com')
++    })
++
++    expect(result.current.walletType).toBe('circle-sca')
++    expect(calls).toEqual([
++      '/api/wallet/email-token',
++      '/api/wallet/initialize',
++      '/api/wallet/complete-login'
++    ])
++    expect(calls).not.toContain('/api/wallet/register')
++    expect(calls).not.toContain('/api/wallet/directory-claim')
++  })
++
+   /* The stamp has to land on an approved transaction, or an active user gets
+      logged out mid-project by the very ceiling meant to be generous to them. */
+   it('stamps activity after a contract call is approved', async () => {
+     vi.stubEnv('VITE_CIRCLE_APP_ID', 'app-1')
+     seed({ issuedDaysAgo: 3, activityDaysAgo: 6 })
+-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+-      ok: true,
+-      json: async () => ({ challengeId: 'chal-1' })
++    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (path) => {
++      if (path === '/api/wallet/session') {
++        return {
++          ok: true,
++          json: async () => ({ authenticated: true, session: {
++            walletId: 'wallet-1',
++            walletAddress: '0x1111111111111111111111111111111111111111'
++          } })
++        }
++      }
++      return { ok: true, json: async () => ({ challengeId: 'chal-1' }) }
+     }))
+ 
+     const { result } = renderHook(() => ({ auth: useAuth(), coordinator: useTransactionConfirm() }), { wrapper })
++    await waitFor(() => expect(result.current.auth.isSca).toBe(true))
+     // The app-open stamp fires first; take it out of the picture so what this
+     // asserts is unambiguously the executeContractCall stamp.
+     await waitFor(() => expect(localStorage.getItem(ACTIVITY_KEY)).not.toBeNull())
+@@ -220,7 +283,6 @@ describe('activity on real use', () => {
+     const executeCall = globalThis.fetch.mock.calls.find(([path]) => path === '/api/wallet/execute-contract-call')
+     expect(JSON.parse(executeCall[1].body)).toMatchObject({
+       userToken: 'tok-1',
+-      walletId: 'wallet-1',
+       contractAddress: request.address,
+       callData: action.callData
+     })
+@@ -253,7 +315,7 @@ describe('activity on real use', () => {
+     await act(async () => {
+       await expect(result.current.executeContractCall(action)).rejects.toThrow(/requires confirmation/i)
+     })
+-    expect(globalThis.fetch).not.toHaveBeenCalled()
++    expect(globalThis.fetch.mock.calls.some(([path]) => path === '/api/wallet/execute-contract-call')).toBe(false)
+   })
+ })
+ 
+@@ -265,7 +327,7 @@ describe('signOut', () => {
+     seed({ issuedDaysAgo: 1, activityDaysAgo: 0 })
+ 
+     const { result } = renderHook(() => useAuth(), { wrapper })
+-    expect(result.current.isConnected).toBe(true)
++    await waitFor(() => expect(result.current.isConnected).toBe(true))
+ 
+     await act(async () => { result.current.signOut() })
+ 

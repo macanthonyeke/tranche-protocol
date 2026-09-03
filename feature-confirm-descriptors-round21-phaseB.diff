@@ -1,0 +1,324 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index b1634fe..6e40e6b 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -2315,26 +2315,33 @@ export function payoutChainLabel(escrow, splits) {
+    fee < the real remainder, a floor-only submission still dispatches
+    successfully on-chain and then fails delivery with INSUFFICIENT_FEE,
+    forcing a self-relay recovery that a correctly-fee'd burn never would have
+-   needed. So the no-split, cross-chain case now signals `needsLiveQuote`
+-   instead of returning a floor immediately; the caller resolves it through
+-   {resolveDominantMaxFee} in utils/cctpFee.js, which uses the live quote
+-   ONLY when it is provably below worstCaseRemainder's bound on the real
+-   remainder — never as a rejection trigger, and never blocking the
+-   transaction if the fetch fails. release() ignores whatever is submitted
+-   here and substitutes the snapshot regardless (:674), so resolving a live
+-   quote for it is harmless (if unnecessary) — same as before.
++   needed. So the no-split, cross-chain, approveRelease case now signals
++   `needsLiveQuote` instead of returning a floor immediately; the caller
++   resolves it through {resolveDominantMaxFee} in utils/cctpFee.js, which
++   uses the live quote ONLY when it is provably below worstCaseRemainder's
++   bound on the real remainder — never as a rejection trigger, and never
++   blocking the transaction if the fetch fails.
++
++   Round 21 Phase B: release() ignores whatever is submitted here and
++   substitutes the snapshot regardless (:674) — Round 20 Phase C still
++   resolved a live quote for it anyway ("harmless if unnecessary"), the same
++   class of pointless request already removed from mutualSettle
++   (Round 20 Phase B). Now gated on `actionKey === 'approve'`, matching how
++   the caller (MilestoneAction.run) already distinguishes the two — release()
++   goes straight to the floor with no network call, same as split legs.
+ 
+    Synchronous and pure on purpose: this test harness cannot execute real
+    Solidity, but it CAN verify this decision independently of the component. */
+-export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps }) {
++export function releaseMaxFeePlan({ escrow, splits, milestoneAmount, maxProtocolFeeBps, actionKey }) {
+   const crossChain = settlementIsCrossChain(escrow, splits)
+   if (!crossChain) return { maxFee: 0n }
+   const floor = escrow.escrowCctpForwardFee ?? 0n
+ 
+   // Split legs always burn at the snapshot regardless of what's submitted
+   // (settled decision #7) — a live quote would fetch a number the contract
+-  // never uses.
+-  if (splits?.length > 0) return { maxFee: floor }
++  // never uses. Same for release(): it substitutes its own snapshot and
++  // never reads the submitted value at all.
++  if (splits?.length > 0 || actionKey !== 'approve') return { maxFee: floor }
+ 
+   return {
+     needsLiveQuote: true,
+@@ -3493,12 +3500,13 @@ function MilestoneAction({
+     // actually govern an approveRelease burn.
+     let quotedMaxFee
+     if (action.needsForwardFee) {
+-      // Round 18/19/20 Phase B/C: see releaseMaxFeePlan for why this reuses
+-      // settlementIsCrossChain instead of reading escrow.destinationDomain
+-      // directly, why split legs skip the network entirely, and why the
+-      // one case that needs it resolves through resolveDominantMaxFee
++      // Round 18/19/20/21 Phase B/C/B: see releaseMaxFeePlan for why this
++      // reuses settlementIsCrossChain instead of reading
++      // escrow.destinationDomain directly, why split legs and release()
++      // (actionKey !== 'approve') both skip the network entirely, and why
++      // the one case that needs it resolves through resolveDominantMaxFee
+       // rather than rejecting on a bad quote.
+-      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps })
++      const plan = releaseMaxFeePlan({ escrow, splits, milestoneAmount: milestone.amount, maxProtocolFeeBps: config?.maxProtocolFeeBps, actionKey: action.key })
+       const maxFee = plan.needsLiveQuote ? await resolveDominantMaxFee(plan.quoteParams) : (plan.maxFee ?? 0n)
+       args = [...action.args, maxFee]
+       quotedMaxFee = maxFee
+diff --git a/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx b/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
+index 5080749..8478279 100644
+--- a/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
++++ b/frontend/src/pages/EscrowDetail.maxFeePlan.test.jsx
+@@ -31,14 +31,21 @@ import { describe, it, expect } from 'vitest'
+    but says nothing about Circle's SEPARATE off-chain forwarding requirement
+    — a floor-only submission can still fail delivery with INSUFFICIENT_FEE
+    when Circle's live fee exceeds the floor, forcing an unnecessary
+-   self-relay. So the no-split cross-chain case now signals `needsLiveQuote`;
+-   the caller resolves that through resolveDominantMaxFee (utils/cctpFee.js),
+-   which uses the live quote ONLY when it is provably below
+-   worstCaseRemainder's bound on the real remainder — never a rejection
++   self-relay. So the no-split cross-chain, approveRelease case now signals
++   `needsLiveQuote`; the caller resolves that through resolveDominantMaxFee
++   (utils/cctpFee.js), which uses the live quote ONLY when it is provably
++   below worstCaseRemainder's bound on the real remainder — never a rejection
+    trigger, never blocking the transaction on a failed fetch. Split legs
+    still skip the network entirely and resolve straight to the floor, exactly
+-   as Round 19 left them — see releaseMaxFeePlan's own doc comment in
+-   EscrowDetail.jsx for the full citation trail. */
++   as Round 19 left them.
++
++   Round 21 Phase B: release() ignores whatever is submitted and substitutes
++   its own snapshot regardless (:674) — Round 20 still resolved a live quote
++   for it anyway, the same pointless-request class already removed from
++   mutualSettle. Now gated on `actionKey === 'approve'`, matching how the
++   caller (MilestoneAction.run) already distinguishes the two keys — release()
++   goes straight to the floor with no network call — see releaseMaxFeePlan's
++   own doc comment in EscrowDetail.jsx for the full citation trail. */
+ import { releaseMaxFeePlan } from './EscrowDetail.jsx'
+ 
+ const ARC = 26
+@@ -64,13 +71,13 @@ describe('releaseMaxFeePlan', () => {
+      _assertCrossChainFee's own rule (TrancheProtocol.sol:1382). Split legs
+      always burn at the snapshot regardless of what's submitted (settled
+      decision #7), so this resolves straight to the floor — no live quote is
+-     ever attempted for a split escrow. */
++     ever attempted for a split escrow, even on the approve path. */
+   it('treats an Arc-root escrow with a cross-chain split leg as cross-chain, and resolves to the escrow floor with no live quote', () => {
+     const splits = [
+       { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+     ]
+-    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits, milestoneAmount: 150_000_000n })
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(ARC), splits, milestoneAmount: 150_000_000n, actionKey: 'approve' })
+     expect(plan).toEqual({ maxFee: 200000n })
+     expect(plan.maxFee).not.toBe(0n)
+     expect(plan.needsLiveQuote).toBeFalsy()
+@@ -79,27 +86,27 @@ describe('releaseMaxFeePlan', () => {
+   /* Split legs always burn at the snapshot regardless of what's submitted
+      (settled decision #7) — a live Circle quote here would fetch a number
+      the contract never uses, even when the escrow's OWN domain already
+-     makes it cross-chain (not just via a split leg). */
++     makes it cross-chain (not just via a split leg), and even on the
++     approve path. */
+   it('resolves to the escrow floor for any cross-chain split, with no live quote', () => {
+     const splits = [
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+     ]
+-    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits, milestoneAmount: 150_000_000n })
++    const plan = releaseMaxFeePlan({ escrow: escrowOn(BASE), splits, milestoneAmount: 150_000_000n, actionKey: 'approve' })
+     expect(plan).toEqual({ maxFee: 200000n })
+     expect(plan.needsLiveQuote).toBeFalsy()
+   })
+ 
+   /* The one case that genuinely needs a live quote: no split legs, a
+-     cross-chain destination. The plan signals the caller to resolve it via
++     cross-chain destination, AND the caller is approveRelease specifically
++     — the only path where the submitted maxFee is actually read by the
++     contract (:647 → :1298). The plan signals the caller to resolve it via
+      resolveDominantMaxFee rather than resolving a value itself — this
+-     function stays synchronous and pure. release() ignores whatever is
+-     ultimately submitted here and substitutes the snapshot regardless
+-     (:674), so resolving a quote is harmless (if unnecessary) on that path
+-     too — the plan doesn't distinguish approve from release. */
+-  it('signals needsLiveQuote for a no-split cross-chain release, with the exact params resolveDominantMaxFee needs', () => {
++     function stays synchronous and pure. */
++  it('signals needsLiveQuote for a no-split cross-chain approveRelease, with the exact params resolveDominantMaxFee needs', () => {
+     const plan = releaseMaxFeePlan({
+-      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n
++      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n, actionKey: 'approve'
+     })
+     expect(plan.maxFee).toBeUndefined()
+     expect(plan.needsLiveQuote).toBe(true)
+@@ -110,6 +117,21 @@ describe('releaseMaxFeePlan', () => {
+       maxProtocolFeeBps: 500n
+     })
+   })
++
++  /* Round 21 Phase B: release() ignores whatever is submitted and
++     substitutes its own snapshot regardless (:674) — a live quote for it
++     would fetch a number the contract never reads, the same class of
++     pointless request already removed from mutualSettle. Gated on
++     actionKey !== 'approve' rather than a release-specific check, so any
++     future action key that isn't 'approve' defaults to the safe, no-network
++     floor path too. */
++  it('resolves to the escrow floor for a no-split cross-chain release() with no live quote, unlike the identical approveRelease shape above', () => {
++    const plan = releaseMaxFeePlan({
++      escrow: escrowOn(BASE), splits: [], milestoneAmount: 150_000_000n, maxProtocolFeeBps: 500n, actionKey: 'release'
++    })
++    expect(plan).toEqual({ maxFee: 200000n })
++    expect(plan.needsLiveQuote).toBeFalsy()
++  })
+ })
+ 
+ /* The core safety property the floor-fallback still relies on, proven
+diff --git a/frontend/src/utils/cctpFee.js b/frontend/src/utils/cctpFee.js
+index b55fa5e..31b1326 100644
+--- a/frontend/src/utils/cctpFee.js
++++ b/frontend/src/utils/cctpFee.js
+@@ -13,6 +13,17 @@ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbo
+ // pick this tier's forwardFee from the API response.
+ const STANDARD_FINALITY = 2000
+ 
++// Round 21 Phase B: a request that simply hangs (a stalled connection,
++// unusually slow response — no explicit timeout at all before this) never
++// resolves and never rejects, so an unprotected `await` here never
++// completes. That breaks resolveDominantMaxFee's "never blocks the
++// transaction" guarantee just as surely as an outright failure would, since
++// its try/catch can only catch a REJECTION, not a hang. 8s: long enough to
++// tolerate a slow/mobile connection to Circle's API for a single small GET,
++// short enough that a genuine hang doesn't leave the pre-signature UI
++// (before the wallet prompt even appears) stalled for an unreasonable time.
++const FEE_QUOTE_TIMEOUT_MS = 8_000
++
+ /**
+  * Fetch Circle's live Forwarding-Service fee for an Arc→destination burn.
+  * @param {number} srcDomain   CCTP source domain (Arc = 26).
+@@ -22,7 +33,17 @@ const STANDARD_FINALITY = 2000
+  */
+ export async function fetchForwardFee(srcDomain, dstDomain, level = 'high') {
+   const url = `${IRIS_BASE}/v2/burn/USDC/fees/${srcDomain}/${dstDomain}?forward=true`
+-  const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } })
++  const controller = new AbortController()
++  const timeoutId = setTimeout(() => controller.abort(), FEE_QUOTE_TIMEOUT_MS)
++  let res
++  try {
++    res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: controller.signal })
++  } catch (err) {
++    if (err.name === 'AbortError') throw new Error("Delivery fee request timed out. Please try again.")
++    throw err
++  } finally {
++    clearTimeout(timeoutId)
++  }
+   if (!res.ok) throw new Error("Couldn't get delivery fee. Please try again.")
+   const data = await res.json()
+   if (!Array.isArray(data)) throw new Error("Couldn't read delivery fee response. Please try again.")
+@@ -79,10 +100,14 @@ export function worstCaseRemainder(amount, maxProtocolFeeBps) {
+  * PROVABLY safe against the contract's real, unknowable-in-advance remainder
+  * — strictly below {worstCaseRemainder}'s lower bound on that remainder.
+  * Falls back to `floor` — Round 19's unconditionally-safe submission — in
+- * every other case: the quote fetch throws, the response is malformed, or
+- * the quote resolves but isn't provably safe. NEVER throws itself, so a
+- * transient Circle fee-API outage degrades to exactly Round 19's behaviour
+- * instead of blocking the caller's transaction.
++ * every other case: the quote fetch throws, the response is malformed, the
++ * request times out (fetchForwardFee's own FEE_QUOTE_TIMEOUT_MS — Round 21
++ * Phase B; a hang neither resolves nor rejects, so this guarantee needed a
++ * timeout somewhere underneath it regardless of this function's own
++ * try/catch), or the quote resolves but isn't provably safe. NEVER throws
++ * itself, so a transient Circle fee-API outage — slow, erroring, or hung —
++ * degrades to exactly Round 19's behaviour instead of blocking the caller's
++ * transaction.
+  *
+  * Scope: only meaningful for a no-split cross-chain burn where the submitted
+  * maxFee genuinely governs the burn (approveRelease, resolveDispute with
+diff --git a/frontend/src/utils/cctpFee.test.js b/frontend/src/utils/cctpFee.test.js
+index 6a2cbca..8f14b58 100644
+--- a/frontend/src/utils/cctpFee.test.js
++++ b/frontend/src/utils/cctpFee.test.js
+@@ -23,7 +23,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
+    resolveDominantMaxFee, deciding whether a live quote is trustworthy
+    enough to prefer over the floor — see that function's own tests below for
+    how the new role is exercised. */
+-import { worstCaseRemainder, resolveDominantMaxFee } from './cctpFee.js'
++import { worstCaseRemainder, resolveDominantMaxFee, fetchForwardFee } from './cctpFee.js'
+ 
+ const MAX_PROTOCOL_FEE_BPS = 500n // mirrors TrancheProtocol.sol:23
+ 
+@@ -148,4 +148,75 @@ describe('resolveDominantMaxFee', () => {
+       })
+     ).resolves.toBe(200000n)
+   })
++
++  /* Round 21 Phase B: a request that simply hangs never resolves and never
++     rejects on its own — an unprotected fetch here would make
++     resolveDominantMaxFee's "never blocks the transaction" guarantee false
++     for a network partial-connection or unusually slow response, not just an
++     outright failure. This mock respects AbortSignal the way real fetch does
++     (rejects with an AbortError once the signal fires), so it can only
++     resolve this test if fetchForwardFee's own timeout actually aborts it. */
++  it('falls back to the floor, without throwing, when the quote request hangs past its timeout', async () => {
++    vi.useFakeTimers()
++    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
++      opts.signal.addEventListener('abort', () => {
++        const err = new Error('The operation was aborted')
++        err.name = 'AbortError'
++        reject(err)
++      })
++    }))
++    vi.stubGlobal('fetch', hangingFetch)
++
++    const resultPromise = resolveDominantMaxFee({
++      destinationDomain: 6, floor: 200000n, recipientAmount: 250_000_000n, maxProtocolFeeBps: 500n
++    })
++    await vi.advanceTimersByTimeAsync(8_000)
++    const maxFee = await resultPromise
++
++    expect(maxFee).toBe(200000n)
++    vi.useRealTimers()
++  })
++})
++
++describe('fetchForwardFee — timeout', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++    vi.useRealTimers()
++  })
++
++  it('throws a clean, catchable error once the request hangs past FEE_QUOTE_TIMEOUT_MS, rather than never resolving', async () => {
++    vi.useFakeTimers()
++    const hangingFetch = vi.fn((url, opts) => new Promise((resolve, reject) => {
++      opts.signal.addEventListener('abort', () => {
++        const err = new Error('The operation was aborted')
++        err.name = 'AbortError'
++        reject(err)
++      })
++    }))
++    vi.stubGlobal('fetch', hangingFetch)
++
++    const resultPromise = fetchForwardFee(26, 6)
++    let settled = false
++    resultPromise.catch(() => {}).finally(() => { settled = true })
++
++    // Well before the timeout: still hanging, exactly the failure mode a
++    // missing timeout would leave forever.
++    await vi.advanceTimersByTimeAsync(5_000)
++    expect(settled).toBe(false)
++
++    await vi.advanceTimersByTimeAsync(3_001)
++    await expect(resultPromise).rejects.toThrow(/timed out/i)
++  })
++
++  it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
++    const fetchMock = vi.fn(() => Promise.resolve({
++      ok: true,
++      json: async () => [{ finalityThreshold: 2000, forwardFee: { high: '150000' } }]
++    }))
++    vi.stubGlobal('fetch', fetchMock)
++    return fetchForwardFee(26, 6).then(() => {
++      const [, opts] = fetchMock.mock.calls[0]
++      expect(opts.signal).toBeInstanceOf(AbortSignal)
++    })
++  })
+ })

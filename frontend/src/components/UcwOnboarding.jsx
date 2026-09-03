@@ -6,7 +6,8 @@ export default function UcwOnboarding({ onContinue }) {
         Your Tranche account is ready.
       </h2>
       <p className="text-sm text-ink-2 leading-relaxed mb-6">
-        Your Circle wallet is linked on Arc Testnet. Continue to the app to
+        Your Tranche account is linked to an Arc wallet on Arc Testnet. Continue to the app
+        to
         create or receive milestone escrows.
       </p>
       <button type="button" onClick={onContinue} className="btn-primary text-sm py-2.5 px-5">

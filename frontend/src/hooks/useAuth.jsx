@@ -3,6 +3,7 @@ import { useAccount, useDisconnect } from 'wagmi'
 import { applyTrancheTheme, applyConfirmLocalization } from '../utils/circleTheme.js'
 import { isTransactionAction } from '../confirm/action.js'
 import { isCircleExecutionLease } from './useTransactionConfirm.js'
+import { useToast } from './useToast.jsx'
 
 /* One source of truth for "who is the current user and how do they sign".
    Both sign-in paths land here, and the rest of the app reads identity from
@@ -134,6 +135,7 @@ async function postJson(path, body) {
 export function AuthProvider({ children }) {
   const { address: eoaAddress, isConnected: eoaConnected } = useAccount()
   const { disconnect } = useDisconnect()
+  const toast = useToast()
 
   const [circle, setCircle] = useState(() => readStoredSession())
   const [sdkReady, setSdkReady] = useState(false)
@@ -143,6 +145,15 @@ export function AuthProvider({ children }) {
   // Set only by the explicit email-directory claim flow. It is never created
   // as a side effect of Circle sign-in.
   const [pendingVerification, setPendingVerification] = useState(null)
+  // Directory discoverability is an optional product binding, not an auth
+  // identity. Keep its server-confirmed state separate from the pending code
+  // so the UI can distinguish checking, unverified, pending, and verified.
+  const [directoryBinding, setDirectoryBinding] = useState(null)
+  const [directoryBindingStatus, setDirectoryBindingStatus] = useState('unknown')
+  // Server-owned onboarding choice. It is intentionally not persisted in the
+  // browser: the authenticated status read is the source of truth across
+  // refreshes, devices, and later Circle sign-ins.
+  const [directoryChoice, setDirectoryChoice] = useState('unknown')
   // A localStorage Circle blob is only a credential cache. The server cookie
   // must validate before the app treats the UCW as connected.
   const [serverSessionState, setServerSessionState] = useState(() => (
@@ -210,6 +221,9 @@ export function AuthProvider({ children }) {
   const persist = useCallback((session) => {
     setCircle(session)
     setServerSessionState('ready')
+    setDirectoryBinding(null)
+    setDirectoryBindingStatus('unknown')
+    setDirectoryChoice('unknown')
     try {
       if (session) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
@@ -355,6 +369,34 @@ export function AuthProvider({ children }) {
 
   const completeOnboarding = useCallback(() => setOnboarding(false), [])
 
+  const refreshDirectoryBinding = useCallback(async () => {
+    if (!circle?.email || serverSessionState !== 'ready') {
+      setDirectoryBinding(null)
+      setDirectoryBindingStatus('unknown')
+      return null
+    }
+
+    setDirectoryBindingStatus('checking')
+    try {
+      const status = await postJson('/api/wallet/directory-claim', {
+        action: 'status',
+        email: circle.email
+      })
+      if (status.verified) {
+        setDirectoryBinding({ ...status, email: status.email ?? circle.email })
+        setDirectoryBindingStatus('verified')
+      } else {
+        setDirectoryBinding(null)
+        setDirectoryBindingStatus('unverified')
+      }
+      setDirectoryChoice(status.choice ?? (status.verified ? 'verified' : 'undecided'))
+      return status
+    } catch (err) {
+      setDirectoryBindingStatus('error')
+      throw err
+    }
+  }, [circle?.email, serverSessionState])
+
   /* Hand back the code from Tranche's own verification email. Only on
      success does the email -> address binding actually get written, so this
      is the step that makes someone findable by email. */
@@ -365,8 +407,28 @@ export function AuthProvider({ children }) {
       code
     })
     setPendingVerification(null)
+    setDirectoryBinding(null)
+    setDirectoryBindingStatus('checking')
+    try {
+      // Verification has committed the binding; this second request makes the
+      // app render the server's current binding state immediately instead of
+      // falling back to the old unverified CTA.
+      await refreshDirectoryBinding()
+    } catch {
+      // The verification response itself is authoritative. If the follow-up
+      // read is briefly unavailable, keep the user in the verified state and
+      // let the next explicit refresh reconcile it.
+      setDirectoryBinding({
+        ...res,
+        email: res.email ?? pendingVerification.email,
+        verified: true
+      })
+      setDirectoryBindingStatus('verified')
+    }
+    setDirectoryChoice('verified')
+    toast.success('You can now be found by email for payments.')
     return res
-  }, [pendingVerification])
+  }, [pendingVerification, refreshDirectoryBinding, toast])
 
   const resendEmailVerification = useCallback(async () => {
     if (!pendingVerification) throw new Error('There is nothing waiting to be verified.')
@@ -375,9 +437,27 @@ export function AuthProvider({ children }) {
     })
   }, [pendingVerification])
 
-  // Leaves the user signed in and able to use the app; they simply aren't
-  // listed in the email directory until they verify.
-  const dismissEmailVerification = useCallback(() => setPendingVerification(null), [])
+  // Leaves the user signed in and records only the optional onboarding choice.
+  // The endpoint intentionally never creates, verifies, or removes a binding.
+  const skipDirectoryPrompt = useCallback(async () => {
+    if (!circle?.email || serverSessionState !== 'ready') {
+      throw new Error('Sign in with Tranche before changing email discoverability.')
+    }
+    const result = await postJson('/api/wallet/directory-claim', {
+      action: 'skip',
+      email: circle.email
+    })
+    setPendingVerification(null)
+    setDirectoryBinding(null)
+    setDirectoryBindingStatus('unverified')
+    setDirectoryChoice(result.choice ?? 'skipped')
+    return result
+  }, [circle?.email, serverSessionState])
+
+  // Kept as a compatibility alias for existing prompt consumers. New UI uses
+  // skipDirectoryPrompt so the server persistence is explicit at the call
+  // site, while older callers still receive the same safe behavior.
+  const dismissEmailVerification = skipDirectoryPrompt
 
   /* Explicit product-email opt-in. Circle sign-in never calls this. The
      requested address is only an email-directory alias; the server derives
@@ -388,14 +468,34 @@ export function AuthProvider({ children }) {
     }
     const verification = await postJson('/api/wallet/directory-claim', { email: circle.email })
     if (verification.verificationRequired) {
+      setDirectoryBinding(null)
+      setDirectoryBindingStatus('pending')
       setPendingVerification({
         verificationId: verification.verificationId,
         email: verification.email,
         expiresInMinutes: verification.expiresInMinutes
       })
+    } else if (verification.verified) {
+      setDirectoryBinding({ ...verification, email: verification.email ?? circle.email })
+      setDirectoryBindingStatus('verified')
+      setDirectoryChoice('verified')
     }
     return verification
   }, [circle, serverSessionState])
+
+  const removeDirectoryBinding = useCallback(async () => {
+    if (!circle?.email || serverSessionState !== 'ready') {
+      throw new Error('Sign in with Tranche before changing email discoverability.')
+    }
+    const result = await postJson('/api/wallet/directory-claim', {
+      action: 'remove',
+      email: circle.email
+    })
+    setDirectoryBinding(null)
+    setDirectoryBindingStatus('unverified')
+    setDirectoryChoice(result.choice ?? 'removed')
+    return result
+  }, [circle?.email, serverSessionState])
 
   const signOut = useCallback(() => {
     // Unconditional, where this used to be guarded on `circle`: persist(null)
@@ -564,22 +664,31 @@ export function AuthProvider({ children }) {
       sdkReady,
       onboarding,
       pendingVerification,
+      directoryBinding,
+      directoryBindingStatus,
+      directoryChoice,
       signInWithEmail,
       createAccountWithEmail,
       completeOnboarding,
       confirmEmailVerification,
       resendEmailVerification,
       dismissEmailVerification,
+      skipDirectoryPrompt,
       startDirectoryClaim,
+      refreshDirectoryBinding,
+      removeDirectoryBinding,
       signOut,
       executeContractCall,
       runCanaryPreflight
     }
   }, [
     circle, serverSessionState, eoaConnected, eoaAddress, sdkReady, onboarding, pendingVerification,
+    directoryBinding, directoryBindingStatus,
+    directoryChoice,
     signInWithEmail, createAccountWithEmail, completeOnboarding,
     confirmEmailVerification, resendEmailVerification,
-    dismissEmailVerification, startDirectoryClaim, signOut, executeContractCall, runCanaryPreflight
+    dismissEmailVerification, skipDirectoryPrompt, startDirectoryClaim, refreshDirectoryBinding,
+    removeDirectoryBinding, signOut, executeContractCall, runCanaryPreflight
   ])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

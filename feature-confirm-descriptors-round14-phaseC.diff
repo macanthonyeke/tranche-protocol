@@ -1,0 +1,251 @@
+diff --git a/frontend/src/pages/ArbiterPanel.confirm.test.jsx b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+index 1eaec71..442ea30 100644
+--- a/frontend/src/pages/ArbiterPanel.confirm.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+@@ -42,12 +42,14 @@ describe('timeoutSettlementConfirm — the split itself', () => {
+   })
+ 
+   it('states both halves', () => {
+-    expect(paramText(d())).toContain("Freelancer's half: 125.00 USDC")
++    // Round 14 #10: the freelancer's half is gross — label it that way, since
++    // the fee comes off before it is credited.
++    expect(paramText(d())).toContain("Freelancer's half: 125.00 USDC before the protocol fee")
+     expect(paramText(d())).toContain("Payer's half: 125.00 USDC")
+   })
+ 
+   it('falls back to a 10,000 denominator when the config has not loaded', () => {
+-    expect(paramText(d({ bpsDenominator: 0n }))).toContain("Freelancer's half: 125.00 USDC")
++    expect(paramText(d({ bpsDenominator: 0n }))).toContain("Freelancer's half: 125.00 USDC before the protocol fee")
+   })
+ })
+ 
+@@ -125,9 +127,17 @@ describe('timeoutSettlementConfirm — not an arbiter ruling', () => {
+ 
+ describe('timeoutSettlementConfirm — credited, not sent', () => {
+   /* Both halves are refund credits on Arc (TrancheProtocol.sol:596, :614).
+-     Neither side is transferred and neither goes cross-chain. */
+-  it('says both halves are withdrawable Arc credits', () => {
+-    expect(paramText(d())).toContain('Both halves are credited as withdrawable balances on Arc, not sent to a wallet.')
++     Neither side is transferred and neither goes cross-chain. But they are
++     not credited the SAME way: the payer's half has no fee (:614, in full);
++     the freelancer's half is credited net of the protocol fee (:593, :596/
++     :609), and the fee itself goes to the treasury separately (:621). Round
++     14 #10: the old copy said "Both halves are credited" right below the two
++     GROSS figures, which reads as promising the freelancer's gross half is
++     what lands in their balance — it is not. */
++  it('says both halves are withdrawable Arc credits, but not the same amount as shown above', () => {
++    const t = paramText(d())
++    expect(t).toContain("The payer's half is credited to Arc in full. The freelancer's half is credited net of that fee — the fee itself goes to the protocol treasury, not into either balance. Neither half is sent to a wallet.")
++    expect(t).not.toMatch(/Both halves are credited/)
+   })
+ 
+   /* A timeout settlement never routes through CCTP, so the escrow's
+@@ -163,9 +173,16 @@ describe('timeoutSettlementConfirm — the fee asymmetry', () => {
+     expect(amounts).toEqual(['250.00 USDC', '125.00 USDC', '125.00 USDC'])
+   })
+ 
+-  it('states no fee rate or net figure', () => {
+-    expect(paramText(d())).not.toMatch(/\d+(\.\d+)?\s?%/)
+-    expect(paramText(d())).not.toMatch(/\bnet\b/i)
++  it('states no fee rate, and never attaches an invented figure to "net"', () => {
++    const t = paramText(d())
++    expect(t).not.toMatch(/\d+(\.\d+)?\s?%/)
++    // Round 14 #10 uses "net" descriptively (the freelancer's half is
++    // credited net of the fee) without a number attached — escrowFeeBps has
++    // no getter, so a net AMOUNT would have to be fabricated; a qualitative
++    // "net of the fee" is not. The adjacent test pins the real invariant:
++    // exactly three USDC figures appear, the milestone total and the two
++    // gross halves — nothing computed from a rate this screen cannot read.
++    expect(t).not.toMatch(/net[^.]*\d+(\.\d+)?\s*USDC/i)
+   })
+ })
+ 
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 7ac831a..c339125 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -483,7 +483,16 @@ export function timeoutShares(amount, bpsDenominator) {
+    protocol fee is escrowFeeBps, snapshotted at deposit and unreadable from
+    the frontend, so the freelancer's net is not stated. The asymmetry is,
+    because it holds regardless of the rate: the fee comes off the
+-   freelancer's half only (:583). */
++   freelancer's half only (:583).
++
++   Round 14 #10: gross-only is fine as a design choice, but the credited-line
++   used to say "Both halves are credited" right below the two gross figures —
++   read together, that states the freelancer's GROSS half lands as their
++   credit. It does not: :593 computes recipientNet = recipientShare - fee and
++   THAT is what's credited (:596/:609); the fee is a separate safeTransfer to
++   the treasury (:621). The payer's half, with no fee, is credited in full
++   (:614) — so the two halves are not even credited the same way, which
++   "Both halves are credited" also flattens. */
+ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, timeoutAt, bpsDenominator }) {
+   const { recipientShare, depositorShare } = timeoutShares(milestone.amount, bpsDenominator)
+ 
+@@ -498,11 +507,11 @@ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, tim
+     parameters: [
+       `Milestone ${index + 1} of ${Number(escrow.milestoneCount)}: ${formatUSDC(milestone.amount)}`,
+       'Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.',
+-      `Freelancer's half: ${formatUSDC(recipientShare)}`,
++      `Freelancer's half: ${formatUSDC(recipientShare)} before the protocol fee`,
+       `Payer's half: ${formatUSDC(depositorShare)}`,
+       ...timeoutCreditLines(escrow, splits),
+       "The protocol fee is taken from the freelancer's half only — the payer's half is fee-free.",
+-      'Both halves are credited as withdrawable balances on Arc, not sent to a wallet.',
++      "The payer's half is credited to Arc in full. The freelancer's half is credited net of that fee — the fee itself goes to the protocol treasury, not into either balance. Neither half is sent to a wallet.",
+       `Arbitration window closed ${formatTimestamp(timeoutAt)}. Anyone can submit this.`
+     ]
+   }
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 4b1cbff..a6eb161 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -2198,7 +2198,13 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     // figure is gross (the protocol fee comes off it, :1270-1271), and the
+     // payer's is never paid at all — it becomes a refund credit they have to
+     // withdraw (:1241).
+-    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited to the payer's refund balance.`
++    //
++    // Round 14 #9: "credited to the payer's refund balance" is only true when
++    // refundTo happens to equal the depositor — the contract credits
++    // e.refundTo (:1241), which can be a different address set at deposit.
++    // refundToLines states the real destination and, only where it actually
++    // diverges, that it is not the payer's own wallet.
++    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited as a refund balance.`
+     return {
+       ...base,
+       title: 'Propose settling this dispute',
+@@ -2207,6 +2213,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+         milestoneLine,
+         `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
+         splitLine,
++        ...refundToLines(escrow),
+         ...(theirBps !== null
+           ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
+           : ['The other party has not proposed anything yet.']),
+@@ -2249,7 +2256,10 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+   }
+   if (bps < 10_000) {
+-    params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
++    // Round 14 #9: credits e.refundTo (:1241), not necessarily the payer's
++    // own wallet — same divergence refundToLines already discloses elsewhere.
++    params.push(...refundToLines(escrow))
++    params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
+   }
+   if (crossChain && bps > 0) {
+     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
+@@ -3714,6 +3724,18 @@ export function retractCancelConfirm({ escrow }) {
+   }
+ }
+ 
++// Round 14 #9: mutualCancel refunds e.refundTo (:1241 area — see
++// refundToLines above), which is the payer's own wallet only when nothing
++// else was set at deposit. Stated only where it actually diverges, same rule
++// refundToLines already follows for the confirm-screen version of this text.
++export function refundDestinationPhrase(escrow) {
++  const diverges = escrow?.refundTo && escrow?.depositor &&
++    escrow.refundTo.toLowerCase() !== escrow.depositor.toLowerCase()
++  return diverges
++    ? "this escrow's configured refund address, not necessarily the payer's own wallet"
++    : "the payer's refund balance"
++}
++
+ function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
+   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
+   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
+@@ -3757,7 +3779,7 @@ function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, cl
+   return (
+     <div className="bg-paper border border-rule rounded-2xl p-5 flex flex-col gap-3">
+       <h3 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Cancel by mutual agreement</h3>
+-      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to the payer's refund balance.</p>
++      <p className="text-xs text-ink-2 leading-relaxed">Both the payer and freelancer need to approve. Any unreleased funds go to {refundDestinationPhrase(escrow)}.</p>
+       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
+         <ApprovalRow label="Payer" approved={payerApproved} />
+         <ApprovalRow label="Freelancer" approved={freelancerApproved} />
+diff --git a/frontend/src/pages/EscrowDetail.settle.test.jsx b/frontend/src/pages/EscrowDetail.settle.test.jsx
+index da24dbd..fc57f47 100644
+--- a/frontend/src/pages/EscrowDetail.settle.test.jsx
++++ b/frontend/src/pages/EscrowDetail.settle.test.jsx
+@@ -59,9 +59,12 @@ describe('a proposal that does not match settles nothing', () => {
+   )
+ 
+   /* Phase C #10 split this line into the three things it was flattening: the
+-     freelancer's figure is gross, and the payer's is a credit, not a payment. */
++     freelancer's figure is gross, and the payer's is a credit, not a payment.
++     Round 14 #9 dropped the flat "the payer's refund balance" clause — the
++     real destination comes from refundToLines, covered with a real refundTo
++     in phaseC.test.jsx; this fixture has none set, so no Credited-to line. */
+   it('states the split as a conditional, not as a fact', () => {
+-    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
++    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited as a refund balance.")
+   })
+ 
+   /* The case most likely to be misread as agreement: the contract requires
+@@ -119,7 +122,7 @@ describe('a matching proposal settles now', () => {
+   })
+ 
+   it('says the payer half is an Arc credit, not a transfer', () => {
+-    expect(paramText(d())).toContain("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
++    expect(paramText(d())).toContain('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
+   })
+ 
+   /* The caller's maxFee is never read (:521-559). Whatever Circle quoted, it
+diff --git a/frontend/src/pages/phaseC.test.jsx b/frontend/src/pages/phaseC.test.jsx
+index 563feb0..ab1dc8f 100644
+--- a/frontend/src/pages/phaseC.test.jsx
++++ b/frontend/src/pages/phaseC.test.jsx
+@@ -16,6 +16,7 @@ import {
+   mutualSettleConfirm,
+   payoutLines,
+   refundToLines,
++  refundDestinationPhrase,
+   proposeMilestoneCancelConfirm,
+   milestoneCancelCompletion,
+   milestoneCancelBlurb,
+@@ -142,6 +143,34 @@ describe('#9 — refunds go to refundTo, which need not be the payer', () => {
+     const refund = milestoneConfirm({ key: 'refund', fn: 'refundAfterDeadline' }, escrowOn(ARC), { ...milestone, state: 0 }, [])
+     expect(paramText(refund)).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
+   })
++
++  /* Round 14 #9: Round 13 reached refundAfterDeadline, proposeMilestoneCancel
++     and cancelEscrowConfirm, but not mutualSettle's own two branches — both
++     still said flatly "the payer's refund balance" regardless of what
++     refundTo actually was. */
++  it('carries the disclosure through the settlement proposal (would-settle branch)', () => {
++    const t = paramText(settle({ theirs: { exists: false, bps: 0n } }))
++    expect(t).toContain(`Credited to: ${REFUND_TO}`)
++    expect(t).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
++    expect(t).not.toMatch(/credited to the payer's refund balance/)
++  })
++
++  it('carries the disclosure through the settlement execution (agreed branch)', () => {
++    const t = paramText(settle())
++    expect(t).toContain(`Credited to: ${REFUND_TO}`)
++    expect(t).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
++    expect(t).not.toMatch(/The payer's share is credited/)
++  })
++
++  /* The mutual-cancel card's own prose (not the confirm descriptor) had the
++     same flat "the payer's refund balance" line — refundDestinationPhrase is
++     what CancelCard renders inline. */
++  it('hedges the mutual-cancel card copy the same way, and stays quiet in the ordinary case', () => {
++    expect(refundDestinationPhrase(escrowOn(ARC))).toBe(
++      "this escrow's configured refund address, not necessarily the payer's own wallet"
++    )
++    expect(refundDestinationPhrase(escrowOn(ARC, { refundTo: DEPOSITOR }))).toBe("the payer's refund balance")
++  })
+ })
+ 
+ /* #10. "Pays both sides immediately" was true of neither side. The payer's
+@@ -174,7 +203,9 @@ describe('#10 — credit, transfer and pending delivery are three different thin
+      plain payments. The payer's is a credit; the freelancer's is pre-fee. */
+   it('distinguishes gross from credited on the settlement proposal', () => {
+     const t = paramText(settle({ theirs: { exists: false, bps: 0n } }))
+-    expect(t).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
++    // Round 14 #9: dropped "credited to the payer's refund balance" — the
++    // real destination now comes from refundToLines, tested separately above.
++    expect(t).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited as a refund balance.")
+     expect(t).not.toMatch(/Would pay .* to the payer/)
+   })
+ 

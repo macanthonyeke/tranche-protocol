@@ -1,0 +1,181 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index a19f442..26ab080 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -212,12 +212,41 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+         }
+       }
+ 
+-      // Circle returns attestation: "PENDING" (string) while still confirming.
++      // Round 32 (fixing the Round 31 review's Medium finding: "attestation
++      // completeness ignores Circle's status field"). Circle's own
++      // resolve-stuck-attestation troubleshooting guide gives the canonical
++      // completeness check verbatim: `if (message.status === "complete" &&
++      // message.attestation)` — status is the authoritative signal that an
++      // attestation is genuinely ready, not just that some attestation
++      // string happens to be present and non-PENDING. Confirmed against two
++      // independent Circle doc pages (the troubleshooting guide's polling
++      // loop and the V1->V2 migration guide's sample response), both of
++      // which show status as a per-MESSAGE field ("complete" / "pending"),
++      // not an envelope-level one — same level as attestation itself.
++      //
++      // Previously this only checked `m.attestation && m.attestation !==
++      // 'PENDING'`, which is fail-open against exactly the anomalous case
++      // Codex constructed: a message with a present, non-PENDING attestation
++      // string but status still 'pending' (or absent) — internally
++      // inconsistent, should be unreachable in a genuine response, but
++      // nothing before this line ever verified that. Requiring status ===
++      // 'complete' closes that gap without weakening anything: a real
++      // resolved message always has both fields agree per Circle's own
++      // documented example.
++      //
++      // Both a 'PENDING'-string attestation AND a null/undefined attestation
++      // are legitimate pre-attestation states here — Circle's own polling
++      // example checks `message.attestation` truthy exactly because it can
++      // be empty/null before status flips to complete, not only "PENDING".
++      // Either way this stays in the same unresolved (keep polling) branch,
++      // never an error state — this is normal, expected latency, not a
++      // fault condition.
++      //
+       // Round 30 (Low finding): signature includes WHICH selected index is
+       // still unattested, not just that one is — same reasoning as the
+       // fingerprint-mismatch signature above.
+       const notAttestedIndexes = messages
+-        .map((m, i) => (m.attestation && m.attestation !== 'PENDING' ? null : i))
++        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' ? null : i))
+         .filter((i) => i !== null)
+       if (notAttestedIndexes.length > 0) {
+         markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index cec7096..c1574de 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -63,10 +63,13 @@ afterEach(() => {
+   vi.useRealTimers()
+ })
+ 
+-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null, message = '0xmessage' } = {}) => ({
++const irisMessage = ({
++  destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx',
++  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = '0xattestation'
++} = {}) => ({
+   message,
+-  attestation: '0xattestation',
+-  status: 'complete',
++  attestation,
++  status,
+   decodedMessage: destinationDomain != null ? { destinationDomain: String(destinationDomain) } : {},
+   forwardState,
+   forwardTxHash,
+@@ -149,6 +152,59 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
+   })
+ })
+ 
++/* Round 32 — attestation completeness must check Circle's own `status`
++   field, not just a present/non-PENDING `attestation` string.
++   Codex's exact anomalous case: a message with a real, non-empty,
++   non-PENDING attestation and even a terminal forwardState, but status
++   still 'pending' (or absent) — internally inconsistent, should be
++   unreachable in a genuine response, but the OLD gate (`m.attestation &&
++   m.attestation !== 'PENDING'`) would have waved it through as delivered
++   anyway, ignoring forwardState terminality entirely being reached on a
++   response Circle itself hasn't marked complete. */
++describe('useCctpDelivery — attestation completeness requires status === "complete", not just a non-PENDING attestation string', () => {
++  it('does NOT treat a message as delivered when attestation is present and non-PENDING but status is "pending" — Codex\'s anomalous case', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'pending', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('does NOT treat a message as delivered when status is missing entirely, even with a real attestation and terminal forwardState', async () => {
++    // Built directly, not via the irisMessage() helper — passing
++    // status: undefined through the helper's destructuring defaults would
++    // silently resolve back to 'complete' (JS applies a default parameter
++    // whenever the value is undefined, key present or not), which would
++    // defeat the point of this exact test.
++    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++    fetchIrisMessages.mockResolvedValue([messageWithoutStatus])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('treats a null attestation as unresolved (keep polling), not an error state, even with status "complete"', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: null, forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('resolves to delivered once status is "complete" AND attestation is present and non-PENDING', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++  })
++})
++
+ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not collapsed by `phase`', () => {
+   it('keeps the COMPLETE message\'s own data intact even when phase is "failed" because a DIFFERENT message failed', async () => {
+     fetchIrisMessages.mockResolvedValue([
+@@ -465,6 +521,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
+     fetchIrisMessages.mockResolvedValue([{
+       message: buildCctpMessage(6),
+       attestation: '0xattestation',
++      status: 'complete',
+       decodedMessage: null,
+       forwardState: 'FAILED',
+       forwardTxHash: null,
+@@ -479,6 +536,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
+     fetchIrisMessages.mockResolvedValue([{
+       message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
+       attestation: '0xattestation',
++      status: 'complete',
+       decodedMessage: { destinationDomain: '6' },
+       forwardState: 'COMPLETE',
+       forwardTxHash: '0xdesttx',
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index 1799335..80d1623 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -183,6 +183,7 @@ const irisMessage = ({
+   return {
+     message,
+     attestation: '0xattestation',
++    status: 'complete',
+     decodedMessage: {
+       destinationDomain: String(destinationDomain),
+       decodedMessageBody: {
+@@ -430,6 +431,7 @@ describe('Round 31: decodedMessage: null must not degrade self-relay recovery to
+     fetchIrisMessages.mockResolvedValue([{
+       message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
+       attestation: '0xattestation',
++      status: 'complete',
+       decodedMessage: null,
+       forwardState: 'FAILED',
+       forwardTxHash: null,
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 6b956dd..1a43a59 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -336,8 +336,9 @@ export function cctpMessageFingerprint(message) {
+    check against" (matches, permissively) here, the same as `fingerprint ==
+    null` below — useCctpDelivery's own attestation gate, which runs
+    immediately after this check, is what correctly keeps polling for this
+-   exact pre-attestation state (`m.attestation && m.attestation !==
+-   'PENDING'`), so there is no need for this function to also detect it.
++   exact pre-attestation state (Round 32: `m.status === 'complete' &&
++   m.attestation && m.attestation !== 'PENDING'`), so there is no need for
++   this function to also detect it.
+    A non-"0x" message that fails to parse as valid CCTP V2 bytes (malformed,
+    truncated) is a different, more anomalous case and fails closed (treated
+    as a mismatch) rather than being let through.

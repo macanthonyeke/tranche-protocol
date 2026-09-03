@@ -41,14 +41,14 @@ describe('ConnectGate UCW account choices', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Create account' }))
     expect(emailProps.current.intent).toBe('signup')
-    expect(screen.getByRole('heading', { name: /create a circle wallet account/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /create a tranche account/i })).toBeInTheDocument()
   })
 
   it('moves an authenticated not-found result to explicit account setup', () => {
     render(<ConnectGate><p>protected</p></ConnectGate>)
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
-    expect(screen.getByRole('status')).toHaveTextContent(/older circle wallet/i)
+    expect(screen.getByRole('status')).toHaveTextContent(/older arc wallet/i)
     expect(emailProps.current.intent).toBe('signup')
   })
 
@@ -57,6 +57,7 @@ describe('ConnectGate UCW account choices', () => {
     render(<ConnectGate><p>protected</p></ConnectGate>)
 
     expect(screen.getByRole('heading', { name: /tranche account is ready/i })).toBeInTheDocument()
+    expect(screen.getByText(/linked to an arc wallet on arc testnet/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /continue to tranche/i }))
     expect(auth.completeOnboarding).toHaveBeenCalledTimes(1)
   })

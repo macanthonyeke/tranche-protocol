@@ -1,0 +1,283 @@
+diff --git a/frontend/src/pages/EscrowDetail.cancel.test.jsx b/frontend/src/pages/EscrowDetail.cancel.test.jsx
+new file mode 100644
+index 0000000..1778205
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.cancel.test.jsx
+@@ -0,0 +1,147 @@
++import { describe, it, expect } from 'vitest'
++
++/* mutualCancel is two different transactions behind one button: the first
++   party's call only writes an approval flag, the second party's call falls
++   into the refund branch and cancels the escrow. The descriptor has to tell
++   them apart, and it has to compute the refundable figure the way the
++   contract does — PENDING milestones only, with IN_REVIEW/DISPUTED making the
++   finalising call revert rather than refund. */
++import { cancelEscrowConfirm } from './EscrowDetail.jsx'
++import { buildContractInteraction } from '../utils/circleTheme.js'
++
++const REFUND_TO = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++
++// Milestone states, as normaliseMilestone yields them:
++// PENDING 0, IN_REVIEW 1, DISPUTED 2, RELEASED 3, REFUNDED 4.
++const PENDING = (amount) => ({ state: 0, amount })
++const IN_REVIEW = (amount) => ({ state: 1, amount })
++const DISPUTED = (amount) => ({ state: 2, amount })
++const RELEASED = (amount) => ({ state: 3, amount })
++const REFUNDED = (amount) => ({ state: 4, amount })
++
++const escrow = { id: 7, refundTo: REFUND_TO, milestoneCount: 4, totalAmount: 400000000n }
++
++const d = (milestones, otherApproved) =>
++  cancelEscrowConfirm({ escrow, milestones, otherApproved })
++
++const paramText = (x) => (x.parameters || []).join('\n')
++
++describe('cancelEscrowConfirm — first party approving', () => {
++  const ms = [PENDING(100000000n), PENDING(100000000n), RELEASED(100000000n), REFUNDED(100000000n)]
++
++  /* This call writes a flag and returns (TrancheProtocol.sol:742-746). A Total
++     here would put the refund figure on the one call that does not refund. */
++  it('carries no amount, because this call moves nothing', () => {
++    expect(d(ms, false)).not.toHaveProperty('amount')
++    const built = buildContractInteraction(d(ms, false))
++    expect(built).not.toHaveProperty('mainCurrency')
++    expect(built).not.toHaveProperty('total')
++  })
++
++  it('says outright that no funds move', () => {
++    expect(d(ms, false).parameters).toContain('No funds move on this transaction.')
++  })
++
++  it('still previews what would be refunded, phrased conditionally', () => {
++    expect(paramText(d(ms, false)))
++      .toContain('Would refund 200.00 USDC across 2 unstarted milestones once both parties approve.')
++  })
++
++  it('is titled as an approval, not as a cancellation', () => {
++    expect(d(ms, false).title).toBe('Approve cancelling this escrow')
++  })
++})
++
++describe('cancelEscrowConfirm — second party finalising', () => {
++  const ms = [PENDING(100000000n), PENDING(50000000n), RELEASED(100000000n), REFUNDED(100000000n)]
++
++  it('reports the refundable figure as the amount', () => {
++    expect(d(ms, true).amount).toBe(150000000n)
++    expect(d(ms, true).amountLabel).toBe('Amount refunded')
++    expect(buildContractInteraction(d(ms, true)).total).toEqual(['150.00 USDC'])
++  })
++
++  /* The contract sums PENDING only (:755-757). Released milestones are already
++     paid out and refunded ones already credited, so counting either would
++     promise the payer money that does not exist. */
++  it('counts PENDING milestones only, not total-minus-released', () => {
++    expect(d([PENDING(10n), RELEASED(999n)], true).amount).toBe(10n)
++    expect(d([PENDING(10n), REFUNDED(999n)], true).amount).toBe(10n)
++    expect(d(ms, true).amount).not.toBe(escrow.totalAmount)
++  })
++
++  it('reports zero when nothing is left to refund', () => {
++    const done = d([RELEASED(100n), REFUNDED(100n)], true)
++    expect(done.amount).toBe(0n)
++    expect(paramText(done)).toContain('0 of 4 milestones refunded')
++  })
++
++  it('says released milestones are not clawed back', () => {
++    expect(d(ms, true).parameters).toContain('Already-released milestones are not clawed back.')
++  })
++
++  /* Same language as every other refund path in this app (Round 1's
++     refundAfterDeadline and declineEscrow): the contract credits
++     refundBalances, it does not transfer. */
++  it('says credited to the refund address, not sent', () => {
++    expect(paramText(d(ms, true))).toContain(`Credited to: ${REFUND_TO}`)
++    expect(paramText(d(ms, true))).toMatch(/withdrawable refund balance on Arc/)
++    expect(paramText(d(ms, true))).not.toMatch(/\bSent to:/)
++  })
++
++  it('states that no protocol fee is taken', () => {
++    expect(d(ms, true).parameters).toContain('No protocol fee is taken.')
++  })
++
++  it('is titled as the cancellation it performs', () => {
++    expect(d(ms, true).title).toBe('Cancel this escrow and refund the payer')
++  })
++})
++
++/* The refund branch reverts with CannotCancelDuringDispute while any milestone
++   is IN_REVIEW or DISPUTED (:752). A descriptor promising a refund there would
++   describe a transaction that cannot succeed. */
++describe.each([
++  ['in review', IN_REVIEW(100000000n)],
++  ['disputed', DISPUTED(100000000n)]
++])('cancelEscrowConfirm — finalising blocked by a milestone %s', (_label, blocker) => {
++  const ms = [PENDING(100000000n), blocker]
++
++  it('promises no amount for a transaction that will revert', () => {
++    expect(d(ms, true)).not.toHaveProperty('amount')
++    expect(buildContractInteraction(d(ms, true))).not.toHaveProperty('mainCurrency')
++  })
++
++  it('says the transaction will not go through, and why', () => {
++    expect(d(ms, true).subtitle).toMatch(/will not go through/)
++    expect(paramText(d(ms, true))).toContain('Blocked by 1 milestone in review or disputed.')
++  })
++
++  /* Only the finalising call reaches the refund branch — the first party's
++     approval succeeds regardless of milestone state. */
++  it('does not block the first party from approving', () => {
++    expect(d(ms, false).title).toBe('Approve cancelling this escrow')
++    expect(paramText(d(ms, false))).not.toMatch(/Blocked by/)
++  })
++})
++
++describe('cancelEscrowConfirm — wording and edge cases', () => {
++  it('pluralises milestone counts', () => {
++    expect(paramText(d([PENDING(1n)], false))).toContain('1 unstarted milestone once')
++    expect(paramText(d([PENDING(1n), PENDING(1n)], false))).toContain('2 unstarted milestones once')
++    expect(paramText(d([PENDING(1n), IN_REVIEW(1n)], true))).toContain('1 milestone in review')
++    expect(paramText(d([IN_REVIEW(1n), DISPUTED(1n)], true))).toContain('2 milestones in review')
++  })
++
++  it('survives milestones being absent rather than crashing the signing flow', () => {
++    expect(() => d(undefined, false)).not.toThrow()
++    expect(() => d(undefined, true)).not.toThrow()
++    expect(d(undefined, true).amount).toBe(0n)
++  })
++
++  it('names the real function in every branch', () => {
++    for (const x of [d([PENDING(1n)], false), d([PENDING(1n)], true), d([IN_REVIEW(1n)], true)]) {
++      expect(x.functionName).toBe('mutualCancel')
++    }
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 4aeb7fa..07b7383 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -237,6 +237,7 @@ function DetailInner() {
+             escrow={escrow}
+             role={role}
+             splits={splits}
++            milestones={milestones}
+             onChange={handleChange}
+             optimistic={optimistic}
+             setOpt={setOpt}
+@@ -543,7 +544,7 @@ function FocusIcon({ tone }) {
+    Locked amount up top, then a stack of border-separated parameter rows. The
+    secondary cards (mutual cancel, receiving address) sit beneath so the whole
+    column scrolls together rather than stacking visually with the milestones. */
+-function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clearOpt }) {
++function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, setOpt, clearOpt }) {
+   const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
+   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
+ 
+@@ -599,7 +600,7 @@ function LedgerColumn({ escrow, role, splits, onChange, optimistic, setOpt, clea
+ 
+       {role && escrow.state === 0 && (
+         <CancelCard
+-          escrow={escrow} role={role} onChange={onChange}
++          escrow={escrow} role={role} milestones={milestones} onChange={onChange}
+           optimistic={optimistic} setOpt={setOpt} clearOpt={clearOpt}
+         />
+       )}
+@@ -2724,7 +2725,86 @@ function Countdown({ label, target, tone = 'warning' }) {
+ }
+ 
+ /* ---------- Cancel by mutual agreement ---------- */
+-function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
++
++/* Confirm-screen copy for mutualCancel, which is two different transactions
++   behind one button (TrancheProtocol.sol:735).
++ *
++ *  - First party to call: sets their approval flag and returns. Nothing moves.
++ *  - Second party to call: both flags are now true, so the same call falls into
++ *    the refund branch, cancels the escrow and credits the payer.
++ *
++ * So `otherApproved` decides whether this is EVIDENCE/STATE or VALUE-MOVING.
++ * The button already knows — it switches its own label between "Approve
++ * cancellation" and "Finalize cancellation" — and the signing screen has to
++ * make the same distinction, or the approving party sees a Total for money
++ * that this transaction does not move.
++ *
++ * The refundable figure is the sum of PENDING milestones only. RELEASED ones
++ * are already paid out and are not clawed back; REFUNDED ones are already
++ * credited. It is NOT total-minus-released, because IN_REVIEW milestones are
++ * neither — they make the finalising call revert outright
++ * (CannotCancelDuringDispute, :752), which is the third case below. */
++export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
++  const list = milestones || []
++  const pending = list.filter((m) => m.state === 0)
++  const refundable = pending.reduce((sum, m) => sum + m.amount, 0n)
++  // IN_REVIEW(1) and DISPUTED(2) both trip CannotCancelDuringDispute.
++  const blocking = list.filter((m) => m.state === 1 || m.state === 2)
++
++  const base = {
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'mutualCancel'
++  }
++
++  if (!otherApproved) {
++    // No `amount`: this call only writes a flag. A Total here would show the
++    // refund figure on the one call that does not perform the refund.
++    return {
++      ...base,
++      title: 'Approve cancelling this escrow',
++      subtitle: 'Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the payer.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Would refund ${formatUSDC(refundable)} across ${pending.length} unstarted milestone${pending.length === 1 ? '' : 's'} once both parties approve.`,
++        'No funds move on this transaction.'
++      ]
++    }
++  }
++
++  if (blocking.length > 0) {
++    // Both parties have approved, so this call takes the refund branch — and
++    // that branch reverts while any milestone is in review or disputed. Do not
++    // put a refund figure on a screen for a transaction that cannot succeed.
++    return {
++      ...base,
++      title: 'Cancel this escrow and refund the payer',
++      subtitle: 'The contract rejects a cancellation while a milestone is in review or disputed, so this transaction will not go through.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Blocked by ${blocking.length} milestone${blocking.length === 1 ? '' : 's'} in review or disputed.`,
++        'Let those milestones settle, or resolve the dispute, then try again.'
++      ]
++    }
++  }
++
++  return {
++    ...base,
++    title: 'Cancel this escrow and refund the payer',
++    subtitle: 'Both parties have now approved. This cancels the escrow and refunds every milestone that has not started. This cannot be undone.',
++    amount: refundable,
++    amountLabel: 'Amount refunded',
++    parameters: [
++      `Escrow #${escrow.id} — ${pending.length} of ${Number(escrow.milestoneCount)} milestones refunded`,
++      `Credited to: ${escrow.refundTo}`,
++      'Already-released milestones are not clawed back.',
++      'No protocol fee is taken.',
++      'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
++    ]
++  }
++}
++
++function CancelCard({ escrow, role, milestones, onChange, optimistic, setOpt, clearOpt }) {
+   const myFlag = role === 'payer' ? escrow.depositorApproveCancel : escrow.recipientApproveCancel
+   const otherFlag = role === 'payer' ? escrow.recipientApproveCancel : escrow.depositorApproveCancel
+   const optApproved = optimistic.cancel === 'approved'
+@@ -2745,7 +2825,10 @@ function CancelCard({ escrow, role, onChange, optimistic, setOpt, clearOpt }) {
+ 
+   const submit = () => tx.run(
+     escrowWrite('mutualCancel', [BigInt(escrow.id)]),
+-    { loadingMessage: 'Submitting. Check your wallet.' }
++    {
++      loadingMessage: 'Submitting. Check your wallet.',
++      confirm: cancelEscrowConfirm({ escrow, milestones, otherApproved: otherFlag })
++    }
+   )
+ 
+   const retract = () => retractTx.run(

@@ -1,0 +1,402 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index e1c66e8..6c328c8 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1469,6 +1469,7 @@ function MilestoneRow({
+                   escrow={escrow}
+                   milestone={milestone}
+                   dispute={dispute}
++                  splits={splits}
+                   role={role}
+                   userAddress={userAddress}
+                   onChange={onChange}
+@@ -1680,7 +1681,7 @@ const DISPUTE_TABS = [
+   ['settle', 'Settle']
+ ]
+ 
+-function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange, onCrossChainRelease }) {
++function DisputePanel({ escrow, milestone, dispute, splits, role, userAddress, onChange, onCrossChainRelease }) {
+   const [tab, setTab] = useState('overview')
+ 
+   return (
+@@ -1737,6 +1738,7 @@ function DisputePanel({ escrow, milestone, dispute, role, userAddress, onChange,
+         <SettlementPanel
+           escrow={escrow}
+           milestone={milestone}
++          splits={splits}
+           role={role}
+           onChange={onChange}
+           onCrossChainRelease={onCrossChainRelease}
+@@ -1932,11 +1934,138 @@ function DisputeDetails({ dispute }) {
+   )
+ }
+ 
++/* VALUE-MOVING: mutualSettle is the densest signing site in the app, and the
++ * things that make it dense are mostly NOT what they look like from the
++ * frontend. Read against TrancheProtocol.sol:521-559 and :1222-1334:
++ *
++ * 1. The caller's `maxFee` is dead. It is in the signature and never read in
++ *    the body — the executing branch burns at e.escrowCctpForwardFee, the
++ *    per-escrow snapshot, precisely so one party cannot pick a fee that
++ *    strands the other's payout (:552-556; settled decision #7). The panel
++ *    still quotes Circle live before submitting and passes it, so the number
++ *    the app fetched is not the number the burn uses. Nothing on this screen
++ *    may present it as a cost.
++ *
++ * 2. The protocol fee is escrowFeeBps, snapshotted at deposit, an internal
++ *    mapping with no getter. The only bps the frontend can read is the live
++ *    global, which drifts the moment an admin calls setProtocolFee. Same rule
++ *    payoutLines and timeoutSettlementConfirm already follow: gross figures
++ *    only, state the asymmetry (fee off the freelancer's share alone,
++ *    :1270-1271), never a rate and never a net.
++ *
++ * 3. Execution needs an EXACT bps match from both sides (:549). A different
++ *    number from the other party does not part-settle and does not
++ *    counter-offer — it just sits there. That is the case a signer is most
++ *    likely to misread as agreement.
++ *
++ * 4. A proposal is overwritable (:541-542, unconditional assignment), so
++ *    unlike Round 8's milestone cancel this one CAN be changed later. Worth
++ *    saying, because the neighbouring screen says the opposite.
++ *
++ * 5. Finding 3 / SE-3 bites hardest here. A partial settlement scales the
++ *    freelancer's share down; if it lands at-or-below the escrow's forwarding
++ *    fee it is credited on Arc instead of delivered cross-chain (:1291,
++ *    :1319). A FULL release can never reach that branch (:1285-1288), so this
++ *    is specific to the partial case — which is the only case this screen
++ *    ever describes. */
++const BPS = 10_000n
++
++function settlementIsCrossChain(escrow, splits) {
++  // Mirrors _assertCrossChainFee: with splits, any non-Arc leg counts.
++  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
++  return Number(escrow.destinationDomain) !== ARC_DOMAIN
++}
++
++export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
++  const n = milestone.index + 1
++  const of = Number(escrow.milestoneCount) || n
++  const pct = bps / 100
++  const recipientShare = (milestone.amount * BigInt(bps)) / BPS
++  const payerShare = milestone.amount - recipientShare
++  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)} in dispute`
++
++  const base = {
++    contractName: 'Tranche Protocol Escrow',
++    contractAddress: CONTRACT_ADDRESS,
++    functionName: 'mutualSettle'
++  }
++
++  const theirBps = theirs?.exists ? Number(theirs.bps) : null
++  const matches = theirBps !== null && theirBps === bps
++
++  if (!matches) {
++    // Nothing executes. No `amount` — the figures below are what WOULD happen,
++    // and a Total row would assert they are happening now.
++    const splitLine = `Would pay ${formatUSDC(recipientShare)} to the freelancer and ${formatUSDC(payerShare)} to the payer.`
++    return {
++      ...base,
++      title: 'Propose settling this dispute',
++      subtitle: 'Records the split you are proposing. Nothing settles until both sides have proposed exactly the same percentage.',
++      parameters: [
++        milestoneLine,
++        `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
++        splitLine,
++        ...(theirBps !== null
++          ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
++          : ['The other party has not proposed anything yet.']),
++        'You can change your number later by proposing again.',
++        'No funds move on this transaction.'
++      ]
++    }
++  }
++
++  // Both sides now agree; this call settles the milestone.
++  const crossChain = settlementIsCrossChain(escrow, splits)
++  const floor = escrow.escrowCctpForwardFee ?? 0n
++  const partial = bps > 0 && bps < 10_000
++
++  const params = [
++    milestoneLine,
++    `Agreed split: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
++  ]
++
++  if (bps > 0) {
++    params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
++  }
++  if (bps < 10_000) {
++    params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
++  }
++  if (bps > 0) {
++    params.push(...payoutLines(escrow, splits))
++    params.push("The protocol fee is taken from the freelancer's share only.")
++  } else {
++    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
++  }
++  if (bps < 10_000) {
++    params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
++  }
++  if (crossChain && bps > 0) {
++    params.push(`Cross-chain delivery uses this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded.`)
++    if (partial) {
++      params.push(
++        splits?.length > 0
++          ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
++          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
++      )
++    }
++  }
++  params.push('This cannot be undone.')
++
++  return {
++    ...base,
++    title: 'Settle this dispute now',
++    subtitle: 'Both sides have proposed the same split, so signing settles the milestone and pays out immediately.',
++    amount: milestone.amount,
++    amountLabel: 'Amount settled',
++    parameters: params
++  }
++}
++
+ /* Mutual settlement (mutualSettle). Either party proposes a recipient share in
+    whole percent; when both parties' proposals match, the contract executes the
+    split automatically. We surface both standing proposals and a one-click
+    "agree to their number" path. */
+-function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainRelease }) {
++function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossChainRelease }) {
+   const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
+     escrow.id, milestone.index, escrow.depositor, escrow.recipient
+   )
+@@ -1976,7 +2105,10 @@ function SettlementPanel({ escrow, milestone, role, onChange, onCrossChainReleas
+     }
+     const txHash = await tx.run(
+       escrowWrite('mutualSettle', [BigInt(escrow.id), BigInt(milestone.index), BigInt(bps), maxFee]),
+-      { loadingMessage: 'Check your wallet.' }
++      {
++        loadingMessage: 'Check your wallet.',
++        confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
++      }
+     )
+     if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+       localStorage.setItem(
+diff --git a/frontend/src/pages/EscrowDetail.settle.test.jsx b/frontend/src/pages/EscrowDetail.settle.test.jsx
+new file mode 100644
+index 0000000..96c7e98
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.settle.test.jsx
+@@ -0,0 +1,215 @@
++import { describe, it, expect } from 'vitest'
++
++/* mutualSettle — the densest signing site in the app.
++
++   Most of what these tests pin is a negative, because the frontend's view of
++   this call is misleading in three separate ways:
++
++   - The caller's maxFee is never read by the contract (:521-559). The panel
++     quotes Circle live and passes it anyway, so the screen must not present
++     that number as a cost.
++   - escrowFeeBps is snapshotted and has no getter, so no rate and no net
++     figure may appear — same rule payoutLines and timeoutSettlementConfirm
++     already follow.
++   - Execution requires an EXACT bps match (:549). A different number from the
++     other side neither part-settles nor counter-offers.
++
++   And one positive that only bites here: a partial settlement can scale the
++   freelancer's share below the forwarding-fee floor, which diverts it to Arc
++   (:1291/:1319). A full release provably cannot (:1285-1288). */
++import { mutualSettleConfirm } from './EscrowDetail.jsx'
++import { buildContractInteraction } from '../utils/circleTheme.js'
++
++const ARC = 26
++const BASE = 6
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain) => ({
++  id: 7,
++  milestoneCount: 3,
++  recipient: RECIPIENT,
++  mintRecipient: B32(RECIPIENT),
++  destinationDomain: domain,
++  escrowCctpForwardFee: 200000n // 0.20 USDC
++})
++
++const milestone = { index: 1, amount: 250000000n, state: 2 } // 250 USDC
++const none = { exists: false, bps: 0n }
++const agreed = (bps) => ({ exists: true, bps: BigInt(bps) })
++
++const paramText = (d) => (d.parameters || []).join('\n')
++
++describe('a proposal that does not match settles nothing', () => {
++  const first = () =>
++    mutualSettleConfirm({ escrow: escrowOn(ARC), milestone, splits: [], bps: 5000, theirs: none })
++  const mismatch = () =>
++    mutualSettleConfirm({ escrow: escrowOn(ARC), milestone, splits: [], bps: 5000, theirs: agreed(6000) })
++
++  /* The figures shown are conditional, so a Total would assert they are
++     happening now. Same reasoning as cancelEscrowConfirm's unapproved branch. */
++  it.each([['first proposal', first], ['mismatched proposal', mismatch]])(
++    '%s carries no amount and renders no currency row',
++    (_n, build) => {
++      expect(build()).not.toHaveProperty('amount')
++      expect(buildContractInteraction(build())).not.toHaveProperty('mainCurrency')
++      expect(paramText(build())).toContain('No funds move on this transaction.')
++    }
++  )
++
++  it('states the split as a conditional, not as a fact', () => {
++    expect(paramText(first())).toContain('Would pay 125.00 USDC to the freelancer and 125.00 USDC to the payer.')
++  })
++
++  /* The case most likely to be misread as agreement: the contract requires
++     dep.bps == rec.bps exactly (:549), so 50 against 60 does nothing at all. */
++  it('names the other number and says it does not match', () => {
++    expect(paramText(mismatch())).toContain('The other party has proposed 60%. The two numbers do not match, so nothing settles yet.')
++  })
++
++  it('says so plainly when there is no counterparty proposal yet', () => {
++    expect(paramText(first())).toContain('The other party has not proposed anything yet.')
++  })
++
++  /* :541-542 assigns unconditionally, so a proposal is revisable — the exact
++     opposite of proposeMilestoneCancel, which is one screen away. */
++  it('says the number can be changed later', () => {
++    expect(paramText(first())).toContain('You can change your number later by proposing again.')
++  })
++})
++
++describe('a matching proposal settles now', () => {
++  const d = (over = {}) =>
++    mutualSettleConfirm({
++      escrow: escrowOn(ARC), milestone, splits: [], bps: 5000, theirs: agreed(5000), ...over
++    })
++
++  it('carries the full milestone amount as the settled total', () => {
++    expect(d().amount).toBe(250000000n)
++    expect(d().amountLabel).toBe('Amount settled')
++    expect(buildContractInteraction(d())).toHaveProperty('mainCurrency')
++  })
++
++  it('says both sides agreed and that it pays out immediately', () => {
++    expect(d().subtitle).toContain('Both sides have proposed the same split')
++    expect(paramText(d())).toContain('This cannot be undone.')
++  })
++
++  it('splits the milestone exactly the way the contract does', () => {
++    expect(paramText(d())).toContain("Freelancer's share: 125.00 USDC before the protocol fee")
++    expect(paramText(d())).toContain("Payer's share: 125.00 USDC")
++  })
++
++  /* escrowFeeBps is snapshotted with no getter. The asymmetry holds at any
++     rate, so it is stated; the rate and the net are not knowable and must not
++     be guessed. */
++  it('states the fee asymmetry without inventing a rate or a net', () => {
++    const t = paramText(d())
++    expect(t).toContain("The protocol fee is taken from the freelancer's share only.")
++    expect(t).toContain('no protocol fee is taken on this half')
++    expect(t).not.toMatch(/\d+(\.\d+)?%\s*(protocol )?fee/i)
++    // \b matters: "Arc Testnet" contains the substring "net".
++    expect(t).not.toMatch(/\bnet\b/i)
++  })
++
++  it('says the payer half is an Arc credit, not a transfer', () => {
++    expect(paramText(d())).toContain("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
++  })
++
++  /* The caller's maxFee is never read (:521-559). Whatever Circle quoted, it
++     is not a cost of this transaction and may not appear as one. */
++  it('never presents a live forwarding quote as a cost', () => {
++    const t = paramText(d({ escrow: escrowOn(BASE) }))
++    expect(t).not.toMatch(/max ?fee/i)
++    expect(t).not.toMatch(/estimated fee/i)
++  })
++})
++
++describe('the two edges of the split', () => {
++  const at = (bps, over = {}) =>
++    mutualSettleConfirm({
++      escrow: escrowOn(ARC), milestone, splits: [], bps, theirs: agreed(bps), ...over
++    })
++
++  /* bps == 0 takes the REFUNDED branch (:1234-1235): no burn, no fee, and no
++     payout line at all. */
++  it('0% pays the freelancer nothing and says the milestone is refunded', () => {
++    const t = paramText(at(0))
++    expect(t).toContain('Nothing is paid to the freelancer. The milestone is refunded in full.')
++    expect(t).toContain("Payer's share: 250.00 USDC")
++    expect(t).not.toContain("Freelancer's share:")
++  })
++
++  it('100% pays the payer nothing', () => {
++    const t = paramText(at(10_000))
++    expect(t).toContain("Freelancer's share: 250.00 USDC")
++    expect(t).not.toContain("Payer's share:")
++  })
++
++  /* A full release provably clears the floor (:1285-1288), so the divert
++     warning would be false there. */
++  it('does not warn about the Arc divert on a full release', () => {
++    expect(paramText(at(10_000, { escrow: escrowOn(BASE) }))).not.toContain('credited on Arc instead')
++  })
++})
++
++describe('Finding 3 — a partial settlement can fall below the delivery floor', () => {
++  const cross = (bps, splits = []) =>
++    mutualSettleConfirm({ escrow: escrowOn(BASE), milestone, splits, bps, theirs: agreed(bps) })
++
++  it('names the escrow fixed forwarding fee rather than a live quote', () => {
++    expect(paramText(cross(5000))).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded.")
++  })
++
++  it('warns that a small share is credited on Arc instead of delivered', () => {
++    expect(paramText(cross(5000))).toContain("If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc instead of being delivered cross-chain.")
++  })
++
++  /* Per-leg on a split escrow (:1319), so the wording has to change with it. */
++  it('phrases the divert per leg when the escrow has splits', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
++    ]
++    expect(paramText(cross(5000, splits))).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
++  })
++
++  /* The case escrow.destinationDomain alone cannot answer: with splits
++     configured, e.destinationDomain is not what the burn uses, so an
++     Arc-domain escrow with one cross-chain leg IS cross-chain by
++     _assertCrossChainFee's rule. Reading only the escrow domain here would
++     silently drop the warning for every split escrow of this shape. */
++  it('treats an Arc-domain escrow with a cross-chain split leg as cross-chain', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(mutualSettleConfirm({
++      escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
++    }))
++    expect(t).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC")
++    expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
++  })
++
++  /* _assertCrossChainFee treats an escrow as cross-chain if ANY leg is, so an
++     all-Arc split must not produce cross-chain copy. */
++  it('says nothing about forwarding fees for an all-Arc split', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(mutualSettleConfirm({
++      escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
++    }))
++    expect(t).not.toContain('forwarding fee')
++    expect(t).not.toContain('credited on Arc instead')
++  })
++
++  it('says nothing about the divert on a same-chain Arc escrow', () => {
++    const t = paramText(mutualSettleConfirm({
++      escrow: escrowOn(ARC), milestone, splits: [], bps: 5000, theirs: agreed(5000)
++    }))
++    expect(t).not.toContain('forwarding fee')
++  })
++})

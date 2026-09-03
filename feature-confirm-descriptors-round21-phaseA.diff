@@ -1,0 +1,286 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index b6655df..590b242 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -51,13 +51,18 @@ export function useCctpDelivery(txHash, isCrossChain) {
+         return
+       }
+ 
++      // Round 21 Phase A: the real Iris response nests destinationDomain
++      // under decodedMessage (as a string) and puts forwardState/
++      // forwardTxHash/forwardErrorCode flat on the message itself — there is
++      // no `forward` wrapper object at all. Verified against real captured
++      // responses for actual Arc-testnet burns (see fetchIrisMessages).
+       const parsed = messages.map((m) => ({
+         message:          m.message,
+         attestation:      m.attestation,
+-        destinationDomain: m.destinationDomain ?? null,
+-        destinationTxHash: m.forward?.destinationTxHash ?? null,
+-        forwardState:      m.forward?.forwardState ?? null,
+-        errorCode:         m.forward?.forwardErrorCode ?? null,
++        destinationDomain: m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null,
++        destinationTxHash: m.forwardTxHash ?? null,
++        forwardState:      m.forwardState ?? null,
++        errorCode:         m.forwardErrorCode ?? null,
+       }))
+       setDeliveries(parsed)
+ 
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index dd603fc..a4912d6 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -1,12 +1,23 @@
+-// useCctpDelivery — Round 20 Phase D.
++// useCctpDelivery — Round 20 Phase D / Round 21 Phase A.
+ //
+-// Two properties matter here: (1) the second argument is now a plain
++// Two properties matter here: (1) the second argument is a plain
+ // isCrossChain boolean, used only to gate polling — not a domain value the
+ // hook trusts for anything else; and (2) each parsed delivery keeps ITS OWN
+ // destinationDomain from Iris, defaulting to null (never a caller-supplied
+ // guess) when Iris omits one. A mixed split settlement can burn to several
+ // DIFFERENT chains in one transaction, so collapsing every message's domain
+ // to one caller-supplied value was never safe — this is what stops that.
++//
++// Round 21 Phase A: the raw-message fixture below (`irisMessage`) matches
++// Circle's REAL Iris response schema — verified live against
++// iris-api-sandbox.circle.com using real Arc-testnet burn transactions,
++// including a genuine depositForBurnWithHook call (hookData decodes to
++// "cctp-forward"). destinationDomain lives at decodedMessage.destinationDomain
++// (a string); forwardState/forwardTxHash/forwardErrorCode are flat on the
++// message itself — there is no `forward` wrapper object. The previous
++// version of this fixture used a shape that was never real, which is why the
++// integration itself was broken despite these tests passing — the fixture
++// and the bug agreed with each other, not with Circle's actual API.
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { renderHook, waitFor } from '@testing-library/react'
+@@ -24,12 +35,14 @@ afterEach(() => {
+   vi.useRealTimers()
+ })
+ 
+-const attested = (overrides = {}) => ({
++const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null } = {}) => ({
+   message: '0xmessage',
+   attestation: '0xattestation',
+-  destinationDomain: 6,
+-  forward: { forwardState: 'COMPLETE', destinationTxHash: '0xdesttx', forwardErrorCode: null },
+-  ...overrides
++  status: 'complete',
++  decodedMessage: destinationDomain != null ? { destinationDomain: String(destinationDomain) } : {},
++  forwardState,
++  forwardTxHash,
++  forwardErrorCode
+ })
+ 
+ describe('useCctpDelivery — isCrossChain gate', () => {
+@@ -46,7 +59,7 @@ describe('useCctpDelivery — isCrossChain gate', () => {
+   })
+ 
+   it('polls once isCrossChain is true and a txHash is present', async () => {
+-    fetchIrisMessages.mockResolvedValue([attested()])
++    fetchIrisMessages.mockResolvedValue([irisMessage()])
+     renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xtx'))
+   })
+@@ -55,8 +68,8 @@ describe('useCctpDelivery — isCrossChain gate', () => {
+ describe('useCctpDelivery — per-message domain, never collapsed to a caller-supplied value', () => {
+   it('keeps each message\'s own destinationDomain from Iris, even when they differ from each other', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      attested({ destinationDomain: 6 }),   // Base Sepolia
+-      attested({ destinationDomain: 0 })    // Ethereum Sepolia — genuinely different chain
++      irisMessage({ destinationDomain: 6 }),   // Base Sepolia
++      irisMessage({ destinationDomain: 0 })    // Ethereum Sepolia — genuinely different chain
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+@@ -65,21 +78,54 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+ 
+   it('defaults an Iris-omitted domain to null, never to some other message\'s domain or a guess', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      attested({ destinationDomain: 6 }),
+-      attested({ destinationDomain: undefined })
++      irisMessage({ destinationDomain: 6 }),
++      irisMessage({ destinationDomain: null })
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries[0].destinationDomain).toBe(6)
+     expect(result.current.deliveries[1].destinationDomain).toBeNull()
+   })
++
++  it('reads the real Iris nesting — decodedMessage.destinationDomain as a string — not a flat top-level field', async () => {
++    // Regression guard for the actual Round 21 bug: the OLD code read
++    // m.destinationDomain (flat, never real) and always got undefined. This
++    // fixture has NO flat destinationDomain at all, only the nested real one,
++    // so a reversion to the flat read would make this resolve to null.
++    fetchIrisMessages.mockResolvedValue([{
++      message: '0xmessage', attestation: '0xattestation', status: 'complete',
++      decodedMessage: { destinationDomain: '6' },
++      forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
++    }])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
++  })
++})
++
++describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are flat, never nested under a `forward` wrapper', () => {
++  it('reads a real completed message correctly with no `forward` object present anywhere', async () => {
++    fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'COMPLETE', forwardTxHash: '0xrealdesttx' })])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries[0].forwardState).toBe('COMPLETE')
++    expect(result.current.deliveries[0].destinationTxHash).toBe('0xrealdesttx')
++  })
++
++  it('reads a real failed message\'s errorCode correctly', async () => {
++    fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    await waitFor(() => expect(result.current.phase).toBe('failed'))
++    expect(result.current.deliveries[0].forwardState).toBe('FAILED')
++    expect(result.current.deliveries[0].errorCode).toBe('INSUFFICIENT_FEE')
++  })
+ })
+ 
+ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not collapsed by `phase`', () => {
+   it('keeps the COMPLETE message\'s own data intact even when phase is "failed" because a DIFFERENT message failed', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      attested({ destinationDomain: 6, forward: { forwardState: 'COMPLETE', destinationTxHash: '0xgood', forwardErrorCode: null } }),
+-      attested({ destinationDomain: 0, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } })
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', forwardTxHash: '0xgood', forwardErrorCode: null }),
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(result.current.phase).toBe('failed'))
+@@ -99,8 +145,8 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not
+ 
+   it('surfaces two independently-failed messages on different domains, both present in `deliveries`', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      attested({ destinationDomain: 6, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } }),
+-      attested({ destinationDomain: 0, forward: { forwardState: 'FAILED', destinationTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' } })
++      irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(result.current.phase).toBe('failed'))
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 8c8d0de..0414957 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,4 +1,5 @@
+ import { encodeFunctionData } from 'viem'
++import { ARC_DOMAIN } from '../config/chains.js'
+ 
+ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
+ 
+@@ -21,8 +22,18 @@ export const cctpTrackKey = (escrowId, milestoneIndex) =>
+ 
+ // Fetch all CCTP messages emitted in a source transaction.
+ // Returns [] if not yet indexed (404 → empty, not an error).
+-export async function fetchIrisMessages(txHash) {
+-  const res = await fetch(`${IRIS_BASE}/v2/messages/${txHash}`)
++//
++// Round 21 Phase A: GET /v2/messages/{txHash} (no domain, no query param) was
++// never a valid request shape — verified live against Circle's sandbox,
++// which responds 400 "params.srcDomainId: Too big... query: At least one of
++// transactionHash or nonce must be provided" for exactly this URL. The real
++// endpoint is GET /v2/messages/{sourceDomainId}?transactionHash={txHash} —
++// confirmed against real captured responses for actual Arc-testnet burns,
++// including a genuine depositForBurnWithHook call (hookData decodes to
++// "cctp-forward", the same hook this contract uses). Every tracked burn in
++// this app originates from Arc, so sourceDomain defaults to ARC_DOMAIN.
++export async function fetchIrisMessages(txHash, sourceDomain = ARC_DOMAIN) {
++  const res = await fetch(`${IRIS_BASE}/v2/messages/${sourceDomain}?transactionHash=${txHash}`)
+   if (res.status === 404) return []
+   if (!res.ok) throw new Error(`Iris HTTP ${res.status}`)
+   const json = await res.json()
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+new file mode 100644
+index 0000000..a8d9ef1
+--- /dev/null
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -0,0 +1,83 @@
++import { describe, it, expect, vi, afterEach } from 'vitest'
++
++/* fetchIrisMessages — Round 21 Phase A.
++
++   GET /v2/messages/{txHash} (no domain path segment, no query param) was
++   never a valid request against Circle's real Iris API — verified live
++   against iris-api-sandbox.circle.com, which responds 400 for exactly this
++   shape: "params.srcDomainId: Too big: expected int to be <9007199254740991,
++   query: At least one of transactionHash or nonce must be provided". The
++   real endpoint is GET /v2/messages/{sourceDomainId}?transactionHash={txHash}
++   — confirmed against real captured responses for actual Arc-testnet burns.
++
++   This means every cross-chain delivery-tracking request this app has ever
++   made hit a 400, not the 404 the code specially treats as "not indexed
++   yet" — so it always surfaced as `phase: 'unavailable'`, never correctly
++   polling for real status. These tests pin the URL shape directly so this
++   can't silently regress back to the never-real one. */
++import { ARC_DOMAIN } from '../config/chains.js'
++
++const { fetchIrisMessages } = await import('./irisDelivery.js')
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++})
++
++const mockOk = (body) => ({ ok: true, status: 200, json: async () => body })
++
++describe('fetchIrisMessages', () => {
++  it('requests the sourceDomain as a path segment and the tx hash as a transactionHash query param', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await fetchIrisMessages('0xabc123')
++
++    expect(fetchMock).toHaveBeenCalledTimes(1)
++    const [url] = fetchMock.mock.calls[0]
++    expect(url).toContain(`/v2/messages/${ARC_DOMAIN}`)
++    expect(url).toContain('transactionHash=0xabc123')
++    // The bug this closes: the tx hash must never appear where the domain
++    // path segment goes.
++    expect(url).not.toContain(`/v2/messages/0xabc123`)
++  })
++
++  it('defaults sourceDomain to ARC_DOMAIN — every tracked burn in this app originates from Arc', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await fetchIrisMessages('0xabc123')
++
++    const [url] = fetchMock.mock.calls[0]
++    expect(url).toContain('/v2/messages/26?')
++  })
++
++  it('accepts an explicit sourceDomain override', async () => {
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await fetchIrisMessages('0xabc123', 6)
++
++    const [url] = fetchMock.mock.calls[0]
++    expect(url).toContain('/v2/messages/6?')
++  })
++
++  it('returns [] on a 404 (not yet indexed), not an error', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 404 })))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
++  })
++
++  it('throws on a non-404 error status — a 400 must not be silently swallowed like a 404', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 400 })))
++    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow('Iris HTTP 400')
++  })
++
++  it('returns the messages array from a real-shaped successful response', async () => {
++    const realShapedMessage = {
++      message: '0xmsg', attestation: '0xatt', status: 'complete',
++      decodedMessage: { destinationDomain: '6' },
++      forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
++    }
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: '0xabc123' }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
++  })
++})

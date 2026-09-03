@@ -1,0 +1,1196 @@
+diff --git a/frontend/src/confirm/adapters.js b/frontend/src/confirm/adapters.js
+new file mode 100644
+index 0000000..18dbb10
+--- /dev/null
++++ b/frontend/src/confirm/adapters.js
+@@ -0,0 +1,100 @@
++/* The wallet-type adapter seam — Round 1 of the custom confirmation flow.
++
++   Two wallet types sign transactions in this app (see hooks/useAuth.jsx's
++   file header): a Circle UCW ('circle-sca'), whose sole security boundary is
++   Circle's own hosted iframe, and an injected wallet or Safe multisig
++   ('eoa'), which renders its own confirmation with zero input from Tranche.
++   useTransactionConfirm.js is wallet-agnostic — it drives Stage A (this
++   app's own confirm screen, built from a ConfirmDescriptor) and then hands
++   off to whichever adapter matches the signed-in wallet type for Stage B
++   (the minimal, wallet-owned hand-off).
++
++   THIS FILE IS THE SEAM, NOT THE WIRING. Nothing here is imported by any
++   page yet, and nothing here calls executeContractCall or wagmi's
++   writeContract — that is Round 2's job, once Stage A has been reviewed in
++   isolation. Both factories below are real, typed, and unit-testable, but
++   their send() intentionally throws until Round 2 replaces the body. This
++   keeps the interface honest: a caller that reaches for one before Round 2
++   wires it gets a clear, immediate error, not a silent no-op or an
++   accidental production call. */
++
++/**
++ * @typedef {Object} TransactionRequest
++ * @property {`0x${string}`} address
++ * @property {readonly unknown[]} abi
++ * @property {string} functionName
++ * @property {readonly unknown[]} args
++ */
++
++/**
++ * @typedef {Object} SendResult
++ * @property {`0x${string}`} [hash]         Present once a real tx hash is known.
++ * @property {string} [challengeId]         Circle-only: the challenge polled
++ *                                          for a hash (see useTx.js's
++ *                                          awaitScaTxHash). Absent for 'eoa'.
++ */
++
++/**
++ * @typedef {Object} TransactionAdapter
++ * @property {'circle-sca' | 'eoa'} type
++ * @property {(request: TransactionRequest, descriptor: import('./descriptors.js').ConfirmDescriptor) => Promise<SendResult>} send
++ *   Dispatches the call AFTER Stage A has been confirmed. For 'circle-sca'
++ *   this is where Stage B's minimal iframe hand-off happens (Round 2: opens
++ *   Circle's confirm iframe with title/subtitle only, no repeated
++ *   breakdown, then polls tx-status the way useTx.js's awaitScaTxHash
++ *   already does). For 'eoa' this is wagmi's write — Tranche has zero
++ *   control over what the wallet shows, by design (see the round's brief).
++ * @property {(receiptOrChallenge: SendResult) => Promise<`0x${string}`>} awaitHash
++ *   Resolves send()'s result to a real transaction hash. A no-op passthrough
++ *   for 'eoa' (send() already returns one); polls Circle's tx-status for
++ *   'circle-sca'.
++ */
++
++class AdapterNotWiredError extends Error {
++  constructor(type, method) {
++    super(
++      `${type} adapter's ${method}() is a Round 1 seam — Round 2 wires it to the real ` +
++      'signing call. If you are seeing this outside a test, useTransactionConfirm ' +
++      'is being used from production code before Round 2 landed.'
++    )
++    this.name = 'AdapterNotWiredError'
++  }
++}
++
++/** @returns {TransactionAdapter} */
++export function createCircleAdapter() {
++  return {
++    type: 'circle-sca',
++    async send() {
++      throw new AdapterNotWiredError('circle-sca', 'send')
++    },
++    async awaitHash() {
++      throw new AdapterNotWiredError('circle-sca', 'awaitHash')
++    }
++  }
++}
++
++/** @returns {TransactionAdapter} */
++export function createEoaAdapter() {
++  return {
++    type: 'eoa',
++    async send() {
++      throw new AdapterNotWiredError('eoa', 'send')
++    },
++    async awaitHash() {
++      throw new AdapterNotWiredError('eoa', 'awaitHash')
++    }
++  }
++}
++
++/** Picks the adapter for the currently signed-in wallet type. Mirrors
++ *  useAuth()'s own walletType resolution (circle wins when both exist) so
++ *  callers don't have to duplicate that precedence — see useAuth.jsx's
++ *  `value` useMemo for the source of truth this mirrors.
++ *  @param {'circle-sca' | 'eoa' | null} walletType
++ *  @returns {TransactionAdapter | null} */
++export function selectAdapter(walletType) {
++  if (walletType === 'circle-sca') return createCircleAdapter()
++  if (walletType === 'eoa') return createEoaAdapter()
++  return null
++}
+diff --git a/frontend/src/confirm/descriptors.js b/frontend/src/confirm/descriptors.js
+new file mode 100644
+index 0000000..ee71971
+--- /dev/null
++++ b/frontend/src/confirm/descriptors.js
+@@ -0,0 +1,529 @@
++/* Pure, wallet-agnostic confirm-screen domain logic — Round 1 of the custom
++   confirmation flow (see useTransactionConfirm.js and adapters.js).
++
++   Everything in this file is a straight port of reasoning that already
++   existed, scattered across pages/EscrowDetail.jsx and pages/ArbiterPanel.jsx
++   as Circle-descriptor builders (milestoneConfirm, payoutLines,
++   redirectPayoutConfirm, mutualSettleConfirm, refundToLines,
++   settlementIsCrossChain). Those functions still exist, still feed Circle's
++   confirm screen through utils/circleTheme.js, and are UNTOUCHED by this
++   file — see the parity tests in descriptors.test.js, which import both the
++   old and new functions and diff their output on the same fixtures.
++
++   The one real change is the output shape. The old functions each returned
++   one flat object with a pile of always-optional fields (amount may or may
++   not be set, a redirect may or may not be `blocked`, a split payout may or
++   may not have per-leg fee caveats...) because Circle's ContractInteraction
++   shape is itself flat. Stage A's design system needs to render same-chain,
++   cross-chain, and split payouts differently on purpose — different
++   affordances, different warnings — so guessing which fields apply from
++   their presence/absence is exactly the kind of bug this round is trying to
++   design out. Every builder below returns a discriminated union tagged by
++   `kind`, and each kind carries only the fields that make sense for it. */
++
++import { ARC_DOMAIN, getDomainName } from '../config/chains.js'
++import { formatUSDC } from '../utils/format.js'
++import { bytes32ToAddress } from '../utils/encode.js'
++
++const BPS = 10_000n
++
++/**
++ * @typedef {'same-chain' | 'cross-chain' | 'split'} SettlementKind
++ *
++ * @typedef {Object} DescriptorBase
++ * @property {SettlementKind} kind
++ * @property {string} title
++ * @property {string} subtitle
++ * @property {string} functionName
++ * @property {string} contractName
++ * @property {string} contractAddress
++ * @property {string[]} parameters
++ * @property {bigint} [amount]
++ * @property {string} [amountLabel]
++ * @property {boolean} [blocked]      True when the caller can build this
++ *                                    descriptor but the underlying call is
++ *                                    known to revert (see
++ *                                    buildRedirectPayoutDescriptor). Stage A
++ *                                    disables proceed() when this is set;
++ *                                    Round 1 only surfaces the flag.
++ *
++ * @typedef {DescriptorBase & { kind: 'same-chain' }} SameChainDescriptor
++ *
++ * @typedef {DescriptorBase & {
++ *   kind: 'cross-chain',
++ *   destinationChain: string,
++ *   fee: { floor: bigint, submitted: bigint|null, divertReachable: boolean }
++ * }} CrossChainDescriptor
++ *
++ * @typedef {DescriptorBase & {
++ *   kind: 'split',
++ *   legs: Array<{ index: number, bps: number, destinationChain: string, crossChain: boolean }>,
++ *   divertReachable: boolean
++ * }} SplitDescriptor
++ *
++ * @typedef {SameChainDescriptor | CrossChainDescriptor | SplitDescriptor} ConfirmDescriptor
++ */
++
++/* Mirrors _assertCrossChainFee (TrancheProtocol.sol) and its three existing
++   frontend copies (EscrowDetail.jsx's settlementIsCrossChain,
++   ArbiterPanel.jsx's resolveIsCrossChain — same body, never unified because
++   each file was independently audited against the contract line it mirrors;
++   Round 1 unifies them here instead, since a UI-agnostic module has no
++   reason to keep the duplication). With splits configured, ANY non-Arc leg
++   makes the settlement cross-chain — the escrow-level destinationDomain is
++   not what the burn loop reads once splits exist. */
++export function hasCrossChainLeg(escrow, splits) {
++  if (splits?.length > 0) return splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
++  return Number(escrow?.destinationDomain) !== ARC_DOMAIN
++}
++
++/* The discriminated union's tag. Split-first, matching every existing
++   descriptor's branch order (payoutLines, redirectPayoutConfirm,
++   mutualSettleConfirm all check `splits?.length > 0` before ever looking at
++   a domain) — a split escrow is a structurally different payout (multiple
++   legs, independent per-leg outcomes) even when every leg happens to be on
++   the same chain, so it is never folded into 'same-chain' or 'cross-chain'. */
++export function classifySettlement(escrow, splits) {
++  if (splits?.length > 0) return 'split'
++  return hasCrossChainLeg(escrow, splits) ? 'cross-chain' : 'same-chain'
++}
++
++/* Port of EscrowDetail.jsx's refundToLines. refundAfterDeadline and a
++   mutualSettle payer-share both credit e.refundTo, not necessarily the
++   depositor's own wallet — see refundTo's own note in the contract. */
++export function describeRefundTo(escrow) {
++  const to = escrow?.refundTo
++  if (!to) return []
++  const lines = [`Credited to: ${to}`]
++  const depositor = escrow?.depositor
++  if (depositor && to.toLowerCase() !== depositor.toLowerCase()) {
++    lines.push("That is this escrow's configured refund address, not the payer's own wallet.")
++  }
++  return lines
++}
++
++/* Port of EscrowDetail.jsx's releaseFeeLines. The two release paths do NOT
++   pay the same forwarding fee: approveRelease hands the caller's submitted
++   maxFee straight through and the no-split burn uses it; release() always
++   substitutes the escrow's own snapshotted floor, since it is permissionless
++   and a griefer could otherwise authorise Circle to consume almost the whole
++   payout. Split legs always burn at the snapshot regardless of which path
++   ran (settled decision #7). */
++export function describeCrossChainFee({ escrow, splits, actionKey, submittedMaxFee }) {
++  if (!hasCrossChainLeg(escrow, splits)) return []
++
++  if (actionKey === 'approve' && (!splits || splits.length === 0) && submittedMaxFee !== undefined && submittedMaxFee !== null) {
++    return [`Delivery costs up to ${formatUSDC(submittedMaxFee)} in Circle forwarding fees, deducted from the payout on arrival.`]
++  }
++
++  const floor = escrow?.escrowCctpForwardFee ?? 0n
++  if (floor === 0n) return []
++
++  if (splits?.length > 0) {
++    return [`Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted on delivery.`]
++  }
++  return [`Delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from the payout on arrival.`]
++}
++
++/* Port of EscrowDetail.jsx's payoutLines. `partial`/`crossChain`/`floor` are
++   optional context from a caller that knows whether Finding 3's sub-floor
++   divert-to-Arc is reachable for THIS call — a full release can never hit
++   it, by construction of the deposit-time F2 floor check plus the F3
++   redirect guard. */
++export function describeSplitPayout(escrow, splits, { partial = false, crossChain = false, floor = 0n } = {}) {
++  if (splits?.length > 0) {
++    const lines = [
++      `${splits.length} configured split entries, by their configured share and destination chain`,
++      'A recipient whose share rounds down to zero is paid nothing.'
++    ]
++    if (partial && crossChain) {
++      lines.push(`Any cross-chain split leg whose nonzero share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
++    }
++    return lines
++  }
++  const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
++  const chainName = getDomainName(Number(escrow.destinationDomain))
++  if (partial && crossChain) {
++    return [
++      `If this amount clears this escrow's forwarding-fee floor, it is paid to ${addr} on ${chainName}.`,
++      `If it does not clear the floor, it is credited on Arc to ${escrow.recipient} instead — no cross-chain delivery.`
++    ]
++  }
++  return [
++    `Paid to: ${addr}`,
++    `Paid on: ${chainName}`
++  ]
++}
++
++/* Port of EscrowDetail.jsx's unreleasedExposure. A CEILING on what could
++   still route through a redirected address, not a promise it will — a
++   pending milestone can end in refund or mutual cancellation, a disputed one
++   can award the freelancer nothing. Terminal states are RELEASED(3) and
++   REFUNDED(4). Returns null (not 0) when the list is missing, so an unknown
++   exposure prints nothing instead of a confident "0.00 USDC". */
++export function unreleasedExposure(milestones) {
++  if (!Array.isArray(milestones) || milestones.length === 0) return null
++  return milestones
++    .filter((m) => m.state !== 3 && m.state !== 4)
++    .reduce((sum, m) => sum + BigInt(m.amount ?? 0n), 0n)
++}
++
++const REDIRECT_BLOCKED_REASON =
++  'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
++
++/* ---------------------------------------------------------------------- *
++ * Flagship builders — compose the pieces above into the discriminated
++ * union every wallet-agnostic surface (Stage A) will render from.
++ * ---------------------------------------------------------------------- */
++
++const CONTRACT_NAME = 'Tranche Protocol Escrow'
++
++/* Port of EscrowDetail.jsx's milestoneConfirm. Covers all four actions
++   computeMilestoneAction can return: claimDelivery (no funds move),
++   refundAfterDeadline (Arc-only credit, never cross-chain), approveRelease
++   and release (the two release paths — see describeCrossChainFee for why
++   they can't share one fee line).
++   @param {{ key: 'claim'|'refund'|'approve'|'release', fn: string }} action
++   @param {object} escrow
++   @param {object} milestone
++   @param {object[]} splits
++   @param {{ contractAddress: string, submittedMaxFee?: bigint }} ctx
++   @returns {ConfirmDescriptor}
++*/
++export function buildMilestoneActionDescriptor(action, escrow, milestone, splits, ctx = {}) {
++  const { contractAddress, submittedMaxFee } = ctx
++  const n = milestone.index + 1
++  const of = Number(escrow.milestoneCount) || n
++  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
++  const base = {
++    contractName: CONTRACT_NAME,
++    contractAddress,
++    functionName: action.fn
++  }
++
++  if (action.key === 'claim') {
++    return {
++      ...base,
++      kind: 'same-chain',
++      title: 'Mark this milestone as delivered',
++      subtitle: "Starts the client's review window. If they don't dispute before it ends, the milestone can be released.",
++      parameters: [milestoneLine, 'No funds move on this transaction.']
++    }
++  }
++
++  if (action.key === 'refund') {
++    return {
++      ...base,
++      kind: 'same-chain',
++      title: 'Refund this milestone',
++      subtitle: 'The deadline and its 72-hour grace period have both passed, so this milestone can be refunded. No protocol fee is taken.',
++      amount: milestone.amount,
++      amountLabel: 'Amount refunded',
++      parameters: [
++        milestoneLine,
++        ...describeRefundTo(escrow),
++        'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
++      ]
++    }
++  }
++
++  if (action.key === 'approve' || action.key === 'release') {
++    const kind = classifySettlement(escrow, splits)
++    const crossChain = hasCrossChainLeg(escrow, splits)
++    const feeLines = describeCrossChainFee({ escrow, splits, actionKey: action.key, submittedMaxFee })
++    const parameters = [
++      milestoneLine,
++      ...describeSplitPayout(escrow, splits),
++      'Protocol fee is deducted from this amount before payout.',
++      ...feeLines
++    ]
++    const title = action.key === 'approve' ? 'Approve and release this milestone' : 'Release this milestone'
++    const subtitle = action.key === 'approve'
++      ? 'Releases the milestone out of escrow to the freelancer. This cannot be undone.'
++      : 'The review window closed without a dispute, so this milestone can now be released to the freelancer by anyone.'
++
++    const shared = {
++      ...base,
++      title,
++      subtitle,
++      amount: milestone.amount,
++      amountLabel: 'Amount released',
++      parameters
++    }
++
++    if (kind === 'split') {
++      return {
++        ...shared,
++        kind: 'split',
++        legs: splits.map((s, index) => ({
++          index,
++          bps: Number(s.bps),
++          destinationChain: getDomainName(Number(s.destinationDomain)),
++          crossChain: Number(s.destinationDomain) !== ARC_DOMAIN
++        })),
++        // A full release/approve can never hit Finding 3's sub-floor divert —
++        // deposit-time validation guarantees every leg's minimum share
++        // already clears the floor. See EscrowDetail.jsx's payoutChainLabel
++        // note on releaseMaxFeePlan for the full citation.
++        divertReachable: false
++      }
++    }
++    if (kind === 'cross-chain') {
++      return {
++        ...shared,
++        kind: 'cross-chain',
++        destinationChain: getDomainName(Number(escrow.destinationDomain)),
++        fee: {
++          floor: escrow.escrowCctpForwardFee ?? 0n,
++          submitted: action.key === 'approve' ? (submittedMaxFee ?? null) : null,
++          divertReachable: false
++        }
++      }
++    }
++    return { ...shared, kind: 'same-chain' }
++  }
++
++  console.warn(`No confirm descriptor for milestone action "${action.key}" — falling back to generic copy.`)
++  return {
++    ...base,
++    kind: 'same-chain',
++    title: 'Confirm this milestone action',
++    subtitle: 'Check the details below, then confirm to sign.',
++    parameters: [milestoneLine]
++  }
++}
++
++/* Port of EscrowDetail.jsx's redirectPayoutConfirm (no-split escrow only —
++   the has-splits "this setting no longer affects where money goes" branch
++   and the mixed-domain redirect blocked check both port here too, since
++   both ARE the "mixed-domain recovery messaging" this round's brief names
++   explicitly). Mirrors :982's guard exactly, including the splits carve-out:
++   with splits configured, e.destinationDomain is not what the burn uses, so
++   the Arc-lock guard does not apply at the escrow level. */
++export function buildRedirectPayoutDescriptor({ escrow, hasSplits, newAddress, newDomain, milestones, contractAddress }) {
++  const exposure = unreleasedExposure(milestones)
++  const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
++  const oldDomain = Number(escrow.destinationDomain)
++  const domain = Number(newDomain)
++  const blocked = domain !== ARC_DOMAIN && oldDomain === ARC_DOMAIN && !hasSplits
++
++  const base = {
++    contractName: CONTRACT_NAME,
++    contractAddress,
++    functionName: 'updateReceivingAddress'
++  }
++
++  if (blocked) {
++    return {
++      ...base,
++      kind: 'same-chain',
++      blocked: true,
++      title: 'Change where this escrow pays out',
++      subtitle: 'This transaction will not go through.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Requested: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++        REDIRECT_BLOCKED_REASON,
++        'You can still change the address while staying on Arc.'
++      ]
++    }
++  }
++
++  if (hasSplits) {
++    return {
++      ...base,
++      kind: 'split',
++      legs: [],
++      divertReachable: false,
++      title: 'Change where this escrow pays out',
++      subtitle: 'This escrow pays through split recipients, so this setting no longer affects where money goes.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Address: ${oldAddress} → ${newAddress}`,
++        `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++        'Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.',
++        'To redirect your own share, use the split address row instead.'
++      ]
++    }
++  }
++
++  const parameters = [
++    `Escrow #${escrow.id}`,
++    `Address: ${oldAddress} → ${newAddress}`,
++    `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++    "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.",
++    ...(exposure === null
++      ? []
++      : [`That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`]),
++    'Milestones already released are unaffected and cannot be recalled.'
++  ]
++
++  const shared = {
++    ...base,
++    title: 'Change where this escrow pays out',
++    subtitle: 'Redirects your milestone payments to a different address, effective immediately.',
++    parameters
++  }
++
++  if (domain !== ARC_DOMAIN) {
++    return {
++      ...shared,
++      kind: 'cross-chain',
++      destinationChain: getDomainName(domain),
++      fee: { floor: escrow.escrowCctpForwardFee ?? 0n, submitted: null, divertReachable: false }
++    }
++  }
++  return { ...shared, kind: 'same-chain' }
++}
++
++/* Port of EscrowDetail.jsx's mutualSettleExecutes — pure prediction from a
++   pre-submission `theirs` snapshot, used only for the confirm descriptor's
++   copy (no receipt exists yet at signing time). */
++export function mutualSettleExecutes(theirs, bps) {
++  const theirBps = theirs?.exists ? Number(theirs.bps) : null
++  return theirBps !== null && theirBps === bps
++}
++
++/* Port of EscrowDetail.jsx's mutualSettleConfirm. The richest of the three
++   flagship builders: exercises split wording, partial-settlement
++   fee/remainder reasoning (Finding 3's sub-floor divert), and the
++   rounds-to-zero edge case, all in one call. */
++export function buildMutualSettleDescriptor({ escrow, milestone, splits, bps, theirs, contractAddress }) {
++  const n = milestone.index + 1
++  const of = Number(escrow.milestoneCount) || n
++  const pct = bps / 100
++  const recipientShare = (milestone.amount * BigInt(bps)) / BPS
++  const payerShare = milestone.amount - recipientShare
++  const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)} in dispute`
++
++  const base = {
++    contractName: CONTRACT_NAME,
++    contractAddress,
++    functionName: 'mutualSettle'
++  }
++
++  const theirBps = theirs?.exists ? Number(theirs.bps) : null
++  const matches = mutualSettleExecutes(theirs, bps)
++
++  if (!matches) {
++    return {
++      ...base,
++      kind: 'same-chain',
++      title: 'Propose settling this dispute',
++      subtitle: 'Records the split you are proposing. Nothing settles until both sides have proposed exactly the same percentage.',
++      parameters: [
++        milestoneLine,
++        `You are proposing ${pct}% to the freelancer, ${100 - pct}% to the payer.`,
++        `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited as a refund balance.`,
++        ...describeRefundTo(escrow),
++        ...(theirBps !== null
++          ? [`The other party has proposed ${theirBps / 100}%. The two numbers do not match, so nothing settles yet.`]
++          : ['The other party has not proposed anything yet.']),
++        'You can change your number later by proposing again.',
++        'No funds move on this transaction.'
++      ]
++    }
++  }
++
++  const kind = classifySettlement(escrow, splits)
++  const crossChain = hasCrossChainLeg(escrow, splits)
++  const floor = escrow.escrowCctpForwardFee ?? 0n
++  const partial = bps > 0 && bps < 10_000
++  const recipientGetsPaid = bps > 0 && recipientShare > 0n
++  const divertReachable = partial && crossChain
++
++  const params = [
++    milestoneLine,
++    `Agreed split: ${pct}% to the freelancer, ${100 - pct}% to the payer.`
++  ]
++  if (bps > 0) params.push(`Freelancer's share: ${formatUSDC(recipientShare)} before the protocol fee`)
++  if (bps < 10_000) params.push(`Payer's share: ${formatUSDC(payerShare)} — no protocol fee is taken on this half`)
++
++  if (recipientGetsPaid) {
++    params.push(...describeSplitPayout(escrow, splits, { partial, crossChain, floor }))
++    if (splits?.length > 0) {
++      if (!crossChain) {
++        params.push('Each split leg with a nonzero share is transferred on Arc as this transaction executes.')
++      } else {
++        const hasArcLeg = splits.some((s) => Number(s.destinationDomain) === ARC_DOMAIN)
++        const legClauses = []
++        if (hasArcLeg) legClauses.push('Any Arc split leg with a nonzero share transfers immediately as part of this transaction.')
++        if (divertReachable) {
++          legClauses.push(
++            "Any cross-chain split leg with a nonzero share that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.",
++            'Any cross-chain split leg with a nonzero share that does not clear the floor is credited on Arc instead, as part of this transaction (see above).'
++          )
++        } else {
++          legClauses.push("Any cross-chain split leg with a nonzero share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++        }
++        params.push(legClauses.join(' '))
++      }
++    } else if (divertReachable) {
++      params.push("If it clears this escrow's forwarding-fee floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction.")
++    } else {
++      params.push(
++        crossChain
++          ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
++          : "The freelancer's share is transferred on Arc as this transaction executes."
++      )
++    }
++    params.push("The protocol fee is taken from the freelancer's share only.")
++  } else if (bps > 0) {
++    params.push("This percentage rounds down to zero USDC at this milestone's amount, so nothing is actually paid to the freelancer despite the nonzero share.")
++  } else {
++    params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
++  }
++
++  if (bps < 10_000) {
++    params.push(...describeRefundTo(escrow))
++    params.push('Credited as a withdrawable refund balance on Arc, not sent to a wallet.')
++  }
++  if (crossChain && recipientGetsPaid) {
++    if (divertReachable) {
++      params.push(
++        splits?.length > 0
++          ? `Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's own share. Legs that do not clear the floor are not charged.`
++          : `If it clears the floor, delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}. If it does not clear the floor, no delivery fee is charged.`
++      )
++    } else {
++      params.push(
++        splits?.length > 0
++          ? `Each cross-chain split leg costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and deducted from that leg's own share on arrival.`
++          : `Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`
++      )
++    }
++  }
++  params.push('This cannot be undone.')
++
++  const shared = {
++    ...base,
++    title: 'Settle this dispute now',
++    subtitle: 'Both sides have proposed the same split, so signing settles the milestone now. Where each share goes, and when it actually arrives, is set out below.',
++    amount: milestone.amount,
++    amountLabel: 'Amount settled',
++    parameters: params
++  }
++
++  if (kind === 'split') {
++    return {
++      ...shared,
++      kind: 'split',
++      legs: splits.map((s, index) => ({
++        index,
++        bps: Number(s.bps),
++        destinationChain: getDomainName(Number(s.destinationDomain)),
++        crossChain: Number(s.destinationDomain) !== ARC_DOMAIN
++      })),
++      divertReachable
++    }
++  }
++  if (kind === 'cross-chain') {
++    return {
++      ...shared,
++      kind: 'cross-chain',
++      destinationChain: getDomainName(Number(escrow.destinationDomain)),
++      fee: { floor, submitted: null, divertReachable }
++    }
++  }
++  return { ...shared, kind: 'same-chain' }
++}
+diff --git a/frontend/src/confirm/descriptors.test.js b/frontend/src/confirm/descriptors.test.js
+new file mode 100644
+index 0000000..9efd5e4
+--- /dev/null
++++ b/frontend/src/confirm/descriptors.test.js
+@@ -0,0 +1,233 @@
++import { describe, it, expect } from 'vitest'
++
++/* Parity suite: the whole point of porting descriptor logic into pure,
++   UI-agnostic functions (descriptors.js) is that it must say exactly what
++   the existing Circle-descriptor builders already say. Both the old and the
++   new functions are imported side by side and diffed on identical fixtures
++   — nothing here is asserted "in a vacuum" against copy retyped by hand,
++   because that would only prove this file agrees with itself.
++
++   The old functions (pages/EscrowDetail.jsx) are untouched by this round —
++   they still feed Circle's confirm screen exactly as before. This file is
++   the evidence for that claim, not just an assertion of it. */
++import { milestoneConfirm, payoutLines, redirectPayoutConfirm, mutualSettleConfirm } from '../pages/EscrowDetail.jsx'
++import { CONTRACT_ADDRESS } from '../config/contract.js'
++import {
++  classifySettlement,
++  hasCrossChainLeg,
++  buildMilestoneActionDescriptor,
++  buildRedirectPayoutDescriptor,
++  buildMutualSettleDescriptor,
++  describeSplitPayout
++} from './descriptors.js'
++
++const RECIPIENT = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const MINT_RECIPIENT_B32 = '0x000000000000000000000000' + RECIPIENT.slice(2)
++const FALLBACK_RECIPIENT = '0x1a260601f65a1c270a1cabf65c09f2f31c0869a5'
++const REFUND_TO = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const NEW_ADDRESS = '0x2b262602f65a1c270a1cabf65c09f2f31c0869b6'
++
++// Domain 6 is Base Sepolia in config/chains.js — non-Arc, so cross-chain.
++const crossChainEscrow = {
++  id: 7,
++  recipient: FALLBACK_RECIPIENT,
++  refundTo: REFUND_TO,
++  mintRecipient: MINT_RECIPIENT_B32,
++  destinationDomain: 6,
++  milestoneCount: 3,
++  escrowCctpForwardFee: 200000n
++}
++
++const sameChainEscrow = {
++  ...crossChainEscrow,
++  destinationDomain: 26 // ARC_DOMAIN
++}
++
++const milestone = { index: 1, amount: 250000000n, state: 1 }
++
++const SPLITS = [
++  { mintRecipient: MINT_RECIPIENT_B32, destinationDomain: 6, bps: 6000n },
++  { mintRecipient: MINT_RECIPIENT_B32, destinationDomain: 26, bps: 4000n }
++]
++
++const ACTIONS = {
++  claim: { key: 'claim', fn: 'claimDelivery' },
++  refund: { key: 'refund', fn: 'refundAfterDeadline' },
++  approve: { key: 'approve', fn: 'approveRelease' },
++  release: { key: 'release', fn: 'release' }
++}
++
++// Only the fields the old flat descriptor and the new discriminated
++// descriptor both have a concept of.
++const commonFields = (d) => ({
++  title: d.title,
++  subtitle: d.subtitle,
++  functionName: d.functionName,
++  amount: d.amount,
++  amountLabel: d.amountLabel,
++  parameters: d.parameters
++})
++
++describe('classifySettlement / hasCrossChainLeg', () => {
++  it('is same-chain for an Arc-root no-split escrow', () => {
++    expect(classifySettlement(sameChainEscrow, [])).toBe('same-chain')
++    expect(hasCrossChainLeg(sameChainEscrow, [])).toBe(false)
++  })
++  it('is cross-chain for a non-Arc no-split escrow', () => {
++    expect(classifySettlement(crossChainEscrow, [])).toBe('cross-chain')
++    expect(hasCrossChainLeg(crossChainEscrow, [])).toBe(true)
++  })
++  it('is split whenever splits exist, even if every leg is Arc', () => {
++    const allArc = [{ destinationDomain: 26, bps: 10_000n }]
++    expect(classifySettlement(sameChainEscrow, allArc)).toBe('split')
++    expect(hasCrossChainLeg(sameChainEscrow, allArc)).toBe(false)
++  })
++  it('mirrors _assertCrossChainFee: any non-Arc leg makes a split cross-chain', () => {
++    expect(hasCrossChainLeg(sameChainEscrow, SPLITS)).toBe(true)
++  })
++})
++
++describe('describeSplitPayout parity with payoutLines', () => {
++  it('matches the old function on a split escrow', () => {
++    expect(describeSplitPayout(crossChainEscrow, SPLITS)).toEqual(payoutLines(crossChainEscrow, SPLITS))
++  })
++  it('matches the old function on a no-split cross-chain escrow', () => {
++    expect(describeSplitPayout(crossChainEscrow, [])).toEqual(payoutLines(crossChainEscrow, []))
++  })
++  it('matches the old function on the divert-reachable branch', () => {
++    const opts = { partial: true, crossChain: true, floor: 200000n }
++    expect(describeSplitPayout(crossChainEscrow, [], opts)).toEqual(payoutLines(crossChainEscrow, [], opts))
++    expect(describeSplitPayout(crossChainEscrow, SPLITS, opts)).toEqual(payoutLines(crossChainEscrow, SPLITS, opts))
++  })
++})
++
++describe('buildMilestoneActionDescriptor parity with milestoneConfirm', () => {
++  it.each([
++    ['claim, no splits', crossChainEscrow, []],
++    ['refund, no splits', crossChainEscrow, []]
++  ])('%s', (_label, escrow, splits) => {
++    const oldClaim = milestoneConfirm(ACTIONS.claim, escrow, milestone, splits)
++    const newClaim = buildMilestoneActionDescriptor(ACTIONS.claim, escrow, milestone, splits, { contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(newClaim)).toEqual(commonFields(oldClaim))
++
++    const oldRefund = milestoneConfirm(ACTIONS.refund, escrow, milestone, splits)
++    const newRefund = buildMilestoneActionDescriptor(ACTIONS.refund, escrow, milestone, splits, { contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(newRefund)).toEqual(commonFields(oldRefund))
++  })
++
++  it('approve on a same-chain escrow: same-chain kind, no fee line', () => {
++    const old = milestoneConfirm(ACTIONS.approve, sameChainEscrow, milestone, [])
++    const next = buildMilestoneActionDescriptor(ACTIONS.approve, sameChainEscrow, milestone, [], { contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('same-chain')
++  })
++
++  it('approve on a no-split cross-chain escrow with a submitted maxFee: cross-chain kind, fee line names the submitted figure', () => {
++    const maxFee = 300000n
++    const old = milestoneConfirm(ACTIONS.approve, crossChainEscrow, milestone, [], maxFee)
++    const next = buildMilestoneActionDescriptor(ACTIONS.approve, crossChainEscrow, milestone, [], { contractAddress: CONTRACT_ADDRESS, submittedMaxFee: maxFee })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('cross-chain')
++    expect(next.fee).toEqual({ floor: 200000n, submitted: maxFee, divertReachable: false })
++  })
++
++  it('release on a no-split cross-chain escrow: fee line names the escrow floor, not any submitted figure', () => {
++    const old = milestoneConfirm(ACTIONS.release, crossChainEscrow, milestone, [], 300000n)
++    const next = buildMilestoneActionDescriptor(ACTIONS.release, crossChainEscrow, milestone, [], { contractAddress: CONTRACT_ADDRESS, submittedMaxFee: 300000n })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.fee.submitted).toBeNull()
++  })
++
++  it('approve on a split escrow: split kind, per-leg fee line, legs carry each destination', () => {
++    const old = milestoneConfirm(ACTIONS.approve, crossChainEscrow, milestone, SPLITS)
++    const next = buildMilestoneActionDescriptor(ACTIONS.approve, crossChainEscrow, milestone, SPLITS, { contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('split')
++    expect(next.legs).toHaveLength(2)
++    expect(next.legs[0].crossChain).toBe(true)
++    expect(next.legs[1].crossChain).toBe(false)
++  })
++})
++
++describe('buildRedirectPayoutDescriptor parity with redirectPayoutConfirm', () => {
++  const milestones = [
++    { state: 0, amount: 100000000n },
++    { state: 3, amount: 50000000n }
++  ]
++
++  it('blocks an Arc-root no-split escrow trying to move off Arc, same as the old function', () => {
++    const args = { escrow: sameChainEscrow, hasSplits: false, newAddress: NEW_ADDRESS, newDomain: 6, milestones }
++    const old = redirectPayoutConfirm(args)
++    const next = buildRedirectPayoutDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.blocked).toBe(true)
++  })
++
++  it('flags a split escrow redirect as a no-op, same as the old function', () => {
++    const args = { escrow: crossChainEscrow, hasSplits: true, newAddress: NEW_ADDRESS, newDomain: 6, milestones }
++    const old = redirectPayoutConfirm(args)
++    const next = buildRedirectPayoutDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('split')
++  })
++
++  it('a normal cross-chain redirect matches, and carries the destination + floor', () => {
++    const args = { escrow: crossChainEscrow, hasSplits: false, newAddress: NEW_ADDRESS, newDomain: 6, milestones }
++    const old = redirectPayoutConfirm(args)
++    const next = buildRedirectPayoutDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('cross-chain')
++    expect(next.fee.floor).toBe(200000n)
++  })
++
++  it('a redirect that stays on Arc is never blocked, matching the old function', () => {
++    const args = { escrow: sameChainEscrow, hasSplits: false, newAddress: NEW_ADDRESS, newDomain: 26, milestones }
++    const old = redirectPayoutConfirm(args)
++    const next = buildRedirectPayoutDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.blocked).toBeUndefined()
++    expect(next.kind).toBe('same-chain')
++  })
++})
++
++describe('buildMutualSettleDescriptor parity with mutualSettleConfirm', () => {
++  it('a proposal that does not yet match the other side', () => {
++    const args = { escrow: crossChainEscrow, milestone, splits: [], bps: 6000, theirs: { exists: true, bps: 4000n } }
++    const old = mutualSettleConfirm(args)
++    const next = buildMutualSettleDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++  })
++
++  it('an executing same-chain settlement', () => {
++    const args = { escrow: sameChainEscrow, milestone, splits: [], bps: 6000, theirs: { exists: true, bps: 6000n } }
++    const old = mutualSettleConfirm(args)
++    const next = buildMutualSettleDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('same-chain')
++  })
++
++  it('an executing partial cross-chain settlement reaches the divert-reachable branch', () => {
++    const args = { escrow: crossChainEscrow, milestone, splits: [], bps: 6000, theirs: { exists: true, bps: 6000n } }
++    const old = mutualSettleConfirm(args)
++    const next = buildMutualSettleDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('cross-chain')
++    expect(next.fee.divertReachable).toBe(true)
++  })
++
++  it('an executing split settlement', () => {
++    const args = { escrow: crossChainEscrow, milestone, splits: SPLITS, bps: 6000, theirs: { exists: true, bps: 6000n } }
++    const old = mutualSettleConfirm(args)
++    const next = buildMutualSettleDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++    expect(next.kind).toBe('split')
++    expect(next.legs).toHaveLength(2)
++  })
++
++  it('a full settlement (bps 0) refunds in full, matching the old function', () => {
++    const args = { escrow: crossChainEscrow, milestone, splits: [], bps: 0, theirs: { exists: true, bps: 0n } }
++    const old = mutualSettleConfirm(args)
++    const next = buildMutualSettleDescriptor({ ...args, contractAddress: CONTRACT_ADDRESS })
++    expect(commonFields(next)).toEqual(commonFields(old))
++  })
++})
+diff --git a/frontend/src/hooks/useTransactionConfirm.js b/frontend/src/hooks/useTransactionConfirm.js
+new file mode 100644
+index 0000000..8bc8c85
+--- /dev/null
++++ b/frontend/src/hooks/useTransactionConfirm.js
+@@ -0,0 +1,144 @@
++import { useCallback, useRef, useState, useSyncExternalStore } from 'react'
++import { selectAdapter } from '../confirm/adapters.js'
++
++/* Wallet-agnostic transaction-confirmation flow — Round 1 of the custom
++   confirmation flow. Drives Stage A (this app's own confirm screen, built
++   from a ConfirmDescriptor — see confirm/descriptors.js) and, once the user
++   confirms, hands off to whichever wallet-type adapter matches how they
++   signed in (Circle UCW or EOA/Safe — see confirm/adapters.js). Neither
++   adapter is wired to a real signing call yet; this hook is the seam that
++   Round 2 wires production call sites through, not production wiring
++   itself. */
++
++// ---------------------------------------------------------------------- //
++// Single-flight lock — module-level, deliberately not per-hook-instance.
++//
++// The race this exists to close is useAuth.jsx's executeContractCall
++// (Round 34 finding, see CLAUDE.md's open follow-ups): two DIFFERENT
++// components can each start a transaction against the one shared
++// wallet-signing surface — Circle's SDK singleton for UCW, or a single
++// injected wallet for EOA — before the first one's confirm surface is
++// ready. A lock scoped to one useTransactionConfirm() call site would never
++// see the other component's in-flight call. Module scope is what makes the
++// lock visible across every instance, exactly like the SDK singleton and
++// the injected wallet it is guarding.
++//
++// This closes the race at its actual source — the request/send call this
++// hook's proceed() makes — rather than inside the SDK boundary useAuth.jsx
++// currently has no guard around at all. It also holds regardless of which
++// adapter ends up handling the call, since the lock lives above both.
++// ---------------------------------------------------------------------- //
++
++let locked = false
++const listeners = new Set()
++
++function setLocked(next) {
++  if (locked === next) return
++  locked = next
++  listeners.forEach((listener) => listener())
++}
++
++function subscribeLock(listener) {
++  listeners.add(listener)
++  return () => listeners.delete(listener)
++}
++
++function getLockSnapshot() {
++  return locked
++}
++
++/** Test-only escape hatch. Production code never needs this: proceed()'s
++ *  finally block always releases the lock it acquired. Exists because
++ *  vitest reuses this module across test cases within a file, and a test
++ *  that intentionally leaves a call in flight (to assert the lock) would
++ *  otherwise leak that lock into the next test. */
++export function __resetLockForTests() {
++  setLocked(false)
++}
++
++/**
++ * @typedef {'reviewing' | 'confirming' | 'settled' | 'error'} ConfirmStatus
++ */
++
++/**
++ * @param {Object} args
++ * @param {import('../confirm/descriptors.js').ConfirmDescriptor | null} [args.descriptor]
++ *   Stage A's payload. Built by the caller (via confirm/descriptors.js)
++ *   before this hook is ever asked to proceed — building it can require
++ *   on-chain reads (a live CCTP fee quote, escrow state) this hook has no
++ *   business owning.
++ * @param {import('../confirm/adapters.js').TransactionRequest | null} [args.request]
++ *   The calldata-shaped request the confirmed adapter will dispatch.
++ * @param {'circle-sca' | 'eoa' | null} [args.walletType]
++ *   Mirrors useAuth()'s walletType. Passed explicitly rather than read from
++ *   useAuth() directly, so this hook stays testable without mocking React
++ *   context and reusable if a non-Tranche-auth wallet type is ever added.
++ * @param {import('../confirm/adapters.js').TransactionAdapter} [args.adapter]
++ *   Injectable override, for tests. Defaults to selectAdapter(walletType).
++ */
++export function useTransactionConfirm({ descriptor = null, request = null, walletType = null, adapter: injectedAdapter } = {}) {
++  const isLocked = useSyncExternalStore(subscribeLock, getLockSnapshot, getLockSnapshot)
++  const [status, setStatus] = useState(/** @type {ConfirmStatus} */ ('reviewing'))
++  const [hash, setHash] = useState(null)
++  const [error, setError] = useState(null)
++  // Whichever call actually acquired the lock owns releasing it — guards
++  // against a second, rejected call's finally block releasing a lock the
++  // FIRST call still legitimately holds.
++  const ownsLockRef = useRef(false)
++
++  const proceed = useCallback(async () => {
++    if (locked) {
++      const err = new Error('Another transaction is already awaiting confirmation. Wait for it to finish.')
++      setStatus('error')
++      setError(err)
++      throw err
++    }
++    if (!descriptor || !request) {
++      const err = new Error('Nothing to confirm yet.')
++      setStatus('error')
++      setError(err)
++      throw err
++    }
++    const adapter = injectedAdapter ?? selectAdapter(walletType)
++    if (!adapter) {
++      const err = new Error('No wallet is connected.')
++      setStatus('error')
++      setError(err)
++      throw err
++    }
++
++    // Acquired synchronously, before the first await below — this is what
++    // makes the guard correct against genuinely concurrent calls, not just
++    // sequential ones: JS run-to-completion means a second proceed() call
++    // fired before this one yields control will see `locked === true` at
++    // its own top-of-function check above, deterministically, every time.
++    setLocked(true)
++    ownsLockRef.current = true
++    setStatus('confirming')
++    setError(null)
++    try {
++      const result = await adapter.send(request, descriptor)
++      const txHash = await adapter.awaitHash(result)
++      setHash(txHash)
++      setStatus('settled')
++      return txHash
++    } catch (err) {
++      setStatus('error')
++      setError(err)
++      throw err
++    } finally {
++      if (ownsLockRef.current) {
++        setLocked(false)
++        ownsLockRef.current = false
++      }
++    }
++  }, [descriptor, request, walletType, injectedAdapter])
++
++  const reset = useCallback(() => {
++    setStatus('reviewing')
++    setHash(null)
++    setError(null)
++  }, [])
++
++  return { status, descriptor, hash, error, locked: isLocked, proceed, reset }
++}
+diff --git a/frontend/src/hooks/useTransactionConfirm.test.jsx b/frontend/src/hooks/useTransactionConfirm.test.jsx
+new file mode 100644
+index 0000000..94767c9
+--- /dev/null
++++ b/frontend/src/hooks/useTransactionConfirm.test.jsx
+@@ -0,0 +1,160 @@
++import { describe, it, expect, vi, afterEach } from 'vitest'
++import { renderHook, act } from '@testing-library/react'
++
++import { useTransactionConfirm, __resetLockForTests } from './useTransactionConfirm.js'
++
++afterEach(() => __resetLockForTests())
++
++const DESCRIPTOR = { kind: 'same-chain', title: 't', subtitle: 's', functionName: 'claimDelivery', parameters: [] }
++const REQUEST = { address: '0xabc', abi: [], functionName: 'claimDelivery', args: [1n, 0n] }
++
++/** A promise the test can resolve/reject on its own schedule, so a hook's
++ *  proceed() can be held "in flight" for exactly as long as a concurrency
++ *  assertion needs — not a real async gap, but a genuinely uncontrolled one
++ *  from the hook's perspective, which is what a race needs to be meaningful. */
++function deferred() {
++  let resolve, reject
++  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
++  return { promise, resolve, reject }
++}
++
++function fakeAdapter({ sendResult = { hash: '0xHASH' }, hash = '0xHASH', sendImpl, hashImpl } = {}) {
++  return {
++    type: 'circle-sca',
++    send: sendImpl ?? vi.fn().mockResolvedValue(sendResult),
++    awaitHash: hashImpl ?? vi.fn().mockResolvedValue(hash)
++  }
++}
++
++describe('useTransactionConfirm — state machine', () => {
++  it('starts reviewing and moves to settled on a successful adapter round trip', async () => {
++    const adapter = fakeAdapter({ hash: '0xDEADBEEF' })
++    const { result } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter }))
++
++    expect(result.current.status).toBe('reviewing')
++    expect(result.current.locked).toBe(false)
++
++    let returned
++    await act(async () => { returned = await result.current.proceed() })
++
++    expect(returned).toBe('0xDEADBEEF')
++    expect(result.current.status).toBe('settled')
++    expect(result.current.hash).toBe('0xDEADBEEF')
++    expect(result.current.locked).toBe(false)
++    expect(adapter.send).toHaveBeenCalledWith(REQUEST, DESCRIPTOR)
++  })
++
++  it('moves to error when the adapter rejects, and releases the lock', async () => {
++    const adapter = fakeAdapter({ sendImpl: vi.fn().mockRejectedValue(new Error('user declined')) })
++    const { result } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter }))
++
++    await act(async () => {
++      await expect(result.current.proceed()).rejects.toThrow('user declined')
++    })
++
++    expect(result.current.status).toBe('error')
++    expect(result.current.error.message).toBe('user declined')
++    expect(result.current.locked).toBe(false)
++  })
++
++  it('rejects immediately, with no adapter call, when descriptor or request is missing', async () => {
++    const adapter = fakeAdapter()
++    const { result } = renderHook(() => useTransactionConfirm({ descriptor: null, request: REQUEST, adapter }))
++
++    await act(async () => {
++      await expect(result.current.proceed()).rejects.toThrow('Nothing to confirm yet.')
++    })
++    expect(adapter.send).not.toHaveBeenCalled()
++    expect(result.current.status).toBe('error')
++  })
++
++  it('reset() returns to reviewing and clears hash/error', async () => {
++    const adapter = fakeAdapter({ hash: '0xAAA' })
++    const { result } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter }))
++    await act(async () => { await result.current.proceed() })
++    expect(result.current.status).toBe('settled')
++
++    act(() => result.current.reset())
++    expect(result.current.status).toBe('reviewing')
++    expect(result.current.hash).toBeNull()
++    expect(result.current.error).toBeNull()
++  })
++})
++
++describe('useTransactionConfirm — single-flight guard, genuinely concurrent calls', () => {
++  it('a second proceed() on the SAME instance rejects while the first is still in flight, then a later call succeeds', async () => {
++    const gate = deferred()
++    const adapter = fakeAdapter({ sendImpl: vi.fn().mockReturnValue(gate.promise), hash: '0xFIRST' })
++    const { result } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter }))
++
++    let firstPromise, secondPromise
++    await act(async () => {
++      // Both calls fired without awaiting the first — this is what makes it
++      // a genuine race rather than two sequential calls. JS run-to-completion
++      // means the first call runs synchronously up to its `await
++      // adapter.send(...)`, acquiring the lock, before this line's second
++      // call ever starts executing.
++      firstPromise = result.current.proceed()
++      secondPromise = result.current.proceed()
++      await expect(secondPromise).rejects.toThrow('Another transaction is already awaiting confirmation.')
++    })
++
++    // The lock is still held — the first call hasn't resolved yet.
++    expect(result.current.locked).toBe(true)
++
++    await act(async () => { gate.resolve({ hash: '0xFIRST' }) })
++    await act(async () => { await firstPromise })
++
++    expect(result.current.status).toBe('settled')
++    expect(result.current.hash).toBe('0xFIRST')
++    expect(result.current.locked).toBe(false)
++    expect(adapter.send).toHaveBeenCalledTimes(1)
++
++    // The lock being released means a subsequent call is not permanently
++    // blocked by the earlier rejection — confirms the guard is a queue-of-one,
++    // not a one-way trip to a stuck state.
++    const adapter2 = fakeAdapter({ hash: '0xSECOND' })
++    const { result: result2 } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter: adapter2 }))
++    await act(async () => { await result2.current.proceed() })
++    expect(result2.current.status).toBe('settled')
++  })
++
++  it('the lock is visible ACROSS two different component instances — the actual shape of the useAuth.jsx race', async () => {
++    // Round 34's finding was two DIFFERENT components racing the same
++    // shared SDK singleton, not one component double-firing its own button.
++    // The lock has to be module-level for this test to mean anything — a
++    // per-instance lock would let both of these through.
++    const gateA = deferred()
++    const adapterA = fakeAdapter({ sendImpl: vi.fn().mockReturnValue(gateA.promise) })
++    const adapterB = fakeAdapter({ hash: '0xB' })
++
++    const { result: componentA } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter: adapterA }))
++    const { result: componentB } = renderHook(() => useTransactionConfirm({ descriptor: DESCRIPTOR, request: REQUEST, adapter: adapterB }))
++
++    let promiseA
++    await act(async () => {
++      promiseA = componentA.current.proceed()
++    })
++    // componentA's own render hasn't necessarily flushed synchronously from
++    // inside its own act() in every RTL version, but the module-level store
++    // update is synchronous — componentB, a wholly separate hook instance,
++    // must already observe the lock.
++    expect(componentB.current.locked).toBe(true)
++
++    await act(async () => {
++      await expect(componentB.current.proceed()).rejects.toThrow('Another transaction is already awaiting confirmation.')
++    })
++    expect(adapterB.send).not.toHaveBeenCalled()
++
++    await act(async () => { gateA.resolve({ hash: '0xA' }) })
++    await act(async () => { await promiseA })
++
++    expect(componentA.current.status).toBe('settled')
++    expect(componentB.current.locked).toBe(false)
++
++    // Now that A released it, B can actually go.
++    await act(async () => { await componentB.current.proceed() })
++    expect(componentB.current.status).toBe('settled')
++    expect(adapterB.send).toHaveBeenCalledTimes(1)
++  })
++})

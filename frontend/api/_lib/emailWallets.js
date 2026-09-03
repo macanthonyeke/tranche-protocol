@@ -58,6 +58,13 @@ export const LOGIN_INTENTS = Object.freeze({
   SIGNIN: 'signin'
 })
 
+export const DIRECTORY_PREFERENCE_CHOICES = Object.freeze({
+  UNDECIDED: 'undecided',
+  SKIPPED: 'skipped',
+  VERIFIED: 'verified',
+  REMOVED: 'removed'
+})
+
 export function normalizeLoginIntent(intent) {
   if (intent === LOGIN_INTENTS.SIGNUP || intent === LOGIN_INTENTS.SIGNIN) return intent
   return null
@@ -79,6 +86,7 @@ export function normalizeEmail(email) {
 }
 
 const bindingKey = (email) => `wallet:email:${email}`
+const preferenceKey = (circleUserId) => `wallet:email-preference:${circleUserId}`
 const sessionKey = (sessionId) => `wallet:otp:${sessionId}`
 
 // Long enough to read an email and finish wallet setup, short enough that an
@@ -159,6 +167,32 @@ export async function readBinding(email) {
 }
 
 /**
+ * Read the authenticated user's optional email-directory choice. The key is
+ * the canonical Circle user ID, not an email or short-lived session token, so
+ * a refresh and a later sign-in see the same onboarding decision.
+ *
+ * @param {string} circleUserId canonical server-derived identity
+ * @returns {Promise<{ choice: string, updatedAt: number } | null>}
+ */
+export async function readDirectoryPreference(circleUserId) {
+  return (await kv.get(preferenceKey(circleUserId))) ?? null
+}
+
+/**
+ * Persist the user's optional email-directory choice without touching the
+ * email binding itself. Skip and remove are deliberately separate choices:
+ * Settings remains the place where a user can opt in again after removal.
+ */
+export async function setDirectoryPreference(circleUserId, choice) {
+  if (!circleUserId || !Object.values(DIRECTORY_PREFERENCE_CHOICES).includes(choice)) {
+    throw new EmailWalletError('A valid email-directory preference is required.')
+  }
+  const record = { choice, updatedAt: Date.now() }
+  await kv.set(preferenceKey(circleUserId), record)
+  return record
+}
+
+/**
  * Bind an email to the Arc address Circle reports for `userId`.
  *
  * Refuses to move an existing binding to a different Circle user. Re-running
@@ -184,4 +218,26 @@ export async function writeBinding(email, { address, userId }) {
   const binding = { address, userId, boundAt: existing?.boundAt ?? Date.now() }
   await kv.set(bindingKey(email), binding)
   return binding
+}
+
+/**
+ * Remove an email-directory binding only when it belongs to the authenticated
+ * wallet identity supplied by the caller. The email is a directory alias; it
+ * is never allowed to choose which wallet is revoked.
+ *
+ * @param {string} email already normalized
+ * @param {{ address: string, userId: string }} binding server-derived identity
+ * @returns {Promise<boolean>} whether a binding was removed
+ */
+export async function removeBinding(email, { address, userId }) {
+  const existing = await readBinding(email)
+  if (!existing) return false
+  if (existing.userId !== userId || existing.address !== address) {
+    throw new EmailWalletError(
+      'This email-directory binding does not belong to this Tranche account.',
+      403
+    )
+  }
+  await kv.del(bindingKey(email))
+  return true
 }

@@ -1,0 +1,2125 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index c219095..15a5ad1 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -293,7 +293,8 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
+ Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory — two different, both-legitimate ways to count, so name which one you mean:
+ 
+ - **Lexical call sites**: the literal `escrowWrite(...)` expressions in source, counted by grepping for them — **27**, of which 2 take the function name from a variable rather than a quoted string: `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`. (A prior revision of this count said 26 — an undercount from deduplicating `resolveDisputeByTimeout`'s two separate UI call sites, `EscrowDetail.jsx` and `ArbiterPanel.jsx`, into one; grepping the literal expressions directly gives 27.)
+-- **Executable paths**: how many distinct contract functions those 27 sites can actually invoke once the 2 variable-function sites are expanded across every value they can resolve to — **32** (25 static/quoted + 4 milestone actions `action.fn` can resolve to + 3 evidence modes `meta.fn` can resolve to).
++- **Expanded call-site paths**: how many confirm-descriptor SCREENS exist once the 2 variable-function sites are expanded across every value they can resolve to — **32** (25 static/quoted call sites, each its own screen to review, + 4 milestone actions `action.fn` can resolve to + 3 evidence modes `meta.fn` can resolve to). This is a coverage metric, not a function count: `resolveDisputeByTimeout`'s two call sites (`EscrowDetail.jsx` and `ArbiterPanel.jsx`) are two of the 25 static ones, each with its own descriptor to get right, so it is deliberately NOT deduplicated here the way the lexical count above explicitly avoids doing either.
++- **Unique contract functions**: how many DISTINCT contract function names are reachable at all — **31** (24 unique quoted functions, since `resolveDisputeByTimeout` is 2 of the 25 static call sites but only 1 function name, + 4 milestone functions + 3 evidence functions). This is the right number for "how many contract functions have a descriptor," not "how many screens exist" — say which you mean.
+ 
+ `CreateEscrow.jsx`'s `deposit` is one of the 27 lexical sites; its descriptor predates the descriptor sweep and came from `feature/circle-ucw-wallets`. Any coverage claim quoting a different number (e.g. "24 of 24", "26 of 26") is either counting only quoted/static call sites (25), deduplicating `resolveDisputeByTimeout`'s two sites (26), or counting only files changed in one PR — say which, or use the figures above.
+ 
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 0b1c5dc..ce8d9a9 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -27,16 +27,33 @@ const POLL_MS = 15_000
+ // doesn't, `destinationDomain` now comes through as `null` (rendered as an
+ // unknown chain downstream) rather than a wrong guess.
+ //
+-// Round 22 Phase A: `expectedMessageCount`, optional — the number of real
+-// MessageSent events the confirming receipt proved should exist for this
+-// tx (see receiptEmittedCctpMessage), persisted by the submitting device
+-// alongside the tracked txHash. A mixed split can burn several legs to
+-// different chains in one transaction, and Iris indexes each message
+-// independently — a partial response (fewer messages than the receipt
+-// proved) is "not fully indexed yet", not "this is the complete set". Only
+-// the submitting device has this number; a subgraph-sourced txHash from a
+-// different device has no persisted count and falls back to the
+-// messages.length === 0 heuristic below, same as before this existed.
++// Round 22 Phase A: `expectedMessages`, optional — originally a bare count
++// of real MessageSent events the confirming receipt proved should exist
++// for this tx, now (Round 26) the actual verified message identities
++// themselves (see receiptEmittedCctpMessageForMilestone /
++// verifiedOwnCctpMessage), persisted by the submitting device alongside
++// the tracked txHash. A mixed split can burn several legs to different
++// chains in one transaction, and Iris indexes each message independently —
++// a partial response (fewer messages than the receipt proved) is "not
++// fully indexed yet", not "this is the complete set". Only the submitting
++// device has this; a subgraph-sourced txHash from a different device falls
++// back to the messages.length === 0 heuristic below, same as before this
++// existed.
++//
++// Round 26 finding 2: a bare count was never enough once Iris's response
++// can contain messages belonging to a DIFFERENT milestone under the same
++// tx hash — Iris has no concept of "milestone", only tx hash. A batch with
++// 2 total messages where only 1 is genuinely this milestone's own used to
++// pass `messages.length(2) >= expectedMessageCount(1)` and then render
++// BOTH — a foreign message's failure could make this milestone look
++// failed, or its success could look like this milestone's own delivery.
++// expectedMessages is now the exact set of raw message hex strings this
++// milestone's own receipt verified (see verifiedOwnCctpMessage's full
++// authenticity chain) — Iris's response is filtered to ONLY the entries
++// whose own `message` field byte-matches one of them (case-insensitive
++// string equality; these are short, few-per-receipt hex strings, so a
++// hash comparison would add a step for no real benefit) before anything
++// else in this function ever looks at it.
+ //
+ // Round 22 Phase B: terminality used to be inferred as "no message is
+ // PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
+@@ -50,18 +67,26 @@ const POLL_MS = 15_000
+ // EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
+ // any value Circle adds later) keeps polling, which is the safe default for
+ // an open-ended field.
+-export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
++export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
+   const [phase, setPhase]           = useState('idle')
+   const [deliveries, setDeliveries] = useState([])
+   const intervalRef = useRef(null)
+   const doneRef     = useRef(false)
++  const expectedMessagesKey = expectedMessages == null ? null : expectedMessages.join(',')
+ 
+   const poll = useCallback(async () => {
+     if (!txHash || !isCrossChain || doneRef.current) return
+     try {
+-      const messages = await fetchIrisMessages(txHash)
++      const allMessages = await fetchIrisMessages(txHash)
++
++      // Identity-based, not count-based (Round 26 finding 2) — see the
++      // doc comment above for why a bare length check let a foreign
++      // milestone's own genuine Iris message through undetected.
++      const messages = expectedMessages != null
++        ? allMessages.filter((m) => expectedMessages.some((em) => em.toLowerCase() === m.message?.toLowerCase()))
++        : allMessages
+ 
+-      if (expectedMessageCount != null && messages.length < expectedMessageCount) {
++      if (expectedMessages != null && messages.length < expectedMessages.length) {
+         setPhase('polling')
+         return
+       }
+@@ -117,7 +142,15 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessageCount) {
+       // so a transient outage doesn't permanently block status.
+       setPhase('unavailable')
+     }
+-  }, [txHash, isCrossChain, expectedMessageCount])
++    // Round 26: depends on expectedMessagesKey (a stable string), not
++    // expectedMessages itself. FallbackCrossChainDelivery recomputes its
++    // verified message array fresh on every render (a new array reference
++    // each time, even when the content is identical) — depending on the
++    // array directly would recreate `poll` every render, which would then
++    // retrigger the effect below and reset phase/deliveries in a loop. The
++    // joined hex strings can never contain a comma, so this is an
++    // unambiguous equality key for otherwise-identical content.
++  }, [txHash, isCrossChain, expectedMessagesKey])
+ 
+   useEffect(() => {
+     if (!txHash || !isCrossChain) {
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index eb55987..5c49ef5 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -35,8 +35,8 @@ afterEach(() => {
+   vi.useRealTimers()
+ })
+ 
+-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null } = {}) => ({
+-  message: '0xmessage',
++const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx', forwardErrorCode = null, message = '0xmessage' } = {}) => ({
++  message,
+   attestation: '0xattestation',
+   status: 'complete',
+   decodedMessage: destinationDomain != null ? { destinationDomain: String(destinationDomain) } : {},
+@@ -215,36 +215,57 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
+   })
+ })
+ 
+-/* Round 23 — expectedMessageCount guard, direct coverage.
+-   Introduced in Round 22 Phase A for the three write sites (a receipt-
+-   verified local track always knows its own real MessageSent count), and
+-   now also fed by MilestoneRow's fallback path once it has a receipt in
+-   hand (Round 23). The guard itself — `messages.length < expectedMessageCount`
+-   keeps polling before ANY completeness check runs — had no direct test
+-   until now; it was only ever exercised incidentally through fixtures where
+-   messages.length already matched. This isolates it: a burn that emitted 2
+-   real MessageSent events but Iris has only indexed 1 of must not be treated
+-   as "fully known" just because the one message it does have is COMPLETE. */
+-describe('useCctpDelivery — expectedMessageCount guard', () => {
+-  it('keeps polling when Iris has indexed fewer messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
+-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
++/* Round 23 / Round 26 finding 2 — expectedMessages guard, direct coverage.
++   Introduced in Round 22 Phase A as a bare count (a receipt-verified local
++   track always knows its own real MessageSent count), fed by MilestoneRow's
++   fallback path once it has a receipt in hand (Round 23), then replaced
++   with actual message IDENTITIES in Round 26: a bare count let a message
++   genuinely belonging to a DIFFERENT milestone in the same batched tx pass
++   `messages.length >= expectedMessageCount` and get rendered as though it
++   were this milestone's own. expectedMessages is now the exact set of raw
++   message hex strings receiptEmittedCctpMessageForMilestone verified as
++   this milestone's own — Iris's response is filtered to only entries whose
++   own `message` field matches one of them before anything else runs. */
++describe('useCctpDelivery — expectedMessages guard', () => {
++  it('keeps polling when Iris has indexed fewer of the expected messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
++    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' })])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+     expect(result.current.phase).toBe('polling')
+     expect(result.current.deliveries).toEqual([])
+   })
+ 
+-  it('proceeds to delivered once Iris catches up to the full expected count', async () => {
++  it('proceeds to delivered once Iris catches up to the full expected set', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
+-      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', message: '0xmsg2' })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, 2))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries).toHaveLength(2)
+   })
+ 
+-  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessageCount is not provided', async () => {
++  it('finding 2: excludes an Iris message that is NOT one of the expected identities, even though messages.length alone would satisfy the old count-based guard — a foreign milestone\'s genuine message under the same tx hash must never be rendered as this milestone\'s own', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmine' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforeign' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmine']))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    // The foreign message's FAILED state must not leak in — if it had, phase
++    // would be 'failed' (anyFailed), not 'delivered', and deliveries would
++    // have length 2, not 1.
++    expect(result.current.deliveries).toHaveLength(1)
++    expect(result.current.deliveries[0].message).toBe('0xmine')
++  })
++
++  it('is case-insensitive when matching expectedMessages against Iris\'s own message field', async () => {
++    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xABCDEF' })])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xabcdef']))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++  })
++
++  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessages is not provided', async () => {
+     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 6744870..bbedd01 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+ import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+@@ -205,7 +205,7 @@ function DisputeBlock({ detail, index, refetch }) {
+   const e = detail.escrow
+   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+   const [resolveTxHash, setResolveTxHash] = useState(null)
+-  const [resolveMessageCount, setResolveMessageCount] = useState(null)
++  const [resolveMessages, setResolveMessages] = useState(null)
+ 
+   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
+   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
+@@ -222,23 +222,30 @@ function DisputeBlock({ detail, index, refetch }) {
+   // so the contract's timeout fallback settles it as a fixed 50/50 split.
+   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
+ 
+-  // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
+-  // "was this escrow/split CONFIGURED for cross-chain" — a resolveDispute
+-  // ruling can execute while rounding every share to zero or diverting
+-  // every cross-chain leg to an Arc credit, with no CCTP message ever
+-  // created. Receives the full confirmed receipt now (see ResolveForm's own
+-  // tx below), not a broadcast-time txHash string — the same
++  // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
++  // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
++  // escrow/split CONFIGURED for cross-chain" — a resolveDispute ruling can
++  // execute while rounding every share to zero or diverting every
++  // cross-chain leg to an Arc credit, with no CCTP message ever created.
++  // Receives the full confirmed receipt now (see ResolveForm's own tx
++  // below), not a broadcast-time txHash string — the same
+   // broadcast-vs-mined gap Round 21 Phase D already closed for mutualSettle.
+   // resolveDisputeByTimeout's own onConfirmed still calls this with `null`
+   // (it never goes cross-chain at all, TrancheProtocol.sol:596/:614 —
+   // both halves always become Arc refund credits), which correctly no-ops
+   // here without needing a receipt to prove that.
++  //
++  // Round 26 finding 3: milestone-scoped and authenticity-verified, not
++  // just "a real MessageSent exists somewhere in this receipt" — Circle
++  // wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack
++  // a foreign UserOperation's logs into the same receipt. detail.id/index
++  // are already in scope — no discovery needed, unlike the fallback path.
+   const handleResolve = useCallback((receipt) => {
+     if (receipt) {
+-      const { emitted, count } = receiptEmittedCctpMessage(receipt)
++      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
+       if (emitted) {
+         setResolveTxHash(receipt.transactionHash)
+-        setResolveMessageCount(count)
++        setResolveMessages(messages)
+         // Also persist to localStorage so EscrowDetail picks it up on other
+         // devices. Round 20 Phase D: no `domain` field — no reader ever
+         // consumed it (both this component and EscrowDetail's MilestoneRow
+@@ -248,7 +255,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         // Iris directly once it has the txHash.
+         localStorage.setItem(
+           cctpTrackKey(detail.id, index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+         )
+       }
+     }
+@@ -322,7 +329,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         <ArbiterDeliveryStatus
+           txHash={resolveTxHash}
+           isCrossChain={trackingDomain != null}
+-          expectedMessageCount={resolveMessageCount}
++          expectedMessages={resolveMessages}
+         />
+       )}
+     </li>
+@@ -358,8 +365,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
+    CrossChainDelivery for the full citation trail on why a single collapsed
+    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+    leg in the same mixed split failed. */
+-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessageCount }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
++function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessages }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
+ 
+   if (phase === 'idle') return null
+ 
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index 60b4b84..d6ed034 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -1,4 +1,4 @@
+-// FallbackCrossChainDelivery — Round 23 / Round 24 Phase A.
++// FallbackCrossChainDelivery — Round 23 / Round 24 Phase A / Round 26.
+ //
+ // MilestoneRow's fallback path (a milestone whose cross-chain release this
+ // device never submitted itself — known only via the subgraph's
+@@ -19,34 +19,31 @@
+ //       that emitted 2 messages but Iris had only indexed 1 of could be
+ //       marked fully delivered early.
+ //
+-// Round 24 Phase A: a THIRD bug in the same fallback path, found by the 12th
+-// Codex review pass — release() is fully permissionless, so a batching /
+-// multicall contract can bundle release-family calls for several milestones
+-// (possibly across different escrows) into ONE transaction. The indexer
+-// stamps that same tx hash as releaseTx on every milestone the batch
+-// touched, and Circle's Iris API returns every MessageSent in the tx with no
+-// per-application scoping — so receiptEmittedCctpMessage(receipt) (Round 22
+-// Phase A, correct for the three write sites, where the receipt is always
+-// this device's own single-purpose call) would attribute EVERY message in
+-// the batch to EVERY milestone that shares the hash. Fixed with
+-// receiptEmittedCctpMessageForMilestone, which scopes to the log-index range
+-// between the nearest preceding terminal event (any milestone) and this
+-// milestone's own terminal event — see that function's and
+-// milestoneCctpLogRange's own doc comments in EscrowDetail.jsx for the proof
+-// this is a hard boundary, not a heuristic.
++// Round 24 Phase A: a THIRD bug in the same fallback path — release() is
++// fully permissionless, so a batching/multicall contract can bundle
++// release-family calls for several milestones (possibly across different
++// escrows) into ONE transaction, sharing one tx hash. Fixed with
++// receiptEmittedCctpMessageForMilestone, scoping to the log-index range
++// between the nearest preceding terminal event and this milestone's own.
++//
++// Round 25 / Round 26: log-index scoping alone only answers "which of THIS
++// CONTRACT's own calls" — not "is this message even from this contract's
++// own burn at all", nor (Round 26 finding 1) "is this message even
++// GENUINE, or a forged MessageTransmitterV2.sendMessage call an attacker
++// made directly, bypassing TokenMessengerV2 entirely". Every fixture below
++// that's meant to represent a genuine burn builds the FULL authenticity
++// chain (see buildCctpMessage) — real header sender (TokenMessengerV2),
++// real body sender (this contract), both fields' version tags set to CCTP
++// V2 — not just a body messageSender, so a fixture only passes if it would
++// actually decode and authenticate the way a real receipt does.
+ //
+ // These tests render FallbackCrossChainDelivery directly, mocking wagmi's
+-// useWaitForTransactionReceipt (the same provider-read hook useTx.js already
+-// uses) to control what receipt comes back. receiptEmittedCctpMessage /
+-// receiptEmittedCctpMessageForMilestone are left REAL — fixtures build
+-// genuine MessageSent and TrancheProtocol event logs via viem's
+-// encodeEventTopics/encodeAbiParameters (same approach as
+-// irisDelivery.test.js), including real logIndex values, so a fixture only
+-// passes if it would actually decode and order the way a real receipt does.
+-// For (b), fetchIrisMessages is the only other mock — useCctpDelivery itself
+-// runs for real, so the test proves the FULL wiring (receipt → decoded count
+-// → expectedMessageCount → useCctpDelivery's guard), not just that the guard
+-// function works in isolation.
++// useWaitForTransactionReceipt (the same provider-read hook useTx.js
++// already uses) to control what receipt comes back, and fetchIrisMessages
++// to control what Iris reports for it — useCctpDelivery itself runs for
++// real, so tests prove the FULL wiring (receipt → verified messages →
++// expectedMessages → useCctpDelivery's identity-based guard), not just that
++// any one piece works in isolation.
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { render, screen, cleanup, waitFor } from '@testing-library/react'
+@@ -78,28 +75,46 @@ vi.mock('../hooks/useAuth.jsx', () => ({
+ 
+ const { FallbackCrossChainDelivery } = await import('./EscrowDetail.jsx')
+ 
+-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
+ const MESSAGE_SENT_ABI = [
+   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+ ]
++const FOREIGN_ADDRESS = '0x1234567890123456789012345678901234567890'
++
++const hexZeros = (byteLen) => '00'.repeat(byteLen)
++const uint32Hex = (n) => n.toString(16).padStart(8, '0')
++const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
++
++// A real, offset-correct CCTP V2 message — every field a genuine message
++// would have up through messageSender (byte 280), not just the one field a
++// given test cares about (Round 26: header sender/version were added
++// alongside Round 25's body sender). Defaults describe a fully genuine
++// message this contract's own burn would produce; individual tests
++// override exactly the field they're exercising.
++const buildCctpMessage = ({
++  headerVersion = 1,
++  headerSender = TOKEN_MESSENGER_V2_ARC,
++  bodyVersion = 1,
++  bodySender = CONTRACT_ADDRESS
++} = {}) =>
++  '0x' +
++  uint32Hex(headerVersion) +
++  hexZeros(4 + 4 + 32) +
++  addressWordHex(headerSender) +
++  hexZeros(32 + 32 + 4 + 4) +
++  uint32Hex(bodyVersion) +
++  hexZeros(32 + 32 + 32) +
++  addressWordHex(bodySender)
++
+ // logIndex is a real field on every viem log — milestoneCctpLogRange orders
+ // and partitions on it, so every fixture below sets it explicitly rather
+ // than relying on array position, matching what a real receipt provides.
+-//
+-// Round 25: `sender` builds a real, offset-correct CCTP V2 message —
+-// receiptEmittedOwnCctpMessage now decodes messageSender out of this exact
+-// byte range (see its own doc comment in utils/irisDelivery.js), so a
+-// fixture only passes if it would actually decode to the right address.
+-// Defaults to CONTRACT_ADDRESS since every test below except the Round 25
+-// gap-(a) ones is exercising this contract's own genuine burns.
+-const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
+-  '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+-
+-const messageSentLog = (logIndex, sender = CONTRACT_ADDRESS) => ({
+-  address: MESSAGE_TRANSMITTER,
++const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
++  address,
+   logIndex,
+   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+-  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
++  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(overrides)])
+ })
+ 
+ // Builds a real TrancheProtocol event log (e.g. MilestoneReleased,
+@@ -115,8 +130,13 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+   return { address, logIndex, topics, data }
+ }
+ 
+-const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE' } = {}) => ({
+-  message: '0xmessage',
++// Round 26 finding 2: `message` defaults to the SAME bytes a genuine
++// verified receipt log would carry — useCctpDelivery now matches Iris
++// entries against expectedMessages by real identity, not just a count, so
++// a fixture whose `message` doesn't match what the receipt actually proved
++// would never be attributed either, same as a real mismatch wouldn't be.
++const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', message = buildCctpMessage() } = {}) => ({
++  message,
+   attestation: '0xattestation',
+   decodedMessage: { destinationDomain: String(destinationDomain) },
+   forwardState,
+@@ -214,14 +234,14 @@ describe('failure mode (b): a receipt proving 2 CCTP messages, Iris initially in
+     renderFallback()
+ 
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xreleasetx'))
+-    // useCctpDelivery's expectedMessageCount guard (messages.length < 2) must
++    // useCctpDelivery's expectedMessages guard (messages.length < 2) must
+     // keep this in the pre-deliveries "polling" state, not render a single
+     // leg as though the settlement were complete.
+     await waitFor(() => expect(screen.getByText(/Delivering…/)).toBeInTheDocument())
+     expect(screen.queryByText(/Delivered to/)).not.toBeInTheDocument()
+   })
+ 
+-  it('reaches the delivered state once Iris reports both messages complete — proving the guard is the count from the receipt, not a permanent block', async () => {
++  it('reaches the delivered state once Iris reports both messages complete — proving the guard is the real message set from the receipt, not a permanent block', async () => {
+     setReceipt({ data: twoMessageReceipt(), isPending: false, isError: false })
+     fetchIrisMessages.mockResolvedValue([
+       irisMessage({ destinationDomain: 6 }),
+@@ -290,9 +310,9 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
+ 
+     renderFallback({ txHash: '0xbatchtx2' })
+ 
+-    // If the 3rd (unrelated) message were wrongly included, expectedMessageCount
+-    // would be 3 and this would stay stuck polling forever instead of showing 2
+-    // delivered legs.
++    // If the 3rd (unrelated) message were wrongly included, expectedMessages
++    // would have length 3 and this would stay stuck polling forever instead
++    // of showing 2 delivered legs.
+     await waitFor(() => expect(screen.getAllByText(/Delivered to/)).toHaveLength(2))
+   })
+ })
+@@ -318,13 +338,13 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
+   })
+ })
+ 
+-describe('Round 25 gap (a): a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
++describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
+   it('does not attribute a foreign TrancheProtocol instance\'s (or a direct Circle depositForBurn\'s) MessageSent to this instance\'s Arc-only release', async () => {
+     setReceipt({
+       data: {
+         transactionHash: '0xforeigntx',
+         logs: [
+-          messageSentLog(0, '0x1234567890123456789012345678901234567890'),   // foreign burn — no boundary around it
++          messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),   // foreign burn — no boundary around it
+           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // this instance's own release, Arc-only, no burn
+         ]
+       },
+@@ -335,6 +355,23 @@ describe('Round 25 gap (a): a foreign application\'s burn shares this receipt wi
+     await waitFor(() => expect(container).toBeEmptyDOMElement())
+     expect(fetchIrisMessages).not.toHaveBeenCalled()
+   })
++
++  it('finding 1: does not attribute a message forged via a direct MessageTransmitterV2.sendMessage call — real header sender is the attacker, not TokenMessengerV2, even though the body claims this contract as messageSender', async () => {
++    setReceipt({
++      data: {
++        transactionHash: '0xforgedtx',
++        logs: [
++          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),
++          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      },
++      isPending: false,
++      isError: false
++    })
++    const { container } = renderFallback({ txHash: '0xforgedtx' })
++    await waitFor(() => expect(container).toBeEmptyDOMElement())
++    expect(fetchIrisMessages).not.toHaveBeenCalled()
++  })
+ })
+ 
+ describe('Round 25 gap (b): a same-contract withdrawRefund burn shares this receipt with an unrelated Arc-only release', () => {
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 62bee0a..e073ae2 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessage, receiptEmittedOwnCctpMessage } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
+ import {
+   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+@@ -1659,7 +1659,14 @@ function MilestoneRow({
+                   isCrossChain
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
+-                  expectedMessageCount={cctpTrack.expectedMessages}
++                  // Round 26: defensive against a pre-Round-26 localStorage
++                  // entry still inside its 24h window, where
++                  // expectedMessages was a bare count (number), not an
++                  // array — Array.isArray falls back to undefined exactly
++                  // like a missing value (see useCctpDelivery's own
++                  // expectedMessages == null branch), never crashes on
++                  // .join/.some over a number.
++                  expectedMessages={Array.isArray(cctpTrack.expectedMessages) ? cctpTrack.expectedMessages : undefined}
+                 />
+               )}
+               {milestone.state === 3 && fallbackTxHash && (
+@@ -2412,130 +2419,22 @@ export function mutualSettlementExecuted(receipt) {
+    Arc credit, and still fire MutualSettlementExecuted with no CCTP message
+    ever created. Both facts matter for different reasons and neither implies
+    the other, so SettlementPanel's tracker write requires both: this wraps
+-   them into one composite ground-truth check, kept separate from the two
+-   simpler write sites (MilestoneAction, DisputeBlock) whose actions either
+-   revert or fully execute with no two-sided-match ambiguity, so
+-   receiptEmittedCctpMessage alone is already their complete answer. */
+-export function mutualSettlementCreatedCctpMessage(receipt) {
+-  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0 }
+-  return receiptEmittedCctpMessage(receipt)
+-}
+-
+-/* Round 24 Phase A. The four terminal, escrowId+milestoneIndex-carrying
+-   events that can each be preceded by a CCTP burn in the SAME top-level
+-   call — TrancheProtocol.sol verified directly, not assumed:
+-     approveRelease        -> MilestoneApproved       (:647/:649)
+-     release                -> MilestoneReleased       (:682/:684)
+-     resolveDispute          -> DisputeResolved         (via _executePartialRelease, :516/:518)
+-     mutualSettle (matched)  -> MutualSettlementExecuted (via _executePartialRelease, :556/:557)
+-   In every one of the four, the burn (if any) happens strictly BEFORE the
+-   terminal event — CEI ordering, confirmed at each call site and in
+-   _executeCCTPReleaseAmount/_executePartialRelease underneath, and nothing
+-   is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
+-   emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
+-   credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
+-   Re-verified exhaustively against every _approveAndBurn/
+-   _executeCCTPReleaseAmount call site in TrancheProtocol.sol: these four
+-   plus withdrawRefund (:877) are the only five burn-capable paths that
+-   exist — see CCTP_BOUNDARY_ONLY_EVENTS below for why withdrawRefund needs
+-   separate handling rather than joining this list.
+-
+-   EVM logs within one transaction are strictly ordered by real execution
+-   order: one external call runs to completion (emitting every one of its
+-   own logs) before the next begins, true regardless of whether a batching
+-   / multicall contract composed several release()-family calls (release()
+-   is fully permissionless) into one transaction. That makes each
+-   milestone's own terminal event a hard boundary, not a heuristic: the
+-   MessageSent logs that genuinely belong to THIS milestone are exactly
+-   those strictly after the nearest PRECEDING terminal event (any
+-   milestone) and up to and including this milestone's own terminal event.
+-   Without this, FallbackCrossChainDelivery (the only site whose receipt
+-   can belong to a caller other than this device — the three write sites
+-   are always this device's own single-purpose tx.run() call, never a
+-   batch) would attribute every MessageSent in a batched tx's receipt to
+-   every milestone that shares the tx hash.
+-
+-   This boundary set only answers "which of THIS CONTRACT's own calls" —
+-   see receiptEmittedOwnCctpMessage (utils/irisDelivery.js) for the
+-   separate, orthogonal question of whether a MessageSent log in the scoped
+-   range is even from this contract's own burn at all (a batch could
+-   contain a foreign TrancheProtocol instance's, or a direct Circle
+-   depositForBurn call's, burn with no recognized boundary around it). */
+-const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
+-
+-/* Round 25. withdrawRefund's RefundWithdrawn(address indexed depositor,
+-   uint256 amount) — verified against ITrancheProtocol.sol — carries no
+-   escrowId or milestoneIndex at all (a refund is wallet-balance-level, not
+-   tied to any single milestone), so it can never be a valid MATCH target
+-   for the (escrowId, milestoneIndex) lookup below, unlike
+-   CCTP_TERMINAL_EVENTS. It still needs to DELIMIT ranges: withdrawRefund's
+-   own tx hash never reaches FallbackCrossChainDelivery as an entry point
+-   (Milestone.releaseTx is stamped only by the 5 release-type handlers,
+-   confirmed in CLAUDE.md — RefundWithdrawn isn't one), but its logs can
+-   still appear INSIDE a batched receipt entered via a different
+-   milestone's own terminal event. Without a boundary here, a batched
+-   withdrawRefund burn immediately before an unrelated Arc-only milestone
+-   release would fall inside that milestone's computed range with nothing
+-   to stop it. Pushed into the same `boundaries` array as
+-   CCTP_TERMINAL_EVENTS but with escrowId/milestoneIndex left null — since
+-   neither can ever equal a real BigInt target, the existing `.find()`
+-   match logic below naturally never selects it as anyone's own terminal
+-   event, while the range computation (which only reads logIndex) still
+-   uses it correctly. */
+-const CCTP_BOUNDARY_ONLY_EVENTS = ['RefundWithdrawn']
+-
+-/* Exported for direct testing. Returns the [start, end] log-index range
+-   (start exclusive, end inclusive) this milestone's own logs occupy within
+-   `receipt`, or null if this milestone's own terminal event isn't found —
+-   defensive only, since the subgraph can only have stamped this txHash as
+-   THIS milestone's releaseTx by having decoded one of CCTP_TERMINAL_EVENTS
+-   for this exact (escrowId, milestoneIndex) out of this exact receipt. */
+-export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
+-  const targetEscrowId = BigInt(escrowId)
+-  const targetMilestoneIndex = BigInt(milestoneIndex)
+-  const boundaries = []
+-
+-  for (const log of receipt.logs) {
+-    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+-    try {
+-      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
+-      if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
+-        boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
+-      } else if (CCTP_BOUNDARY_ONLY_EVENTS.includes(dec.eventName)) {
+-        boundaries.push({ logIndex: log.logIndex, escrowId: null, milestoneIndex: null })
+-      }
+-    } catch {}
+-  }
+-
+-  const match = boundaries.find(
+-    (b) => b.escrowId === targetEscrowId && b.milestoneIndex === targetMilestoneIndex
+-  )
+-  if (!match) return null
+-
+-  const start = boundaries
+-    .filter((b) => b.logIndex < match.logIndex)
+-    .reduce((max, b) => Math.max(max, b.logIndex), -1)
+-
+-  return { start, end: match.logIndex }
+-}
+-
+-/* Round 24 Phase A / Round 25. The milestone-scoped counterpart to
+-   receiptEmittedCctpMessage — used only by FallbackCrossChainDelivery,
+-   where the receipt can belong to a batched, multi-milestone transaction
+-   this device never submitted. Scopes the receipt to just this milestone's
+-   own log range (see milestoneCctpLogRange) AND to messages whose own
+-   decoded messageSender is this contract's address (see
+-   receiptEmittedOwnCctpMessage's doc comment for why the log-index
+-   scoping alone isn't sufficient) before running the shared MessageSent
+-   count. No match found (should be unreachable in practice — see
+-   milestoneCctpLogRange's own doc comment) fails the same way as
+-   "genuinely no CCTP message": nothing reliable to attribute either way,
+-   so there is no meaningful difference in what the UI should show. */
+-export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
+-  const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
+-  if (!range) return { emitted: false, count: 0 }
+-  const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
+-  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
++   them into one composite ground-truth check.
++
++   Round 26 finding 3: now takes escrowId/milestoneIndex and delegates to
++   receiptEmittedCctpMessageForMilestone (the same authenticity- and
++   milestone-scoped check FallbackCrossChainDelivery uses), not the bare
++   receiptEmittedCctpMessage this used to call directly — Circle-managed
++   wallets are ERC-4337 smart accounts, and a bundler's handleOps can pack a
++   foreign UserOperation's logs into the same receipt even for a tx this
++   device itself submitted, so "this device's own single-purpose call"
++   never actually guaranteed a single-purpose RECEIPT. SettlementPanel
++   already has escrow.id/milestone.index in scope at the call site — it
++   isn't discovering them from the subgraph the way the fallback path has
++   to, so no new plumbing was needed to make this call. */
++export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
++  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [] }
++  return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+ }
+ 
+ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs }) {
+@@ -2772,8 +2671,10 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+       // cross-chain leg to an Arc credit and still fire
+       // MutualSettlementExecuted, with no CCTP message ever created.
+       // mutualSettlementCreatedCctpMessage requires both: settlement
+-      // executed AND the receipt proves a real message was sent.
+-      const { emitted, count } = mutualSettlementCreatedCctpMessage(receipt)
++      // executed AND the receipt proves a real message genuinely THIS
++      // milestone's own was sent (Round 26: authenticity- and
++      // milestone-scoped, not just "a message exists somewhere").
++      const { emitted, messages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
+       if (emitted) {
+         // Round 20 Phase D: no `domain` field — no reader ever consumed it
+         // (both MilestoneRow and DisputeBlock recompute the domain live from
+@@ -2783,7 +2684,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // domains from Iris directly once it has the txHash.
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+         )
+         onCrossChainRelease?.()
+       }
+@@ -2956,8 +2857,8 @@ export function shouldClearCctpTrack(deliveries) {
+    recovery card for one of potentially several simultaneously-failed legs.
+    Exported for direct testing — the same reasoning EscrowDetail exports its
+    other confirm-descriptor and decision functions for. */
+-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessageCount }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessageCount)
++export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessages }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
+   const [copied, setCopied] = useState(false)
+ 
+   // Once every message Iris knows about for this tx has actually completed,
+@@ -3084,12 +2985,13 @@ const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
+ 
+    Fixed by fetching the receipt directly (useWaitForTransactionReceipt is
+    the same provider-read hook useTx.js already uses to turn a hash into a
+-   receipt) and reusing receiptEmittedCctpMessage — the exact same
+-   ground-truth check the three write sites run, just read after the fact
+-   instead of at confirmation time. Its own decoded count becomes
+-   expectedMessageCount, closing (b) the same way a local cctpTrack record
+-   already does. A receipt that emits zero messages renders nothing (same
+-   as any other non-cross-chain milestone), closing (a).
++   receipt) and reusing the shared ground-truth check the write sites run
++   (as of Round 26, receiptEmittedCctpMessageForMilestone — see its own doc
++   comment), just read after the fact instead of at confirmation time. Its
++   own verified messages become expectedMessages, closing (b) the same way
++   a local cctpTrack record already does. A receipt that emits zero
++   messages renders nothing (same as any other non-cross-chain milestone),
++   closing (a).
+ 
+    Introduces an async fetch on a path that used to render synchronously
+    from local/subgraph data alone, so there are three states to cover
+@@ -3119,13 +3021,15 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
+   })
+ 
+   if (receipt) {
+-    // Round 24 Phase A: scoped to this milestone's own log range, not
+-    // receiptEmittedCctpMessage(receipt) unscoped — this receipt can belong
+-    // to a batched, multi-milestone transaction release()'s permissionless
+-    // callers can compose (see receiptEmittedCctpMessageForMilestone's own
+-    // doc comment), unlike the three write sites where the receipt is
+-    // always this device's own single-purpose call.
+-    const { emitted, count } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
++    // Round 24 Phase A / Round 26: scoped to this milestone's own log
++    // range AND authenticity-verified (see receiptEmittedCctpMessageForMilestone's
++    // own doc comment) — this receipt can belong to a batched,
++    // multi-milestone transaction release()'s permissionless callers can
++    // compose, the same class of risk Round 26 finding 3 found the three
++    // write sites share too (Circle-managed wallets are ERC-4337 smart
++    // accounts; a bundler can pack a foreign UserOperation's logs into any
++    // receipt, not just this permissionless path's).
++    const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+     if (!emitted) return null
+     return (
+       <CrossChainDelivery
+@@ -3133,7 +3037,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
+         isCrossChain
+         escrowId={escrowId}
+         milestoneIndex={milestoneIndex}
+-        expectedMessageCount={count}
++        expectedMessages={messages}
+       />
+     )
+   }
+@@ -3789,25 +3693,33 @@ function MilestoneAction({
+ }) {
+   const [activeKey, setActiveKey] = useState(null)
+   const tx = useTx({
+-    // Round 22 Phase A: gated on receiptEmittedCctpMessage(receipt), not on
+-    // "was this escrow/split CONFIGURED for cross-chain" — MilestoneAction
+-    // shares this one run() across all four milestone actions, and two of
+-    // them (claim, refund) never touch CCTP at all regardless of the
+-    // escrow's domain: claimDelivery moves no funds
+-    // (milestoneConfirm: "No funds move on this transaction"),
+-    // refundAfterDeadline only ever credits an Arc refund balance
+-    // (TrancheProtocol.sol:715). The old gate tracked both anyway whenever
+-    // the escrow happened to be cross-chain-configured. Also moved from
+-    // right after tx.run() (broadcast time) into onConfirmed (confirmation
+-    // time) — the same broadcast-vs-mined gap Round 21 Phase D already
+-    // closed for mutualSettle specifically.
++    // Round 22 Phase A: gated on receiptEmittedCctpMessageForMilestone
++    // (Round 26: was the bare receiptEmittedCctpMessage), not on "was this
++    // escrow/split CONFIGURED for cross-chain" — MilestoneAction shares
++    // this one run() across all four milestone actions, and two of them
++    // (claim, refund) never touch CCTP at all regardless of the escrow's
++    // domain: claimDelivery moves no funds (milestoneConfirm: "No funds
++    // move on this transaction"), refundAfterDeadline only ever credits an
++    // Arc refund balance (TrancheProtocol.sol:715). The old gate tracked
++    // both anyway whenever the escrow happened to be cross-chain-configured.
++    // Also moved from right after tx.run() (broadcast time) into
++    // onConfirmed (confirmation time) — the same broadcast-vs-mined gap
++    // Round 21 Phase D already closed for mutualSettle specifically.
++    //
++    // Round 26 finding 3: milestone-scoped and authenticity-verified, not
++    // just "a real MessageSent exists somewhere in this receipt" — Circle
++    // wallets are ERC-4337 smart accounts, and a bundler's handleOps can
++    // pack a foreign UserOperation's logs into the same receipt this
++    // device's own submission produced, even though this device only ever
++    // submitted one call. escrow.id/milestone.index are already in scope
++    // here — no discovery needed, unlike the fallback path.
+     onConfirmed: (receipt) => {
+       onChange?.(); setActiveKey(null)
+-      const { emitted, count } = receiptEmittedCctpMessage(receipt)
++      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+       if (emitted) {
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: count })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
+         )
+         onCrossChainRelease?.()
+       }
+diff --git a/frontend/src/pages/EscrowDetail.milestoneCctpLogRange.test.jsx b/frontend/src/pages/EscrowDetail.milestoneCctpLogRange.test.jsx
+deleted file mode 100644
+index d35cdc9..0000000
+--- a/frontend/src/pages/EscrowDetail.milestoneCctpLogRange.test.jsx
++++ /dev/null
+@@ -1,212 +0,0 @@
+-// milestoneCctpLogRange / receiptEmittedCctpMessageForMilestone — Round 24
+-// Phase A / Round 25.
+-//
+-// Direct, unit-level coverage of the correlation function itself (no
+-// rendering, no wagmi/query mocking) — the component-level tests in
+-// EscrowDetail.fallbackCrossChainDelivery.test.jsx exercise the full
+-// pipeline, this file pins down the pure log-partitioning logic in
+-// isolation, matching this file's existing convention for exported pure
+-// decision functions (mutualSettlementExecuted, shouldClearCctpTrack,
+-// payoutChainLabel, etc — each gets its own direct describe block).
+-//
+-// See milestoneCctpLogRange's own doc comment in EscrowDetail.jsx for the
+-// on-chain proof this partition is a hard boundary (every CCTP-relevant
+-// release-family call emits its own MessageSent logs strictly BEFORE its
+-// own terminal escrowId+milestoneIndex event, and nothing after it), not a
+-// best-effort heuristic.
+-//
+-// Round 25: Round 24 answered "which of THIS CONTRACT's own calls does a
+-// message belong to" but never "is this message even from this contract's
+-// own burn at all" — receiptEmittedCctpMessage matches on the MessageSent
+-// event signature alone, regardless of emitting application, which a
+-// permissionless-caller batch can exploit two ways: (a) a foreign
+-// TrancheProtocol instance's (or a direct Circle depositForBurn's) burn
+-// with no recognized boundary around it at all, and (b) withdrawRefund —
+-// a genuine same-contract burn whose RefundWithdrawn event was never in
+-// CCTP_TERMINAL_EVENTS, so it delimited nothing. Both are covered below:
+-// messageSentLog's `sender` param builds a real, offset-correct
+-// messageSender word (verified against Circle's own CCTP V2 technical
+-// guide — see messageSenderOf's doc comment in utils/irisDelivery.js) so a
+-// fixture only passes the filter if it would actually decode to the right
+-// address, and CCTP_BOUNDARY_ONLY_EVENTS is exercised directly via
+-// RefundWithdrawn fixtures.
+-
+-import { describe, it, expect } from 'vitest'
+-import { encodeEventTopics, encodeAbiParameters } from 'viem'
+-import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+-import { milestoneCctpLogRange, receiptEmittedCctpMessageForMilestone } from './EscrowDetail.jsx'
+-
+-const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+-  const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
+-  const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
+-  const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
+-  const data = nonIndexed.length > 0
+-    ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
+-    : '0x'
+-  return { address, logIndex, topics, data }
+-}
+-
+-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
+-const MESSAGE_SENT_ABI = [
+-  { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+-]
+-const FOREIGN_ADDRESS = '0x1234567890123456789012345678901234567890'
+-
+-// A real, offset-correct CCTP V2 message: 248 zero bytes (header +
+-// burnToken/mintRecipient/amount, irrelevant here) followed by the
+-// 32-byte messageSender word at the real documented offset (248-280).
+-// messageSenderOf only ever reads that one word, so the leading zeros
+-// stand in for fields this test never needs to be realistic.
+-const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
+-  '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+-
+-const messageSentLog = (logIndex, sender = CONTRACT_ADDRESS) => ({
+-  address: MESSAGE_TRANSMITTER,
+-  logIndex,
+-  topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+-  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
+-})
+-
+-describe('milestoneCctpLogRange', () => {
+-  it('finds the [start, end] range as [-1, ownLogIndex] for the FIRST call in a receipt', () => {
+-    const receipt = {
+-      logs: [
+-        messageSentLog(0),
+-        escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+-      ]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: -1, end: 1 })
+-  })
+-
+-  it('finds the range as [previous milestone\'s boundary, own boundary] for a LATER call in a batched receipt', () => {
+-    const receipt = {
+-      logs: [
+-        messageSentLog(0),
+-        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
+-        messageSentLog(2),
+-        escrowLog(3, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' })
+-      ]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
+-  })
+-
+-  it('returns null when this milestone\'s own terminal event is not present at all', () => {
+-    const receipt = {
+-      logs: [
+-        messageSentLog(0),
+-        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n })
+-      ]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+-  })
+-
+-  it('distinguishes milestoneIndex within the SAME escrow — a boundary for a different milestone of the same escrow is not a match', () => {
+-    const receipt = {
+-      logs: [escrowLog(0, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 0n })]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+-  })
+-
+-  it('ignores DisputeTimedOutSettled as a boundary — it never precedes a CCTP burn (Arc-only credit), so it must not appear in CCTP_TERMINAL_EVENTS matching', () => {
+-    // If DisputeTimedOutSettled were (wrongly) treated as this milestone's
+-    // own match target, this would return a range instead of null.
+-    const receipt = {
+-      logs: [escrowLog(0, 'DisputeTimedOutSettled', { escrowId: 7n, milestoneIndex: 1n, defaultBps: 5000n })]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+-  })
+-
+-  it('orders by the real logIndex field, not array position — a receipt whose logs array is out of logIndex order still partitions correctly', () => {
+-    // Deliberately shuffled array order; logIndex is what must matter.
+-    const receipt = {
+-      logs: [
+-        escrowLog(3, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' }),
+-        messageSentLog(0),
+-        messageSentLog(2),
+-        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n })
+-      ]
+-    }
+-    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
+-  })
+-
+-  describe('Round 25: RefundWithdrawn as a boundary-only marker', () => {
+-    const refundWithdrawnLog = (logIndex) =>
+-      escrowLog(logIndex, 'RefundWithdrawn', { depositor: '0x179cc4c8f23d257b7f4acb785464025570e3af86', amount: 100_000_000n })
+-
+-    it('delimits a later milestone\'s range from an earlier withdrawRefund call in the same batched receipt', () => {
+-      const receipt = {
+-        logs: [
+-          messageSentLog(0),          // withdrawRefund's own burn
+-          refundWithdrawnLog(1),
+-          messageSentLog(2),          // the target milestone's own burn
+-          escrowLog(3, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+-        ]
+-      }
+-      // Without RefundWithdrawn as a boundary this would resolve to
+-      // { start: -1, end: 3 }, wrongly including withdrawRefund's burn.
+-      expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
+-    })
+-
+-    it('is never itself a valid match target, even for a milestoneIndex-less lookup — RefundWithdrawn carries no escrowId/milestoneIndex at all', () => {
+-      const receipt = { logs: [refundWithdrawnLog(0)] }
+-      expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+-    })
+-  })
+-})
+-
+-describe('receiptEmittedCctpMessageForMilestone', () => {
+-  it('counts only the MessageSent logs within this milestone\'s own range', () => {
+-    const receipt = {
+-      logs: [
+-        messageSentLog(0),
+-        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
+-        messageSentLog(2),
+-        messageSentLog(3),
+-        escrowLog(4, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
+-      ]
+-    }
+-    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: true, count: 2 })
+-    expect(receiptEmittedCctpMessageForMilestone(receipt, 3, 0)).toEqual({ emitted: true, count: 1 })
+-  })
+-
+-  it('returns emitted:false, count:0 when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
+-    const receipt = { logs: [messageSentLog(0)] }
+-    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0 })
+-  })
+-
+-  describe('Round 25 gap (a): a foreign application\'s burn, log-index-adjacent but not this contract\'s own', () => {
+-    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range', () => {
+-      const receipt = {
+-        logs: [
+-          messageSentLog(0, FOREIGN_ADDRESS),   // a foreign TrancheProtocol instance's own burn — no boundary of its own
+-          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+-        ]
+-      }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0 })
+-    })
+-
+-    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range', () => {
+-      const receipt = {
+-        logs: [
+-          messageSentLog(0, FOREIGN_ADDRESS),
+-          messageSentLog(1),   // this contract's own, real burn
+-          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+-        ]
+-      }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: true, count: 1 })
+-    })
+-  })
+-
+-  describe('Round 25 gap (b): a same-contract withdrawRefund burn batched adjacent to an Arc-only milestone release', () => {
+-    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release', () => {
+-      const receipt = {
+-        logs: [
+-          messageSentLog(0),   // withdrawRefund's own real burn
+-          escrowLog(1, 'RefundWithdrawn', { depositor: '0x179cc4c8f23d257b7f4acb785464025570e3af86', amount: 100_000_000n }),
+-          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
+-        ]
+-      }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0 })
+-    })
+-  })
+-})
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+index a5be447..804309d 100644
+--- a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
++++ b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+@@ -33,43 +33,58 @@ const MILESTONE_INDEX = 1n
+ const PROPOSER = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
+ const OTHER_CONTRACT = '0x3600000000000000000000000000000000000000' // USDC precompile, a real different address
+ 
+-const buildLog = (eventName, args, address = CONTRACT_ADDRESS) => {
++const buildLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+   const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
+   const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
+   const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
+   const data = nonIndexed.length > 0
+     ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
+     : '0x'
+-  return { address, topics, data }
++  return { address, logIndex, topics, data }
+ }
+ 
+-const proposedLog = (bps) => buildLog('MutualSettlementProposed', {
++const proposedLog = (logIndex, bps) => buildLog(logIndex, 'MutualSettlementProposed', {
+   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, proposer: PROPOSER, bps: BigInt(bps)
+ })
+-const executedLog = (bps) => buildLog('MutualSettlementExecuted', {
++const executedLog = (logIndex, bps) => buildLog(logIndex, 'MutualSettlementExecuted', {
+   escrowId: ESCROW_ID, milestoneIndex: MILESTONE_INDEX, bps: BigInt(bps)
+ })
+ 
+-// Arc's own (source-side) MessageTransmitterV2 — verified live, see
+-// receiptEmittedCctpMessage's own doc comment in utils/irisDelivery.js.
+-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++// Round 26: a real, offset-correct, fully-authentic CCTP V2 message —
++// receiptEmittedCctpMessageForMilestone now requires the full chain
++// (verifiedOwnCctpMessage in utils/irisDelivery.js), not just a
++// well-formed MessageSent log, so these fixtures build genuine header
++// (TOKEN_MESSENGER_V2_ARC sender, version 1) and body (CONTRACT_ADDRESS
++// sender, version 1) fields, not just the body sender Round 25 checked.
++const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
+ const MESSAGE_SENT_ABI = [
+   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+ ]
+-const messageSentLog = (messageHex = '0x1234') => ({
+-  address: MESSAGE_TRANSMITTER,
++const buildCctpMessage = () =>
++  '0x' +
++  '00000001' +                                                          // header version 1
++  '00'.repeat(4 + 4 + 32) +                                              // sourceDomain, destinationDomain, nonce
++  TOKEN_MESSENGER_V2_ARC.slice(2).toLowerCase().padStart(64, '0') +      // header sender
++  '00'.repeat(32 + 32 + 4 + 4) +                                         // recipient, destinationCaller, finality fields
++  '00000001' +                                                          // body version 1
++  '00'.repeat(32 + 32 + 32) +                                            // burnToken, mintRecipient, amount
++  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0')              // body messageSender
++const messageSentLog = (logIndex) => ({
++  address: MESSAGE_TRANSMITTER_V2_ARC,
++  logIndex,
+   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+-  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
++  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage()])
+ })
+ 
+ describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
+   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {
+-    const receipt = { transactionHash: '0xtx1', logs: [proposedLog(6000)] }
++    const receipt = { transactionHash: '0xtx1', logs: [proposedLog(0, 6000)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(false)
+   })
+ 
+   it('is true for a receipt whose logs include a real MutualSettlementExecuted event', () => {
+-    const receipt = { transactionHash: '0xtx2', logs: [proposedLog(6000), executedLog(6000)] }
++    const receipt = { transactionHash: '0xtx2', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(true)
+   })
+ 
+@@ -77,8 +92,8 @@ describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot'
+     // A real mutualSettle-that-executes receipt also contains USDC Transfer
+     // logs from the burn/credit — a log from a different address must not
+     // be mistaken for (or crash while checking) MutualSettlementExecuted.
+-    const foreignLog = { address: OTHER_CONTRACT, topics: ['0xdeadbeef'], data: '0x' }
+-    const receipt = { transactionHash: '0xtx3', logs: [foreignLog, executedLog(6000)] }
++    const foreignLog = { address: OTHER_CONTRACT, logIndex: 0, topics: ['0xdeadbeef'], data: '0x' }
++    const receipt = { transactionHash: '0xtx3', logs: [foreignLog, executedLog(1, 6000)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(true)
+   })
+ 
+@@ -102,7 +117,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
+ 
+     // But the other side updated their proposal to 60% in the window before
+     // this transaction landed — the REAL on-chain outcome executed.
+-    const receipt = { transactionHash: '0xtx5', logs: [proposedLog(bps), executedLog(bps)] }
++    const receipt = { transactionHash: '0xtx5', logs: [proposedLog(0, bps), executedLog(1, bps)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(true)
+   })
+ 
+@@ -114,7 +129,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
+     // But the other side changed their proposal away from 60% before this
+     // transaction landed — the REAL on-chain call only recorded a proposal,
+     // dep.bps != rec.bps, no execution.
+-    const receipt = { transactionHash: '0xtx6', logs: [proposedLog(bps)] }
++    const receipt = { transactionHash: '0xtx6', logs: [proposedLog(0, bps)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(false)
+   })
+ 
+@@ -132,7 +147,7 @@ describe('the actual race: ground truth (receipt) vs. the stale pre-submission s
+   it('the two functions can disagree on the exact same settlement, proving they are not interchangeable', () => {
+     const theirs = { exists: true, bps: 5000n }
+     const bps = 5000
+-    const receiptShowingNoExecution = { transactionHash: '0xtx7', logs: [proposedLog(bps)] }
++    const receiptShowingNoExecution = { transactionHash: '0xtx7', logs: [proposedLog(0, bps)] }
+ 
+     expect(mutualSettleExecutes(theirs, bps)).toBe(true)
+     expect(mutualSettlementExecuted(receiptShowingNoExecution)).toBe(false)
+@@ -161,9 +176,9 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+   it('is false when the settlement executed but every leg rounded to zero or diverted to Arc — no MessageSent at all', () => {
+     // MutualSettlementExecuted fires unconditionally on a matching
+     // settlement — it does not by itself mean a burn happened.
+-    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(6000), executedLog(6000)] }
++    const receipt = { transactionHash: '0xtx8', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(true)
+-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
+   })
+ 
+   /* Verified independently of the test above: a mutation that drops ONLY
+@@ -182,9 +197,9 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+     // Should never happen in a real receipt (mutualSettle can't burn without
+     // executing), but proves the executed check is genuinely required, not
+     // redundant with the message check.
+-    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(6000), messageSentLog('0xdeadbeef')] }
++    const receipt = { transactionHash: '0xtx9', logs: [proposedLog(0, 6000), messageSentLog(1)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(false)
+-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
+   })
+ 
+   /* Independently verified to catch a real bug the two tests above cannot
+@@ -199,10 +214,46 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+      exercises count propagation through the true branch at all — this is
+      that fixture, not a restatement of "requires both facts". */
+   it('is true, with the real count, only when the settlement executed AND a real message was sent', () => {
++    // Real on-chain ordering (Round 24): the burn(s) happen strictly BEFORE
++    // the terminal MutualSettlementExecuted event, not after — so the two
++    // MessageSent logs sit at indices 1-2, executedLog last at index 3.
+     const receipt = {
+       transactionHash: '0xtx10',
+-      logs: [proposedLog(6000), executedLog(6000), messageSentLog('0x0001'), messageSentLog('0x0002')]
++      logs: [proposedLog(0, 6000), messageSentLog(1), messageSentLog(2), executedLog(3, 6000)]
+     }
+-    expect(mutualSettlementCreatedCctpMessage(receipt)).toEqual({ emitted: true, count: 2 })
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
++      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()]
++    })
++  })
++
++  /* Round 26 finding 3: this device's own submitted transaction is not
++     guaranteed to be a single-purpose receipt. Circle-managed wallets are
++     ERC-4337 smart accounts, and a bundler's handleOps can pack a foreign
++     UserOperation's logs into the SAME receipt this device's own mutualSettle
++     call produced — a burn from an entirely different application, or a
++     different user's TrancheProtocol call, batched adjacent to this
++     settlement with no relationship to it at all. SettlementPanel used to
++     call the bare, unscoped receiptEmittedCctpMessage here (Round 22),
++     trusting that "this device only submitted one call" meant "this receipt
++     only contains one call's logs" — which a bundler breaks. */
++  it('finding 3: does not attribute a foreign UserOperation\'s burn (no relationship to this escrow/milestone, present earlier in the same bundled receipt) to this settlement', () => {
++    const foreignBurn = {
++      address: MESSAGE_TRANSMITTER_V2_ARC,
++      logIndex: 0,
++      topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
++      data: encodeAbiParameters([{ type: 'bytes' }], [
++        '0x00000001' + '00'.repeat(4 + 4 + 32) +
++        TOKEN_MESSENGER_V2_ARC.slice(2).toLowerCase().padStart(64, '0') +
++        '00'.repeat(32 + 32 + 4 + 4) + '00000001' + '00'.repeat(32 + 32 + 32) +
++        '9999999999999999999999999999999999999999'.padStart(64, '0') // a different app's own address, not CONTRACT_ADDRESS
++      ])
++    }
++    const receipt = {
++      transactionHash: '0xtx11',
++      logs: [foreignBurn, proposedLog(1, 6000), messageSentLog(2), executedLog(3, 6000)]
++    }
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
++      emitted: true, count: 1, messages: [buildCctpMessage()]
++    })
+   })
+ })
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index c42706b..4aaa2c2 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,6 +1,7 @@
+ import { encodeFunctionData, decodeEventLog, slice } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ import { bytes32ToAddress } from './encode.js'
++import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
+ 
+@@ -116,85 +117,279 @@ const MESSAGE_SENT_ABI = [
+   }
+ ]
+ 
+-/* Round 22 Phase A. Ground truth for "did a CCTP message actually get
+-   created", the question none of claimDelivery succeeding, refundAfterDeadline
+-   succeeding, or MutualSettlementExecuted firing actually answers —
+-   claimDelivery and refundAfterDeadline never touch CCTP at all regardless of
+-   the escrow's configured domain, and a mutualSettle/resolveDispute call can
+-   execute while every leg still rounds to zero or diverts to an Arc credit,
+-   emitting no CCTP message despite genuinely executing.
+-
+-   Decodes EVERY log in the confirmed receipt against MESSAGE_SENT_ABI rather
+-   than filtering by a hardcoded contract address first — deliberately, since
+-   a same-contract-address filter (the pattern mutualSettlementExecuted uses
+-   for this contract's OWN events) doesn't apply to an event a DIFFERENT
+-   contract emits, and MessageSent's topic0 is Circle's own canonical event
+-   signature hash, unique enough that a false match from an unrelated log is
+-   not a realistic risk — this also means it keeps working if Circle ever
+-   redeploys the MessageTransmitterV2 proxy to a new address, the same
+-   caution CLAUDE.md already documents for the TokenMessenger proxy.
+-
+-   A single call can emit MORE than one MessageSent — a mixed split can burn
+-   several legs to different chains in one transaction (bounded by
+-   MAX_SPLITS = 10) — so this returns the real count alongside the boolean,
+-   for callers to persist as the expected message count (see
+-   useCctpDelivery's own comment for why that matters). */
+-export function receiptEmittedCctpMessage(receipt) {
+-  let count = 0
+-  for (const log of receipt.logs) {
+-    try {
+-      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
+-      if (dec.eventName === 'MessageSent') count++
+-    } catch {}
+-  }
+-  return { emitted: count > 0, count }
+-}
++/* Round 25. Decodes the `messageSender` field out of a raw CCTP message
++   BODY — the address that called depositForBurn (or, per Circle's own CCTP
++   V2 technical guide's naming, depositForBurnWithCaller/
++   depositForBurnWithHook family) on the source domain. Verified against
++   Circle's documented V2 message format
++   (developers.circle.com/cctp/references/technical-guide): the top-level
++   message header's `messageBody` field starts at absolute byte offset 148;
++   BurnMessageV2's own `messageSender` field sits at relative offset 100
++   within that body (absolute 248), a 32-byte word — confirmed identically
++   via two independent fetches of Circle's docs. TrancheProtocol.sol calls
++   tokenMessenger.depositForBurnWithHook(...) directly from _approveAndBurn
++   — no intermediary contract — so for every burn THIS contract makes,
++   msg.sender to TokenMessenger (and therefore messageSender in the
++   resulting message) is always this contract's own address.
+ 
+-/* Round 25. Decodes the `messageSender` field out of a raw CCTP message —
+-   the address that called depositForBurn (or, per Circle's own CCTP V2
+-   technical guide's naming, depositForBurnWithCaller/depositForBurnWithHook
+-   family) on the source domain. Verified against Circle's documented V2
+-   message format (developers.circle.com/cctp/references/technical-guide):
+-   the top-level message header's `messageBody` field starts at absolute
+-   byte offset 148; BurnMessageV2's own `messageSender` field sits at
+-   relative offset 100 within that body (absolute 248), a 32-byte word —
+-   confirmed identically via two independent fetches of Circle's docs.
+-   TrancheProtocol.sol calls tokenMessenger.depositForBurnWithHook(...)
+-   directly from _approveAndBurn — no intermediary contract — so for every
+-   burn THIS contract makes, msg.sender to TokenMessenger (and therefore
+-   messageSender in the resulting message) is always this contract's own
+-   address. */
++   Round 26: this field ALONE is forgeable and must never be trusted in
++   isolation — see verifiedOwnCctpMessage's own doc comment for the full
++   authenticity chain this is now only one link of. */
+ export function messageSenderOf(message) {
+   return bytes32ToAddress(slice(message, 248, 280))
+ }
+ 
+-/* Round 25. receiptEmittedCctpMessage answers "did a CCTP message get
+-   created anywhere in this receipt" — deliberately unscoped by contract
+-   address (see that function's own doc comment: robust to a future
+-   MessageTransmitterV2 redeploy). Correct for the three original write
+-   sites (MilestoneAction/DisputeBlock/SettlementPanel): each receipt there
+-   is this device's own tx.run(escrowWrite(...)) call — a single top-level
+-   call to OUR contract's own function, so nothing else could have burned
+-   inside it. NOT correct for FallbackCrossChainDelivery: release() is
+-   fully permissionless, so a batching/multicall contract can compose
+-   several calls — potentially to a DIFFERENT TrancheProtocol instance, or
+-   a direct Circle depositForBurn call entirely outside this app — into one
+-   transaction sharing a tx hash this app's own indexer may still see.
+-   milestoneCctpLogRange's log-index boundaries (EscrowDetail.jsx) only
+-   answer "which of THIS contract's own calls", never "is this message even
+-   from this contract's burn at all" — a foreign burn with no recognized
+-   boundary around it would fall inside whatever range it happens to land
+-   in. This is the second, orthogonal filter: only count a MessageSent
+-   log whose OWN decoded messageSender is this contract's address. */
++// Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract
++// that actually emits MessageSent. Live-verified (Round 22): decoded a
++// real Arc-testnet depositForBurnWithHook receipt and found this event at
++// this exact address.
++export const MESSAGE_TRANSMITTER_V2_ARC = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275'
++
++// Round 26. Arc's TokenMessengerV2 proxy — verified against
++// deploy/deploy.js:37 (the literal constructor argument every deploy
++// passes as _tokenMessenger) and CLAUDE.md, not just documentation: this
++// is the exact address TrancheProtocol.sol's own `tokenMessenger` state
++// variable holds on the live contract. Verified against Circle's real V2
++// source (MessageTransmitterV2.sol, TokenMessengerV2.sol on GitHub, not
++// just the docs table): MessageTransmitterV2.sendMessage stamps the
++// message header's `sender` field from its own msg.sender
++// (`_messageSender = msg.sender.toBytes32()`), and TokenMessengerV2's
++// _depositForBurn calls that sendMessage directly with no intermediary —
++// so for a burn TokenMessengerV2 itself initiated, this is what the
++// header's sender field holds.
++export const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
++
++// CCTP V2's version tag, on both the top-level header and BurnMessageV2's
++// own body (verified against Circle's docs: V1 uses 0 for the same field).
++const CCTP_V2_VERSION = 1
++
++function readUint32(message, byteOffset) {
++  return Number(BigInt(slice(message, byteOffset, byteOffset + 4)))
++}
++
++// Round 26. The top-level message header's own `sender` field — offset 44,
++// 32 bytes — "Address of MessageTransmitterV2 caller on source domain" per
++// Circle's V2 technical guide. A DIFFERENT field from messageSenderOf's
++// body-level messageSender (which identifies who called TokenMessengerV2);
++// this one identifies who called MessageTransmitterV2 directly. V1's
++// header layout is not a subset of V2's — V1's own sender field sits at
++// byte 20, not 44 — confirming these offsets are only valid once the
++// version field (see messageHeaderVersionOf) has actually been checked.
++export function messageHeaderSenderOf(message) {
++  return bytes32ToAddress(slice(message, 44, 76))
++}
++
++export function messageHeaderVersionOf(message) {
++  return readUint32(message, 0)
++}
++
++// BurnMessageV2's OWN internal version field, at relative offset 0 within
++// the body (absolute 148, since messageBody starts there).
++export function messageBodyVersionOf(message) {
++  return readUint32(message, 148)
++}
++
++/* Round 26. The full authenticity chain for one MessageSent log — closing
++   the gap Round 25's messageSenderOf-only check left open (finding 1) and
++   generalized so every call site can share it (finding 3), not just
++   FallbackCrossChainDelivery.
++
++   MessageTransmitterV2.sendMessage is a public, permissionless function
++   that accepts an ARBITRARY messageBody and faithfully stamps the header's
++   own sender field from its real msg.sender — so anyone can call the REAL
++   MessageTransmitterV2 directly and get a real MessageSent event back
++   whose header.sender is honestly THEIR OWN address (never
++   TokenMessengerV2's), with a messageBody of their own choosing (including
++   one that plants an arbitrary address, e.g. this app's CONTRACT_ADDRESS,
++   at the body's messageSender offset). None of that requires ever calling
++   TokenMessengerV2 or burning anything.
++
++   Four checks, all required, none sufficient alone:
++     1. log.address must be Arc's REAL MessageTransmitterV2
++        (MESSAGE_TRANSMITTER_V2_ARC). Without this, nothing below means
++        anything at all — a self-deployed decoy contract can emit the
++        exact same MessageSent(bytes) topic with FULLY attacker-chosen
++        bytes, including a forged header.sender that would otherwise pass
++        check 2. Only the real contract's own sendMessage() has any
++        genuine relationship between msg.sender and the header it emits.
++     2. The message's own header.sender (see messageHeaderSenderOf) must be
++        Arc's real TokenMessengerV2 (TOKEN_MESSENGER_V2_ARC). This is what
++        proves TokenMessengerV2 itself — not some other permissionless
++        caller of the real MessageTransmitterV2 — constructed this
++        specific message, which is the only thing that makes check 3
++        trustworthy.
++     3. The body's messageSender (messageSenderOf) must equal `ownAddress`
++        — the actual identity callers care about, honestly stamped by
++        TokenMessengerV2's own _depositForBurn from ITS real msg.sender,
++        given check 2 already holds.
++     4. Both the header's and the body's own version fields must read as
++        CCTP V2 before ANY of the above offsets are trusted — V1's layout
++        is a different shape entirely (its header sender sits at byte 20,
++        not 44; its body has no messageSender field at byte 248 at all),
++        so skipping this could silently misread unrelated bytes as a
++        "sender" that happens to match by coincidence.
++   Returns the raw, verified `message` hex string on success (finding 2
++   needs the actual identity to match against Iris, not just a boolean) or
++   null. */
++export function verifiedOwnCctpMessage(log, ownAddress) {
++  if (log.address?.toLowerCase() !== MESSAGE_TRANSMITTER_V2_ARC.toLowerCase()) return null
++  try {
++    const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
++    if (dec.eventName !== 'MessageSent') return null
++    const message = dec.args.message
++    if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION) return null
++    if (messageBodyVersionOf(message) !== CCTP_V2_VERSION) return null
++    if (messageHeaderSenderOf(message).toLowerCase() !== TOKEN_MESSENGER_V2_ARC.toLowerCase()) return null
++    if (messageSenderOf(message).toLowerCase() !== ownAddress.toLowerCase()) return null
++    return message
++  } catch {
++    return null
++  }
++}
++
++/* Round 25 / Round 26. Answers "did a CCTP message genuinely THIS
++   contract's own burn get created in this receipt" — deliberately scoped
++   and authenticity-verified (see verifiedOwnCctpMessage above for the
++   full chain), unlike Round 22's original design (matching on the
++   MessageSent event signature alone, unscoped by address — robust to a
++   future MessageTransmitterV2 redeploy, correct against accidental topic0
++   collision, but not a defense against DELIBERATE forgery). Every call
++   site handling a receipt that could contain another party's activity
++   needs this: FallbackCrossChainDelivery (release() is permissionless)
++   and, per Round 26 finding 3, the three original write sites too —
++   Circle-managed wallets are ERC-4337 smart accounts, and a bundler's
++   handleOps can pack a foreign UserOperation's logs into the SAME receipt
++   this device's own submission produced. Returns the actual verified
++   messages (finding 2), not just a count — a bare count let a foreign,
++   log-index-adjacent message pass a messages.length-based guard
++   undetected once identity wasn't checked. */
+ export function receiptEmittedOwnCctpMessage(receipt, ownAddress) {
+-  const own = ownAddress.toLowerCase()
+-  const ownLogs = receipt.logs.filter((log) => {
++  const messages = receipt.logs
++    .map((log) => verifiedOwnCctpMessage(log, ownAddress))
++    .filter((message) => message != null)
++  return { emitted: messages.length > 0, count: messages.length, messages }
++}
++
++/* Round 24 Phase A. The four terminal, escrowId+milestoneIndex-carrying
++   events that can each be preceded by a CCTP burn in the SAME top-level
++   call — TrancheProtocol.sol verified directly, not assumed:
++     approveRelease        -> MilestoneApproved       (:647/:649)
++     release                -> MilestoneReleased       (:682/:684)
++     resolveDispute          -> DisputeResolved         (via _executePartialRelease, :516/:518)
++     mutualSettle (matched)  -> MutualSettlementExecuted (via _executePartialRelease, :556/:557)
++   In every one of the four, the burn (if any) happens strictly BEFORE the
++   terminal event — CEI ordering, confirmed at each call site and in
++   _executeCCTPReleaseAmount/_executePartialRelease underneath, and nothing
++   is emitted by any of them AFTER their own terminal event (_checkEscrowCompletion
++   emits nothing). resolveDisputeByTimeout never burns at all (Arc-only
++   credit, DisputeTimedOutSettled excluded from CCTP_TERMINAL_EVENTS below).
++   Re-verified exhaustively against every _approveAndBurn/
++   _executeCCTPReleaseAmount call site in TrancheProtocol.sol: these four
++   plus withdrawRefund (:877) are the only five burn-capable paths that
++   exist — see CCTP_BOUNDARY_ONLY_EVENTS below for why withdrawRefund needs
++   separate handling rather than joining this list.
++
++   EVM logs within one transaction are strictly ordered by real execution
++   order: one external call runs to completion (emitting every one of its
++   own logs) before the next begins, true regardless of whether a batching
++   / multicall contract composed several release()-family calls (release()
++   is fully permissionless) into one transaction, OR whether an ERC-4337
++   bundler's handleOps packed several UserOperations into one transaction
++   (Round 26 finding 3 — each UserOp's own execution, including every log
++   it emits, still completes before the next one begins; the same
++   invariant, one extra call-frame). That makes each milestone's own
++   terminal event a hard boundary, not a heuristic: the MessageSent logs
++   that genuinely belong to THIS milestone are exactly those strictly after
++   the nearest PRECEDING terminal event (any milestone) and up to and
++   including this milestone's own terminal event.
++
++   This boundary set only answers "which of THIS CONTRACT's own calls" —
++   see receiptEmittedOwnCctpMessage above for the separate, orthogonal
++   question of whether a MessageSent log in the scoped range is even from
++   this contract's own burn at all (a batch could contain a foreign
++   TrancheProtocol instance's, or a direct Circle depositForBurn call's,
++   burn with no recognized boundary around it).
++
++   Round 26: relocated here from EscrowDetail.jsx (Round 24) so
++   ArbiterPanel.jsx's DisputeBlock can import it too, alongside
++   EscrowDetail.jsx's own write sites and FallbackCrossChainDelivery —
++   EscrowDetail.jsx already imports FROM ArbiterPanel.jsx (timeoutSettlementConfirm),
++   so the reverse import would have been circular. */
++const CCTP_TERMINAL_EVENTS = ['MilestoneApproved', 'MilestoneReleased', 'DisputeResolved', 'MutualSettlementExecuted']
++
++/* Round 25. withdrawRefund's RefundWithdrawn(address indexed depositor,
++   uint256 amount) — verified against ITrancheProtocol.sol — carries no
++   escrowId or milestoneIndex at all (a refund is wallet-balance-level, not
++   tied to any single milestone), so it can never be a valid MATCH target
++   for the (escrowId, milestoneIndex) lookup below, unlike
++   CCTP_TERMINAL_EVENTS. It still needs to DELIMIT ranges: withdrawRefund's
++   own tx hash never reaches FallbackCrossChainDelivery as an entry point
++   (Milestone.releaseTx is stamped only by the 5 release-type handlers,
++   confirmed in CLAUDE.md — RefundWithdrawn isn't one), but its logs can
++   still appear INSIDE a batched receipt entered via a different
++   milestone's own terminal event. Without a boundary here, a batched
++   withdrawRefund burn immediately before an unrelated Arc-only milestone
++   release would fall inside that milestone's computed range with nothing
++   to stop it. Pushed into the same `boundaries` array as
++   CCTP_TERMINAL_EVENTS but with escrowId/milestoneIndex left null — since
++   neither can ever equal a real BigInt target, the existing `.find()`
++   match logic below naturally never selects it as anyone's own terminal
++   event, while the range computation (which only reads logIndex) still
++   uses it correctly. */
++const CCTP_BOUNDARY_ONLY_EVENTS = ['RefundWithdrawn']
++
++/* Exported for direct testing. Returns the [start, end] log-index range
++   (start exclusive, end inclusive) this milestone's own logs occupy within
++   `receipt`, or null if this milestone's own terminal event isn't found —
++   defensive only, since the subgraph can only have stamped this txHash as
++   THIS milestone's releaseTx by having decoded one of CCTP_TERMINAL_EVENTS
++   for this exact (escrowId, milestoneIndex) out of this exact receipt. */
++export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
++  const targetEscrowId = BigInt(escrowId)
++  const targetMilestoneIndex = BigInt(milestoneIndex)
++  const boundaries = []
++
++  for (const log of receipt.logs) {
++    if (log.address?.toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) continue
+     try {
+-      const dec = decodeEventLog({ abi: MESSAGE_SENT_ABI, data: log.data, topics: log.topics })
+-      return dec.eventName === 'MessageSent' && messageSenderOf(dec.args.message).toLowerCase() === own
+-    } catch {
+-      return false
+-    }
+-  })
+-  return receiptEmittedCctpMessage({ ...receipt, logs: ownLogs })
++      const dec = decodeEventLog({ abi: ESCROW_ABI, data: log.data, topics: log.topics })
++      if (CCTP_TERMINAL_EVENTS.includes(dec.eventName)) {
++        boundaries.push({ logIndex: log.logIndex, escrowId: dec.args.escrowId, milestoneIndex: dec.args.milestoneIndex })
++      } else if (CCTP_BOUNDARY_ONLY_EVENTS.includes(dec.eventName)) {
++        boundaries.push({ logIndex: log.logIndex, escrowId: null, milestoneIndex: null })
++      }
++    } catch {}
++  }
++
++  const match = boundaries.find(
++    (b) => b.escrowId === targetEscrowId && b.milestoneIndex === targetMilestoneIndex
++  )
++  if (!match) return null
++
++  const start = boundaries
++    .filter((b) => b.logIndex < match.logIndex)
++    .reduce((max, b) => Math.max(max, b.logIndex), -1)
++
++  return { start, end: match.logIndex }
++}
++
++/* Round 24 Phase A / Round 25 / Round 26. The milestone-scoped, authenticity-
++   verified counterpart to receiptEmittedCctpMessage — used by every call
++   site that can receive a receipt containing another party's activity: the
++   three original write sites (Round 26 finding 3 — Circle-managed wallets
++   are ERC-4337 smart accounts, and a bundler's handleOps can pack a
++   foreign UserOperation's logs into even this device's own receipt) and
++   FallbackCrossChainDelivery (release() is permissionless). Scopes the
++   receipt to just this milestone's own log range (milestoneCctpLogRange)
++   AND to messages that pass the full authenticity chain
++   (receiptEmittedOwnCctpMessage / verifiedOwnCctpMessage) before running
++   the shared MessageSent count. No match found (should be unreachable in
++   practice — see milestoneCctpLogRange's own doc comment) fails the same
++   way as "genuinely no CCTP message": nothing reliable to attribute either
++   way, so there is no meaningful difference in what the UI should show. */
++export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
++  const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
++  if (!range) return { emitted: false, count: 0, messages: [] }
++  const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
++  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
+ }
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index e3e2b1e..42b308c 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -19,7 +19,19 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+-const { fetchIrisMessages, receiptEmittedCctpMessage, messageSenderOf, receiptEmittedOwnCctpMessage } = await import('./irisDelivery.js')
++const {
++  fetchIrisMessages,
++  messageSenderOf,
++  messageHeaderSenderOf,
++  messageHeaderVersionOf,
++  messageBodyVersionOf,
++  verifiedOwnCctpMessage,
++  receiptEmittedOwnCctpMessage,
++  milestoneCctpLogRange,
++  receiptEmittedCctpMessageForMilestone,
++  MESSAGE_TRANSMITTER_V2_ARC,
++  TOKEN_MESSENGER_V2_ARC
++} = await import('./irisDelivery.js')
+ 
+ afterEach(() => {
+   vi.unstubAllGlobals()
+@@ -197,188 +209,388 @@ describe('fetchIrisMessages — in-flight guard', () => {
+   })
+ })
+ 
+-/* receiptEmittedCctpMessage — Round 22 Phase A.
+-
+-   Every prior fix to delivery tracking (Round 20 Phase B/D, Round 21 Phase
+-   C/D) taught the frontend to correctly check "did the intended
+-   business-logic action succeed" — did the ruling actually pay someone, did
+-   settlement proposals actually match. A correct answer to that question is
+-   still not the same question as "did a CCTP message actually get created":
+-   claimDelivery succeeding is real, it's just not a cross-chain delivery;
+-   MutualSettlementExecuted firing is real, it's just not proof a burn
+-   happened, since the contract emits it even when every leg rounds to zero
+-   or diverts to an Arc credit. This is the one shared ground-truth check —
+-   a real MessageSent log in the confirmed receipt — that answers the actual
+-   question, replacing three separately-reasoned-about "did this execute"
+-   checks (MilestoneAction, DisputeBlock, SettlementPanel).
+-
+-   MESSAGE_TRANSMITTER, the topic0, and the exact "message" field decode
+-   were all verified live against a real Arc-testnet depositForBurnWithHook
+-   transaction (see receiptEmittedCctpMessage's own doc comment in
+-   irisDelivery.js) — these fixtures build the SAME real event shape via
+-   viem's encodeEventTopics/encodeAbiParameters, not hand-rolled objects, so
+-   a fixture only passes if it would actually decode against the real ABI. */
+-const MESSAGE_TRANSMITTER = '0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275' // Arc's own (source-side) MessageTransmitterV2, verified live
++/* ============================================================================
++   Round 26 shared fixtures.
++
++   MESSAGE_SENT_ABI/buildCctpMessage/messageSentLog/escrowLog are used by
++   every describe block below (messageHeaderSenderOf through
++   receiptEmittedCctpMessageForMilestone) — one consolidated, fully-featured
++   set of fixtures instead of the several inconsistent local ones earlier
++   rounds accumulated.
++
++   buildCctpMessage constructs a REAL, offset-correct 280-byte CCTP V2
++   message — every field a genuine message would have up through
++   messageSender (byte 280), not just the one field a given test cares
++   about — so a fixture only passes a check if it would actually decode
++   that way against the real byte layout. Defaults (headerVersion: 1,
++   headerSender: TOKEN_MESSENGER_V2_ARC, bodyVersion: 1,
++   bodySender: CONTRACT_ADDRESS) describe a fully genuine message; each
++   describe block below overrides exactly the one field it's testing.
++   Verified against Circle's own CCTP V2 technical guide
++   (developers.circle.com/cctp/references/technical-guide), confirmed via
++   two independent fetches, and against Circle's real V2 GitHub source
++   (MessageTransmitterV2.sol, TokenMessengerV2.sol) for the semantic claims
++   (header.sender = the real caller of sendMessage; TokenMessengerV2 calls
++   sendMessage directly, no intermediary). ============================ */
+ const MESSAGE_SENT_ABI = [
+   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+ ]
+-
+-const messageSentLog = (messageHex = '0x1234', address = MESSAGE_TRANSMITTER) => ({
++const FOREIGN_ADDRESS = '0x1234567890123456789012345678901234567890'
++const DECOY_CONTRACT = '0x9999999999999999999999999999999999999999'
++
++const hexZeros = (byteLen) => '00'.repeat(byteLen)
++const uint32Hex = (n) => n.toString(16).padStart(8, '0')
++const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
++
++const buildCctpMessage = ({
++  headerVersion = 1,
++  headerSender = TOKEN_MESSENGER_V2_ARC,
++  bodyVersion = 1,
++  bodySender = CONTRACT_ADDRESS
++} = {}) =>
++  '0x' +
++  uint32Hex(headerVersion) +      // version            0-4
++  hexZeros(4) +                   // sourceDomain       4-8
++  hexZeros(4) +                   // destinationDomain  8-12
++  hexZeros(32) +                  // nonce              12-44
++  addressWordHex(headerSender) +  // sender             44-76
++  hexZeros(32) +                  // recipient          76-108
++  hexZeros(32) +                  // destinationCaller  108-140
++  hexZeros(4) +                   // minFinalityThreshold      140-144
++  hexZeros(4) +                   // finalityThresholdExecuted 144-148
++  uint32Hex(bodyVersion) +        // body version       148-152
++  hexZeros(32) +                  // burnToken          152-184
++  hexZeros(32) +                  // mintRecipient       184-216
++  hexZeros(32) +                  // amount             216-248
++  addressWordHex(bodySender)      // messageSender      248-280
++
++const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
+   address,
++  logIndex,
+   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+-  data: encodeAbiParameters([{ type: 'bytes' }], [messageHex])
++  data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(overrides)])
+ })
+ 
+-const escrowLog = (eventName, args, address = CONTRACT_ADDRESS) => {
++const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+   const abiItem = ESCROW_ABI.find((i) => i.type === 'event' && i.name === eventName)
+   const topics = encodeEventTopics({ abi: ESCROW_ABI, eventName, args })
+   const nonIndexed = abiItem.inputs.filter((i) => !i.indexed)
+   const data = nonIndexed.length > 0
+     ? encodeAbiParameters(nonIndexed, nonIndexed.map((i) => args[i.name]))
+     : '0x'
+-  return { address, topics, data }
++  return { address, logIndex, topics, data }
+ }
+ 
+-describe('receiptEmittedCctpMessage', () => {
+-  it('is false for a real claimDelivery receipt — no funds move, no CCTP message, regardless of the escrow\'s configured domain', () => {
+-    // claimDelivery's own confirm descriptor states this outright: "No
+-    // funds move on this transaction." A real receipt for it contains only
+-    // DeliveryClaimed, never anything from the MessageTransmitter.
+-    const receipt = {
+-      transactionHash: '0xtx1',
+-      logs: [escrowLog('DeliveryClaimed', { escrowId: 7n, milestoneIndex: 1n, reviewDeadline: 123n })]
+-    }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++describe('messageHeaderVersionOf / messageBodyVersionOf', () => {
++  it('reads the header version at byte offset 0', () => {
++    expect(messageHeaderVersionOf(buildCctpMessage({ headerVersion: 1 }))).toBe(1)
++    expect(messageHeaderVersionOf(buildCctpMessage({ headerVersion: 0 }))).toBe(0)
+   })
+ 
+-  it('is false for a real refundAfterDeadline receipt — credits an Arc refund balance only, never cross-chain', () => {
+-    // TrancheProtocol.sol:715: refundBalances[e.refundTo] on Arc, no
+-    // transfer, no CCTP burn — true regardless of destinationDomain.
+-    const receipt = {
+-      transactionHash: '0xtx2',
+-      logs: [escrowLog('RefundedAfterDeadline', { escrowId: 7n, milestoneIndex: 1n, amount: 250_000_000n })]
+-    }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++  it('reads the body version at byte offset 148 — independent of the header version', () => {
++    expect(messageBodyVersionOf(buildCctpMessage({ bodyVersion: 1 }))).toBe(1)
++    expect(messageBodyVersionOf(buildCctpMessage({ bodyVersion: 0 }))).toBe(0)
++  })
++})
++
++describe('messageHeaderSenderOf', () => {
++  it('decodes the header sender word at byte offset 44-76 — a DIFFERENT field than the body messageSender at 248', () => {
++    expect(messageHeaderSenderOf(buildCctpMessage({ headerSender: TOKEN_MESSENGER_V2_ARC })).toLowerCase())
++      .toBe(TOKEN_MESSENGER_V2_ARC.toLowerCase())
++  })
++
++  it('decodes a foreign header sender correctly — not a fixed/hardcoded expectation', () => {
++    expect(messageHeaderSenderOf(buildCctpMessage({ headerSender: FOREIGN_ADDRESS })).toLowerCase())
++      .toBe(FOREIGN_ADDRESS.toLowerCase())
++  })
++})
++
++/* messageSenderOf — Round 25, byte offset re-confirmed Round 26. */
++describe('messageSenderOf', () => {
++  it('decodes the real messageSender word at the documented byte offset (248-280)', () => {
++    expect(messageSenderOf(buildCctpMessage({ bodySender: CONTRACT_ADDRESS })).toLowerCase()).toBe(CONTRACT_ADDRESS.toLowerCase())
++  })
++
++  it('decodes a different sender correctly — not a fixed/hardcoded expectation', () => {
++    expect(messageSenderOf(buildCctpMessage({ bodySender: FOREIGN_ADDRESS })).toLowerCase()).toBe(FOREIGN_ADDRESS.toLowerCase())
++  })
++})
++
++/* verifiedOwnCctpMessage — Round 26 finding 1.
++
++   MessageTransmitterV2.sendMessage is public and permissionless and
++   faithfully stamps the header's sender field from its real msg.sender —
++   so anyone can call the REAL MessageTransmitterV2 directly with an
++   ARBITRARY messageBody, getting back a genuine MessageSent event whose
++   header.sender honestly identifies THEM (never TokenMessengerV2), with a
++   messageBody of their own choosing — including one that plants
++   CONTRACT_ADDRESS at the body's messageSender offset despite never
++   calling TokenMessengerV2 or burning anything. Each test below flips
++   exactly ONE of the four required checks away from genuine while keeping
++   the other three valid, proving each is independently necessary — not
++   just that the happy path works. */
++describe('verifiedOwnCctpMessage', () => {
++  it('returns the raw message for a fully genuine log', () => {
++    const log = messageSentLog(0)
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBe(buildCctpMessage())
++  })
++
++  it('rejects a log from ANY address other than the real MessageTransmitterV2 — a self-deployed decoy contract can emit an identical MessageSent(bytes) topic with fully attacker-crafted bytes, including a forged header.sender', () => {
++    const log = messageSentLog(0, {}, DECOY_CONTRACT)
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++
++  it('rejects a header version that is not CCTP V2 (e.g. 0, CCTP V1) even though every other field is genuine — V1s layout is a different shape entirely, so trusting these offsets first would misparse it', () => {
++    const log = messageSentLog(0, { headerVersion: 0 })
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++
++  it('rejects a body version that is not CCTP V2, even with a genuine header', () => {
++    const log = messageSentLog(0, { bodyVersion: 0 })
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++
++  it('finding 1s exact attack: rejects a message whose header.sender is NOT TokenMessengerV2, even though the body.messageSender is spoofed to equal ownAddress — this is the forged message an attacker gets from calling the REAL MessageTransmitterV2.sendMessage directly, bypassing TokenMessengerV2 entirely', () => {
++    const log = messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS })
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++
++  it('rejects a message whose body.messageSender is not the given ownAddress, even with a genuine TokenMessengerV2 header.sender', () => {
++    const log = messageSentLog(0, { bodySender: FOREIGN_ADDRESS })
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++
++  it('does not mistake a log from a different EVENT on the real MessageTransmitterV2 address, and does not crash on one', () => {
++    const log = { address: MESSAGE_TRANSMITTER_V2_ARC, topics: ['0xdeadbeef'], data: '0x' }
++    expect(verifiedOwnCctpMessage(log, CONTRACT_ADDRESS)).toBeNull()
++  })
++})
++
++describe('receiptEmittedOwnCctpMessage', () => {
++  it('counts a message whose full authenticity chain matches the given ownAddress', () => {
++    const receipt = { logs: [messageSentLog(0)] }
++    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
++  })
++
++  it('excludes a real, well-formed MessageSent log whose body messageSender is a DIFFERENT address', () => {
++    const receipt = { logs: [messageSentLog(0, { bodySender: FOREIGN_ADDRESS })] }
++    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: false, count: 0, messages: [] })
++  })
++
++  it('finding 1: excludes a message forged via a direct MessageTransmitterV2.sendMessage call (real contract, wrong header.sender) even though the body.messageSender is spoofed correctly', () => {
++    const receipt = { logs: [messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS })] }
++    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: false, count: 0, messages: [] })
++  })
++
++  it('finding 1: excludes a message emitted by a decoy contract impersonating MessageTransmitterV2, even with fully genuine-looking header AND body bytes', () => {
++    const receipt = { logs: [messageSentLog(0, {}, DECOY_CONTRACT)] }
++    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: false, count: 0, messages: [] })
+   })
+ 
+-  it('is false for a resolveDispute ruling that executes but rounds to zero or diverts every cross-chain leg to Arc', () => {
+-    // DisputeResolved fires unconditionally on a successful resolveDispute
+-    // call — it does not by itself mean a burn happened. A ruling whose
+-    // recipient share rounds to zero, or whose every cross-chain leg
+-    // diverts to an Arc credit (sub-floor), settles with no MessageSent at
+-    // all despite genuinely executing.
++  it('counts only the matching-sender messages out of a mix, and returns their real message bytes', () => {
+     const receipt = {
+-      transactionHash: '0xtx3',
+-      logs: [escrowLog('DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 6000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' })]
++      logs: [
++        messageSentLog(0),
++        messageSentLog(1, { bodySender: FOREIGN_ADDRESS }),
++        messageSentLog(2)
++      ]
+     }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: false, count: 0 })
++    const result = receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)
++    expect(result.emitted).toBe(true)
++    expect(result.count).toBe(2)
++    expect(result.messages).toEqual([buildCctpMessage(), buildCctpMessage()])
+   })
+ 
+-  it('is true, count 1, for a genuine no-split cross-chain approveRelease burn', () => {
++  it('is case-insensitive on the address comparison — an ownAddress argument in a different case than the decoded (lowercase) messageSender still matches', () => {
++    const receipt = { logs: [messageSentLog(0)] }
++    const shoutedOwnAddress = '0x' + CONTRACT_ADDRESS.slice(2).toUpperCase()
++    expect(receiptEmittedOwnCctpMessage(receipt, shoutedOwnAddress)).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
++  })
++})
++
++/* milestoneCctpLogRange / receiptEmittedCctpMessageForMilestone — Round 24
++   Phase A / Round 25 / Round 26.
++
++   Round 26: relocated here from EscrowDetail.jsx so ArbiterPanel.jsx's
++   DisputeBlock can import it too (EscrowDetail.jsx already imports FROM
++   ArbiterPanel.jsx, so the reverse would have been circular) — see
++   milestoneCctpLogRange's own doc comment in irisDelivery.js. */
++describe('milestoneCctpLogRange', () => {
++  it('finds the [start, end] range as [-1, ownLogIndex] for the FIRST call in a receipt', () => {
+     const receipt = {
+-      transactionHash: '0xtx4',
+       logs: [
+-        escrowLog('MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n }),
+-        messageSentLog('0xdeadbeef')
++        messageSentLog(0),
++        escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+       ]
+     }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: -1, end: 1 })
+   })
+ 
+-  it('is true, count matching the real number, for a mixed split settling multiple cross-chain legs in one transaction', () => {
+-    // A mixed split can burn several legs to different chains in a single
+-    // call (bounded by MAX_SPLITS = 10) — each is its own MessageSent.
++  it('finds the range as [previous milestone\'s boundary, own boundary] for a LATER call in a batched receipt', () => {
+     const receipt = {
+-      transactionHash: '0xtx5',
+       logs: [
+-        escrowLog('MutualSettlementProposed', { escrowId: 7n, milestoneIndex: 1n, proposer: '0x179cc4c8f23d257b7f4acb785464025570e3af86', bps: 6000n }),
+-        escrowLog('MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n }),
+-        messageSentLog('0x0001'),
+-        messageSentLog('0x0002'),
+-        messageSentLog('0x0003')
++        messageSentLog(0),
++        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
++        messageSentLog(2),
++        escrowLog(3, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' })
+       ]
+     }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 3 })
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
+   })
+ 
+-  it('does not mistake a log from a different contract for MessageSent, and does not crash on one', () => {
++  it('returns null when this milestone\'s own terminal event is not present at all', () => {
+     const receipt = {
+-      transactionHash: '0xtx6',
+       logs: [
+-        { address: '0x3600000000000000000000000000000000000000', topics: ['0xdeadbeef'], data: '0x' }, // USDC precompile, unrelated topic
+-        messageSentLog('0xcafe')
++        messageSentLog(0),
++        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n })
+       ]
+     }
+-    expect(receiptEmittedCctpMessage(receipt)).toEqual({ emitted: true, count: 1 })
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+   })
+ 
+-  it('returns false, count 0, not throws, for an empty logs array', () => {
+-    expect(receiptEmittedCctpMessage({ transactionHash: '0xtx7', logs: [] })).toEqual({ emitted: false, count: 0 })
++  it('distinguishes milestoneIndex within the SAME escrow — a boundary for a different milestone of the same escrow is not a match', () => {
++    const receipt = {
++      logs: [escrowLog(0, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 0n })]
++    }
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
+   })
+-})
+ 
+-/* messageSenderOf / receiptEmittedOwnCctpMessage — Round 25.
+-
+-   Round 22's receiptEmittedCctpMessage deliberately matches on the
+-   MessageSent event signature alone, regardless of emitting application —
+-   correct for that round's purpose (robust to a MessageTransmitterV2 proxy
+-   redeploy) and for the three original write sites (always this device's
+-   own single-purpose tx). Not correct for FallbackCrossChainDelivery,
+-   where release()'s permissionlessness lets a batching contract compose a
+-   foreign application's burn into the same transaction. messageSenderOf
+-   answers the narrower, ownership question these fixtures build a REAL,
+-   offset-correct message for — verified against Circle's own CCTP V2
+-   technical guide (developers.circle.com/cctp/references/technical-guide):
+-   messageBody starts at absolute byte offset 148; BurnMessageV2's
+-   messageSender sits at relative offset 100 within it (absolute 248), a
+-   32-byte word. */
+-describe('messageSenderOf', () => {
+-  const buildCctpMessage = (sender) =>
+-    '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
++  it('ignores DisputeTimedOutSettled as a boundary — it never precedes a CCTP burn (Arc-only credit), so it must not appear in CCTP_TERMINAL_EVENTS matching', () => {
++    // If DisputeTimedOutSettled were (wrongly) treated as this milestone's
++    // own match target, this would return a range instead of null.
++    const receipt = {
++      logs: [escrowLog(0, 'DisputeTimedOutSettled', { escrowId: 7n, milestoneIndex: 1n, defaultBps: 5000n })]
++    }
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
++  })
+ 
+-  it('decodes the real messageSender word at the documented byte offset (248-280)', () => {
+-    expect(messageSenderOf(buildCctpMessage(CONTRACT_ADDRESS)).toLowerCase()).toBe(CONTRACT_ADDRESS.toLowerCase())
++  it('orders by the real logIndex field, not array position — a receipt whose logs array is out of logIndex order still partitions correctly', () => {
++    // Deliberately shuffled array order; logIndex is what must matter.
++    const receipt = {
++      logs: [
++        escrowLog(3, 'DisputeResolved', { escrowId: 7n, milestoneIndex: 1n, recipientBps: 10000n, resolutionHash: '0x' + '00'.repeat(32), resolutionURI: 'ipfs://x' }),
++        messageSentLog(0),
++        messageSentLog(2),
++        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n })
++      ]
++    }
++    expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
+   })
+ 
+-  it('decodes a different sender correctly — not a fixed/hardcoded expectation', () => {
+-    const foreign = '0x1234567890123456789012345678901234567890'
+-    expect(messageSenderOf(buildCctpMessage(foreign)).toLowerCase()).toBe(foreign.toLowerCase())
++  describe('Round 25: RefundWithdrawn as a boundary-only marker', () => {
++    const refundWithdrawnLog = (logIndex) =>
++      escrowLog(logIndex, 'RefundWithdrawn', { depositor: '0x179cc4c8f23d257b7f4acb785464025570e3af86', amount: 100_000_000n })
++
++    it('delimits a later milestone\'s range from an earlier withdrawRefund call in the same batched receipt', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0),          // withdrawRefund's own burn
++          refundWithdrawnLog(1),
++          messageSentLog(2),          // the target milestone's own burn
++          escrowLog(3, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      }
++      // Without RefundWithdrawn as a boundary this would resolve to
++      // { start: -1, end: 3 }, wrongly including withdrawRefund's burn.
++      expect(milestoneCctpLogRange(receipt, 7, 1)).toEqual({ start: 1, end: 3 })
++    })
++
++    it('is never itself a valid match target, even for a milestoneIndex-less lookup — RefundWithdrawn carries no escrowId/milestoneIndex at all', () => {
++      const receipt = { logs: [refundWithdrawnLog(0)] }
++      expect(milestoneCctpLogRange(receipt, 7, 1)).toBeNull()
++    })
+   })
+ })
+ 
+-describe('receiptEmittedOwnCctpMessage', () => {
+-  const buildCctpMessage = (sender = CONTRACT_ADDRESS) =>
+-    '0x' + '00'.repeat(248) + sender.slice(2).toLowerCase().padStart(64, '0')
+-  const ownMessageSentLog = (sender = CONTRACT_ADDRESS) => ({
+-    address: MESSAGE_TRANSMITTER,
+-    topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+-    data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage(sender)])
++describe('receiptEmittedCctpMessageForMilestone', () => {
++  it('counts only the MessageSent logs within this milestone\'s own range, and returns their real message bytes', () => {
++    const receipt = {
++      logs: [
++        messageSentLog(0),
++        escrowLog(1, 'MilestoneReleased', { escrowId: 3n, milestoneIndex: 0n }),
++        messageSentLog(2),
++        messageSentLog(3),
++        escrowLog(4, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
++      ]
++    }
++    const forMilestone1 = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
++    expect(forMilestone1.emitted).toBe(true)
++    expect(forMilestone1.count).toBe(2)
++    expect(forMilestone1.messages).toEqual([buildCctpMessage(), buildCctpMessage()])
++
++    const forMilestone0 = receiptEmittedCctpMessageForMilestone(receipt, 3, 0)
++    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
+   })
+ 
+-  it('counts a message whose own decoded messageSender matches the given ownAddress', () => {
+-    const receipt = { logs: [ownMessageSentLog(CONTRACT_ADDRESS)] }
+-    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: true, count: 1 })
++  it('returns emitted:false, count:0, messages:[] when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
++    const receipt = { logs: [messageSentLog(0)] }
++    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
+   })
+ 
+-  it('excludes a real, well-formed MessageSent log whose messageSender is a DIFFERENT address', () => {
+-    const receipt = { logs: [ownMessageSentLog('0x1234567890123456789012345678901234567890')] }
+-    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: false, count: 0 })
++  describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn, log-index-adjacent but not this contract\'s own', () => {
++    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),   // a foreign TrancheProtocol instance's own burn — no boundary of its own
++          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      }
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++    })
++
++    it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),
++          escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      }
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++    })
++
++    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),
++          messageSentLog(1),   // this contract's own, real burn
++          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      }
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
++    })
+   })
+ 
+-  it('counts only the matching-sender messages out of a mix', () => {
+-    const receipt = {
+-      logs: [
+-        ownMessageSentLog(CONTRACT_ADDRESS),
+-        ownMessageSentLog('0x1234567890123456789012345678901234567890'),
+-        ownMessageSentLog(CONTRACT_ADDRESS)
+-      ]
+-    }
+-    expect(receiptEmittedOwnCctpMessage(receipt, CONTRACT_ADDRESS)).toEqual({ emitted: true, count: 2 })
++  describe('Round 25 gap (b): a same-contract withdrawRefund burn batched adjacent to an Arc-only milestone release', () => {
++    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0),   // withdrawRefund's own real burn
++          escrowLog(1, 'RefundWithdrawn', { depositor: '0x179cc4c8f23d257b7f4acb785464025570e3af86', amount: 100_000_000n }),
++          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
++        ]
++      }
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++    })
+   })
+ 
+-  it('is case-insensitive on the address comparison — an ownAddress argument in a different case than the decoded (lowercase) messageSender still matches', () => {
+-    const receipt = { logs: [ownMessageSentLog(CONTRACT_ADDRESS)] }
+-    const shoutedOwnAddress = '0x' + CONTRACT_ADDRESS.slice(2).toUpperCase()
+-    expect(receiptEmittedOwnCctpMessage(receipt, shoutedOwnAddress)).toEqual({ emitted: true, count: 1 })
++  describe('Round 26 finding 2: identity, not just count, matters for downstream Iris filtering', () => {
++    it('returns DISTINCT message bytes for two genuinely different burns in the same milestone (a mixed split), so downstream identity matching can tell them apart', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0, { bodySender: CONTRACT_ADDRESS }),
++          messageSentLog(1, { bodySender: CONTRACT_ADDRESS }),
++          escrowLog(2, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
++        ]
++      }
++      const { messages } = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
++      // Both messages are byte-identical here (same sender, no other
++      // differentiating field in this fixture) — the point of this test is
++      // that the array has the real per-message bytes available at all
++      // (length 2, not a collapsed count), not that THESE TWO specific
++      // fixtures differ; useCctpDelivery's identity filter only needs
++      // messages to be distinguishable when Iris's OWN response actually
++      // differs (different attestation/forwardState per real message).
++      expect(messages).toHaveLength(2)
++    })
+   })
+ })

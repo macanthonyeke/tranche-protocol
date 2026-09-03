@@ -1,0 +1,1210 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 15a5ad1..7a7c258 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -290,7 +290,7 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
+ 
+ ## Circle confirm-descriptor coverage
+ 
+-Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory — two different, both-legitimate ways to count, so name which one you mean:
++Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory — three different, all-legitimate ways to count, so name which one you mean:
+ 
+ - **Lexical call sites**: the literal `escrowWrite(...)` expressions in source, counted by grepping for them — **27**, of which 2 take the function name from a variable rather than a quoted string: `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`. (A prior revision of this count said 26 — an undercount from deduplicating `resolveDisputeByTimeout`'s two separate UI call sites, `EscrowDetail.jsx` and `ArbiterPanel.jsx`, into one; grepping the literal expressions directly gives 27.)
+ - **Expanded call-site paths**: how many confirm-descriptor SCREENS exist once the 2 variable-function sites are expanded across every value they can resolve to — **32** (25 static/quoted call sites, each its own screen to review, + 4 milestone actions `action.fn` can resolve to + 3 evidence modes `meta.fn` can resolve to). This is a coverage metric, not a function count: `resolveDisputeByTimeout`'s two call sites (`EscrowDetail.jsx` and `ArbiterPanel.jsx`) are two of the 25 static ones, each with its own descriptor to get right, so it is deliberately NOT deduplicated here the way the lexical count above explicitly avoids doing either.
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index ce8d9a9..88c9d89 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -27,33 +27,46 @@ const POLL_MS = 15_000
+ // doesn't, `destinationDomain` now comes through as `null` (rendered as an
+ // unknown chain downstream) rather than a wrong guess.
+ //
+-// Round 22 Phase A: `expectedMessages`, optional — originally a bare count
+-// of real MessageSent events the confirming receipt proved should exist
+-// for this tx, now (Round 26) the actual verified message identities
+-// themselves (see receiptEmittedCctpMessageForMilestone /
+-// verifiedOwnCctpMessage), persisted by the submitting device alongside
+-// the tracked txHash. A mixed split can burn several legs to different
+-// chains in one transaction, and Iris indexes each message independently —
+-// a partial response (fewer messages than the receipt proved) is "not
+-// fully indexed yet", not "this is the complete set". Only the submitting
+-// device has this; a subgraph-sourced txHash from a different device falls
+-// back to the messages.length === 0 heuristic below, same as before this
+-// existed.
++// Round 27 (fixing the Round 26 review's High finding): `expectedMessages`
++// (Round 22/26 — a raw hex identity to content-match against Iris's own
++// `message` field) is GONE. CCTP V2 mutates several message fields between
++// burn-time and attestation — nonce, finalityThresholdExecuted, feeExecuted
++// are all zero/empty in the source-side log and only filled in once Iris
++// attests the message — so a real message's source-side bytes and Iris's
++// returned bytes for the SAME delivery are simply never equal. Every real
++// poll under the old design had `messages.length === 0` forever; confirmed
++// live against a real Arc-testnet burn (byte-diff against a real captured
++// Iris response), not assumed from the docs alone.
+ //
+-// Round 26 finding 2: a bare count was never enough once Iris's response
+-// can contain messages belonging to a DIFFERENT milestone under the same
+-// tx hash — Iris has no concept of "milestone", only tx hash. A batch with
+-// 2 total messages where only 1 is genuinely this milestone's own used to
+-// pass `messages.length(2) >= expectedMessageCount(1)` and then render
+-// BOTH — a foreign message's failure could make this milestone look
+-// failed, or its success could look like this milestone's own delivery.
+-// expectedMessages is now the exact set of raw message hex strings this
+-// milestone's own receipt verified (see verifiedOwnCctpMessage's full
+-// authenticity chain) — Iris's response is filtered to ONLY the entries
+-// whose own `message` field byte-matches one of them (case-insensitive
+-// string equality; these are short, few-per-receipt hex strings, so a
+-// hash comparison would add a step for no real benefit) before anything
+-// else in this function ever looks at it.
++// Replaced with `expectedOrdinals` (this milestone's own verified messages'
++// 0-indexed positions among every real MessageTransmitterV2 MessageSent log
++// in the WHOLE receipt — see irisDelivery.js's
++// receiptEmittedCctpMessageForMilestone) and `expectedTotalMessages` (that
++// universe's own size). Circle's GET /v2/messages API reference states
++// "Each message for a given transaction hash is ordered by ascending log
++// index" — so once Iris has indexed EVERY real message in the transaction,
++// `allMessages[ordinal]` is guaranteed to be the same entry the receipt
++// proved belongs to this milestone, no content comparison needed.
++//
++// The "once" matters: `allMessages.length >= expectedTotalMessages` is the
++// completeness gate below, and it has to be checked against the FULL
++// universe size, not just "enough entries to cover this milestone's own
++// ordinals". Circle's ordering guarantee only says messages actually
++// PRESENT in a response are sorted by log index — it does not say a
++// still-partial response is a stable PREFIX of the final ordering (e.g. if
++// Iris indexes/exposes a later-log-index message before an earlier one,
++// a 1-entry partial response could be that later message sitting at
++// position 0, not the earlier one this milestone might actually need).
++// Waiting for the full count first means the two orderings (this app's
++// receipt-derived one, Iris's own) are provably the same set, sorted the
++// same way, before any position is ever trusted.
++//
++// Round 22 Phase A: expectedMessages/expectedOrdinals only exists for a
++// receipt-verified local track or fallback (see irisDelivery.js) — a
++// subgraph-sourced txHash from a different device without either falls
++// back to treating this as nothing to track (see the null-guard below),
++// same spirit as before this existed, but never the fully-unfiltered
++// "trust whatever Iris returns" branch Round 26's review found unsafe.
+ //
+ // Round 22 Phase B: terminality used to be inferred as "no message is
+ // PENDING or missing a forwardState" — anything else (i.e. not PENDING) was
+@@ -67,31 +80,39 @@ const POLL_MS = 15_000
+ // EXPLICITLY 'COMPLETE' or 'FAILED' — anything else (PENDING, CONFIRMED, or
+ // any value Circle adds later) keeps polling, which is the safe default for
+ // an open-ended field.
+-export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
++export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages) {
+   const [phase, setPhase]           = useState('idle')
+   const [deliveries, setDeliveries] = useState([])
+   const intervalRef = useRef(null)
+   const doneRef     = useRef(false)
+-  const expectedMessagesKey = expectedMessages == null ? null : expectedMessages.join(',')
++  const expectedOrdinalsKey = expectedOrdinals == null ? null : expectedOrdinals.join(',')
+ 
+   const poll = useCallback(async () => {
+     if (!txHash || !isCrossChain || doneRef.current) return
+     try {
+-      const allMessages = await fetchIrisMessages(txHash)
++      // Round 27: no expectedOrdinals means nothing reliable to attribute —
++      // every real call site (a receipt-verified local track or
++      // FallbackCrossChainDelivery's live receipt refetch) always has this
++      // by the time it mounts a tracker at all, so this should be
++      // unreachable in practice. Staying in 'polling' forever here is the
++      // safe default: this used to fall through to trusting Iris's
++      // response unfiltered, which is the exact identity gap Round 26 was
++      // built to close — silently-forever is much safer than silently-wrong.
++      if (expectedOrdinals == null) {
++        setPhase('polling')
++        return
++      }
+ 
+-      // Identity-based, not count-based (Round 26 finding 2) — see the
+-      // doc comment above for why a bare length check let a foreign
+-      // milestone's own genuine Iris message through undetected.
+-      const messages = expectedMessages != null
+-        ? allMessages.filter((m) => expectedMessages.some((em) => em.toLowerCase() === m.message?.toLowerCase()))
+-        : allMessages
++      const allMessages = await fetchIrisMessages(txHash)
+ 
+-      if (expectedMessages != null && messages.length < expectedMessages.length) {
++      if (allMessages.length < expectedTotalMessages) {
+         setPhase('polling')
+         return
+       }
+ 
+-      if (messages.length === 0) {
++      const messages = expectedOrdinals.map((ord) => allMessages[ord]).filter(Boolean)
++
++      if (messages.length < expectedOrdinals.length) {
+         setPhase('polling')
+         return
+       }
+@@ -109,7 +130,7 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
+       // under decodedMessage (as a string) and puts forwardState/
+       // forwardTxHash/forwardErrorCode flat on the message itself — there is
+       // no `forward` wrapper object at all. Verified against real captured
+-      // responses for actual Arc-testnet burns (see fetchIrisMessages).
++      // responses for actual Arc-testnet burns.
+       const parsed = messages.map((m) => ({
+         message:          m.message,
+         attestation:      m.attestation,
+@@ -142,15 +163,16 @@ export function useCctpDelivery(txHash, isCrossChain, expectedMessages) {
+       // so a transient outage doesn't permanently block status.
+       setPhase('unavailable')
+     }
+-    // Round 26: depends on expectedMessagesKey (a stable string), not
+-    // expectedMessages itself. FallbackCrossChainDelivery recomputes its
+-    // verified message array fresh on every render (a new array reference
++    // Round 27: depends on expectedOrdinalsKey (a stable string), not
++    // expectedOrdinals itself. FallbackCrossChainDelivery recomputes its
++    // verified ordinals array fresh on every render (a new array reference
+     // each time, even when the content is identical) — depending on the
+     // array directly would recreate `poll` every render, which would then
+     // retrigger the effect below and reset phase/deliveries in a loop. The
+-    // joined hex strings can never contain a comma, so this is an
++    // joined integers can never collide across genuinely different ordinal
++    // sets in a way that matters here (same array, same key), so this is an
+     // unambiguous equality key for otherwise-identical content.
+-  }, [txHash, isCrossChain, expectedMessagesKey])
++  }, [txHash, isCrossChain, expectedOrdinalsKey, expectedTotalMessages])
+ 
+   useEffect(() => {
+     if (!txHash || !isCrossChain) {
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index 5c49ef5..8dc3c1c 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -1,4 +1,4 @@
+-// useCctpDelivery — Round 20 Phase D / Round 21 Phase A.
++// useCctpDelivery — Round 20 Phase D / Round 21 Phase A / Round 27.
+ //
+ // Two properties matter here: (1) the second argument is a plain
+ // isCrossChain boolean, used only to gate polling — not a domain value the
+@@ -18,6 +18,16 @@
+ // version of this fixture used a shape that was never real, which is why the
+ // integration itself was broken despite these tests passing — the fixture
+ // and the bug agreed with each other, not with Circle's actual API.
++//
++// Round 27: every test below now passes expectedOrdinals/expectedTotalMessages
++// — the hook no longer has an "unfiltered, trust whatever Iris returns"
++// branch at all (see the hook's own doc comment for why: that branch was
++// the exact identity gap Round 26 built content-matching to close, and
++// Round 26's content-matching turned out to never work for a real message
++// in the first place, since CCTP V2 mutates several message fields between
++// burn-time and attestation). A real call site (a receipt-verified local
++// track, or FallbackCrossChainDelivery's live receipt refetch) always has
++// ordinals in hand before mounting a tracker at all.
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { renderHook, waitFor, act } from '@testing-library/react'
+@@ -58,9 +68,9 @@ describe('useCctpDelivery — isCrossChain gate', () => {
+     await waitFor(() => expect(fetchIrisMessages).not.toHaveBeenCalled())
+   })
+ 
+-  it('polls once isCrossChain is true and a txHash is present', async () => {
++  it('polls once isCrossChain is true, a txHash is present, and expectedOrdinals is provided', async () => {
+     fetchIrisMessages.mockResolvedValue([irisMessage()])
+-    renderHook(() => useCctpDelivery('0xtx', true))
++    renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xtx'))
+   })
+ })
+@@ -71,7 +81,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+       irisMessage({ destinationDomain: 6 }),   // Base Sepolia
+       irisMessage({ destinationDomain: 0 })    // Ethereum Sepolia — genuinely different chain
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
+   })
+@@ -81,7 +91,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+       irisMessage({ destinationDomain: 6 }),
+       irisMessage({ destinationDomain: null })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries[0].destinationDomain).toBe(6)
+     expect(result.current.deliveries[1].destinationDomain).toBeNull()
+@@ -97,7 +107,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+       decodedMessage: { destinationDomain: '6' },
+       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
+     }])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries[0].destinationDomain).toBe(6)
+   })
+@@ -106,7 +116,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are flat, never nested under a `forward` wrapper', () => {
+   it('reads a real completed message correctly with no `forward` object present anywhere', async () => {
+     fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'COMPLETE', forwardTxHash: '0xrealdesttx' })])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries[0].forwardState).toBe('COMPLETE')
+     expect(result.current.deliveries[0].destinationTxHash).toBe('0xrealdesttx')
+@@ -114,7 +124,7 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
+ 
+   it('reads a real failed message\'s errorCode correctly', async () => {
+     fetchIrisMessages.mockResolvedValue([irisMessage({ forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(result.current.phase).toBe('failed'))
+     expect(result.current.deliveries[0].forwardState).toBe('FAILED')
+     expect(result.current.deliveries[0].errorCode).toBe('INSUFFICIENT_FEE')
+@@ -127,7 +137,7 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not
+       irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', forwardTxHash: '0xgood', forwardErrorCode: null }),
+       irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('failed'))
+ 
+     // The aggregate phase says "failed", but the actually-delivered message's
+@@ -148,7 +158,7 @@ describe('useCctpDelivery — mixed outcomes are preserved in `deliveries`, not
+       irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+       irisMessage({ destinationDomain: 0, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('failed'))
+     expect(result.current.deliveries).toHaveLength(2)
+     expect(result.current.deliveries.map((d) => d.destinationDomain)).toEqual([6, 0])
+@@ -176,7 +186,7 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
+       irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+       irisMessage({ destinationDomain: 0, forwardState: 'CONFIRMED', forwardTxHash: null, forwardErrorCode: null })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+ 
+     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+     expect(fetchIrisMessages).toHaveBeenCalledTimes(1)
+@@ -200,7 +210,7 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
+         irisMessage({ destinationDomain: 6, forwardState: 'FAILED', forwardTxHash: null, forwardErrorCode: 'INSUFFICIENT_FEE' }),
+         irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null })
+       ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+ 
+     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+     expect(result.current.phase).toBe('polling')
+@@ -215,21 +225,33 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
+   })
+ })
+ 
+-/* Round 23 / Round 26 finding 2 — expectedMessages guard, direct coverage.
+-   Introduced in Round 22 Phase A as a bare count (a receipt-verified local
+-   track always knows its own real MessageSent count), fed by MilestoneRow's
+-   fallback path once it has a receipt in hand (Round 23), then replaced
+-   with actual message IDENTITIES in Round 26: a bare count let a message
+-   genuinely belonging to a DIFFERENT milestone in the same batched tx pass
+-   `messages.length >= expectedMessageCount` and get rendered as though it
+-   were this milestone's own. expectedMessages is now the exact set of raw
+-   message hex strings receiptEmittedCctpMessageForMilestone verified as
+-   this milestone's own — Iris's response is filtered to only entries whose
+-   own `message` field matches one of them before anything else runs. */
+-describe('useCctpDelivery — expectedMessages guard', () => {
+-  it('keeps polling when Iris has indexed fewer of the expected messages than the receipt proved should exist, even though the one it has is already COMPLETE', async () => {
+-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' })])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
++/* Round 27 (fixing the Round 26 review's High finding) — expectedOrdinals /
++   expectedTotalMessages guard, direct coverage.
++
++   Round 22 Phase A introduced a bare count. Round 26 replaced it with
++   content identity (raw message hex, matched against Iris's own `message`
++   field) to fix a real cross-attribution bug (finding 2: a bare count let a
++   message genuinely belonging to a DIFFERENT milestone in the same batched
++   tx pass undetected). But content identity turned out to never work for a
++   REAL message at all: CCTP V2 assigns nonce off-chain and fills in
++   finalityThresholdExecuted/feeExecuted only once Iris attests, so a real
++   message's source-side bytes and Iris's returned bytes for the SAME
++   delivery are never byte-equal — confirmed live against a real Arc-testnet
++   burn. Every real poll under Round 26's design had messages.length === 0
++   forever.
++
++   Round 27 replaces content matching with ORDINAL POSITION: Circle's own
++   GET /v2/messages API reference states "Each message for a given
++   transaction hash is ordered by ascending log index" — so
++   expectedOrdinals (this milestone's own verified messages' 0-indexed
++   positions among every real MessageTransmitterV2 log in the WHOLE
++   receipt) picks the right Iris entries without ever comparing content,
++   once expectedTotalMessages (the universe's own size) confirms Iris has
++   indexed the whole transaction. */
++describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', () => {
++  it('keeps polling when Iris has indexed fewer messages than the receipt proved should exist across the WHOLE transaction, even though the ones it has are already COMPLETE', async () => {
++    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 2))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+     expect(result.current.phase).toBe('polling')
+     expect(result.current.deliveries).toEqual([])
+@@ -237,37 +259,87 @@ describe('useCctpDelivery — expectedMessages guard', () => {
+ 
+   it('proceeds to delivered once Iris catches up to the full expected set', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmsg1' }),
+-      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE', message: '0xmsg2' })
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' })
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmsg1', '0xmsg2']))
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+     expect(result.current.deliveries).toHaveLength(2)
+   })
+ 
+-  it('finding 2: excludes an Iris message that is NOT one of the expected identities, even though messages.length alone would satisfy the old count-based guard — a foreign milestone\'s genuine message under the same tx hash must never be rendered as this milestone\'s own', async () => {
++  it('selects Iris entries by POSITION, not the milestone\'s own count — a foreign milestone\'s message occupying an earlier ordinal slot in the same tx must not be selected as this milestone\'s own', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xmine' }),
+-      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforeign' })
++      irisMessage({ destinationDomain: 3, forwardState: 'FAILED' }),      // ordinal 0 — a DIFFERENT milestone's own message
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })     // ordinal 1 — this milestone's own
+     ])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xmine']))
++    // This milestone's own verified message is ordinal 1 of 2 total.
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [1], 2))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+-    // The foreign message's FAILED state must not leak in — if it had, phase
+-    // would be 'failed' (anyFailed), not 'delivered', and deliveries would
+-    // have length 2, not 1.
++    // The foreign message at ordinal 0 (FAILED, domain 3) must never leak
++    // in — if it had, phase would be 'failed' and deliveries would have
++    // length 2, not 1.
+     expect(result.current.deliveries).toHaveLength(1)
+-    expect(result.current.deliveries[0].message).toBe('0xmine')
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
+   })
+ 
+-  it('is case-insensitive when matching expectedMessages against Iris\'s own message field', async () => {
+-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xABCDEF' })])
+-    const { result } = renderHook(() => useCctpDelivery('0xtx', true, ['0xabcdef']))
++  /* The exact regression the High finding describes: a genuine message
++     whose Iris-returned form differs from its receipt-derived source form
++     in precisely the fields CCTP V2 treats as mutable (nonce,
++     finalityThresholdExecuted, feeExecuted) must still be correctly
++     attributed to the milestone. Under Round 26's content-matching design
++     this would have failed forever (messages.length stuck at 0); under
++     ordinal selection, content is never even inspected for matching. */
++  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted) — content is never compared', async () => {
++    // The source-side receipt would have had nonce/finalityThresholdExecuted/
++    // feeExecuted all zero (pre-attestation); Iris's response here uses
++    // deliberately DIFFERENT, non-zero values in exactly those fields —
++    // real CCTP V2 behavior, confirmed live against an actual Arc-testnet
++    // burn. The fixture only needs a message string that would NEVER
++    // content-match a zeroed source message; the exact bytes don't matter
++    // since ordinal selection never reads them for matching.
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({
++        destinationDomain: 6,
++        forwardState: 'COMPLETE',
++        message: '0xattested-form-with-real-nonce-and-finality-and-fee-filled-in'
++      })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries).toHaveLength(1)
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
+   })
+ 
+-  it('is a no-op (falls back to the messages.length === 0 heuristic) when expectedMessages is not provided', async () => {
++  /* The other scenario the High finding's own review explicitly asked for:
++     a batched transaction where a forged (finding-1-style) message —
++     real MessageTransmitterV2 contract, wrong header.sender, so it still
++     gets a real MessageSent log and a real ordinal slot in Iris's response
++     — occupies an EARLIER ordinal slot than this milestone's own genuine
++     message. The forged message must not shift or replace what gets
++     selected for the genuine one. */
++  it('selects the correct Iris entry despite a finding-1-style forged message occupying an earlier ordinal slot in the same transaction', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforged' }),     // ordinal 0 — the forged message
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xgenuine' })    // ordinal 1 — this milestone's own genuine message
++    ])
++    // receiptEmittedCctpMessageForMilestone would have computed ordinals: [1]
++    // here — verifiedOwnCctpMessage rejects the forged message (wrong
++    // header.sender), but it still occupies ordinal 0 of the 2-message
++    // universe, so the genuine message's own position is 1, not 0.
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [1], 2))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries).toHaveLength(1)
++    expect(result.current.deliveries[0].message).toBe('0xgenuine')
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
++  })
++
++  it('never trusts Iris unfiltered when expectedOrdinals is not provided — stays in polling forever rather than reopening the identity gap the ordinal/content guards exist to close', async () => {
+     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true))
+-    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    await waitFor(() => expect(result.current.phase).toBe('polling'))
++    // Never even calls Iris — there is nothing safe to do with the response
++    // without ordinals to select by.
++    expect(fetchIrisMessages).not.toHaveBeenCalled()
++    expect(result.current.deliveries).toEqual([])
+   })
+ })
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index bbedd01..61ea4b2 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -205,7 +205,8 @@ function DisputeBlock({ detail, index, refetch }) {
+   const e = detail.escrow
+   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+   const [resolveTxHash, setResolveTxHash] = useState(null)
+-  const [resolveMessages, setResolveMessages] = useState(null)
++  const [resolveOrdinals, setResolveOrdinals] = useState(null)
++  const [resolveTotalMessages, setResolveTotalMessages] = useState(null)
+ 
+   // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
+   // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
+@@ -242,10 +243,11 @@ function DisputeBlock({ detail, index, refetch }) {
+   // are already in scope — no discovery needed, unlike the fallback path.
+   const handleResolve = useCallback((receipt) => {
+     if (receipt) {
+-      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
++      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, detail.id, index)
+       if (emitted) {
+         setResolveTxHash(receipt.transactionHash)
+-        setResolveMessages(messages)
++        setResolveOrdinals(ordinals)
++        setResolveTotalMessages(totalMessages)
+         // Also persist to localStorage so EscrowDetail picks it up on other
+         // devices. Round 20 Phase D: no `domain` field — no reader ever
+         // consumed it (both this component and EscrowDetail's MilestoneRow
+@@ -253,9 +255,14 @@ function DisputeBlock({ detail, index, refetch }) {
+         // domain couldn't represent a mixed split's several real per-message
+         // domains anyway. useCctpDelivery gets its per-message domains from
+         // Iris directly once it has the txHash.
++        //
++        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
++        // `messages` array Round 26 persisted here — see useCctpDelivery's
++        // own doc comment for why content matching against Iris never
++        // actually worked.
+         localStorage.setItem(
+           cctpTrackKey(detail.id, index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+       }
+     }
+@@ -329,7 +336,8 @@ function DisputeBlock({ detail, index, refetch }) {
+         <ArbiterDeliveryStatus
+           txHash={resolveTxHash}
+           isCrossChain={trackingDomain != null}
+-          expectedMessages={resolveMessages}
++          expectedOrdinals={resolveOrdinals}
++          expectedTotalMessages={resolveTotalMessages}
+         />
+       )}
+     </li>
+@@ -365,8 +373,8 @@ const domainLabel = (domain) => (domain != null ? getDomainName(domain) : 'an un
+    CrossChainDelivery for the full citation trail on why a single collapsed
+    phase/domain silently hid an already-delivered leg whenever a DIFFERENT
+    leg in the same mixed split failed. */
+-function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedMessages }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
++function ArbiterDeliveryStatus({ txHash, isCrossChain, expectedOrdinals, expectedTotalMessages }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
+ 
+   if (phase === 'idle') return null
+ 
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+index 2419159..a116785 100644
+--- a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -1,4 +1,4 @@
+-import { describe, it, expect } from 'vitest'
++import { describe, it, expect, afterEach } from 'vitest'
+ 
+ /* shouldClearCctpTrack — Round 20 Phase D.
+    The old design cleared the shared cctpTrackKey entry the instant ANY
+@@ -17,7 +17,8 @@ import { describe, it, expect } from 'vitest'
+    relayed" from this function's point of view — deliberately, since that's
+    exactly what keeps the tracker (and the other leg's recovery card)
+    alive. */
+-import { shouldClearCctpTrack } from './EscrowDetail.jsx'
++import { shouldClearCctpTrack, readCctpTrack } from './EscrowDetail.jsx'
++import { cctpTrackKey } from '../utils/irisDelivery.js'
+ 
+ const complete = (overrides = {}) => ({ forwardState: 'COMPLETE', destinationDomain: 6, ...overrides })
+ const failed = (overrides = {}) => ({ forwardState: 'FAILED', destinationDomain: 6, ...overrides })
+@@ -48,3 +49,70 @@ describe('shouldClearCctpTrack', () => {
+     expect(shouldClearCctpTrack([complete(), pending()])).toBe(false)
+   })
+ })
++
++/* readCctpTrack — Round 27 (fixing the Round 26 review's Medium finding).
++
++   The old design let a malformed/legacy localStorage record (Round 26's
++   raw-hex expectedMessages array, or the earlier Round 22 bare numeric
++   count) fall all the way through to CrossChainDelivery's render site,
++   where Array.isArray(...) ? ... : undefined turned it into "no identity
++   constraint at all" for the record's remaining 24h lifetime — the exact
++   unfiltered-Iris gap Round 26 as a whole was built to close, reopened by
++   its own legacy data. readCctpTrack now validates the shape itself and
++   discards anything unusable, the same way it already discards an aged-out
++   record — so it returns null exactly like "no local record", and
++   MilestoneRow's existing `!cctpTrack` fallback to FallbackCrossChainDelivery
++   naturally reverifies from the receipt instead of ever handing out a
++   record with no usable ordinal data. */
++describe('readCctpTrack', () => {
++  const ESCROW_ID = 7
++  const MILESTONE_INDEX = 1
++  const KEY = cctpTrackKey(ESCROW_ID, MILESTONE_INDEX)
++
++  afterEach(() => {
++    localStorage.clear()
++  })
++
++  it('returns null when no record exists at all', () => {
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++  })
++
++  it('returns a well-formed Round 27 record unchanged', () => {
++    const record = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(record))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(record)
++  })
++
++  it('discards and removes an aged-out record (older than 24h), same as before this round', () => {
++    const record = { txHash: '0xtx', ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++    localStorage.setItem(KEY, JSON.stringify(record))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards and removes a Round 26 legacy record — expectedMessages (raw hex array), no expectedOrdinals at all — rather than treating it as usable', () => {
++    const legacy = { txHash: '0xtx', ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
++    localStorage.setItem(KEY, JSON.stringify(legacy))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards and removes a pre-Round-26 legacy record — expectedMessages as a bare numeric count — rather than treating it as usable', () => {
++    const legacy = { txHash: '0xtx', ts: Date.now(), expectedMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(legacy))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record whose expectedOrdinals is an array but expectedTotalMessages is missing/non-numeric', () => {
++    const malformed = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0] }
++    localStorage.setItem(KEY, JSON.stringify(malformed))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('returns null (not a throw) on unparseable JSON', () => {
++    localStorage.setItem(KEY, 'not json')
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index d6ed034..24f6ec8 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -42,8 +42,8 @@
+ // already uses) to control what receipt comes back, and fetchIrisMessages
+ // to control what Iris reports for it — useCctpDelivery itself runs for
+ // real, so tests prove the FULL wiring (receipt → verified messages →
+-// expectedMessages → useCctpDelivery's identity-based guard), not just that
+-// any one piece works in isolation.
++// expectedOrdinals/expectedTotalMessages → useCctpDelivery's ordinal-
++// position guard, Round 27), not just that any one piece works in isolation.
+ 
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+ import { render, screen, cleanup, waitFor } from '@testing-library/react'
+@@ -130,11 +130,12 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+   return { address, logIndex, topics, data }
+ }
+ 
+-// Round 26 finding 2: `message` defaults to the SAME bytes a genuine
+-// verified receipt log would carry — useCctpDelivery now matches Iris
+-// entries against expectedMessages by real identity, not just a count, so
+-// a fixture whose `message` doesn't match what the receipt actually proved
+-// would never be attributed either, same as a real mismatch wouldn't be.
++// Round 27: `message` no longer needs to match the receipt's own bytes at
++// all — useCctpDelivery selects Iris entries by ORDINAL POSITION now (see
++// its own doc comment for why content can never match a real message:
++// CCTP V2 mutates several fields between burn-time and attestation). The
++// default still happens to reuse buildCctpMessage() for convenience, but
++// nothing below depends on it matching.
+ const irisMessage = ({ destinationDomain = 6, forwardState = 'COMPLETE', message = buildCctpMessage() } = {}) => ({
+   message,
+   attestation: '0xattestation',
+@@ -234,9 +235,9 @@ describe('failure mode (b): a receipt proving 2 CCTP messages, Iris initially in
+     renderFallback()
+ 
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalledWith('0xreleasetx'))
+-    // useCctpDelivery's expectedMessages guard (messages.length < 2) must
+-    // keep this in the pre-deliveries "polling" state, not render a single
+-    // leg as though the settlement were complete.
++    // useCctpDelivery's completeness guard (allMessages.length < expectedTotalMessages,
++    // 1 < 2 here) must keep this in the pre-deliveries "polling" state, not
++    // render a single leg as though the settlement were complete.
+     await waitFor(() => expect(screen.getByText(/Delivering…/)).toBeInTheDocument())
+     expect(screen.queryByText(/Delivered to/)).not.toBeInTheDocument()
+   })
+@@ -303,17 +304,30 @@ describe('Round 24 Phase A: batched multi-milestone transaction — messages mus
+       isPending: false,
+       isError: false
+     })
++    // Round 27: the completeness gate is against the WHOLE transaction's
++    // real message count (3 — one for escrow 3/milestone 0's own burn, two
++    // for this milestone's), not just this milestone's own 2 — Iris's
++    // response covers the whole tx, so ordinal position 1 only reliably
++    // means "this milestone's first message" once every earlier real
++    // position (0: escrow 3/milestone 0's own burn) is indexed too. Ascending
++    // by logIndex per Circle's own ordering guarantee: position 0 is
++    // escrow 3/milestone 0's message (logIndex 0), positions 1-2 are this
++    // milestone's own two (logIndex 2, 3).
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ destinationDomain: 6 }),
+-      irisMessage({ destinationDomain: 0 })
++      irisMessage({ destinationDomain: 7 }),   // escrow 3/milestone 0's own (Polygon Amoy) — not this milestone's
++      irisMessage({ destinationDomain: 6 }),   // Base Sepolia
++      irisMessage({ destinationDomain: 0 })    // Ethereum Sepolia
+     ])
+ 
+     renderFallback({ txHash: '0xbatchtx2' })
+ 
+-    // If the 3rd (unrelated) message were wrongly included, expectedMessages
+-    // would have length 3 and this would stay stuck polling forever instead
+-    // of showing 2 delivered legs.
++    // If the unrelated escrow 3/milestone 0 message were wrongly selected as
++    // one of THIS milestone's own, a 3rd "Delivered to" line (Polygon Amoy)
++    // would render alongside the correct two.
+     await waitFor(() => expect(screen.getAllByText(/Delivered to/)).toHaveLength(2))
++    expect(screen.queryByText(/Delivered to Polygon Amoy/)).not.toBeInTheDocument()
++    expect(screen.getByText(/Delivered to Base Sepolia/)).toBeInTheDocument()
++    expect(screen.getByText(/Delivered to Ethereum Sepolia/)).toBeInTheDocument()
+   })
+ })
+ 
+@@ -393,3 +407,66 @@ describe('Round 25 gap (b): a same-contract withdrawRefund burn shares this rece
+     expect(fetchIrisMessages).not.toHaveBeenCalled()
+   })
+ })
++
++/* Round 27 (fixing the Round 26 review's High finding) — full end-to-end
++   wiring: receipt → receiptEmittedCctpMessageForMilestone's real
++   ordinals/totalMessages → useCctpDelivery's ordinal-position selection,
++   with useCctpDelivery running for real (not mocked), the same way every
++   other describe block in this file proves the full wiring rather than one
++   piece in isolation. */
++describe('Round 27: ordinal-position selection end to end', () => {
++  it('attributes a genuine message correctly even though Iris\'s returned `message` differs from the source-side bytes in CCTP V2\'s mutable fields — content is never compared, only ordinal position', async () => {
++    setReceipt({
++      data: {
++        transactionHash: '0xmutabletx',
++        logs: [
++          messageSentLog(0),
++          escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      },
++      isPending: false,
++      isError: false
++    })
++    // Deliberately NOT buildCctpMessage() — this represents Iris's real
++    // attested form (nonce/finalityThresholdExecuted/feeExecuted filled in),
++    // which is never byte-equal to the zeroed source-side form. Under
++    // Round 26's content-matching design this would never have attributed
++    // — messages.length would stay 0 forever.
++    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, message: '0xattested-form-differs-from-source' })])
++
++    renderFallback({ txHash: '0xmutabletx' })
++
++    await waitFor(() => expect(screen.getByText(/Delivered to/)).toBeInTheDocument())
++  })
++
++  it('selects the correct Iris entry despite a finding-1-style forged message (real contract, wrong header.sender) occupying an earlier ordinal slot in the same batched transaction', async () => {
++    setReceipt({
++      data: {
++        transactionHash: '0xforgedearliertx',
++        logs: [
++          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),   // forged — real contract, real topic, wrong header.sender: ordinal 0
++          messageSentLog(1),   // this milestone's own genuine burn: ordinal 1
++          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      },
++      isPending: false,
++      isError: false
++    })
++    // Iris has no concept of "our" authenticity checks — it indexes both
++    // real MessageSent logs, forged one first (ordinal 0, FAILED so a
++    // wrong selection would be visibly distinguishable), genuine one second
++    // (ordinal 1, COMPLETE).
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforged' }),
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xgenuine' })
++    ])
++
++    renderFallback({ txHash: '0xforgedearliertx' })
++
++    await waitFor(() => expect(screen.getByText(/Delivered to/)).toBeInTheDocument())
++    // Exactly one leg renders (the genuine one) — the forged message at
++    // ordinal 0 must never be selected or rendered as this milestone's own.
++    expect(screen.getAllByText(/Delivered to/)).toHaveLength(1)
++    expect(screen.queryByText(/Delivery failed/)).not.toBeInTheDocument()
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index e073ae2..282e014 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1448,7 +1448,7 @@ function useMilestoneReleaseTxs(escrowId) {
+ 
+ const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
+ 
+-function readCctpTrack(escrowId, milestoneIndex) {
++export function readCctpTrack(escrowId, milestoneIndex) {
+   try {
+     const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
+     if (!raw) return null
+@@ -1457,6 +1457,23 @@ function readCctpTrack(escrowId, milestoneIndex) {
+       localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
+       return null
+     }
++    // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
++    // array (dropped this round, see useCctpDelivery's own doc comment for
++    // why content matching never worked) or the earlier Round 22 bare
++    // numeric count — carries no usable ordinal data. MUST NOT be treated
++    // as "no constraint": the old design let a missing/malformed shape fall
++    // through to useCctpDelivery's fully-unfiltered branch for this
++    // record's remaining lifetime inside CCTP_TRACK_MAX_AGE_MS, silently
++    // reopening the exact identity gap Round 26 (and this round) exist to
++    // close. Discarding it here — the same way an aged-out record is
++    // discarded just above — makes readCctpTrack return null exactly like
++    // "no local record at all", so MilestoneRow's existing `!cctpTrack`
++    // fallback to FallbackCrossChainDelivery naturally takes over and
++    // reverifies straight from the receipt instead.
++    if (!Array.isArray(parsed.expectedOrdinals) || typeof parsed.expectedTotalMessages !== 'number') {
++      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++      return null
++    }
+     return parsed
+   } catch {
+     return null
+@@ -1659,14 +1676,13 @@ function MilestoneRow({
+                   isCrossChain
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
+-                  // Round 26: defensive against a pre-Round-26 localStorage
+-                  // entry still inside its 24h window, where
+-                  // expectedMessages was a bare count (number), not an
+-                  // array — Array.isArray falls back to undefined exactly
+-                  // like a missing value (see useCctpDelivery's own
+-                  // expectedMessages == null branch), never crashes on
+-                  // .join/.some over a number.
+-                  expectedMessages={Array.isArray(cctpTrack.expectedMessages) ? cctpTrack.expectedMessages : undefined}
++                  // Round 27: readCctpTrack itself now discards any record
++                  // whose expectedOrdinals/expectedTotalMessages shape isn't
++                  // usable (legacy or malformed) — see its own doc comment —
++                  // so cctpTrack.expectedOrdinals is guaranteed to be a real
++                  // array whenever cctpTrack is non-null here.
++                  expectedOrdinals={cctpTrack.expectedOrdinals}
++                  expectedTotalMessages={cctpTrack.expectedTotalMessages}
+                 />
+               )}
+               {milestone.state === 3 && fallbackTxHash && (
+@@ -2433,7 +2449,7 @@ export function mutualSettlementExecuted(receipt) {
+    isn't discovering them from the subgraph the way the fallback path has
+    to, so no new plumbing was needed to make this call. */
+ export function mutualSettlementCreatedCctpMessage(receipt, escrowId, milestoneIndex) {
+-  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [] }
++  if (!mutualSettlementExecuted(receipt)) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
+   return receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+ }
+ 
+@@ -2674,7 +2690,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+       // executed AND the receipt proves a real message genuinely THIS
+       // milestone's own was sent (Round 26: authenticity- and
+       // milestone-scoped, not just "a message exists somewhere").
+-      const { emitted, messages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
++      const { emitted, ordinals, totalMessages } = mutualSettlementCreatedCctpMessage(receipt, escrow.id, milestone.index)
+       if (emitted) {
+         // Round 20 Phase D: no `domain` field — no reader ever consumed it
+         // (both MilestoneRow and DisputeBlock recompute the domain live from
+@@ -2682,9 +2698,14 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // stored domain couldn't represent a mixed split's several real
+         // per-message domains anyway. useCctpDelivery gets its per-message
+         // domains from Iris directly once it has the txHash.
++        //
++        // Round 27: expectedOrdinals/expectedTotalMessages, not the raw hex
++        // `messages` array Round 26 persisted here — see useCctpDelivery's
++        // own doc comment for why content matching against Iris never
++        // actually worked.
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+         onCrossChainRelease?.()
+       }
+@@ -2857,8 +2878,8 @@ export function shouldClearCctpTrack(deliveries) {
+    recovery card for one of potentially several simultaneously-failed legs.
+    Exported for direct testing — the same reasoning EscrowDetail exports its
+    other confirm-descriptor and decision functions for. */
+-export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedMessages }) {
+-  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedMessages)
++export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIndex, expectedOrdinals, expectedTotalMessages }) {
++  const { phase, deliveries } = useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expectedTotalMessages)
+   const [copied, setCopied] = useState(false)
+ 
+   // Once every message Iris knows about for this tx has actually completed,
+@@ -2988,8 +3009,10 @@ const FALLBACK_RECEIPT_TIMEOUT_MS = 20_000
+    receipt) and reusing the shared ground-truth check the write sites run
+    (as of Round 26, receiptEmittedCctpMessageForMilestone — see its own doc
+    comment), just read after the fact instead of at confirmation time. Its
+-   own verified messages become expectedMessages, closing (b) the same way
+-   a local cctpTrack record already does. A receipt that emits zero
++   own verified messages become expectedOrdinals/expectedTotalMessages
++   (Round 27: ordinal position, not raw-hex identity — see
++   useCctpDelivery's own doc comment), closing (b) the same way a local
++   cctpTrack record already does. A receipt that emits zero
+    messages renders nothing (same as any other non-cross-chain milestone),
+    closing (a).
+ 
+@@ -3029,7 +3052,7 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
+     // write sites share too (Circle-managed wallets are ERC-4337 smart
+     // accounts; a bundler can pack a foreign UserOperation's logs into any
+     // receipt, not just this permissionless path's).
+-    const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
++    const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex)
+     if (!emitted) return null
+     return (
+       <CrossChainDelivery
+@@ -3037,7 +3060,8 @@ export function FallbackCrossChainDelivery({ txHash, escrowId, milestoneIndex })
+         isCrossChain
+         escrowId={escrowId}
+         milestoneIndex={milestoneIndex}
+-        expectedMessages={messages}
++        expectedOrdinals={ordinals}
++        expectedTotalMessages={totalMessages}
+       />
+     )
+   }
+@@ -3715,11 +3739,11 @@ function MilestoneAction({
+     // here — no discovery needed, unlike the fallback path.
+     onConfirmed: (receipt) => {
+       onChange?.(); setActiveKey(null)
+-      const { emitted, messages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
++      const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+       if (emitted) {
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedMessages: messages })
++          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+         onCrossChainRelease?.()
+       }
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+index 804309d..029ab2f 100644
+--- a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
++++ b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+@@ -178,7 +178,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+     // settlement — it does not by itself mean a burn happened.
+     const receipt = { transactionHash: '0xtx8', logs: [proposedLog(0, 6000), executedLog(1, 6000)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(true)
+-    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
+   })
+ 
+   /* Verified independently of the test above: a mutation that drops ONLY
+@@ -199,7 +199,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+     // redundant with the message check.
+     const receipt = { transactionHash: '0xtx9', logs: [proposedLog(0, 6000), messageSentLog(1)] }
+     expect(mutualSettlementExecuted(receipt)).toBe(false)
+-    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [] })
++    expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
+   })
+ 
+   /* Independently verified to catch a real bug the two tests above cannot
+@@ -222,7 +222,7 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+       logs: [proposedLog(0, 6000), messageSentLog(1), messageSentLog(2), executedLog(3, 6000)]
+     }
+     expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
+-      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()]
++      emitted: true, count: 2, messages: [buildCctpMessage(), buildCctpMessage()], ordinals: [0, 1], totalMessages: 2
+     })
+   })
+ 
+@@ -252,8 +252,12 @@ describe('mutualSettlementCreatedCctpMessage — requires BOTH facts, not just o
+       transactionHash: '0xtx11',
+       logs: [foreignBurn, proposedLog(1, 6000), messageSentLog(2), executedLog(3, 6000)]
+     }
++    // Round 27: the foreign UserOperation's burn still occupies ordinal 0 of
++    // the 2-message universe (it's a real MessageTransmitterV2 log, just not
++    // OUR message) — this milestone's own genuine message is correctly at
++    // ordinal 1, not 0.
+     expect(mutualSettlementCreatedCctpMessage(receipt, ESCROW_ID, MILESTONE_INDEX)).toEqual({
+-      emitted: true, count: 1, messages: [buildCctpMessage()]
++      emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2
+     })
+   })
+ })
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 4aaa2c2..ce57ab5 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,4 +1,4 @@
+-import { encodeFunctionData, decodeEventLog, slice } from 'viem'
++import { encodeFunctionData, decodeEventLog, slice, toEventSelector } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ import { bytes32ToAddress } from './encode.js'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+@@ -386,10 +386,76 @@ export function milestoneCctpLogRange(receipt, escrowId, milestoneIndex) {
+    the shared MessageSent count. No match found (should be unreachable in
+    practice — see milestoneCctpLogRange's own doc comment) fails the same
+    way as "genuinely no CCTP message": nothing reliable to attribute either
+-   way, so there is no meaningful difference in what the UI should show. */
++   way, so there is no meaningful difference in what the UI should show.
++
++   Round 27 (fixing the Round 26 review's High finding). CCTP V2 mutates
++   several message fields between burn-time (this source receipt) and
++   attestation (Iris's response) — nonce (header, byte 12-44) is assigned
++   off-chain by Circle, finalityThresholdExecuted (header, byte 144-148) and
++   feeExecuted (body) are filled in once attested, expirationBlock can
++   change too. Content equality between the raw source-side message and
++   Iris's own `message` field therefore never holds for a real message —
++   confirmed live: a genuine Arc-testnet burn's source-side log and Iris's
++   returned message for the SAME delivery differ in exactly these fields,
++   nowhere else (verified byte-by-byte against a real captured Iris
++   response, not assumed). Round 26's `messages` (raw hex, still returned
++   below for callers that want the actual bytes) can therefore never be
++   used to find this milestone's own entries in Iris's response — every
++   real poll had `messages.length === 0` and the tracker never resolved.
++
++   Fixed by ordinal position instead of content: Circle's own GET
++   /v2/messages API reference states "Each message for a given transaction
++   hash is ordered by ascending log index" — so this milestone's own
++   verified message(s) can be identified by WHERE they sit (0-indexed)
++   among every real MessageTransmitterV2-emitted MessageSent log in the
++   WHOLE receipt (realMessageTransmitterLogIndexesAsc below), not just this
++   milestone's own scoped range — Iris's response covers the whole
++   transaction, so the ordinal has to be counted against the same universe
++   Iris counts against, confirmed by fetching Circle's own API reference
++   directly (not assumed from the migration guide's shorter example).
++
++   The ordinal universe is deliberately NOT authenticity-filtered.
++   MessageTransmitterV2.sendMessage is public and permissionless (see
++   verifiedOwnCctpMessage's own doc comment), so a forged message — real
++   contract, wrong header.sender, the exact finding 1 attack — still gets a
++   real MessageSent log at the real contract address and still consumes a
++   real ordinal slot in Iris's response, even though this app's own
++   authenticity chain correctly rejects it as not-ours. Excluding it from
++   the count here would shift every ordinal after it by one and
++   misattribute a later real message to the wrong slot. Trust that a given
++   ordinal is genuinely THIS milestone's own still comes entirely from
++   verifiedOwnCctpMessage's four-check chain, run first to find OUR OWN
++   scoped logs; the ordinal count is a separate question answered against
++   the unfiltered universe.
++
++   `ordinals` are this milestone's own verified messages' 0-indexed
++   positions in that universe (usually one entry; more for a mixed split
++   settling several legs in one call). `totalMessages` is the universe's
++   own size — useCctpDelivery needs it to gate on Iris having indexed EVERY
++   real message in the transaction before trusting any ordinal-based
++   selection (see its own doc comment for why a still-partial response
++   can't be trusted to be a stable prefix of the final ordering). */
++const MESSAGE_SENT_TOPIC0 = toEventSelector('MessageSent(bytes)')
++
++export function realMessageTransmitterLogIndexesAsc(logs) {
++  return logs
++    .filter((log) =>
++      log.address?.toLowerCase() === MESSAGE_TRANSMITTER_V2_ARC.toLowerCase() &&
++      log.topics?.[0] === MESSAGE_SENT_TOPIC0
++    )
++    .map((log) => log.logIndex)
++    .sort((a, b) => a - b)
++}
++
+ export function receiptEmittedCctpMessageForMilestone(receipt, escrowId, milestoneIndex) {
+   const range = milestoneCctpLogRange(receipt, escrowId, milestoneIndex)
+-  if (!range) return { emitted: false, count: 0, messages: [] }
++  if (!range) return { emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 }
+   const scopedLogs = receipt.logs.filter((log) => log.logIndex > range.start && log.logIndex <= range.end)
+-  return receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
++  const result = receiptEmittedOwnCctpMessage({ ...receipt, logs: scopedLogs }, CONTRACT_ADDRESS)
++  const universe = realMessageTransmitterLogIndexesAsc(receipt.logs)
++  const ordinals = scopedLogs
++    .filter((log) => verifiedOwnCctpMessage(log, CONTRACT_ADDRESS) != null)
++    .map((log) => universe.indexOf(log.logIndex))
++    .filter((ord) => ord !== -1)
++  return { ...result, ordinals, totalMessages: universe.length }
+ }
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 42b308c..3643739 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -29,6 +29,7 @@ const {
+   receiptEmittedOwnCctpMessage,
+   milestoneCctpLogRange,
+   receiptEmittedCctpMessageForMilestone,
++  realMessageTransmitterLogIndexesAsc,
+   MESSAGE_TRANSMITTER_V2_ARC,
+   TOKEN_MESSENGER_V2_ARC
+ } = await import('./irisDelivery.js')
+@@ -503,7 +504,7 @@ describe('milestoneCctpLogRange', () => {
+ })
+ 
+ describe('receiptEmittedCctpMessageForMilestone', () => {
+-  it('counts only the MessageSent logs within this milestone\'s own range, and returns their real message bytes', () => {
++  it('counts only the MessageSent logs within this milestone\'s own range, and returns their real message bytes plus their ordinal positions in the WHOLE receipt', () => {
+     const receipt = {
+       logs: [
+         messageSentLog(0),
+@@ -517,38 +518,43 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+     expect(forMilestone1.emitted).toBe(true)
+     expect(forMilestone1.count).toBe(2)
+     expect(forMilestone1.messages).toEqual([buildCctpMessage(), buildCctpMessage()])
++    // Round 27: 3 real MessageSent logs total in the receipt (logIndex 0, 2,
++    // 3) — this milestone's own two are the 2nd and 3rd (0-indexed: 1, 2),
++    // since logIndex 0 belongs to escrow 3/milestone 0.
++    expect(forMilestone1.ordinals).toEqual([1, 2])
++    expect(forMilestone1.totalMessages).toBe(3)
+ 
+     const forMilestone0 = receiptEmittedCctpMessageForMilestone(receipt, 3, 0)
+-    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
++    expect(forMilestone0).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [0], totalMessages: 3 })
+   })
+ 
+-  it('returns emitted:false, count:0, messages:[] when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
++  it('returns emitted:false, count:0, messages:[], ordinals:[], totalMessages:0 when no terminal event for this milestone is found (defensive — should be unreachable given how releaseTx is indexed)', () => {
+     const receipt = { logs: [messageSentLog(0)] }
+-    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++    expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 0 })
+   })
+ 
+   describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn, log-index-adjacent but not this contract\'s own', () => {
+-    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range', () => {
++    it('excludes a MessageSent log whose own messageSender is a DIFFERENT contract, even though it falls inside this milestone\'s computed range — but still counts it toward totalMessages, since it is a real log in the ordinal universe', () => {
+       const receipt = {
+         logs: [
+           messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),   // a foreign TrancheProtocol instance's own burn — no boundary of its own
+           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+         ]
+       }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+     })
+ 
+-    it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range', () => {
++    it('excludes a message forged via a direct MessageTransmitterV2.sendMessage call, even inside this milestone\'s own computed range — but still counts it toward totalMessages', () => {
+       const receipt = {
+         logs: [
+           messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),
+           escrowLog(1, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+         ]
+       }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+     })
+ 
+-    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range', () => {
++    it('counts only the real, own-sender message when a foreign-sender message shares the same computed range, but its ordinal position (1) correctly accounts for the foreign message occupying slot 0', () => {
+       const receipt = {
+         logs: [
+           messageSentLog(0, { bodySender: FOREIGN_ADDRESS }),
+@@ -556,12 +562,14 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
+         ]
+       }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: true, count: 1, messages: [buildCctpMessage()] })
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({
++        emitted: true, count: 1, messages: [buildCctpMessage()], ordinals: [1], totalMessages: 2
++      })
+     })
+   })
+ 
+   describe('Round 25 gap (b): a same-contract withdrawRefund burn batched adjacent to an Arc-only milestone release', () => {
+-    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release', () => {
++    it('does not attribute withdrawRefund\'s own burn to a following Arc-only milestone release, but still counts it toward totalMessages', () => {
+       const receipt = {
+         logs: [
+           messageSentLog(0),   // withdrawRefund's own real burn
+@@ -569,12 +577,12 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+           escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })   // Arc-only: no burn of its own
+         ]
+       }
+-      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [] })
++      expect(receiptEmittedCctpMessageForMilestone(receipt, 7, 1)).toEqual({ emitted: false, count: 0, messages: [], ordinals: [], totalMessages: 1 })
+     })
+   })
+ 
+   describe('Round 26 finding 2: identity, not just count, matters for downstream Iris filtering', () => {
+-    it('returns DISTINCT message bytes for two genuinely different burns in the same milestone (a mixed split), so downstream identity matching can tell them apart', () => {
++    it('returns DISTINCT message bytes AND distinct ordinal positions for two genuinely different burns in the same milestone (a mixed split), so downstream ordinal selection can tell them apart', () => {
+       const receipt = {
+         logs: [
+           messageSentLog(0, { bodySender: CONTRACT_ADDRESS }),
+@@ -582,15 +590,65 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+           escrowLog(2, 'MutualSettlementExecuted', { escrowId: 7n, milestoneIndex: 1n, bps: 6000n })
+         ]
+       }
+-      const { messages } = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
++      const { messages, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
+       // Both messages are byte-identical here (same sender, no other
+       // differentiating field in this fixture) — the point of this test is
+       // that the array has the real per-message bytes available at all
+       // (length 2, not a collapsed count), not that THESE TWO specific
+-      // fixtures differ; useCctpDelivery's identity filter only needs
+-      // messages to be distinguishable when Iris's OWN response actually
+-      // differs (different attestation/forwardState per real message).
++      // fixtures differ. Round 27: ordinals are what downstream selection
++      // actually uses now (content is no longer trusted at all, see
++      // useCctpDelivery's own doc comment), and these two ARE distinct
++      // (0 and 1) even though their bytes happen not to be.
+       expect(messages).toHaveLength(2)
++      expect(ordinals).toEqual([0, 1])
++      expect(totalMessages).toBe(2)
++    })
++  })
++
++  describe('Round 27 (High finding fix): ordinal position, not content, is what Iris selection uses', () => {
++    it('a finding-1-style forged message (real contract, wrong header.sender) occupying an EARLIER ordinal slot does not shift this milestone\'s own message off its correct position', () => {
++      // The exact batched scenario the fix has to get right: an attacker's
++      // forged MessageTransmitterV2.sendMessage call (real contract, real
++      // MessageSent topic, so it consumes a real ordinal slot in Iris's
++      // response) lands BEFORE this milestone's own genuine burn in the
++      // same transaction. verifiedOwnCctpMessage correctly rejects the
++      // forged one as not-ours, but it must still count toward the ordinal
++      // universe, or the genuine message's ordinal would be off by one.
++      const receipt = {
++        logs: [
++          messageSentLog(0, { headerSender: FOREIGN_ADDRESS, bodySender: CONTRACT_ADDRESS }),   // forged — occupies ordinal 0
++          messageSentLog(1),   // this milestone's own genuine burn — must resolve to ordinal 1, not 0
++          escrowLog(2, 'MilestoneReleased', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      }
++      const result = receiptEmittedCctpMessageForMilestone(receipt, 7, 1)
++      expect(result.emitted).toBe(true)
++      expect(result.count).toBe(1)
++      expect(result.ordinals).toEqual([1])
++      expect(result.totalMessages).toBe(2)
++    })
++
++    it('realMessageTransmitterLogIndexesAsc includes every real-contract MessageSent log regardless of authenticity (check 1 only), sorted ascending by logIndex — the universe Iris\'s own ordering is counted against', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(5, { headerSender: FOREIGN_ADDRESS }),   // forged, but still a real log at the real contract
++          messageSentLog(2, { bodySender: FOREIGN_ADDRESS }),     // a foreign application's own genuine burn
++          messageSentLog(9)                                       // this contract's own genuine burn
++        ]
++      }
++      // Deliberately out of logIndex order in the array — the function must
++      // sort by the real logIndex field, not array position.
++      expect(realMessageTransmitterLogIndexesAsc(receipt.logs)).toEqual([2, 5, 9])
++    })
++
++    it('realMessageTransmitterLogIndexesAsc excludes logs from a decoy contract address, and logs from the real contract that are not MessageSent at all', () => {
++      const receipt = {
++        logs: [
++          messageSentLog(0, {}, '0x9999999999999999999999999999999999999999'),   // decoy address, real MessageSent topic
++          { address: MESSAGE_TRANSMITTER_V2_ARC, logIndex: 1, topics: ['0xdeadbeef'], data: '0x' }   // real address, different event
++        ]
++      }
++      expect(realMessageTransmitterLogIndexesAsc(receipt.logs)).toEqual([])
+     })
+   })
+ })

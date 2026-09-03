@@ -1,0 +1,218 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 6453739..fdd991d 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -987,13 +987,17 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+       `Escrow #${escrow.id}`,
+       `Address: ${oldAddress} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+-      'Applies to every milestone not yet released, including any currently in review.',
++      // Round 15 #6/#8: this used to be an unqualified "every milestone",
++      // with the timeout exception appended several lines later — and
++      // dropped entirely when milestones was unavailable, at which point the
++      // still-present blanket claim was the LEAST accurate it ever got. The
++      // exception is a fact about mechanism, not about the exposure figure,
++      // so it belongs in this always-present sentence rather than gated
++      // alongside a number that may or may not be known.
++      "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.",
+       ...(exposure === null
+         ? []
+-        : [
+-            `That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`,
+-            "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
+-          ]),
++        : [`That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+@@ -1051,6 +1055,15 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       ...(exposure === null
+         ? []
+         : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
++      // Round 15 #7: unlike the no-split branch, a timeout DOES honor a
++      // redirected split ADDRESS — the split loop reads the live, current
++      // s[i].mintRecipient (TrancheProtocol.sol:609). But that same loop
++      // never reads s[i].destinationDomain at all; every leg's share lands in
++      // refundBalances (an Arc credit) regardless of what chain it names
++      // (:594-610). So an address change here does apply to a timeout
++      // settlement; a chain change does not — two different answers for the
++      // two things this one screen lets you redirect together.
++      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit. It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.",
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+diff --git a/frontend/src/pages/EscrowDetail.redirect.test.jsx b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+index 0af7b39..6574929 100644
+--- a/frontend/src/pages/EscrowDetail.redirect.test.jsx
++++ b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+@@ -54,8 +54,14 @@ describe('redirectPayoutConfirm — an allowed redirect', () => {
+      destinationDomain are read at release time, never snapshotted, so this
+      reaches milestones that already exist — including one already claimed and
+      waiting on the payer. */
+-  it('says it applies to everything unsettled, including milestones in review', () => {
+-    expect(paramText(d())).toContain('Applies to every milestone not yet released, including any currently in review.')
++  /* Round 15 #6: the leading sentence itself now names the timeout exception
++     rather than a separate line appended after it — "every milestone" was
++     never quite true of a milestone that times out with no arbiter ruling,
++     which always pays the ORIGINAL recipient regardless of this redirect. */
++  it('says it applies to everything unsettled, including milestones in review, except a timeout', () => {
++    const t = paramText(d())
++    expect(t).toContain('Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review.')
++    expect(t).toContain("A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.")
+   })
+ 
+   it('does not claim in-flight milestones are protected', () => {
+@@ -112,7 +118,7 @@ describe('redirectPayoutConfirm — the directions F3 allows', () => {
+      sentence passes for any other wrong output too — including a reworded
+      block, or the split no-op branch. */
+   const allows = (d) => {
+-    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released, including any currently in review.')
++    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review.')
+     expect(d.parameters.join('\n')).not.toContain(REDIRECT_BLOCKED_TEXT)
+     expect(d.subtitle).toContain('Redirects your milestone payments')
+   }
+@@ -227,6 +233,19 @@ describe('redirectSplitConfirm', () => {
+   it('survives an unknown current address', () => {
+     expect(paramText(d({ currentAddress: null }))).toContain(`Address: unknown → ${NEW_ADDR}`)
+   })
++
++  /* Round 15 #7: unlike the no-split branch (where a timeout ignores the
++     redirect entirely), a split leg's timeout credit reads the LIVE
++     mintRecipient (TrancheProtocol.sol:609) — so an address change here does
++     reach a timeout settlement. What it never reads is destinationDomain
++     (:594-610): every leg's timeout share lands in refundBalances (an Arc
++     credit) no matter what chain is configured. Two different answers for
++     the two things this screen redirects together, so both need saying. */
++  it('says a timeout honors the updated address but always as an Arc credit, ignoring the chain', () => {
++    const t = paramText(d())
++    expect(t).toContain("A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit.")
++    expect(t).toContain('It never reads the destination chain, so changing the chain has no effect on a timeout settlement; only changing the address does.')
++  })
+ })
+ 
+ describe('the two redirects are not interchangeable', () => {
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index 74a1f55..b3363c9 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -240,6 +240,12 @@ function domainRemovalBlocks(domain) {
+   return 'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
+ }
+ 
++// F3 rejects redirecting an Arc-funded escrow cross-chain independently of
++// supportedDomains (:982, :1033) — true for every domain except Arc itself,
++// which this list has no power to change either way.
++const ARC_FUNDED_REDIRECT_CAVEAT =
++  'Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.'
++
+ /* Two carve-outs that still belong on the ADD screen. Neither corrects a
+    claim the leading sentence made — "new escrows may name this chain, and
+    payouts may be redirected to it" says nothing about refund-withdrawal
+@@ -249,21 +255,30 @@ function domainRemovalBlocks(domain) {
+ 
+    1. Domain 0 doubles as withdrawRefund's Arc sentinel, so adding it to
+       supportedDomains does not create a new withdrawal route through it.
++      That sentinel meaning is unrelated to domain 0's OTHER, ordinary
++      meaning as a real CCTP destination (Ethereum) for redirect purposes —
++      F3 restricts an Arc-funded escrow from redirecting there exactly like
++      any other domain, so this case still needs the same F3 caveat every
++      other non-Arc domain gets, alongside the sentinel note.
+    2. ARC_DOMAIN is exempt from both redirect guards by construction (:975,
+       :1027), so re-adding it does not change redirect availability — it was
+-      already reachable.
++      already reachable, and (being Arc) it does not need the F3 caveat
++      either: F3 restricts redirecting AWAY from Arc, not TO it.
+    3. Enabling a domain does not make it reachable for every escrow. An
+       Arc-funded escrow (or Arc split leg) still cannot be redirected
+       cross-chain — F3 rejects it independently of supportedDomains (:982,
+       :1033). */
+ function domainAdditionCaveats(domain) {
+   if (Number(domain) === 0) {
+-    return ['This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.']
++    return [
++      'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.',
++      ARC_FUNDED_REDIRECT_CAVEAT
++    ]
+   }
+   if (Number(domain) === ARC_DOMAIN) {
+     return ['Arc was already always available for redirects; the contract exempts it from this list.']
+   }
+-  return ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
++  return [ARC_FUNDED_REDIRECT_CAVEAT]
+ }
+ 
+ export function domainConfirm({ domain, domainName, enabled }) {
+diff --git a/frontend/src/pages/phaseB.test.jsx b/frontend/src/pages/phaseB.test.jsx
+index 63a8119..a997bb8 100644
+--- a/frontend/src/pages/phaseB.test.jsx
++++ b/frontend/src/pages/phaseB.test.jsx
+@@ -128,6 +128,16 @@ describe('#7 — domain toggles have three carve-outs', () => {
+       .toContain('This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.')
+   })
+ 
++  /* Round 15 #7: domain 0's refund-sentinel meaning (withdrawRefund) and its
++     ordinary meaning as a real CCTP destination (Ethereum, for redirects) are
++     unrelated. F3 restricts redirecting an Arc-funded escrow there exactly
++     like any other non-Arc domain — the ADD screen for domain 0 was dropping
++     that caveat, unlike every other non-Arc domain. */
++  it('still warns that enabling domain 0 does not unblock Arc-funded escrows', () => {
++    expect(paramText(build(0, false)))
++      .toContain('Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.')
++  })
++
+   /* Both redirects read `!= ARC_DOMAIN && !supportedDomains[...]` (:975, :1027),
+      so Arc is exempt from the list entirely. */
+   it('says Arc redirects survive removing Arc', () => {
+diff --git a/frontend/src/pages/phaseD.test.jsx b/frontend/src/pages/phaseD.test.jsx
+index c65ccdf..462b703 100644
+--- a/frontend/src/pages/phaseD.test.jsx
++++ b/frontend/src/pages/phaseD.test.jsx
+@@ -167,9 +167,12 @@ describe('#18.3 — a redirect states what it is worth', () => {
+     expect(t).toContain('A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.')
+   })
+ 
++  /* Round 15 #6: the exception moved INTO the leading "Applies to every
++     milestone" sentence rather than sitting several lines below it as a
++     separate correction. */
+   it('discloses that a no-split timeout pays the original recipient, not the redirected address', () => {
+     expect(paramText(payout())).toContain(
+-      "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
++      "Applies to every milestone not yet released and settled through approval, dispute resolution, or mutual agreement, including any currently in review. A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address."
+     )
+   })
+ 
+@@ -178,10 +181,16 @@ describe('#18.3 — a redirect states what it is worth', () => {
+     expect(paramText(payout())).not.toMatch(/\bnet\b/i)
+   })
+ 
+-  it('omits the figure and the timeout caveat when the milestones are not available', () => {
++  /* Round 15 #8: the old copy kept the blanket "every milestone" claim active
++     when milestones was unavailable while dropping the timeout exception —
++     the LEAST accurate combination, exactly when there's no ceiling figure to
++     compensate. The exception is a mechanism fact, not a number, so it's now
++     part of the always-present leading sentence: only the ceiling FIGURE is
++     what's actually milestones-dependent, and that's still correctly omitted. */
++  it('keeps the timeout exception even when the milestones are not available, and omits only the figure', () => {
+     const t = paramText(payout({ milestones: undefined }))
+-    expect(t).not.toMatch(/ceiling of|still to be paid|undefined|NaN|times out/)
+-    expect(t).toContain('Applies to every milestone not yet released, including any currently in review.')
++    expect(t).not.toMatch(/ceiling of|still to be paid|undefined|NaN/)
++    expect(t).toContain("A milestone that times out with no arbiter ruling is the one exception — it always pays the escrow's original recipient, never this redirected address.")
+   })
+ 
+   /* The split branch's write changes no destination at all, and the blocked
+@@ -227,4 +236,14 @@ describe('#18.3 — a redirect states what it is worth', () => {
+   it('omits it on the split redirect too when unavailable', () => {
+     expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid|ceiling on gross principal/)
+   })
++
++  /* Round 15 #7: distinct from the address-recipient issue above — this is
++     about the destination CHAIN specifically, and (like the #6/#8 leading
++     sentence) it's a mechanism fact rather than a number, so it stays present
++     even when the ceiling figure is omitted for lack of milestone data. */
++  it('keeps the destination-chain-ignored-at-timeout caveat even when milestones are unavailable', () => {
++    expect(paramText(split({ milestones: [] }))).toContain(
++      "A milestone that times out with no arbiter ruling does honor this leg's updated address — but always as an Arc credit."
++    )
++  })
+ })

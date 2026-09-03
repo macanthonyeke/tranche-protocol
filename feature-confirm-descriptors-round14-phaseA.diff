@@ -1,0 +1,528 @@
+diff --git a/frontend/src/hooks/useEscrows.js b/frontend/src/hooks/useEscrows.js
+index f72c2fc..321aaf2 100644
+--- a/frontend/src/hooks/useEscrows.js
++++ b/frontend/src/hooks/useEscrows.js
+@@ -254,14 +254,18 @@ export function useAccountActivity(address) {
+ 
+ export function useRefundBalance(address) {
+   const enabled = !!address
+-  const { data, isLoading, refetch } = useReadContract({
++  const { data, isLoading, error, refetch } = useReadContract({
+     address: CONTRACT_ADDRESS,
+     abi: ESCROW_ABI,
+     functionName: 'refundBalances',
+     args: enabled ? [address] : undefined,
+     query: { enabled }
+   })
+-  return { balance: data ?? 0n, isLoading, refetch }
++  // `data ?? 0n` reads identically to a genuine zero balance whether the read
++  // succeeded or failed — callers that gate on isLoading alone cannot tell an
++  // RPC failure from "this wallet really has nothing", so the error travels
++  // alongside rather than being swallowed here.
++  return { balance: data ?? 0n, isLoading, error: enabled ? (error ?? null) : null, refetch }
+ }
+ 
+ export function useUsdcBalance(address) {
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index 0fe1312..5fbe1d1 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -10,6 +10,7 @@ import WalletButton from '../components/WalletButton.jsx'
+ 
+ import { useReadContract } from 'wagmi'
+ 
++import { useAuth } from '../hooks/useAuth.jsx'
+ import { useRoles } from '../hooks/useRoles.jsx'
+ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useProtocolConfig } from '../hooks/useArbiter.js'
+@@ -46,9 +47,13 @@ const RECOVERY_LOOKUP_DELAY_MS = 400
+  * too. Exact string comparison, not case-insensitive: the debounced value is
+  * the same string arriving later, and a checksum-case difference is a
+  * different lookup key to react-query anyway. */
+-export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading }) {
++export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading, balanceError, recoveryError }) {
+   if (isAddress(typed) && typed !== debounced) return true
+-  return !!(balanceLoading || recoveryLoading)
++  // A failed read is not a resolved one. `?? null` / `?? 0n` below make an
++  // errored read LOOK like a genuine empty result — same shape as the
++  // in-flight case this gate already exists to catch, so it is folded in
++  // here rather than checked separately at every call site.
++  return !!(balanceLoading || recoveryLoading || balanceError || recoveryError)
+ }
+ 
+ /* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
+@@ -65,19 +70,22 @@ export function expiryOf(proposedAt) {
+ function usePendingRecovery(address) {
+   const enabled = !!address
+   const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, query: { enabled } }
+-  const { data: proposedOwner, isLoading: ownerLoading } = useReadContract({
++  const { data: proposedOwner, isLoading: ownerLoading, error: ownerError } = useReadContract({
+     ...base, functionName: 'pendingRefundRecovery', args: enabled ? [address] : undefined
+   })
+-  const { data: proposedAt, isLoading: atLoading } = useReadContract({
++  const { data: proposedAt, isLoading: atLoading, error: atError } = useReadContract({
+     ...base, functionName: 'pendingRefundRecoveryAt', args: enabled ? [address] : undefined
+   })
+   // `?? null` / `?? 0n` are indistinguishable from a real empty result, so the
+   // loading flag has to travel with them: "no pending proposal" and "haven't
+-  // looked yet" must not render as the same sentence on a confirm screen.
++  // looked yet" must not render as the same sentence on a confirm screen. An
++  // RPC failure is a third case that reads identically to both if it is not
++  // also carried out — see recoveryReadsPending.
+   return {
+     proposedOwner: proposedOwner ?? null,
+     proposedAt: proposedAt ?? 0n,
+-    isLoading: enabled && (ownerLoading || atLoading)
++    isLoading: enabled && (ownerLoading || atLoading),
++    error: enabled ? (ownerError || atError || null) : null
+   }
+ }
+ 
+@@ -349,10 +357,8 @@ function Body({ roles }) {
+         <DomainControls />
+         <div className="rule" />
+       </>)}
+-      {roles.isRecoveryManager && (<>
+-        <RecoveryControls />
+-        <div className="rule" />
+-      </>)}
++      <RecoveryControls canPropose={roles.isRecoveryManager} />
++      <div className="rule" />
+       {roles.isPauser && <PauseControl config={config} refetch={refetch} />}
+     </div>
+   )
+@@ -550,8 +556,19 @@ function DomainControls() {
+   )
+ }
+ 
+-/* ---------- Recovery Controls ---------- */
+-function RecoveryControls() {
++/* ---------- Recovery Controls ----------
++   claimRefundCreditTransfer has no onlyRole — the contract gates it on
++   msg.sender == proposed (:943), a specific address, not a role. So Claim is
++   always rendered here, independent of `canPropose`. Gating it on
++   isRecoveryManager (as this used to) locked out a nominee who happens to
++   also hold some unrelated role (fee manager, domain manager, pauser,
++   default admin): that wallet reaches Body rather than the no-role fallback
++   below, and Body used to show RecoveryControls — and therefore Claim — only
++   to recovery managers. There is no reverse index from nominee to source (see
++   the no-role branch's comment in Gate()), so this cannot detect "is this
++   wallet nominated anywhere" up front; unconditional visibility is the only
++   way every nominee reaches the form regardless of what else they hold. */
++function RecoveryControls({ canPropose }) {
+   return (
+     <section className="flex flex-col gap-6 max-w-prose">
+       <div>
+@@ -560,7 +577,7 @@ function RecoveryControls() {
+           Two-step emergency refund credit recovery. Step 1 (admin): propose the transfer. Step 2 (new owner): claim from their wallet.
+         </p>
+       </div>
+-      <ProposeRecovery />
++      {canPropose && <ProposeRecovery />}
+       <ClaimRecovery />
+     </section>
+   )
+@@ -662,16 +679,27 @@ function ProposeRecovery() {
+   // Debounced so investigating a wallet is one lookup after typing stops, not
+   // one per keystroke that happens to parse as an address.
+   const lookupFrom = useDebouncedValue(from, RECOVERY_LOOKUP_DELAY_MS)
+-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
+-  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const { balance, isLoading: balanceLoading, error: balanceError } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const { proposedOwner, proposedAt, isLoading: recoveryLoading, error: recoveryError } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
+   const readsPending = recoveryReadsPending({
+-    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading
++    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading, balanceError, recoveryError
+   })
++  // Only worth surfacing once the failure belongs to what's currently typed —
++  // while `from` is still catching up to `lookupFrom` the mismatch alone
++  // already holds `readsPending`, and an error left over from a
++  // since-abandoned lookup would be a stale complaint about a wallet the
++  // admin isn't even looking at anymore.
++  const readFailed = isAddress(from) && from === lookupFrom && !!(balanceError || recoveryError)
+ 
+   // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
+   // pending" — both of which are what an unresolved read looks like, and both
+   // of which are exactly wrong when the truth is a funded wallet with a
+-  // standing nomination about to be overwritten.
++  // standing nomination about to be overwritten. The same check runs again on
++  // the confirm-stage button below: `from`/`to` stay editable once the
++  // confirmation panel is open, so `valid` has to be re-evaluated live at the
++  // moment of signing rather than trusted from when the panel opened, or
++  // editing the fields afterward (to an unread wallet, or to the zero
++  // address) would slip past the checks that already run below.
+   const valid =
+     isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
+     from.toLowerCase() !== to.toLowerCase() && !readsPending
+@@ -705,6 +733,11 @@ function ProposeRecovery() {
+           />
+         )}
+       </Field>
++      {readFailed && (
++        <p className="text-[12px] text-bad">
++          Could not read this wallet's balance or pending proposal. Try again before proposing.
++        </p>
++      )}
+       {!confirm ? (
+         <div>
+           <button className="btn-danger" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
+@@ -727,7 +760,7 @@ function ProposeRecovery() {
+                   from, to, balance, existingOwner: proposedOwner, existingExpiry: expiryOf(proposedAt)
+                 })
+               })}
+-              disabled={tx.isBusy}
++              disabled={!valid || tx.isBusy}
+             >
+               {tx.isBusy ? 'Submitting…' : 'Confirm proposal'}
+             </button>
+@@ -739,6 +772,7 @@ function ProposeRecovery() {
+ }
+ 
+ function ClaimRecovery() {
++  const { address: connected } = useAuth()
+   const [blacklisted, setBlacklisted] = useState('')
+   const [confirm, setConfirm] = useState(false)
+   const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
+@@ -749,15 +783,30 @@ function ClaimRecovery() {
+   // Same debounce as step 1: the claim panel looks up the same two getters
+   // against the same restricted wallet, so it leaks the same trail.
+   const lookupAddr = useDebouncedValue(blacklisted, RECOVERY_LOOKUP_DELAY_MS)
+-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
+-  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const { balance, isLoading: balanceLoading, error: balanceError } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const { proposedOwner, proposedAt, isLoading: recoveryLoading, error: recoveryError } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
+   const readsPending = recoveryReadsPending({
+-    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading
++    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading, balanceError, recoveryError
+   })
++  const readFailed = isAddress(blacklisted) && blacklisted === lookupAddr && !!(balanceError || recoveryError)
++
++  // claimRefundCreditTransfer has no onlyRole — the contract's only gate is
++  // msg.sender == proposed (:943). A wallet that reads a standing proposal
++  // for a DIFFERENT address is a guaranteed revert, same as submitting the
++  // zero address on the propose side: worth stopping client-side rather than
++  // paying gas to learn it on-chain. `proposedOwner` reads as the zero
++  // address when nothing is pending (see proposeRecoveryConfirm's own
++  // handling of the same getter), so that case is deliberately not treated
++  // as a mismatch here — it is "nothing to claim yet", not "wrong wallet".
++  const hasProposal = isAddress(proposedOwner) && proposedOwner !== ZERO_ADDRESS
++  const nomineeMismatch = hasProposal && !!connected && proposedOwner.toLowerCase() !== connected.toLowerCase()
+ 
+   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
+-  // execution-time balance (:945), and drops the expiry line entirely.
+-  const valid = isAddress(blacklisted) && !readsPending
++  // execution-time balance (:945), and drops the expiry line entirely. The
++  // same check runs again on the confirm-stage button below — see the note
++  // in ProposeRecovery on why `valid` cannot be trusted only at panel-open
++  // time once the field stays editable underneath it.
++  const valid = isAddress(blacklisted) && !readsPending && !nomineeMismatch
+ 
+   return (
+     <div className="panel p-4 flex flex-col gap-3">
+@@ -776,6 +825,16 @@ function ClaimRecovery() {
+           />
+         )}
+       </Field>
++      {readFailed && (
++        <p className="text-[12px] text-bad">
++          Could not read this wallet's balance or pending proposal. Try again before claiming.
++        </p>
++      )}
++      {nomineeMismatch && (
++        <p className="text-[12px] text-bad">
++          This proposal names <span className="num">{truncateAddr(proposedOwner)}</span> as the wallet allowed to claim it — not the one you're connected with. Signing from this wallet will revert.
++        </p>
++      )}
+       {!confirm ? (
+         <div>
+           <button className="btn-primary" disabled={!valid || tx.isBusy} onClick={() => setConfirm(true)}>
+@@ -796,7 +855,7 @@ function ClaimRecovery() {
+                 loadingMessage: 'Claiming refund credit…',
+                 confirm: claimRecoveryConfirm({ blacklisted, balance, expiry: expiryOf(proposedAt) })
+               })}
+-              disabled={tx.isBusy}
++              disabled={!valid || tx.isBusy}
+             >
+               {tx.isBusy ? 'Claiming…' : 'Confirm claim'}
+             </button>
+diff --git a/frontend/src/pages/round14PhaseA.test.jsx b/frontend/src/pages/round14PhaseA.test.jsx
+new file mode 100644
+index 0000000..d7be4f6
+--- /dev/null
++++ b/frontend/src/pages/round14PhaseA.test.jsx
+@@ -0,0 +1,275 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
++
++/* Round 14 Phase A — a second Codex pass on Round 13's own recovery-panel
++   fixes found two regressions and one still-incomplete finding in the code
++   Round 13 itself touched:
++
++   1/2. TWO-STAGE CONFIRM BYPASS. Round 13 (#1/#2) made the submit gate check
++        `valid`/`readsPending`, but only on the button that OPENS the confirm
++        panel. The field stays editable underneath the open panel, and the
++        actual signing button only ever checked `tx.isBusy` — so editing the
++        address (to an unread wallet, or to the zero address) after opening
++        confirm slipped straight past every check Round 13 added. Fixed here
++        by re-evaluating the same `valid` on the signing button too, since
++        `valid` is derived fresh every render from current state rather than
++        anything captured at panel-open time.
++
++   3. Round 13 exempted wallets holding NO admin role from the role gate so
++      they could still reach ClaimRecovery (claimRefundCreditTransfer has no
++      onlyRole — the contract's gate is msg.sender == proposed). It missed
++      the mirror case: a wallet that DOES hold some unrelated role (fee
++      manager, domain manager, pauser, default admin) but is not a recovery
++      manager was routed to Body, and Body only rendered RecoveryControls —
++      and therefore Claim — behind isRecoveryManager. Fixed by making Claim
++      unconditional inside RecoveryControls regardless of role.
++
++   4. The claim form read `proposedOwner` off-chain but never compared it to
++      the connected wallet before offering a signature — a guaranteed
++      msg.sender revert if they differ, the same "pays for a revert" shape as
++      the zero-address guard on the propose side (#16, Round 13). */
++
++const runMock = vi.hoisted(() => vi.fn())
++const txState = vi.hoisted(() => ({ current: { run: null, isBusy: false, status: 'idle', hash: null, error: null } }))
++const authMock = vi.hoisted(() => ({ current: { address: '0x1111111111111111111111111111111111111111' } }))
++const rolesMock = vi.hoisted(() => ({ current: { roles: { isRecoveryManager: true }, isLoading: false } }))
++const protocolConfigMock = vi.hoisted(() => ({ current: { config: { protocolFeeBps: 199n, protocolTreasury: '0x2222222222222222222222222222222222222222', cctpForwardFee: 200000n, paused: false }, refetch: vi.fn() } }))
++
++// Per-address fixtures, keyed lowercase, read by the wagmi/useEscrows mocks
++// below. This is what lets the tests distinguish "data for A" from "data for
++// B" instead of one shared mock object standing in for both.
++const balances = vi.hoisted(() => ({ current: {} }))
++const balanceErrors = vi.hoisted(() => ({ current: {} }))
++const proposedOwners = vi.hoisted(() => ({ current: {} }))
++const proposedAts = vi.hoisted(() => ({ current: {} }))
++const recoveryErrors = vi.hoisted(() => ({ current: {} }))
++
++vi.mock('../hooks/useTx.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  useTx: () => ({ ...txState.current, run: runMock })
++}))
++vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => authMock.current }))
++vi.mock('../hooks/useEscrows.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  useRefundBalance: (address) => {
++    const key = address?.toLowerCase()
++    if (!key) return { balance: 0n, isLoading: false, error: null, refetch: vi.fn() }
++    return {
++      balance: balances.current[key] ?? 0n,
++      isLoading: false,
++      error: balanceErrors.current[key] ?? null,
++      refetch: vi.fn()
++    }
++  }
++}))
++vi.mock('../hooks/useRoles.jsx', () => ({ useRoles: () => rolesMock.current }))
++vi.mock('../hooks/useArbiter.js', () => ({ useProtocolConfig: () => protocolConfigMock.current }))
++vi.mock('../hooks/useSupportedDomains.js', () => ({ useSupportedDomains: () => ({ supported: [], refetch: vi.fn() }) }))
++vi.mock('wagmi', async (importOriginal) => ({
++  ...(await importOriginal()),
++  // Keyed by functionName + the address argument, so the two recovery
++  // getters (pendingRefundRecovery / pendingRefundRecoveryAt) can be given
++  // independent, per-address values — a single shared mock object can't tell
++  // "B's real reads have settled" from "A's reads are still what's cached".
++  useReadContract: (opts) => {
++    const enabled = !!opts?.query?.enabled
++    const key = opts?.args?.[0]?.toLowerCase()
++    if (!enabled || !key) return { data: undefined, isLoading: false, error: null, refetch: vi.fn() }
++    if (opts.functionName === 'pendingRefundRecovery') {
++      return { data: recoveryErrors.current[key] ? undefined : (proposedOwners.current[key] ?? ZERO), isLoading: false, error: recoveryErrors.current[key] ?? null, refetch: vi.fn() }
++    }
++    if (opts.functionName === 'pendingRefundRecoveryAt') {
++      return { data: recoveryErrors.current[key] ? undefined : (proposedAts.current[key] ?? 0n), isLoading: false, error: recoveryErrors.current[key] ?? null, refetch: vi.fn() }
++    }
++    return { data: undefined, isLoading: false, error: null, refetch: vi.fn() }
++  },
++  useAccount: () => ({ address: authMock.current?.address, isConnected: true, chainId: 5042002 }),
++  useConnect: () => ({ connect: vi.fn(), connectors: [] })
++}))
++vi.mock('../components/ConnectGate.jsx', () => ({ default: ({ children }) => children }))
++
++const ProtocolSettings = (await import('./ProtocolSettings.jsx')).default
++
++const ZERO = '0x0000000000000000000000000000000000000000'
++const ADDR_A = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const ADDR_B = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const REPLACEMENT = '0x2Fcbb92566C51E92c1353d0a6a9AC86f10bb1a03'
++
++const type = (el, value) => fireEvent.change(el, { target: { value } })
++const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
++
++const RECOVERY_DEBOUNCE_MS = 400
++const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
++
++afterEach(() => { cleanup() })
++
++beforeEach(() => {
++  runMock.mockReset()
++  txState.current = { run: null, isBusy: false, status: 'idle', hash: null, error: null }
++  authMock.current = { address: '0x1111111111111111111111111111111111111111' }
++  rolesMock.current = { roles: { isRecoveryManager: true }, isLoading: false }
++  balances.current = { [ADDR_A.toLowerCase()]: 100000000n, [ADDR_B.toLowerCase()]: 500000000n }
++  balanceErrors.current = {}
++  proposedOwners.current = { [ADDR_A.toLowerCase()]: ZERO, [ADDR_B.toLowerCase()]: ZERO }
++  proposedAts.current = { [ADDR_A.toLowerCase()]: 0n, [ADDR_B.toLowerCase()]: 0n }
++  recoveryErrors.current = {}
++})
++
++describe('#1/#2 — the propose panel re-validates at the moment of signing', () => {
++  const openConfirm = async () => {
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
++    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
++    await act(settleLookup)
++    fireEvent.click(screen.getByRole('button', { name: /^propose transfer$/i }))
++    return screen.getByRole('button', { name: /^confirm proposal$/i })
++  }
++
++  it('blocks signing if the address is edited to one whose reads have not settled', async () => {
++    const confirmBtn = await openConfirm()
++    expect(confirmBtn).not.toBeDisabled()
++
++    // Edit the field to B underneath the open confirm panel, then try to
++    // sign before B's debounce/reads have caught up.
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_B)
++    expect(screen.getByRole('button', { name: /^confirm proposal$/i })).toBeDisabled()
++    fireEvent.click(screen.getByRole('button', { name: /^confirm proposal$/i }))
++    expect(runMock).not.toHaveBeenCalled()
++  })
++
++  it('submits the CURRENT input once its reads settle, not what was cached when the panel opened', async () => {
++    await openConfirm()
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_B)
++    await act(settleLookup)
++
++    const confirmBtn = screen.getByRole('button', { name: /^confirm proposal$/i })
++    expect(confirmBtn).not.toBeDisabled()
++    fireEvent.click(confirmBtn)
++
++    expect(runMock).toHaveBeenCalledTimes(1)
++    const [call] = runMock.mock.calls.at(-1)
++    expect(call.args[0]).toBe(ADDR_B)
++    // B's own balance (500.00), not A's stale cached balance (100.00).
++    expect(lastConfirm().parameters.join('\n')).toContain('Balance today: 500.00 USDC')
++  })
++
++  it('blocks signing if the destination is edited to the zero address after confirm opens', async () => {
++    await openConfirm()
++    type(screen.getByPlaceholderText(/\(replacement\)/i), ZERO)
++    expect(screen.getByRole('button', { name: /^confirm proposal$/i })).toBeDisabled()
++    fireEvent.click(screen.getByRole('button', { name: /^confirm proposal$/i }))
++    expect(runMock).not.toHaveBeenCalled()
++  })
++})
++
++describe('#1/#2 — the claim panel re-validates at the moment of signing', () => {
++  const openConfirm = async () => {
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++    fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
++    return screen.getByRole('button', { name: /^confirm claim$/i })
++  }
++
++  it('blocks signing if the address is edited to one whose reads have not settled', async () => {
++    const confirmBtn = await openConfirm()
++    expect(confirmBtn).not.toBeDisabled()
++
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_B)
++    expect(screen.getByRole('button', { name: /^confirm claim$/i })).toBeDisabled()
++    fireEvent.click(screen.getByRole('button', { name: /^confirm claim$/i }))
++    expect(runMock).not.toHaveBeenCalled()
++  })
++
++  it('submits the CURRENT input once its reads settle, not what was cached when the panel opened', async () => {
++    await openConfirm()
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_B)
++    await act(settleLookup)
++
++    const confirmBtn = screen.getByRole('button', { name: /^confirm claim$/i })
++    expect(confirmBtn).not.toBeDisabled()
++    fireEvent.click(confirmBtn)
++
++    expect(runMock).toHaveBeenCalledTimes(1)
++    const [call] = runMock.mock.calls.at(-1)
++    expect(call.args[0]).toBe(ADDR_B)
++    expect(lastConfirm().amount).toBe(500000000n)
++  })
++})
++
++describe('#2 — a failed read is not treated as a resolved-empty one', () => {
++  it('propose: disables submission and surfaces a failure message rather than a false empty state', async () => {
++    balanceErrors.current[ADDR_A.toLowerCase()] = new Error('RPC unavailable')
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
++    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^propose transfer$/i })).toBeDisabled()
++    expect(screen.getByText(/could not read this wallet's balance or pending proposal/i)).toBeTruthy()
++  })
++
++  it('claim: disables submission and surfaces a failure message rather than a false empty state', async () => {
++    recoveryErrors.current[ADDR_A.toLowerCase()] = new Error('RPC unavailable')
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++    expect(screen.getByText(/could not read this wallet's balance or pending proposal/i)).toBeTruthy()
++  })
++})
++
++describe('#3 — claim is reachable by any connected wallet, independent of role', () => {
++  it('a wallet holding an unrelated role (fee manager, not recovery manager) still sees Claim', () => {
++    rolesMock.current = { roles: { isFeeManager: true }, isLoading: false }
++    render(<ProtocolSettings />)
++    expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeTruthy()
++  })
++
++  it('the same wallet does NOT see Propose, which stays admin-gated', () => {
++    rolesMock.current = { roles: { isFeeManager: true }, isLoading: false }
++    render(<ProtocolSettings />)
++    expect(screen.queryByPlaceholderText(/current credit holder/i)).toBeNull()
++  })
++
++  it('a wallet holding no admin role at all still sees Claim (unchanged fallback path)', () => {
++    rolesMock.current = { roles: {}, isLoading: false }
++    render(<ProtocolSettings />)
++    expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
++  })
++})
++
++describe('#4 — claim warns before signing as the wrong wallet', () => {
++  it('blocks and warns when the proposal names a different wallet than the connected one', async () => {
++    proposedOwners.current[ADDR_A.toLowerCase()] = ADDR_B // NOT authMock's connected address
++    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++    expect(screen.getByText(/not the one you're connected with/i)).toBeTruthy()
++  })
++
++  it('does not warn when the connected wallet IS the proposed nominee', async () => {
++    proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
++    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
++    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
++  })
++
++  it('does not warn when nothing is pending (zero address reads as no proposal, not a mismatch)', async () => {
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
++    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
++  })
++})

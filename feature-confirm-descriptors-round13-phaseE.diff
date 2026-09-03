@@ -1,0 +1,346 @@
+diff --git a/frontend/src/hooks/useDebouncedValue.js b/frontend/src/hooks/useDebouncedValue.js
+new file mode 100644
+index 0000000..011cf31
+--- /dev/null
++++ b/frontend/src/hooks/useDebouncedValue.js
+@@ -0,0 +1,33 @@
++import { useEffect, useState } from 'react'
++
++/* Trailing-edge debounce for a value that drives a network read.
++ *
++ * Written for the recovery panel, where the read is the problem rather than
++ * the render: an admin investigating a restricted wallet types or corrects a
++ * 42-character address, and every intermediate string that happens to parse as
++ * an address fires `refundBalances` + both `pendingRefundRecovery` getters at
++ * the configured RPC. The values are public — this is not about secrecy — but
++ * the *pattern* is not: it hands whoever serves that endpoint a timestamped
++ * trail of which wallets an admin looked at, before anything is signed and
++ * whether or not they go through with it.
++ *
++ * Trailing edge specifically: a leading-edge debounce would fire on the first
++ * keystroke, which is the one this exists to suppress.
++ *
++ * Returns the previous settled value while a new one is pending, so callers
++ * can compare the two to tell "waiting to look" apart from "looked, and this
++ * is the answer" — a distinction the recovery panel's submit gate depends on.
++ */
++export function useDebouncedValue(value, delayMs = 400) {
++  const [settled, setSettled] = useState(value)
++
++  useEffect(() => {
++    if (value === settled) return undefined
++    const timer = setTimeout(() => setSettled(value), delayMs)
++    // Every change inside the window cancels the previous timer, so a run of
++    // keystrokes costs one read rather than one per keystroke.
++    return () => clearTimeout(timer)
++  }, [value, delayMs, settled])
++
++  return settled
++}
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index ce0853f..0fe1312 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -14,6 +14,7 @@ import { useRoles } from '../hooks/useRoles.jsx'
+ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useRefundBalance } from '../hooks/useEscrows.js'
++import { useDebouncedValue } from '../hooks/useDebouncedValue.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
+ import { formatUSDC, formatTimestamp, truncateAddr, isNonZeroAddress } from '../utils/format.js'
+@@ -21,6 +22,35 @@ import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
+ 
+ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+ 
++/* How long the recovery panel waits after typing stops before looking a wallet
++ * up. Long enough that correcting a mistyped character costs one read instead
++ * of several, short enough that the submit button does not feel stuck — the
++ * gate below holds it disabled for exactly this long after the last keystroke.
++ */
++const RECOVERY_LOOKUP_DELAY_MS = 400
++
++/* The recovery panels' submit gate, unchanged in intent from the loading gate
++ * it replaces: never let a proposal or a claim be submitted against figures
++ * that have not actually been read.
++ *
++ * Debouncing the lookup opens a window the old expression could not see. A
++ * freshly typed address is valid, but its reads have not been issued yet, so
++ * both `isLoading` flags are false — a disabled react-query is not a loading
++ * one. Gating on those alone would enable the button during the pause, which
++ * is precisely the mid-read submit the gate exists to prevent: a confirm
++ * screen showing 0.00 USDC and "no proposal is currently pending", both of
++ * which are what an unread result looks like and both of which are wrong when
++ * the truth is a funded wallet with a standing nomination.
++ *
++ * So "typed something the reads have not caught up with" counts as pending
++ * too. Exact string comparison, not case-insensitive: the debounced value is
++ * the same string arriving later, and a checksum-case difference is a
++ * different lookup key to react-query anyway. */
++export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading }) {
++  if (isAddress(typed) && typed !== debounced) return true
++  return !!(balanceLoading || recoveryLoading)
++}
++
+ /* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
+    bytecode-budget note), so the 14 days is mirrored here rather than read. */
+ const RECOVERY_WINDOW_SECONDS = 14 * 24 * 60 * 60
+@@ -628,9 +658,15 @@ function ProposeRecovery() {
+   // Read-only: what the balance is now, and whether a proposal is already
+   // standing for this wallet. Feeds the confirm screen only — nothing here
+   // changes what is clickable except the loading gate below.
+-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(from) ? from : undefined)
+-  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(from) ? from : undefined)
+-  const readsPending = balanceLoading || recoveryLoading
++  //
++  // Debounced so investigating a wallet is one lookup after typing stops, not
++  // one per keystroke that happens to parse as an address.
++  const lookupFrom = useDebouncedValue(from, RECOVERY_LOOKUP_DELAY_MS)
++  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const readsPending = recoveryReadsPending({
++    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading
++  })
+ 
+   // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
+   // pending" — both of which are what an unresolved read looks like, and both
+@@ -710,9 +746,14 @@ function ClaimRecovery() {
+   // The claim sweeps the balance as it stands at claim time, so the figure on
+   // the confirm screen has to be read live off the source wallet — not off
+   // anything captured when the proposal was made.
+-  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
+-  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
+-  const readsPending = balanceLoading || recoveryLoading
++  // Same debounce as step 1: the claim panel looks up the same two getters
++  // against the same restricted wallet, so it leaks the same trail.
++  const lookupAddr = useDebouncedValue(blacklisted, RECOVERY_LOOKUP_DELAY_MS)
++  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const readsPending = recoveryReadsPending({
++    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading
++  })
+ 
+   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
+   // execution-time balance (:945), and drops the expiry line entirely.
+diff --git a/frontend/src/pages/confirmWiring.test.jsx b/frontend/src/pages/confirmWiring.test.jsx
+index 89d3537..e48c685 100644
+--- a/frontend/src/pages/confirmWiring.test.jsx
++++ b/frontend/src/pages/confirmWiring.test.jsx
+@@ -1,5 +1,5 @@
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
++import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+ 
+ /* Wiring tests.
+  *
+@@ -71,6 +71,19 @@ const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
+ 
+ const type = (el, value) => fireEvent.change(el, { target: { value } })
+ 
++/* Phase E: the recovery panels debounce their lookups by 400ms, and the submit
++   gate deliberately counts "typed, not yet looked up" as a read still pending
++   — otherwise the button would go live during the pause, which is the exact
++   mid-read submit the gate exists to prevent.
++ *
++ * So a test that types an address and immediately expects the button live is
++ * now asserting the wrong instant, not a broken gate. Advance past the window
++ * first. Uses real timers deliberately: this file renders components and
++ * fires events, and swapping the whole file to fake timers to serve two
++ * assertions would be a much larger change than waiting 400ms twice. */
++const RECOVERY_DEBOUNCE_MS = 400
++const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
++
+ // The treasury field is labelled rather than uniquely placeheld (several
+ // inputs share the bare "0x…" placeholder), so select it by its label.
+ const treasuryInput = () => screen.getByLabelText(/treasury address/i)
+@@ -170,10 +183,11 @@ describe('the recovery claim is wired to its descriptor', () => {
+   // No admin role: this is the nominee path, which the page must still expose.
+   beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
+ 
+-  const openClaim = () => {
++  const openClaim = async () => {
+     render(<ProtocolSettings />)
+     const input = screen.getByPlaceholderText(/the restricted wallet from step 1/i)
+     type(input, GOOD)
++    await act(settleLookup)
+     fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
+     return screen.getByRole('button', { name: /confirm claim/i })
+   }
+@@ -183,9 +197,9 @@ describe('the recovery claim is wired to its descriptor', () => {
+     expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
+   })
+ 
+-  it('passes the real claimRecoveryConfirm output to tx.run', () => {
++  it('passes the real claimRecoveryConfirm output to tx.run', async () => {
+     readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
+-    fireEvent.click(openClaim())
++    fireEvent.click(await openClaim())
+ 
+     const confirm = lastConfirm()
+     expect(confirm.functionName).toBe('claimRefundCreditTransfer')
+@@ -212,9 +226,15 @@ describe('the recovery claim is wired to its descriptor', () => {
+     expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+   })
+ 
+-  it('allows submission once both reads have resolved', () => {
++  /* Phase E: "resolved" now includes the debounce settling. Before the window
++     elapses the reads have not been issued at all, so the button must still be
++     disabled — asserted first, since that is the state the privacy change
++     introduced and the gate has to cover. */
++  it('allows submission once both reads have resolved', async () => {
+     render(<ProtocolSettings />)
+     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++    await act(settleLookup)
+     expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
+   })
+ })
+diff --git a/frontend/src/pages/phaseE.test.jsx b/frontend/src/pages/phaseE.test.jsx
+new file mode 100644
+index 0000000..2041d38
+--- /dev/null
++++ b/frontend/src/pages/phaseE.test.jsx
+@@ -0,0 +1,143 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { renderHook, act } from '@testing-library/react'
++import { getAddress, isAddress } from 'viem'
++
++/* Phase E #21 — the recovery panel's lookups, debounced.
++
++   Not a correctness bug and not a secrecy one: refundBalances and both
++   pendingRefundRecovery getters are public, and anyone can read them for any
++   address. What leaked was the read pattern. An admin investigating a
++   restricted wallet typed or corrected a 42-character address and every
++   intermediate string that parsed as an address fired three reads at the
++   configured RPC — handing whoever serves that endpoint a timestamped trail of
++   which wallets an admin was looking at, before anything was signed and
++   whether or not they ever went through with it.
++
++   The subtle part is not the debounce. It is that debouncing opens a window
++   the existing submit gate could not see, and Phase A's guarantee has to
++   survive it — see the second describe. */
++import { useDebouncedValue } from '../hooks/useDebouncedValue.js'
++import { recoveryReadsPending } from './ProtocolSettings.jsx'
++
++const ADDR_A = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const ADDR_B = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++
++describe('#21 — useDebouncedValue holds a value back until typing stops', () => {
++  beforeEach(() => vi.useFakeTimers())
++  afterEach(() => vi.useRealTimers())
++
++  it('returns the initial value immediately', () => {
++    const { result } = renderHook(() => useDebouncedValue('', 400))
++    expect(result.current).toBe('')
++  })
++
++  /* The whole point: the value the reads key off must not change on the
++     keystroke itself. */
++  it('does not surface a new value before the delay elapses', () => {
++    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: '' }
++    })
++    rerender({ v: ADDR_A })
++    expect(result.current).toBe('')
++    act(() => { vi.advanceTimersByTime(399) })
++    expect(result.current).toBe('')
++    act(() => { vi.advanceTimersByTime(1) })
++    expect(result.current).toBe(ADDR_A)
++  })
++
++  /* A run of edits inside the window must collapse to ONE settled value, not
++     one per edit — this is the assertion that actually pins "one read instead
++     of one per keystroke". Each intermediate here is a full valid address, the
++     shape that used to fire a read. */
++  it('collapses a burst of edits into a single settled value', () => {
++    const seen = []
++    const { rerender } = renderHook(({ v }) => {
++      const settled = useDebouncedValue(v, 400)
++      seen.push(settled)
++      return settled
++    }, { initialProps: { v: '' } })
++
++    for (const v of [ADDR_A, ADDR_B, ADDR_A, ADDR_B]) {
++      rerender({ v })
++      act(() => { vi.advanceTimersByTime(100) })
++    }
++    // 400ms of edits, none of them 400ms apart: nothing has settled yet.
++    expect([...new Set(seen)]).toEqual([''])
++
++    act(() => { vi.advanceTimersByTime(400) })
++    rerender({ v: ADDR_B })
++    expect([...new Set(seen)]).toEqual(['', ADDR_B])
++  })
++
++  it('settles again on a later change', () => {
++    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: ADDR_A }
++    })
++    rerender({ v: ADDR_B })
++    act(() => { vi.advanceTimersByTime(400) })
++    expect(result.current).toBe(ADDR_B)
++  })
++
++  /* Unmounting mid-window must not leave a timer to fire into a dead
++     component. */
++  it('clears its pending timer on unmount', () => {
++    const { rerender, unmount } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: '' }
++    })
++    rerender({ v: ADDR_A })
++    unmount()
++    expect(() => act(() => { vi.advanceTimersByTime(1000) })).not.toThrow()
++    expect(vi.getTimerCount()).toBe(0)
++  })
++})
++
++/* Phase A's gate: never submit against figures that have not been read. The
++   confirm screen would otherwise show 0.00 USDC and "no proposal is currently
++   pending" — both of which are what an unread result looks like, and both of
++   which are exactly wrong for a funded wallet with a standing nomination.
++
++   Debouncing breaks the old expression's assumption. Between the keystroke and
++   the settle, the reads are DISABLED rather than in flight, so both isLoading
++   flags read false. Gating on those alone would enable the button precisely
++   during the pause this change introduces — turning a privacy fix into a
++   correctness regression. */
++describe('#21 — the submit gate survives the debounce window', () => {
++  const gate = (over = {}) => recoveryReadsPending({
++    typed: ADDR_A, debounced: ADDR_A, balanceLoading: false, recoveryLoading: false, ...over
++  })
++
++  it('counts a typed address the reads have not caught up with as pending', () => {
++    expect(gate({ typed: ADDR_A, debounced: '' })).toBe(true)
++    expect(gate({ typed: ADDR_A, debounced: ADDR_B })).toBe(true)
++  })
++
++  it('clears once the debounced value matches what was typed', () => {
++    expect(gate()).toBe(false)
++  })
++
++  it('still reports pending while either read is actually in flight', () => {
++    expect(gate({ balanceLoading: true })).toBe(true)
++    expect(gate({ recoveryLoading: true })).toBe(true)
++  })
++
++  /* A half-typed address never triggered a read and never will, so it must not
++     hold the gate — the address-validity check in front of the comparison is
++     what keeps an empty or partial field from reading as "pending forever". */
++  it('does not hold the gate for an incomplete address', () => {
++    for (const typed of ['', '0x', '0x179cc4c8f23d257b7f4acb7854640255']) {
++      expect(gate({ typed, debounced: '' })).toBe(false)
++    }
++  })
++
++  /* Exact comparison, not case-insensitive. Both forms below are valid to
++     viem — all-lowercase has no checksum to verify, and the mixed-case one is
++     correctly checksummed — so a user who types the lowercase form and then
++     pastes the checksummed one has genuinely changed the react-query key, and
++     the second lookup really has not happened yet. */
++  it('treats a checksum-case difference as not yet settled', () => {
++    const checksummed = getAddress(ADDR_A)
++    expect(checksummed).not.toBe(ADDR_A)
++    expect(isAddress(checksummed) && isAddress(ADDR_A)).toBe(true)
++    expect(gate({ typed: checksummed, debounced: ADDR_A })).toBe(true)
++  })
++})

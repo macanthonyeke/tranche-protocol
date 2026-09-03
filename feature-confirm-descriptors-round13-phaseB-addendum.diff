@@ -1,0 +1,38 @@
+diff --git a/frontend/src/pages/phaseB.test.jsx b/frontend/src/pages/phaseB.test.jsx
+index ca4190a..957b89a 100644
+--- a/frontend/src/pages/phaseB.test.jsx
++++ b/frontend/src/pages/phaseB.test.jsx
+@@ -82,6 +82,33 @@ describe('#6 — the two release paths do not pay the same forwarding fee', () =
+     expect(t).toContain("fixed forwarding fee of 0.20 USDC")
+     expect(t).not.toMatch(/undefined|NaN/)
+   })
++
++  /* A zero or absent snapshot with no quote to fall back on means the fee is
++     UNKNOWN, not zero — escrows funded before setFee.js ran carry
++     escrowCctpForwardFee = 0, and the Goldsky read can omit the field entirely.
++     Falling through to formatUSDC would print "0.00 USDC", which is both wrong
++     and reassuring: the burn still pays Circle's live fee out of the payout.
++     Saying nothing is the only honest option, so assert on the silence
++     directly rather than leaning on the Arc case to cover it incidentally. */
++  it('states no forwarding fee at all when the snapshot is zero or absent', () => {
++    const zeroed = { ...escrowOn(BASE), escrowCctpForwardFee: 0n }
++    const { escrowCctpForwardFee, ...omitted } = escrowOn(BASE)
++
++    for (const escrow of [zeroed, omitted]) {
++      // 'approve' with no maxFee is the unquoted path; 'release' discards any
++      // quote by construction, so both land on the snapshot branch.
++      for (const key of ['approve', 'release']) {
++        const t = paramText(confirm(key, { escrow }))
++        expect(t).not.toMatch(/forwarding fee|Delivery costs/i)
++        // Boundary-anchored: a bare `toContain('0.00 USDC')` also matches
++        // inside the milestone's own "250.00 USDC", so it would fail on a
++        // correct descriptor. This rejects a standalone zero amount only.
++        expect(t).not.toMatch(/(^|[^\d.])0(\.0+)? USDC/)
++        // and it is silence about the fee specifically, not an empty descriptor
++        expect(t).toContain('Protocol fee is deducted from this amount before payout.')
++      }
++    }
++  })
+ })
+ 
+ /* #7. "Removing blocks everything / enabling restores everything" is false in

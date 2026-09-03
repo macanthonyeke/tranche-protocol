@@ -1,0 +1,275 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 88c9d89..0319a0d 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -30,13 +30,14 @@ const POLL_MS = 15_000
+ // Round 27 (fixing the Round 26 review's High finding): `expectedMessages`
+ // (Round 22/26 — a raw hex identity to content-match against Iris's own
+ // `message` field) is GONE. CCTP V2 mutates several message fields between
+-// burn-time and attestation — nonce, finalityThresholdExecuted, feeExecuted
+-// are all zero/empty in the source-side log and only filled in once Iris
+-// attests the message — so a real message's source-side bytes and Iris's
+-// returned bytes for the SAME delivery are simply never equal. Every real
+-// poll under the old design had `messages.length === 0` forever; confirmed
+-// live against a real Arc-testnet burn (byte-diff against a real captured
+-// Iris response), not assumed from the docs alone.
++// burn-time and attestation — nonce, finalityThresholdExecuted, and
++// feeExecuted are all zero/empty in the source-side log and only filled in
++// once Iris attests the message, and expirationBlock can change too — so a
++// real message's source-side bytes and Iris's returned bytes for the SAME
++// delivery are simply never equal. Every real poll under the old design had
++// `messages.length === 0` forever; confirmed live against a real
++// Arc-testnet burn (byte-diff against a real captured Iris response), not
++// assumed from the docs alone.
+ //
+ // Replaced with `expectedOrdinals` (this milestone's own verified messages'
+ // 0-indexed positions among every real MessageTransmitterV2 MessageSent log
+@@ -48,7 +49,7 @@ const POLL_MS = 15_000
+ // `allMessages[ordinal]` is guaranteed to be the same entry the receipt
+ // proved belongs to this milestone, no content comparison needed.
+ //
+-// The "once" matters: `allMessages.length >= expectedTotalMessages` is the
++// The "once" matters: `allMessages.length === expectedTotalMessages` is the
+ // completeness gate below, and it has to be checked against the FULL
+ // universe size, not just "enough entries to cover this milestone's own
+ // ordinals". Circle's ordering guarantee only says messages actually
+@@ -61,6 +62,15 @@ const POLL_MS = 15_000
+ // receipt-derived one, Iris's own) are provably the same set, sorted the
+ // same way, before any position is ever trusted.
+ //
++// Round 28: exact equality, not `>=`. Nothing in Circle's API reference
++// rules out Iris ever returning MORE entries than the receipt's real count,
++// and an overflow occurring anywhere before or between the ordinals being
++// selected would shift indexing and select the wrong message — the same
++// misattribution risk the ordinal scheme above exists to prevent. `!==`
++// fails closed (stays polling) on an overflow instead of silently risking a
++// wrong selection on the (unconfirmed) assumption that overflow can't
++// happen.
++//
+ // Round 22 Phase A: expectedMessages/expectedOrdinals only exists for a
+ // receipt-verified local track or fallback (see irisDelivery.js) — a
+ // subgraph-sourced txHash from a different device without either falls
+@@ -105,7 +115,7 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+ 
+       const allMessages = await fetchIrisMessages(txHash)
+ 
+-      if (allMessages.length < expectedTotalMessages) {
++      if (allMessages.length !== expectedTotalMessages) {
+         setPhase('polling')
+         return
+       }
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index 8dc3c1c..0c531df 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -233,12 +233,12 @@ describe('useCctpDelivery — terminality requires every message to be explicitl
+    field) to fix a real cross-attribution bug (finding 2: a bare count let a
+    message genuinely belonging to a DIFFERENT milestone in the same batched
+    tx pass undetected). But content identity turned out to never work for a
+-   REAL message at all: CCTP V2 assigns nonce off-chain and fills in
+-   finalityThresholdExecuted/feeExecuted only once Iris attests, so a real
+-   message's source-side bytes and Iris's returned bytes for the SAME
+-   delivery are never byte-equal — confirmed live against a real Arc-testnet
+-   burn. Every real poll under Round 26's design had messages.length === 0
+-   forever.
++   REAL message at all: CCTP V2 assigns nonce off-chain, fills in
++   finalityThresholdExecuted/feeExecuted only once Iris attests, and can
++   change expirationBlock too, so a real message's source-side bytes and
++   Iris's returned bytes for the SAME delivery are never byte-equal —
++   confirmed live against a real Arc-testnet burn. Every real poll under
++   Round 26's design had messages.length === 0 forever.
+ 
+    Round 27 replaces content matching with ORDINAL POSITION: Circle's own
+    GET /v2/messages API reference states "Each message for a given
+@@ -267,6 +267,24 @@ describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', (
+     expect(result.current.deliveries).toHaveLength(2)
+   })
+ 
++  // Round 28 — fail closed on overflow, not just undershoot. Nothing in
++  // Circle's API reference rules out Iris ever returning MORE entries than
++  // the receipt's real count, and an overflow occurring before or between
++  // the selected ordinals would shift indexing and select the wrong
++  // message. The old `<` check silently accepted this; `!==` keeps polling
++  // instead.
++  it('keeps polling — never selects — when Iris returns MORE entries than expectedTotalMessages', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' }),
++      irisMessage({ destinationDomain: 0, forwardState: 'COMPLETE' }),
++      irisMessage({ destinationDomain: 3, forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toEqual([])
++  })
++
+   it('selects Iris entries by POSITION, not the milestone\'s own count — a foreign milestone\'s message occupying an earlier ordinal slot in the same tx must not be selected as this milestone\'s own', async () => {
+     fetchIrisMessages.mockResolvedValue([
+       irisMessage({ destinationDomain: 3, forwardState: 'FAILED' }),      // ordinal 0 — a DIFFERENT milestone's own message
+@@ -285,18 +303,18 @@ describe('useCctpDelivery — expectedOrdinals / expectedTotalMessages guard', (
+   /* The exact regression the High finding describes: a genuine message
+      whose Iris-returned form differs from its receipt-derived source form
+      in precisely the fields CCTP V2 treats as mutable (nonce,
+-     finalityThresholdExecuted, feeExecuted) must still be correctly
+-     attributed to the milestone. Under Round 26's content-matching design
+-     this would have failed forever (messages.length stuck at 0); under
+-     ordinal selection, content is never even inspected for matching. */
+-  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted) — content is never compared', async () => {
++     finalityThresholdExecuted, feeExecuted, expirationBlock) must still be
++     correctly attributed to the milestone. Under Round 26's content-matching
++     design this would have failed forever (messages.length stuck at 0);
++     under ordinal selection, content is never even inspected for matching. */
++  it('attributes a genuine message correctly even though its Iris-returned `message` bytes differ from the source-side bytes in CCTP V2\'s mutable fields (nonce, finalityThresholdExecuted, feeExecuted, expirationBlock) — content is never compared', async () => {
+     // The source-side receipt would have had nonce/finalityThresholdExecuted/
+-    // feeExecuted all zero (pre-attestation); Iris's response here uses
+-    // deliberately DIFFERENT, non-zero values in exactly those fields —
+-    // real CCTP V2 behavior, confirmed live against an actual Arc-testnet
+-    // burn. The fixture only needs a message string that would NEVER
+-    // content-match a zeroed source message; the exact bytes don't matter
+-    // since ordinal selection never reads them for matching.
++    // feeExecuted/expirationBlock all zero (pre-attestation); Iris's response
++    // here uses deliberately DIFFERENT, non-zero values in exactly those
++    // fields — real CCTP V2 behavior, confirmed live against an actual
++    // Arc-testnet burn. The fixture only needs a message string that would
++    // NEVER content-match a zeroed source message; the exact bytes don't
++    // matter since ordinal selection never reads them for matching.
+     fetchIrisMessages.mockResolvedValue([
+       irisMessage({
+         destinationDomain: 6,
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+index a116785..a31006d 100644
+--- a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -111,8 +111,49 @@ describe('readCctpTrack', () => {
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('returns null (not a throw) on unparseable JSON', () => {
++  // Round 28 — coherence, not just shape. A record can be the right TYPES
++  // (array, number) and still be nonsense: empty, out of range, negative,
++  // fractional, or duplicated. Any of these would previously pass through to
++  // useCctpDelivery, which has no way to detect an incoherent ordinal set on
++  // its own.
++  it('discards a vacuous record — expectedOrdinals empty, expectedTotalMessages zero', () => {
++    const vacuous = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
++    localStorage.setItem(KEY, JSON.stringify(vacuous))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with an out-of-range ordinal (ordinal 3 against a total of 2)', () => {
++    const outOfRange = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(outOfRange))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a negative ordinal', () => {
++    const negative = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(negative))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a fractional ordinal', () => {
++    const fractional = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(fractional))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('discards a record with a duplicate ordinal', () => {
++    const duplicate = { txHash: '0xtx', ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
++    localStorage.setItem(KEY, JSON.stringify(duplicate))
++    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('returns null and removes the entry on unparseable JSON — discarded the same way as any other invalid record, not left behind', () => {
+     localStorage.setItem(KEY, 'not json')
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index 24f6ec8..0eee3fb 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -428,10 +428,10 @@ describe('Round 27: ordinal-position selection end to end', () => {
+       isError: false
+     })
+     // Deliberately NOT buildCctpMessage() — this represents Iris's real
+-    // attested form (nonce/finalityThresholdExecuted/feeExecuted filled in),
+-    // which is never byte-equal to the zeroed source-side form. Under
+-    // Round 26's content-matching design this would never have attributed
+-    // — messages.length would stay 0 forever.
++    // attested form (nonce/finalityThresholdExecuted/feeExecuted/
++    // expirationBlock filled in), which is never byte-equal to the zeroed
++    // source-side form. Under Round 26's content-matching design this would
++    // never have attributed — messages.length would stay 0 forever.
+     fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, message: '0xattested-form-differs-from-source' })])
+ 
+     renderFallback({ txHash: '0xmutabletx' })
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 282e014..5448776 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1448,13 +1448,34 @@ function useMilestoneReleaseTxs(escrowId) {
+ 
+ const CCTP_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000
+ 
++// Round 28: expectedOrdinals/expectedTotalMessages being the right TYPES
++// (array / number) doesn't mean they're COHERENT — an out-of-range, negative,
++// fractional, or duplicate ordinal, or a vacuous {ordinals: [], total: 0}
++// record, would still pass the Round 27 shape check and later feed
++// useCctpDelivery a broken selection key. Every field the record actually
++// needs gets checked here, once, so an incoherent record is discarded the
++// same way a malformed or aged-out one already is.
++function isValidCctpTrackRecord(parsed) {
++  if (typeof parsed.txHash !== 'string' || typeof parsed.ts !== 'number') return false
++  if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
++  if (!Array.isArray(parsed.expectedOrdinals) || parsed.expectedOrdinals.length === 0) return false
++  const seen = new Set()
++  for (const ord of parsed.expectedOrdinals) {
++    if (!Number.isInteger(ord) || ord < 0 || ord >= parsed.expectedTotalMessages) return false
++    if (seen.has(ord)) return false
++    seen.add(ord)
++  }
++  return true
++}
++
+ export function readCctpTrack(escrowId, milestoneIndex) {
++  const key = cctpTrackKey(escrowId, milestoneIndex)
+   try {
+-    const raw = localStorage.getItem(cctpTrackKey(escrowId, milestoneIndex))
++    const raw = localStorage.getItem(key)
+     if (!raw) return null
+     const parsed = JSON.parse(raw)
+     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
+-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++      localStorage.removeItem(key)
+       return null
+     }
+     // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
+@@ -1469,13 +1490,18 @@ export function readCctpTrack(escrowId, milestoneIndex) {
+     // discarded just above — makes readCctpTrack return null exactly like
+     // "no local record at all", so MilestoneRow's existing `!cctpTrack`
+     // fallback to FallbackCrossChainDelivery naturally takes over and
+-    // reverifies straight from the receipt instead.
+-    if (!Array.isArray(parsed.expectedOrdinals) || typeof parsed.expectedTotalMessages !== 'number') {
+-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++    // reverifies straight from the receipt instead. Round 28: this check now
++    // also covers coherence, not just shape — see isValidCctpTrackRecord.
++    if (!isValidCctpTrackRecord(parsed)) {
++      localStorage.removeItem(key)
+       return null
+     }
+     return parsed
+   } catch {
++    // Round 28: unparseable JSON is exactly as unusable as a malformed
++    // record — discard it the same way, instead of leaving a dead key that
++    // getItem/JSON.parse will keep failing on for the rest of its 24h life.
++    localStorage.removeItem(key)
+     return null
+   }
+ }

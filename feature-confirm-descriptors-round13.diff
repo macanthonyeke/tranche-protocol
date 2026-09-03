@@ -1,0 +1,3123 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 3c57bc6..f78b46d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -288,11 +288,25 @@ Sequence: Pashov → Trail of Bits (6 plugins) → OpenZeppelin (develop-secure-
+ 
+ ---
+ 
++## Circle confirm-descriptor coverage
++
++Every wallet-signing site in the frontend carries a `confirm` descriptor (the object Circle's User-Controlled Wallet screen is built from). Counted from source rather than from memory:
++
++- **26 lexical `escrowWrite(...)` call sites**, of which 2 take the function name from a variable — `action.fn` in `computeMilestoneAction` and `meta.fn` in `EVIDENCE_MODES`.
++- **31 executable paths** once those two expand (24 static + 4 milestone actions + 3 evidence modes).
++
++`CreateEscrow.jsx`'s `deposit` is one of the 26; its descriptor predates the descriptor sweep and came from `feature/circle-ucw-wallets`. Any coverage claim quoting a smaller number (e.g. "24 of 24") is counting only quoted call sites, or only files changed in one PR — say which, or use the figures above.
++
+ ## Open FRONTEND follow-ups (not contract, not blocking)
+ 
+ - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."
+ - SE-6 (remaining piece): `EscrowDetail.jsx`'s `AckBanner` should block "Accept terms" when `InvoiceViewer`'s SHA-256 check fails. Verification itself now exists (see "Frontend: invoice attachment pinning (IPFS)" above) — this is only the missing gate on acknowledgement.
+ 
++Deferred from Round 13 Phase D — investigated, scoped, deliberately not built:
++
++- **Round 13 #17 — the protocol-fee snapshot is reachable, but not from where the descriptors read.** `escrowFeeBps` is emitted as `EscrowTermsSnapshotted` (`TrancheProtocol.sol:350`), indexed at `indexer/src/mapping.ts:208` into `Escrow.protocolFeeBps` (`indexer/schema.graphql:42`). So the "no getter, therefore gross only" premise in `mutualSettleConfirm`, `resolveDisputeConfirm`, `timeoutSettlementConfirm` and `payoutLines` is now obsolete *as a data-availability claim*. What blocks it is plumbing, not availability: those four descriptor families live on `EscrowDetail`/`ArbiterPanel`, whose `escrow` comes from the on-chain `getEscrowDetail`, and the only per-escrow Goldsky read on those pages (`fetchEscrowInvoice` → `useEscrowInvoice`) is gated on the escrow having an invoice at all three call sites, so piggybacking there would deliver the fee for invoiced escrows only. Doing it properly needs a new ungated per-escrow query/hook (`escrow(id) { protocolFeeBps }`), threading into the four families, an honest-degradation path when `VITE_GOLDSKY_ENDPOINT` is unset, and inverting four existing mutation-verified guards that currently assert no rate and no net ever appears (`ArbiterPanel.confirm.test.jsx:166-168`, `ArbiterPanel.resolve.test.jsx:82-89`, `EscrowDetail.settle.test.jsx:110-118`, plus `EscrowDetail.confirm.test.jsx:158`'s rationale comment). Pairs naturally with SE-3, which needs a per-escrow subgraph read of its own.
++- **Round 13 #18.4 — the CCTP forward-fee settings descriptor stays cautionary, deliberately.** `ProtocolSettings.jsx`'s `cctpForwardFeeConfirm` warns that the floor must stay at or above Circle's live fee without quoting one. That is not an oversight: `utils/cctpFee.js`'s `fetchForwardFee(src, dst)` is per-destination-domain and gas-priced, while the floor being set is protocol-wide, so there is no single honest number to attach. Quoting every supported domain and showing the max would be the defensible version (the floor's job is covering the worst route) at the cost of N Iris calls on a settings screen — and it would make this the only async descriptor builder in the sweep, since every other one is a pure sync function built inline at its call site.
++
+ Found during the Circle confirm-descriptor sweep on `feature/confirm-descriptors`. All five are missing *behaviour*, not missing copy, which is why none was fixed in that work:
+ 
+ - `EscrowDetail.jsx`'s `CancelCard`: the finalize button stays enabled when a milestone is `IN_REVIEW`/`DISPUTED`, so a user can submit a `mutualCancel` that is proven to revert (`CannotCancelDuringDispute`). The confirm screen now warns before signing — `cancelEscrowConfirm`'s blocked branch — but the button should be disabled in that state.
+diff --git a/frontend/src/hooks/useDebouncedValue.js b/frontend/src/hooks/useDebouncedValue.js
+new file mode 100644
+index 0000000..011cf31
+--- /dev/null
++++ b/frontend/src/hooks/useDebouncedValue.js
+@@ -0,0 +1,33 @@
++import { useEffect, useState } from 'react'
++
++/* Trailing-edge debounce for a value that drives a network read.
++ *
++ * Written for the recovery panel, where the read is the problem rather than
++ * the render: an admin investigating a restricted wallet types or corrects a
++ * 42-character address, and every intermediate string that happens to parse as
++ * an address fires `refundBalances` + both `pendingRefundRecovery` getters at
++ * the configured RPC. The values are public — this is not about secrecy — but
++ * the *pattern* is not: it hands whoever serves that endpoint a timestamped
++ * trail of which wallets an admin looked at, before anything is signed and
++ * whether or not they go through with it.
++ *
++ * Trailing edge specifically: a leading-edge debounce would fire on the first
++ * keystroke, which is the one this exists to suppress.
++ *
++ * Returns the previous settled value while a new one is pending, so callers
++ * can compare the two to tell "waiting to look" apart from "looked, and this
++ * is the answer" — a distinction the recovery panel's submit gate depends on.
++ */
++export function useDebouncedValue(value, delayMs = 400) {
++  const [settled, setSettled] = useState(value)
++
++  useEffect(() => {
++    if (value === settled) return undefined
++    const timer = setTimeout(() => setSettled(value), delayMs)
++    // Every change inside the window cancels the previous timer, so a run of
++    // keystrokes costs one read rather than one per keystroke.
++    return () => clearTimeout(timer)
++  }, [value, delayMs, settled])
++
++  return settled
++}
+diff --git a/frontend/src/pages/ArbiterPanel.confirm.test.jsx b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+index 568fe62..1eaec71 100644
+--- a/frontend/src/pages/ArbiterPanel.confirm.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.confirm.test.jsx
+@@ -76,9 +76,26 @@ describe('timeoutShares', () => {
+     }
+   })
+ 
++  /* Independent literals, not another call of the function under test.
++     Comparing timeoutShares(x, 0n) to timeoutShares(x, 10000n) holds for ANY
++     implementation that ignores its denominator — including one that always
++     divides by 2, or always returns zero. */
+   it('falls back to 10,000 when the denominator has not loaded', () => {
+-    expect(timeoutShares(250000000n, 0n)).toEqual(timeoutShares(250000000n, 10000n))
+-    expect(timeoutShares(250000000n, undefined)).toEqual(timeoutShares(250000000n, 10000n))
++    expect(timeoutShares(250000000n, 0n)).toEqual({
++      recipientShare: 125000000n, depositorShare: 125000000n
++    })
++    expect(timeoutShares(250000000n, undefined)).toEqual({
++      recipientShare: 125000000n, depositorShare: 125000000n
++    })
++  })
++
++  /* Pins that the denominator is actually used: a real 5000n bps denominator
++     makes the 5000-bps numerator a full 100% share, which a hardcoded halving
++     would get wrong. */
++  it('honours a denominator that is not 10,000', () => {
++    expect(timeoutShares(250000000n, 5000n)).toEqual({
++      recipientShare: 250000000n, depositorShare: 0n
++    })
+   })
+ })
+ 
+@@ -165,12 +182,15 @@ describe('timeoutCreditLines', () => {
+      mechanics stay off the signing screen. */
+   it('describes the fan-out for a split escrow without naming one recipient', () => {
+     const lines = timeoutCreditLines(escrow, SPLITS)
+-    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients")
++    expect(lines[0]).toBe("Freelancer's share is divided across 2 split recipients by their configured percentages")
+     expect(lines.join('\n')).not.toContain(RECIPIENT)
+   })
+ 
++  // Phase C #11: the split branch now carries a rounding caveat, so the payer
++  // line is last rather than second.
+   it('still names the payer destination on a split escrow', () => {
+-    expect(timeoutCreditLines(escrow, SPLITS)[1]).toBe(`Payer's share goes to ${REFUND_TO}`)
++    const lines = timeoutCreditLines(escrow, SPLITS)
++    expect(lines[lines.length - 1]).toBe(`Payer's share goes to ${REFUND_TO}`)
+   })
+ 
+   it('keeps split dust mechanics off the screen', () => {
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 0ffe5ff..99b4303 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -439,9 +439,15 @@ function EvidenceHashRow({ label, hash }) {
+  * signing screen — same level of abstraction as Round 1's split handling. */
+ export function timeoutCreditLines(escrow, splits) {
+   return [
+-    splits?.length > 0
+-      ? `Freelancer's share is divided across ${splits.length} split recipients`
+-      : `Freelancer's share goes to ${escrow.recipient}`,
++    ...(splits?.length > 0
++      // Not every configured recipient necessarily gets something: the credit
++      // loop is guarded by `share > 0` (:608), so a leg whose proportional
++      // share rounds down to zero is skipped entirely.
++      ? [
++        `Freelancer's share is divided across ${splits.length} split recipients by their configured percentages`,
++        'A recipient whose share rounds down to zero is credited nothing.'
++      ]
++      : [`Freelancer's share goes to ${escrow.recipient}`]),
+     `Payer's share goes to ${escrow.refundTo}`
+   ]
+ }
+@@ -502,6 +508,20 @@ export function timeoutSettlementConfirm({ escrow, milestone, index, splits, tim
+   }
+ }
+ 
++/* Where a no-split payout actually lands. The CCTP burn targets
++   e.mintRecipient (TrancheProtocol.sol:1298); e.recipient is only the
++   authorisation identity, and updateReceivingAddress moves mintRecipient
++   without ever touching it (:986-990). Naming `recipient` on a signing screen
++   therefore shows the pre-redirect address as though it were the destination.
++
++   The one place recipient IS the destination is the Finding 3 divert: a
++   cross-chain share at-or-below the floor is credited to
++   refundBalances[e.recipient] on Arc instead (:1291-1293). Handled separately
++   below, and deliberately not conflated with this. */
++function payoutAddress(escrow) {
++  return escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
++}
++
+ /* Mirrors _assertCrossChainFee (TrancheProtocol.sol): with splits configured,
+    e.destinationDomain is not what the burn uses, so ANY non-Arc leg makes the
+    settlement cross-chain. */
+@@ -566,8 +586,28 @@ export function resolveDisputeConfirm({
+   if (bps > 0) {
+     params.push(
+       splits?.length > 0
+-        ? `Freelancer's share is divided across ${splits.length} split recipients, each on their own chain`
+-        : `Freelancer's share is sent to ${escrow.recipient} on ${getDomainName(Number(escrow.destinationDomain))}`
++        // "each on their own chain" promises delivery this call cannot
++        // guarantee: a leg rounding to zero is skipped (:1312), and on a
++        // partial ruling a sub-floor cross-chain leg is credited on Arc
++        // instead (:1319) — the caveat pushed below.
++        ? `Freelancer's share is divided across ${splits.length} split recipients, each to their configured chain`
++        // The burn goes to e.mintRecipient (:1298), NOT e.recipient.
++        // updateReceivingAddress rewrites mintRecipient and leaves recipient
++        // untouched (:986-990), so the two diverge the moment a freelancer
++        // redirects — and recipient is the stale one.
++        : `Freelancer's share is sent to ${payoutAddress(escrow)} on ${getDomainName(Number(escrow.destinationDomain))}`
++    )
++    if (splits?.length > 0) {
++      params.push('A recipient whose share rounds down to zero is paid nothing.')
++    }
++    // "Pays both sides immediately" was true of neither half. A cross-chain
++    // share is a burn Circle mints minutes later; an Arc share is a
++    // safeTransfer inside this transaction (:1343-1346); and the payer's half
++    // is a credit that is never sent anywhere (:606 below).
++    params.push(
++      crossChain
++        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
++        : "The freelancer's share is transferred on Arc as this transaction executes."
+     )
+     params.push("The protocol fee is taken from the freelancer's share only.")
+   } else {
+@@ -584,14 +624,19 @@ export function resolveDisputeConfirm({
+     // actually applies rather than both.
+     params.push(
+       splits?.length > 0
+-        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
++        // A cap, not a charge: the snapshot is passed to CCTP as maxFee and
++        // Circle deducts its actual fee — possibly less — from the burned
++        // amount on the destination (TrancheProtocol.sol:874-877).
++        ? `Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery.`
+         : `Delivery costs up to ${formatUSDC(maxFee ?? 0n)} in Circle forwarding fees, deducted from the freelancer's share on arrival.`
+     )
+     if (partial) {
+       params.push(
+         splits?.length > 0
+           ? `Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`
+-          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc instead of being delivered cross-chain.`
++          // The divert credits refundBalances[e.recipient] (:1292) — the one
++          // branch where `recipient`, not `mintRecipient`, is the destination.
++          : `If the freelancer's share after the protocol fee is ${formatUSDC(floor)} or less, it is credited on Arc to ${escrow.recipient} instead of being delivered cross-chain.`
+       )
+     }
+   }
+@@ -606,7 +651,7 @@ export function resolveDisputeConfirm({
+ 
+   return {
+     title: 'Resolve this dispute',
+-    subtitle: 'Your ruling settles the milestone and pays both sides immediately. It cannot be appealed, reversed, or re-ruled.',
++    subtitle: 'Your ruling settles the milestone now. It cannot be appealed, reversed, or re-ruled — but the two shares do not reach the parties the same way, or at the same speed.',
+     amount: milestone.amount,
+     amountLabel: 'Amount settled',
+     contractName: 'Tranche Protocol Escrow',
+diff --git a/frontend/src/pages/ArbiterPanel.resolve.test.jsx b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+index b34dc88..db6d3df 100644
+--- a/frontend/src/pages/ArbiterPanel.resolve.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+@@ -25,10 +25,18 @@ const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
+ const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
+ const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
+ 
++/* mintRecipient deliberately differs from recipient. The burn targets
++   mintRecipient (:1298) while recipient is only the authorisation identity, and
++   updateReceivingAddress moves one without the other (:986-990) — so a fixture
++   where they match cannot tell a correct descriptor from one reading the stale
++   field. REDIRECTED is what a freelancer redirected TO; RECIPIENT is what they
++   redirected away from. */
++const REDIRECTED = '0x8ba1f109551bd432803012645ac136ddd64dba72'
+ const escrowOn = (domain) => ({
+   id: 7,
+   milestoneCount: 3,
+   recipient: RECIPIENT,
++  mintRecipient: B32(REDIRECTED),
+   refundTo: REFUND_TO,
+   destinationDomain: domain,
+   escrowCctpForwardFee: 200000n // 0.20 USDC
+@@ -97,7 +105,23 @@ describe('the ruling itself', () => {
+ describe('told apart from the fixed 50/50 timeout', () => {
+   it('sends the freelancer share to their chain rather than crediting Arc', () => {
+     const t = paramText(build({ escrow: escrowOn(BASE) }))
+-    expect(t).toContain(`Freelancer's share is sent to ${RECIPIENT} on Base Sepolia`)
++    expect(t).toContain(`Freelancer's share is sent to ${REDIRECTED} on Base Sepolia`)
++  })
++
++  /* The bug this guards: naming e.recipient shows the pre-redirect address as
++     though it were the destination, so an arbiter signing after a redirect
++     would be told the money goes somewhere it does not. */
++  it('names the redirected mintRecipient, never the stale recipient field', () => {
++    const t = paramText(build({ escrow: escrowOn(BASE) }))
++    expect(t).toContain(REDIRECTED)
++    expect(t).not.toContain(`sent to ${RECIPIENT}`)
++  })
++
++  /* Only the Finding 3 divert credits recipient (:1292), and it says so
++     explicitly rather than reusing the delivery wording. */
++  it('names recipient only for the Arc divert, and labels it as such', () => {
++    const t = paramText(build({ escrow: escrowOn(BASE) }))
++    expect(t).toContain(`credited on Arc to ${RECIPIENT} instead of being delivered cross-chain`)
+   })
+ 
+   /* The payer half genuinely is an Arc credit on both paths, so this line is
+@@ -135,8 +159,10 @@ describe('the two edges of the ruling', () => {
+   })
+ 
+   it('does not warn about the Arc divert on a full award', () => {
++    // Substring must not assume the sentence's exact shape — a reworded divert
++    // line would otherwise slip past this.
+     expect(paramText(build({ bps: 10_000, escrow: escrowOn(BASE), maxFee: 500000n })))
+-      .not.toContain('credited on Arc instead')
++      .not.toMatch(/credited on Arc/i)
+   })
+ })
+ 
+@@ -158,13 +184,13 @@ describe('the maxFee asymmetry between split and no-split', () => {
+      state a figure the contract never uses. */
+   it('quotes the escrow snapshot floor for split legs, never the caller maxFee', () => {
+     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of 0.20 USDC, deducted from that leg's share on delivery.")
++    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery.")
+     expect(t).not.toContain('0.45 USDC')
+   })
+ 
+   it('describes a split payout as a fan-out rather than one address', () => {
+     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+-    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each on their own chain")
++    expect(t).toContain("Freelancer's share is divided across 2 split recipients, each to their configured chain")
+     expect(t).not.toContain(`sent to ${RECIPIENT}`)
+   })
+ })
+@@ -172,7 +198,7 @@ describe('the maxFee asymmetry between split and no-split', () => {
+ describe('Finding 3 — a partial award can fall below the delivery floor', () => {
+   it('warns for a no-split cross-chain partial', () => {
+     expect(paramText(build({ escrow: escrowOn(BASE), maxFee: 450000n })))
+-      .toContain("If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc instead of being delivered cross-chain.")
++      .toContain(`If the freelancer's share after the protocol fee is 0.20 USDC or less, it is credited on Arc to ${RECIPIENT} instead of being delivered cross-chain.`)
+   })
+ 
+   it('phrases the divert per leg for a split escrow', () => {
+@@ -190,7 +216,7 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
+       { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
+     ]
+     const t = paramText(build({ escrow: escrowOn(ARC), splits }))
+-    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of 0.20 USDC")
++    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
+     expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
+   })
+ 
+diff --git a/frontend/src/pages/EscrowDetail.cancel.test.jsx b/frontend/src/pages/EscrowDetail.cancel.test.jsx
+index 7c60489..9375119 100644
+--- a/frontend/src/pages/EscrowDetail.cancel.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cancel.test.jsx
+@@ -94,7 +94,9 @@ describe('cancelEscrowConfirm — second party finalising', () => {
+   })
+ 
+   it('is titled as the cancellation it performs', () => {
+-    expect(d(ms, true).title).toBe('Cancel this escrow and refund the payer')
++    // Phase C #9: not "refund the payer" — the credit goes to refundTo, which
++    // is only the payer when address(0) was passed at deposit.
++    expect(d(ms, true).title).toBe('Cancel this escrow and refund it')
+   })
+ })
+ 
+diff --git a/frontend/src/pages/EscrowDetail.confirm.test.jsx b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+index 175e460..8ea3686 100644
+--- a/frontend/src/pages/EscrowDetail.confirm.test.jsx
++++ b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+@@ -49,7 +49,12 @@ describe('payoutLines', () => {
+   it('describes the fan-out for a split escrow and names no individual recipient', () => {
+     const lines = payoutLines(escrow, SPLITS)
+ 
+-    expect(lines).toEqual(['Paid to: 2 split recipients, each on their own chain'])
++    // Phase C #11: "each on their own chain" became "each to their configured
++    // chain", plus a rounding caveat — a leg rounding to zero reaches nobody.
++    expect(lines).toEqual([
++      'Paid to: 2 split recipients, each to their configured chain',
++      'A recipient whose share rounds down to zero is paid nothing.'
++    ])
+     expect(lines.join('\n')).not.toContain(RECIPIENT)
+     expect(lines.join('\n')).not.toContain(FALLBACK_RECIPIENT)
+   })
+@@ -136,10 +141,14 @@ describe.each([
+     expect(d().amountLabel).toBe('Amount released')
+   })
+ 
++  /* Literal expectations. Looping over payoutLines(...) and asserting the
++     descriptor contains them is circular — both sides come from the same
++     helper, so it holds even if that helper prints the wrong address. */
+   it('embeds the real payout destination lines', () => {
+-    for (const line of payoutLines(escrow, [])) {
+-      expect(d().parameters).toContain(line)
+-    }
++    expect(d().parameters).toContain(`Paid to: ${RECIPIENT}`)
++    expect(d().parameters).toContain('Paid on: Base Sepolia')
++    // The stale field must not appear in its place.
++    expect(d().parameters.join('\n')).not.toContain(FALLBACK_RECIPIENT)
+   })
+ 
+   it('discloses that the protocol fee comes out of the figure shown', () => {
+diff --git a/frontend/src/pages/EscrowDetail.dispute.test.jsx b/frontend/src/pages/EscrowDetail.dispute.test.jsx
+index 9ca739a..31e70f4 100644
+--- a/frontend/src/pages/EscrowDetail.dispute.test.jsx
++++ b/frontend/src/pages/EscrowDetail.dispute.test.jsx
+@@ -85,11 +85,21 @@ describe('raiseDisputeConfirm', () => {
+     expect(paramText(d())).toContain('does not guarantee a refund')
+   })
+ 
+-  it('truncates a reason too long for a confirm screen', () => {
+-    const long = 'x'.repeat(400)
+-    const text = paramText(d({ reason: long }))
+-    expect(text).toContain('…')
+-    expect(text).not.toContain('x'.repeat(200))
++  /* truncateText caps at 140 including the ellipsis, so the rendered reason is
++     exactly 139 x's + '…'. Asserting the precise boundary rather than "contains
++     an ellipsis somewhere", which any output with a '…' anywhere satisfies —
++     including one that truncated nothing, or truncated to the wrong length. */
++  it('truncates a long reason to exactly the 140-character cap', () => {
++    const text = paramText(d({ reason: 'x'.repeat(400) }))
++    expect(text).toContain(`Reason: "${'x'.repeat(139)}…"`)
++    expect(text).not.toContain('x'.repeat(140))
++  })
++
++  it('leaves a reason inside the cap completely untouched', () => {
++    const exact = 'y'.repeat(140)
++    const text = paramText(d({ reason: exact }))
++    expect(text).toContain(`Reason: "${exact}"`)
++    expect(text).not.toContain('…')
+   })
+ })
+ 
+@@ -192,9 +202,19 @@ describe('proposeMilestoneCancelConfirm — first proposer', () => {
+   })
+ })
+ 
++/* Phase C #12: the "rest of the escrow carries on" line is now conditional on
++   the sibling milestones, so the executing branch needs them. Milestone 0 is
++   released and 2 is still pending, which is the ordinary mid-escrow case the
++   line was always describing. */
++const SIBLINGS = [
++  { index: 0, amount: 250000000n, state: 3 },
++  { index: 1, amount: 250000000n, state: 1 },
++  { index: 2, amount: 250000000n, state: 0 }
++]
++
+ describe('proposeMilestoneCancelConfirm — second proposer executes', () => {
+   const d = (role = 'payer') =>
+-    proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed: true })
++    proposeMilestoneCancelConfirm({ escrow, milestone, milestones: SIBLINGS, role, otherProposed: true })
+ 
+   /* Here the same call falls through to the refund branch (:803-817), so the
+      figure is real and belongs in the Total. */
+diff --git a/frontend/src/pages/EscrowDetail.invoice.test.jsx b/frontend/src/pages/EscrowDetail.invoice.test.jsx
+index d3c603e..e2dc759 100644
+--- a/frontend/src/pages/EscrowDetail.invoice.test.jsx
++++ b/frontend/src/pages/EscrowDetail.invoice.test.jsx
+@@ -142,9 +142,13 @@ describe('extendDeadlineConfirm', () => {
+   /* The point of the descriptor. refundAfterDeadline opens at deadline + 72h
+      (:703), not at the deadline — the row's own help text says "past the
+      deadline", which is 72 hours optimistic. */
++  // Phase C #15 rewrote this line twice over: "from <date>" became "only
++  // after <date>" (the guard is `<=`, so the refund opens strictly after), and
++  // "refundable to you" lost its beneficiary claim (the credit goes to
++  // refundTo). The 72-hour offset itself is unchanged.
+   it('states the refund date as 72 hours after the new deadline, not the deadline', () => {
+-    expect(paramText(d())).toContain('refundable to you from 3 Feb 2026')
+-    expect(paramText(d())).toContain('72 hours after the new deadline')
++    expect(paramText(d())).toContain('refundable only after 3 Feb 2026')
++    expect(paramText(d())).toContain('72 hours past the new deadline, not at it')
+   })
+ 
+   it('says the direction is one-way', () => {
+@@ -161,6 +165,6 @@ describe('extendDeadlineConfirm', () => {
+   it('derives the refund date from the NEW deadline plus exactly 72 hours', () => {
+     const far = extendDeadlineConfirm({ escrow, newDeadline: Number(escrow.deadline) + 365 * DAY })
+     // 1 Jan 2026 + 365d = 1 Jan 2027; + 72h = 4 Jan 2027.
+-    expect(paramText(far)).toContain('refundable to you from 4 Jan 2027')
++    expect(paramText(far)).toContain('refundable only after 4 Jan 2027')
+   })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 6c328c8..ae84009 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -12,6 +12,9 @@ import Field from '../components/Field.jsx'
+ import Skeleton, { SkeletonMilestoneCard } from '../components/Skeleton.jsx'
+ import EditableRow from '../components/EditableRow.jsx'
+ import { useEscrowDetail, useDisputeConfig, useSettlementProposals, useTick } from '../hooks/useEscrows.js'
++// One source of truth for the fixed-50/50 copy: ArbiterPanel's trigger and the
++// permissionless one added here must not drift.
++import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
+ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+@@ -20,7 +23,7 @@ import { resolveMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage } from '../utils/irisDelivery.js'
+ import {
+-  isValidAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
++  isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+   NO_ATTACHMENT_URI
+ } from '../utils/format.js'
+@@ -405,22 +408,22 @@ function AckBanner({ escrow, onChange, onAcknowledged }) {
+               // (TrancheProtocol.sol:1091).
+               confirm: {
+                 title: 'Decline this escrow',
+-                subtitle: 'Rejects the whole engagement and returns everything to the payer. This cannot be undone — a new escrow would have to be created.',
++                subtitle: "Rejects the whole engagement and returns everything to the escrow's refund address. This cannot be undone — a new escrow would have to be created.",
+                 amount: escrow.totalAmount,
+-                amountLabel: 'Amount returned to payer',
++                amountLabel: 'Amount refunded',
+                 contractName: 'Tranche Protocol Escrow',
+                 contractAddress: CONTRACT_ADDRESS,
+                 functionName: 'declineEscrow',
+                 parameters: [
+                   `Escrow #${escrow.id} — all ${Number(escrow.milestoneCount)} milestones refunded`,
+-                  `Credited to: ${escrow.refundTo}`,
++                  ...refundToLines(escrow),
+                   'No protocol fee is taken.',
+                   'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+                 ]
+               }
+             }
+           )}
+-          title="Reject the whole escrow. Refunds the full amount to the payer — no protocol fee. Only available while every milestone is still pending."
++          title="Reject the whole escrow. Refunds the full amount to the escrow's refund address — no protocol fee. Only available while every milestone is still pending."
+         >
+           {declineTx.isBusy ? 'Working…' : 'Decline escrow'}
+         </button>
+@@ -584,7 +587,25 @@ function FocusIcon({ tone }) {
+    Locked amount up top, then a stack of border-separated parameter rows. The
+    secondary cards (mutual cancel, receiving address) sit beneath so the whole
+    column scrolls together rather than stacking visually with the milestones. */
++/* A split recipient is authorised by the contract on the strength of the
++   address currently encoded in their split leg (:1021), not on being
++   e.recipient. Role detection only knows depositor/recipient, so an
++   independent split payee classified as `null` could never reach the row that
++   redirects their own money. Detected separately here rather than folded into
++   `role`, which stays a two-value depositor/recipient concept everywhere else. */
++function useSplitRecipientIndex(splits) {
++  const { address } = useAuth()
++  return useMemo(() => {
++    if (!splits?.length || !address) return -1
++    return splits.findIndex((s) => {
++      const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
++      return addr && addr.toLowerCase() === address.toLowerCase()
++    })
++  }, [splits, address])
++}
++
+ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic, setOpt, clearOpt }) {
++  const mySplitIndex = useSplitRecipientIndex(splits)
+   const hasInvoice = !!(escrow.invoiceHash && escrow.invoiceHash !== ZERO_BYTES32)
+   const { invoiceData, invoiceAcknowledgedAt } = useEscrowInvoice(hasInvoice ? escrow.id : null)
+ 
+@@ -634,8 +655,11 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic,
+ 
+       {splits?.length > 0 && <SplitRecipients splits={splits} escrow={escrow} />}
+ 
+-      {role && escrow.state === 0 && (
+-        <EditableParamsPanel escrow={escrow} role={role} splits={splits} hasInvoice={hasInvoice} onChange={onChange} />
++      {(role || mySplitIndex >= 0) && escrow.state === 0 && (
++        <EditableParamsPanel
++          escrow={escrow} role={role} splits={splits} mySplitIndex={mySplitIndex}
++          hasInvoice={hasInvoice} milestones={milestones} onChange={onChange}
++        />
+       )}
+ 
+       {role && escrow.state === 0 && (
+@@ -653,20 +677,14 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic,
+    built on the shared EditableRow primitive so the deadline / invoice link /
+    receiving address / split address flows share one interaction pattern
+    instead of four hand-rolled inline-edit cards. */
+-function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+-  const { address } = useAuth()
+-  const mySplitIndex = role === 'freelancer' && splits
+-    ? splits.findIndex((s) => {
+-        const addr = s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null
+-        return addr && address && addr.toLowerCase() === address.toLowerCase()
+-      })
+-    : -1
+-
++function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, milestones, onChange }) {
+   const rows = []
+   if (role === 'payer') rows.push('deadline')
+   if (role === 'payer' && hasInvoice) rows.push('invoice')
+   if (role === 'freelancer') rows.push('receiving')
+-  if (role === 'freelancer' && mySplitIndex >= 0) rows.push('split')
++  // Not gated on role: the contract authorises whoever currently holds the
++  // leg's encoded address (:1021), which need not be e.recipient.
++  if (mySplitIndex >= 0) rows.push('split')
+   if (rows.length === 0) return null
+ 
+   return (
+@@ -678,7 +696,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+           const last = i === rows.length - 1
+           if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+           if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+-          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} onChange={onChange} last={last} />
++          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} milestones={milestones} onChange={onChange} last={last} />
+           if (key === 'split') {
+             const s = splits[mySplitIndex]
+             return (
+@@ -689,6 +707,7 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+                 currentDomain={Number(s.destinationDomain)}
+                 currentAddress={s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null}
+                 pct={Number(s.bps) / 100}
++                milestones={milestones}
+                 onChange={onChange}
+                 last={last}
+               />
+@@ -711,7 +730,14 @@ function EditableParamsPanel({ escrow, role, splits, hasInvoice, onChange }) {
+  * once DELIVERY_GRACE_PERIOD has fully elapsed (:703), because the recipient
+  * may still claim inside that window (:405). Both dates go on the screen —
+  * the deadline the parties talk about, and the date the money actually
+- * becomes refundable. */
++ * becomes refundable.
++ *
++ * Two things that date is not. The guard is `block.timestamp <= deadline +
++ * GRACE` (:703), so the refund opens strictly AFTER that moment, not at it —
++ * a signer who reads it as "from 3 Feb" and submits at 3 Feb will be reverted
++ * by DeadlineNotReached. And the refund is credited to e.refundTo (:715),
++ * which is only the depositor when address(0) was passed at deposit
++ * (:274-275); "refundable to you" is an assumption the contract never makes. */
+ export function extendDeadlineConfirm({ escrow, newDeadline }) {
+   const GRACE = 72 * 60 * 60
+   const current = Number(escrow.deadline)
+@@ -725,7 +751,8 @@ export function extendDeadlineConfirm({ escrow, newDeadline }) {
+     parameters: [
+       `Escrow #${escrow.id}`,
+       `Deadline: ${formatDeadline(current)} → ${formatDeadline(next)}`,
+-      `Your refund path moves with it: undelivered milestones become refundable to you from ${formatDeadline(next + GRACE)}, 72 hours after the new deadline.`,
++      `Your refund path moves with it: undelivered milestones become refundable only after ${formatDeadline(next + GRACE)} — 72 hours past the new deadline, not at it.`,
++      `Refunds are credited to this escrow's refund address, ${escrow.refundTo} — which is not necessarily the wallet you are signing with.`,
+       'The freelancer gets that much longer to deliver. Their consent is not required.',
+       'No funds move on this transaction.'
+     ]
+@@ -754,7 +781,7 @@ function DeadlineEditRow({ escrow, onChange, last }) {
+       label="Deadline"
+       ownerTag="Payer"
+       currentDisplay={formatDeadline(escrow.deadline)}
+-      help="You can only move the deadline later, never earlier. Past the deadline, any undelivered milestone becomes refundable to you."
++      help="You can only move the deadline later, never earlier. Once 72 hours past the deadline have elapsed, any undelivered milestone can be refunded to this escrow's refund address."
+       fields={[{ key: 'deadline', label: 'New deadline', type: 'datetime', min: minStr }]}
+       validate={(d) => toTs(d) > currentTs}
+       busy={tx.isBusy}
+@@ -872,7 +899,30 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
+ const REDIRECT_BLOCKED_REASON =
+   'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
+ 
+-export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain }) {
++/* What a redirect is actually worth, which is the one thing these screens
++ * never said. "Applies to every milestone not yet released" is true and
++ * unquantified: it covers the whole remaining escrow on a fresh one and
++ * nothing at all on a finished one, and the signer cannot tell which from the
++ * screen. The figure is already loaded — LedgerColumn receives `milestones`
++ * and dropped it before EditableParamsPanel — so this is disclosure, not a
++ * new read.
++ *
++ * Terminal states are RELEASED(3) and REFUNDED(4); everything else (PENDING,
++ * IN_REVIEW, DISPUTED) still routes through the address being changed.
++ * Deliberately gross: netting it would need escrowFeeBps, which is
++ * snapshotted with no getter — the same rule payoutLines follows.
++ *
++ * Returns null rather than 0 when the list is missing, so an unknown exposure
++ * prints nothing instead of a confident "0.00 USDC". */
++export function unreleasedExposure(milestones) {
++  if (!Array.isArray(milestones) || milestones.length === 0) return null
++  return milestones
++    .filter((m) => m.state !== 3 && m.state !== 4)
++    .reduce((sum, m) => sum + BigInt(m.amount ?? 0n), 0n)
++}
++
++export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain, milestones }) {
++  const exposure = unreleasedExposure(milestones)
+   const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+   const oldDomain = Number(escrow.destinationDomain)
+   const domain = Number(newDomain)
+@@ -901,6 +951,26 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+     }
+   }
+ 
++  // With splits configured the burn loop reads s[i].mintRecipient exclusively
++  // (:1280-1332) and e.mintRecipient is never consulted. The write succeeds and
++  // changes nothing about where money goes, so promising a redirect here would
++  // be the most expensive kind of wrong: a signed transaction, a paid fee, and
++  // a payout that still lands at the old address.
++  if (hasSplits) {
++    return {
++      ...base,
++      title: 'Change where this escrow pays out',
++      subtitle: 'This escrow pays through split recipients, so this setting no longer affects where money goes.',
++      parameters: [
++        `Escrow #${escrow.id}`,
++        `Address: ${oldAddress} → ${newAddress}`,
++        `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
++        'Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.',
++        'To redirect your own share, use the split address row instead.'
++      ]
++    }
++  }
++
+   return {
+     ...base,
+     title: 'Change where this escrow pays out',
+@@ -910,12 +980,16 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+       `Address: ${oldAddress} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+       'Applies to every milestone not yet released, including any currently in review.',
++      ...(exposure === null
++        ? []
++        : [`That is ${formatUSDC(exposure)} still to be paid, before the protocol fee.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+ }
+ 
+-export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain }) {
++export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain, milestones }) {
++  const exposure = unreleasedExposure(milestones)
+   const oldDomain = Number(currentDomain)
+   const domain = Number(newDomain)
+   // Mirrors :1033 — no splits carve-out here; this leg's own domain is what
+@@ -953,12 +1027,20 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+       'Applies to every milestone not yet released, including any currently in review.',
++      // The leg's own exposure, not the escrow's: this row moves one share.
++      // Stated as the pool and the share rather than a multiplied-out figure —
++      // the per-leg amount is computed from each release's post-fee remainder
++      // (:1309), so a product of two gross numbers would be a number the
++      // contract never arrives at.
++      ...(exposure === null
++        ? []
++        : [`${formatUSDC(exposure)} is still to be paid across this escrow, of which this leg takes ${shareLabel} after the protocol fee.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+ }
+ 
+-function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
++function ReceivingAddressEditRow({ escrow, hasSplits, milestones, onChange, last }) {
+   const [saveNonce, setSaveNonce] = useState(0)
+   const [successInfo, setSuccessInfo] = useState(null)
+   const { supported } = useSupportedDomains()
+@@ -986,7 +1068,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
+         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain || ARC_DOMAIN }
+       ]}
+-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
++      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+       busy={tx.isBusy}
+       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
+       onSubmit={(d) => {
+@@ -996,7 +1078,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+           {
+             loadingMessage: 'Updating. Check your wallet.',
+             confirm: redirectPayoutConfirm({
+-              escrow, hasSplits, newAddress: d.addr, newDomain: Number(d.domain)
++              escrow, hasSplits, milestones, newAddress: d.addr, newDomain: Number(d.domain)
+             })
+           }
+         )
+@@ -1006,7 +1088,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+   )
+ }
+ 
+-function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, onChange, last }) {
++function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, milestones, onChange, last }) {
+   const [saveNonce, setSaveNonce] = useState(0)
+   const [successInfo, setSuccessInfo] = useState(null)
+   const { supported } = useSupportedDomains()
+@@ -1034,7 +1116,7 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
+         { key: 'addr', label: 'New address', type: 'text', mono: true, placeholder: '0x…' },
+         { key: 'domain', label: 'Receiving chain', type: 'select', options: domainOptions, value: currentDomain }
+       ]}
+-      validate={(d) => isValidAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
++      validate={(d) => isNonZeroAddress(d.addr) && domainOptions.some((o) => o.value === Number(d.domain))}
+       busy={tx.isBusy}
+       successMessage={successInfo ? `Updated to ${truncateAddr(successInfo.address)} on ${getDomainName(successInfo.domain)}.` : null}
+       onSubmit={(d) => {
+@@ -1044,7 +1126,7 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
+           {
+             loadingMessage: 'Updating. Check your wallet.',
+             confirm: redirectSplitConfirm({
+-              escrow, splitIndex, currentAddress, currentDomain, pct,
++              escrow, splitIndex, currentAddress, currentDomain, pct, milestones,
+               newAddress: d.addr, newDomain: Number(d.domain)
+             })
+           }
+@@ -1477,6 +1559,16 @@ function MilestoneRow({
+                 />
+               )}
+ 
++              {milestone.state === 2 && (
++                <TimeoutSettlementTrigger
++                  escrow={escrow}
++                  milestone={milestone}
++                  dispute={dispute}
++                  splits={splits}
++                  onChange={onChange}
++                />
++              )}
++
+               {(milestone.state === 3 || milestone.state === 4) &&
+                 dispute?.resolutionHash && dispute.resolutionHash !== ZERO_BYTES32 && (
+                   <ResolutionNote dispute={dispute} />
+@@ -1499,6 +1591,7 @@ function MilestoneRow({
+                   <MilestoneCancelControl
+                     escrow={escrow}
+                     milestone={milestone}
++                    milestones={milestones}
+                     role={role}
+                     onChange={onChange}
+                   />
+@@ -1525,6 +1618,36 @@ function ChevronIcon({ open }) {
+   )
+ }
+ 
++/* Shared by proposeMilestoneCancelConfirm below and by the panel's own blurb,
++ * so the signing screen and the screen behind it cannot reach opposite
++ * conclusions about the same cancellation. Terminal states are RELEASED(3) and
++ * REFUNDED(4) — the same two _checkEscrowCompletion accepts (:727).
++ *
++ * `reconciled` is the honesty gate rather than a loading check: today
++ * getEscrowDetail builds `milestones` as `new Milestone[](e.milestoneCount)` in
++ * the same call that returns the escrow (:1163-1184), and useEscrowDetail
++ * derives both from that one response, so a short list cannot occur through the
++ * app's own path. It guards the exported descriptor, which any future caller
++ * can hand a partial list. */
++export function milestoneCancelCompletion(escrow, milestoneIndex, milestones) {
++  const list = milestones || []
++  const reconciled = list.length > 0 && list.length === Number(escrow?.milestoneCount)
++  const completesEscrow = reconciled &&
++    list.every((m) => m.index === milestoneIndex || m.state === 3 || m.state === 4)
++  return { reconciled, completesEscrow }
++}
++
++/* The panel's static blurb. Three-way for the same reason the descriptor is:
++ * with nothing to reconcile against, "the rest of the escrow continues" is a
++ * claim, not a default. */
++export function milestoneCancelBlurb({ reconciled, completesEscrow }) {
++  const base = 'Both the payer and freelancer must propose. Once both agree, this milestone'
++  if (!reconciled) return `${base} is refunded.`
++  return completesEscrow
++    ? `${base}'s amount is refunded to the escrow's refund address — and since every other milestone has settled, that completes the whole escrow.`
++    : `${base}'s amount is refunded to the escrow's refund address and the rest of the escrow continues.`
++}
++
+ /* EVIDENCE/STATE: proposeMilestoneCancel is two transactions wearing one
+  * button. With the counterparty not yet on board it writes a single bool
+  * (:799); with them already on board the same call falls straight through to
+@@ -1537,8 +1660,16 @@ function ChevronIcon({ open }) {
+  * clears the escrow-level flags. Nothing clears milestoneCancelProposals
+  * except the refund branch itself or a completed escrow-wide mutualCancel
+  * (:761-762). A milestone proposal is therefore irrevocable, which is exactly
+- * the sort of thing a user assumes carries over from the screen next door. */
+-export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed }) {
++ * the sort of thing a user assumes carries over from the screen next door.
++ *
++ * "The rest of the escrow carries on" is the other claim that needs care: the
++ * refund branch calls _checkEscrowCompletion (:814), which flips the escrow to
++ * COMPLETED once every milestone is RELEASED or REFUNDED (:722-733). Cancel the
++ * last nonterminal one and this transaction ends the engagement rather than
++ * trimming it. That needs the sibling milestones to know, so `milestones` is
++ * passed in; when it cannot be reconciled against milestoneCount the line is
++ * dropped rather than guessed, since both readings are consequential. */
++export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed, milestones }) {
+   const line = milestoneLineFor(escrow, milestone)
+   const base = {
+     contractName: 'Tranche Protocol Escrow',
+@@ -1567,43 +1698,106 @@ export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherPr
+     }
+   }
+ 
++  const { reconciled, completesEscrow } = milestoneCancelCompletion(escrow, milestone.index, milestones)
++
+   return {
+     ...base,
+-    title: 'Cancel this milestone and refund the payer',
++    title: 'Cancel this milestone and refund it',
+     subtitle: 'The other party has already proposed this, so signing cancels the milestone and refunds it now. This cannot be undone.',
+     amount: milestone.amount,
+     amountLabel: 'Amount refunded',
+     parameters: [
+       line,
+-      `Credited to: ${escrow.refundTo}`,
++      ...refundToLines(escrow),
+       ...(givingUp ? ['This is your payment for this milestone. You will not be paid for it.'] : []),
+       'No protocol fee is taken.',
+       'Credited as a withdrawable refund balance on Arc, not sent to a wallet.',
+-      'The rest of the escrow carries on — only this milestone is cancelled.'
++      ...(completesEscrow
++        ? ['Every other milestone has already settled, so this completes the whole escrow — nothing carries on afterwards.']
++        : reconciled
++          ? ['The rest of the escrow carries on — only this milestone is cancelled.']
++          : [])
+     ]
+   }
+ }
+ 
++/* resolveDisputeByTimeout takes no caller input and carries no role gate
++   (:561): once block.timestamp reaches raisedAt + ARBITER_WINDOW, anyone can
++   settle the milestone at the fixed 50/50. Until now the only button for it
++   lived behind ArbiterPanel's role gate, so the permissionless escape hatch
++   was reachable only by the very party whose inaction it exists to route
++   around.
++
++   Rendered for ANY connected wallet, deliberately — that is the contract's
++   own access rule, not a relaxation of it. ArbiterPanel's own trigger is
++   untouched; this is an addition.
++
++   The descriptor is imported from ArbiterPanel rather than re-written, so the
++   two buttons cannot drift into describing the same call differently. */
++function TimeoutSettlementTrigger({ escrow, milestone, dispute, splits, onChange }) {
++  const { arbiterWindow, bpsDenominator } = useDisputeConfig()
++  const tx = useTx({ onConfirmed: () => onChange?.() })
++
++  const raisedAt = Number(dispute?.raisedAt ?? 0)
++  const windowSecs = Number(arbiterWindow ?? 0n)
++  const timeoutAt = raisedAt + windowSecs
++  // Fails closed: an unloaded window or a dispute with no raisedAt yields
++  // nothing rather than an always-on button.
++  const reached = raisedAt > 0 && windowSecs > 0 && Math.floor(Date.now() / 1000) >= timeoutAt
++  if (!reached) return null
++
++  return (
++    <div className="mt-4 pt-4 border-t border-rule/50 flex flex-col gap-2">
++      <h4 className="text-[11px] uppercase tracking-[0.18em] text-ink-3 font-medium">Arbitration window closed</h4>
++      <p className="text-xs text-ink-2 leading-relaxed">
++        No arbiter ruled within {formatWindow(arbiterWindow)}. Anyone can now settle this milestone
++        at the fixed 50/50 the contract falls back to — including you.
++      </p>
++      <div>
++        <TxButton
++          className="btn-secondary text-sm py-2"
++          onClick={() => tx.run(
++            escrowWrite('resolveDisputeByTimeout', [BigInt(escrow.id), BigInt(milestone.index)]),
++            {
++              loadingMessage: 'Settling by timeout.',
++              confirm: timeoutSettlementConfirm({
++                escrow, milestone, index: milestone.index, splits, timeoutAt, bpsDenominator
++              })
++            }
++          )}
++          disabled={tx.isBusy}
++          loading={tx.isBusy}
++          label="Settle by timeout"
++        />
++      </div>
++    </div>
++  )
++}
++
+ /* ---------- Per-milestone mutual cancel ----------
+    Cancels a single milestone (refunds its amount to the payer) once both
+    parties have proposed — the milestone-level analogue of {mutualCancel}. The
+    public `milestoneCancelProposals` mapping is read directly for both parties
+    so each side sees the live approval state. */
+-function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
++function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange }) {
+   const [open, setOpen] = useState(false)
+   const milestoneIndex = milestone.index
+ 
+   const baseArgs = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, functionName: 'milestoneCancelProposals' }
+-  const { data: payerProposedRaw, refetch: refetchPayer } = useReadContract({
++  const { data: payerProposedRaw, isLoading: payerLoading, refetch: refetchPayer } = useReadContract({
+     ...baseArgs,
+     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.depositor],
+     query: { refetchInterval: POLL_MS }
+   })
+-  const { data: freelancerProposedRaw, refetch: refetchFreelancer } = useReadContract({
++  const { data: freelancerProposedRaw, isLoading: freelancerLoading, refetch: refetchFreelancer } = useReadContract({
+     ...baseArgs,
+     args: [BigInt(escrow.id), BigInt(milestoneIndex), escrow.recipient],
+     query: { refetchInterval: POLL_MS }
+   })
++  // An unread proposal coerces to false, which is the same value as "they have
++  // not proposed" — and that is the branch deciding whether this call records a
++  // vote or immediately refunds the milestone (:803).
++  const proposalsLoading = payerLoading || freelancerLoading
+ 
+   const tx = useTx({
+     onConfirmed: () => { refetchPayer(); refetchFreelancer(); onChange?.() }
+@@ -1615,11 +1809,15 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
+ 
+   const otherProposed = role === 'payer' ? freelancerProposed : payerProposed
+ 
++  // Literally the same call the descriptor makes, so the panel and the signing
++  // screen cannot disagree about whether this cancellation ends the escrow.
++  const completion = milestoneCancelCompletion(escrow, milestoneIndex, milestones)
++
+   const submit = () => tx.run(
+     escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
+     {
+       loadingMessage: 'Submitting. Check your wallet.',
+-      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, role, otherProposed })
++      confirm: proposeMilestoneCancelConfirm({ escrow, milestone, milestones, role, otherProposed })
+     }
+   )
+ 
+@@ -1647,7 +1845,7 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
+         </button>
+       </div>
+       <p className="text-xs text-ink-2 leading-relaxed">
+-        Both the payer and freelancer must propose. Once both agree, this milestone's amount is refunded to the payer and the rest of the escrow continues.
++        {milestoneCancelBlurb(completion)}
+       </p>
+       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
+         <ApprovalRow label="Payer" approved={payerProposed} />
+@@ -1656,7 +1854,7 @@ function MilestoneCancelControl({ escrow, milestone, role, onChange }) {
+       <TxButton
+         className="btn-danger text-sm py-2"
+         onClick={submit}
+-        disabled={iProposed || tx.isBusy}
++        disabled={iProposed || tx.isBusy || proposalsLoading}
+         loading={tx.isBusy}
+         label={iProposed
+           ? 'You proposed this'
+@@ -1996,7 +2194,11 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   if (!matches) {
+     // Nothing executes. No `amount` — the figures below are what WOULD happen,
+     // and a Total row would assert they are happening now.
+-    const splitLine = `Would pay ${formatUSDC(recipientShare)} to the freelancer and ${formatUSDC(payerShare)} to the payer.`
++    // "Would pay X and Y" flattens three different things: the freelancer's
++    // figure is gross (the protocol fee comes off it, :1270-1271), and the
++    // payer's is never paid at all — it becomes a refund credit they have to
++    // withdraw (:1241).
++    const splitLine = `Would settle at ${formatUSDC(recipientShare)} to the freelancer before the protocol fee, and ${formatUSDC(payerShare)} credited to the payer's refund balance.`
+     return {
+       ...base,
+       title: 'Propose settling this dispute',
+@@ -2032,6 +2234,16 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   }
+   if (bps > 0) {
+     params.push(...payoutLines(escrow, splits))
++    // Three different arrival behaviours hide behind "pays out": an Arc leg is
++    // a safeTransfer inside this transaction (:1343-1346), a cross-chain leg is
++    // a burn that Circle mints minutes later, and the payer's half is a credit
++    // that is never sent anywhere (:1241). The subtitle no longer claims one
++    // speed for all three, so the distinction has to appear here.
++    params.push(
++      crossChain
++        ? "The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant."
++        : "The freelancer's share is transferred on Arc as this transaction executes."
++    )
+     params.push("The protocol fee is taken from the freelancer's share only.")
+   } else {
+     params.push('Nothing is paid to the freelancer. The milestone is refunded in full.')
+@@ -2040,7 +2252,10 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     params.push("The payer's share is credited as a withdrawable balance on Arc, not sent to a wallet.")
+   }
+   if (crossChain && bps > 0) {
+-    params.push(`Cross-chain delivery uses this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded.`)
++    // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
++    // Circle deducts its actual forwarding fee — which may be less — from the
++    // burned amount on the destination (TrancheProtocol.sol:874-877).
++    params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
+     if (partial) {
+       params.push(
+         splits?.length > 0
+@@ -2054,7 +2269,7 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+   return {
+     ...base,
+     title: 'Settle this dispute now',
+-    subtitle: 'Both sides have proposed the same split, so signing settles the milestone and pays out immediately.',
++    subtitle: 'Both sides have proposed the same split, so signing settles the milestone now. Where each share goes, and when it actually arrives, is set out below.',
+     amount: milestone.amount,
+     amountLabel: 'Amount settled',
+     parameters: params
+@@ -2066,7 +2281,12 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+    split automatically. We surface both standing proposals and a one-click
+    "agree to their number" path. */
+ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossChainRelease }) {
+-  const { depositorProposal, recipientProposal, refetch } = useSettlementProposals(
++  // isLoading matters here, not just for spinners: an unread proposal looks
++  // exactly like "no proposal", and the descriptor branches on that to decide
++  // between "nothing settles yet" and a settlement that executes on this very
++  // transaction (:549). Submitting mid-read can therefore promise the wrong
++  // one of those two.
++  const { depositorProposal, recipientProposal, isLoading: proposalsLoading, refetch } = useSettlementProposals(
+     escrow.id, milestone.index, escrow.depositor, escrow.recipient
+   )
+   const { config } = useProtocolConfig()
+@@ -2084,7 +2304,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+ 
+   const pctNum = pct === '' ? NaN : Number(pct)
+   const pctValid = Number.isFinite(pctNum) && pctNum >= 0 && pctNum <= 100
+-  const canSubmit = pctValid && !tx.isBusy
++  const canSubmit = pctValid && !tx.isBusy && !proposalsLoading
+ 
+   // Same-chain (Arc) settlements take maxFee = 0; cross-chain must cover
+   // Circle's live forwarding fee on the recipient's share, quoted at submit time.
+@@ -2124,7 +2344,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+   const bpsToPct = (bps) => Number(bps) / 100
+   // Their proposal differs from mine (or I have none): offer to accept it,
+   // which makes both proposals match and settles on-chain.
+-  const canAgree = theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
++  const canAgree = !proposalsLoading && theirs.exists && (!mine.exists || mine.bps !== theirs.bps)
+ 
+   // Perspective-relative copy: `role === 'payer'` is the depositor (client),
+   // otherwise the recipient (freelancer). Both sides always enter the
+@@ -2596,6 +2816,29 @@ function MilestoneStateGlyph({ state }) {
+    Single most relevant action per role/state. Glowing clay for primary
+    positive actions; warning tone reserved for the dispute portal at the
+    bottom of the page so the inline action stays positive-leaning. */
++/* Refund-destination lines, the counterpart to payoutLines below.
++ *
++ * Every refund in this contract credits e.refundTo, and refundTo is whatever
++ * address was passed at deposit — it falls back to the depositor only when
++ * address(0) was supplied (TrancheProtocol.sol:274-275). So "refunded to the
++ * payer" is an assumption the contract never makes: a payer who set a treasury
++ * or a co-founder's wallet as refundTo gets a screen promising them money that
++ * goes somewhere else.
++ *
++ * The address alone does not fix that — a signer who assumes it is their own
++ * wallet reads past it. State the divergence only where it is real, so the
++ * ordinary case (refundTo == depositor) stays quiet. */
++export function refundToLines(escrow) {
++  const to = escrow?.refundTo
++  if (!to) return []
++  const lines = [`Credited to: ${to}`]
++  const depositor = escrow?.depositor
++  if (depositor && to.toLowerCase() !== depositor.toLowerCase()) {
++    lines.push("That is this escrow's configured refund address, not the payer's own wallet.")
++  }
++  return lines
++}
++
+ /* Payout-destination lines for a signing screen's `parameters`.
+  *
+  * A split escrow pays each leg to its own address on its own destination
+@@ -2611,7 +2854,13 @@ function MilestoneStateGlyph({ state }) {
+  * same reasoning as networkFee in utils/circleTheme.js. */
+ export function payoutLines(escrow, splits) {
+   if (splits?.length > 0) {
+-    return [`Paid to: ${splits.length} split recipients, each on their own chain`]
++    // Not "each on their own chain": a leg whose share rounds down to zero is
++    // skipped outright by the `share > 0` guard (:1312), so it is paid nothing
++    // and reaches no chain at all.
++    return [
++      `Paid to: ${splits.length} split recipients, each to their configured chain`,
++      'A recipient whose share rounds down to zero is paid nothing.'
++    ]
+   }
+   const addr = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+   return [
+@@ -2655,7 +2904,7 @@ function computeMilestoneAction(escrow, milestone, role, { reviewWindowExpired,
+    keyed the same way. See utils/circleTheme.js for the descriptor shape; this
+    is the only description of these calls a UCW user ever sees, since none of
+    the four has an app-side confirmation step in front of it. */
+-export function milestoneConfirm(action, escrow, milestone, splits) {
++export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
+   const n = milestone.index + 1
+   const of = Number(escrow.milestoneCount) || n
+   const milestoneLine = `Milestone ${n} of ${of}: ${formatUSDC(milestone.amount)}`
+@@ -2668,11 +2917,23 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
+   if (action.key === 'claim') {
+     // No `amount`: claimDelivery moves nothing. Putting the milestone figure in
+     // the Total row would tell the freelancer they are being paid right now.
++    //
++    // The window's length is the one number that decides when this freelancer
++    // gets paid, it is per-escrow (e.reviewWindow, set at deposit and used at
++    // :417), and it is already on the escrow object every other surface reads
++    // — the row at :640 and FocusBar at :472 both print it. Only the signing
++    // screen said "the review window" and left the signer to guess.
+     return {
+       ...base,
+       title: 'Mark this milestone as delivered',
+       subtitle: "Starts the client's review window. If they don't dispute before it ends, the milestone can be released.",
+-      parameters: [milestoneLine, 'No funds move on this transaction.']
++      parameters: [
++        milestoneLine,
++        ...(escrow.reviewWindow
++          ? [`Review window: ${formatWindow(escrow.reviewWindow)} from this transaction. After it ends without a dispute, anyone can release the payment.`]
++          : []),
++        'No funds move on this transaction.'
++      ]
+     }
+   }
+ 
+@@ -2683,22 +2944,60 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
+     // in their wallet.
+     return {
+       ...base,
+-      title: 'Refund this milestone to the payer',
++      title: 'Refund this milestone',
+       subtitle: 'The deadline and its 72-hour grace period have both passed, so this milestone can be refunded. No protocol fee is taken.',
+       amount: milestone.amount,
+       amountLabel: 'Amount refunded',
+       parameters: [
+         milestoneLine,
+-        `Credited to: ${escrow.refundTo}`,
++        ...refundToLines(escrow),
+         'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+       ]
+     }
+   }
+ 
+-  const releaseParams = [
++  /* The two release paths do NOT pay the same forwarding fee, so they cannot
++     share one line about it.
++
++     approveRelease hands the caller's quoted maxFee straight through (:647),
++     and the no-split burn uses it (:1298) — the depositor is opting into a
++     live figure. release() throws that argument away and substitutes
++     e.escrowCctpForwardFee (:674, :682) precisely because it is permissionless
++     and a griefer could otherwise authorise Circle to consume almost the whole
++     payout. Split legs always burn at the snapshot (:1329) whichever path ran.
++
++     So: caller's quote only when approving a no-split escrow; the escrow's
++     fixed floor in every other cross-chain case; nothing at all on Arc, where
++     _approveAndBurn forces maxFee = 0 (:1343-1346). */
++  const releaseFeeLines = (key) => {
++    const crossChain = splits?.length > 0
++      ? splits.some((s) => Number(s.destinationDomain) !== ARC_DOMAIN)
++      : Number(escrow.destinationDomain) !== ARC_DOMAIN
++    if (!crossChain) return []
++
++    // A quote governs only the no-split approve path; everywhere else the
++    // snapshot does.
++    if (key === 'approve' && splits?.length === 0 && maxFee !== undefined && maxFee !== null) {
++      return [`Delivery costs up to ${formatUSDC(maxFee)} in Circle forwarding fees, quoted now and deducted from the payout on arrival.`]
++    }
++
++    // No quote to fall back on: an absent or zero snapshot means the figure is
++    // unknown, not that delivery is free. Printing "0.00 USDC" would state a
++    // fee that is both wrong and reassuring — say nothing instead.
++    const floor = escrow.escrowCctpForwardFee ?? 0n
++    if (floor === 0n) return []
++
++    if (splits?.length > 0) {
++      return [`Each cross-chain split leg pays this escrow's fixed forwarding fee of up to ${formatUSDC(floor)}, deducted on delivery.`]
++    }
++    return [`Delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from the payout on arrival.`]
++  }
++
++  const releaseParams = (key) => [
+     milestoneLine,
+     ...payoutLines(escrow, splits),
+-    'Protocol fee is deducted from this amount before payout.'
++    'Protocol fee is deducted from this amount before payout.',
++    ...releaseFeeLines(key)
+   ]
+ 
+   if (action.key === 'approve') {
+@@ -2708,7 +3007,7 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
+       subtitle: 'Releases the milestone out of escrow to the freelancer. This cannot be undone.',
+       amount: milestone.amount,
+       amountLabel: 'Amount released',
+-      parameters: releaseParams
++      parameters: releaseParams('approve')
+     }
+   }
+ 
+@@ -2720,7 +3019,7 @@ export function milestoneConfirm(action, escrow, milestone, splits) {
+       subtitle: 'The review window closed without a dispute, so this milestone can now be released to the freelancer by anyone.',
+       amount: milestone.amount,
+       amountLabel: 'Amount released',
+-      parameters: releaseParams
++      parameters: releaseParams('release')
+     }
+   }
+ 
+@@ -2767,6 +3066,9 @@ function MilestoneAction({
+     setOpt(`milestone_${milestone.index}`, action.optimistic)
+ 
+     let args = action.args
++    // Kept outside the try so the descriptor can name the figure that will
++    // actually govern an approveRelease burn.
++    let quotedMaxFee
+     if (action.needsForwardFee) {
+       // Whole milestone is released; burn amount is the milestone minus the
+       // protocol fee. Quote Circle's live forwarding fee for the band check.
+@@ -2780,6 +3082,7 @@ function MilestoneAction({
+           burnAmount: milestone.amount - protocolFee
+         })
+         args = [...action.args, maxFee]
++        quotedMaxFee = maxFee
+       } catch (err) {
+         clearOpt(`milestone_${milestone.index}`)
+         setActiveKey(null)
+@@ -2791,7 +3094,7 @@ function MilestoneAction({
+     try {
+       const txHash = await tx.run(escrowWrite(action.fn, args), {
+         loadingMessage: 'Check your wallet.',
+-        confirm: milestoneConfirm(action, escrow, milestone, splits)
++        confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+       })
+       if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
+         localStorage.setItem(
+@@ -2998,21 +3301,49 @@ const EVIDENCE_BASE = {
+ 
+ /* raiseDispute freezes the milestone into DISPUTED (:456) and writes the
+  * reason and URI into DisputeData as plain strings (:443-454). There is no
+- * withdrawDispute anywhere in the contract — once raised, the only exits are
+- * the arbiter's resolveDispute or resolveDisputeByTimeout. Both facts belong
+- * on the screen: this is not a reversible "flag for review". */
+-export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName }) {
++ * withdrawDispute anywhere in the contract — once raised, it cannot be taken
++ * back. That much belongs on the screen: this is not a reversible "flag for
++ * review".
++ *
++ * What the copy previously got wrong is the other half — that raising a
++ * dispute "hands it to the arbiter", as though the arbiter were the only way
++ * out. Three exits exist, and two of them need no arbiter at all:
++ *
++ *   - mutualSettle accepts DISPUTED explicitly (:534), so the two parties can
++ *     still agree a split between themselves afterwards;
++ *   - resolveDisputeByTimeout has no role gate (:561), so once ARBITER_WINDOW
++ *     elapses anyone — including either party — can settle it at a fixed
++ *     50/50;
++ *   - resolveDispute, the arbiter's discretionary ruling (:495).
++ *
++ * A signer told the arbiter decides will wait for one, which is exactly the
++ * inaction the timeout exists to route around.
++ *
++ * Phase D: that line named the window without measuring it. ARBITER_WINDOW is
++ * 14 days (sol:69) and the fallback is hardcoded 5000 bps (:576) — both fixed
++ * at compile time, so there is nothing to fetch and no reason to be vague. The
++ * figures go into the existing sentence rather than a second one: "no arbiter
++ * rules" and "how long you wait for one" are the same fact, and splitting them
++ * across two bullets reads as two separate escape hatches. `arbiterWindow` is
++ * threaded in rather than re-hardcoded here so this cannot drift from the
++ * countdown the dispute panel renders from the same source. */
++export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName, arbiterWindow }) {
++  // Degrade to the unquantified phrasing rather than printing "undefined days".
++  const window = arbiterWindow ? formatWindow(arbiterWindow) : null
+   return {
+     ...EVIDENCE_BASE,
+     functionName: 'raiseDispute',
+     title: 'Dispute this milestone',
+-    subtitle: 'Freezes the milestone and hands it to the arbiter, who decides how much of it each side receives. A dispute cannot be withdrawn once raised.',
++    subtitle: 'Freezes the milestone so it cannot be released while the disagreement is open. A dispute cannot be withdrawn once raised.',
+     parameters: [
+       `${milestoneLineFor(escrow, milestone)} — frozen, not refunded`,
+       `Reason: "${truncateText(reason)}"`,
+       ...evidenceLines({ uri, fileName }),
+       'Your reason and link are stored on-chain in the clear, readable by anyone, permanently.',
+       'The arbiter can award any split from 0 to 100% — disputing does not guarantee a refund.',
++      window
++        ? `An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within ${window}, anyone can settle it at a fixed 50/50.`
++        : 'An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.',
+       'No funds move on this transaction.'
+     ]
+   }
+@@ -3105,6 +3436,10 @@ function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed })
+ 
+   const reset = () => { setReason(''); setUri(''); setFileHash(null); setFileName(null) }
+   const tx = useTx({ onConfirmed: () => { reset(); onConfirmed?.() } })
++  // Above the early return: this sits with the other hook calls so the ordering
++  // stays stable whether or not the modal is open. Only `raise` reads it; the
++  // other two descriptors ignore the extra key.
++  const { arbiterWindow } = useDisputeConfig()
+ 
+   useEffect(() => { if (!open) reset() }, [open]) // eslint-disable-line
+ 
+@@ -3141,7 +3476,7 @@ function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed })
+       : [id, idx, evidenceHash, uri]
+     tx.run(escrowWrite(meta.fn, args), {
+       loadingMessage: 'Check your wallet.',
+-      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName })
++      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName, arbiterWindow })
+     })
+   }
+ 
+@@ -3313,7 +3648,7 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
+     return {
+       ...base,
+       title: 'Approve cancelling this escrow',
+-      subtitle: 'Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the payer.',
++      subtitle: "Records your approval. Nothing moves until the other party approves too — then the escrow is cancelled and unstarted milestones are refunded to the escrow's refund address.",
+       parameters: [
+         `Escrow #${escrow.id}`,
+         `Would refund ${formatUSDC(refundable)} across ${pending.length} unstarted milestone${pending.length === 1 ? '' : 's'} once both parties approve.`,
+@@ -3328,7 +3663,7 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
+     // put a refund figure on a screen for a transaction that cannot succeed.
+     return {
+       ...base,
+-      title: 'Cancel this escrow and refund the payer',
++      title: 'Cancel this escrow and refund it',
+       subtitle: 'The contract rejects a cancellation while a milestone is in review or disputed, so this transaction will not go through.',
+       parameters: [
+         `Escrow #${escrow.id}`,
+@@ -3340,13 +3675,13 @@ export function cancelEscrowConfirm({ escrow, milestones, otherApproved }) {
+ 
+   return {
+     ...base,
+-    title: 'Cancel this escrow and refund the payer',
++    title: 'Cancel this escrow and refund it',
+     subtitle: 'Both parties have now approved. This cancels the escrow and refunds every milestone that has not started. This cannot be undone.',
+     amount: refundable,
+     amountLabel: 'Amount refunded',
+     parameters: [
+       `Escrow #${escrow.id} — ${pending.length} of ${Number(escrow.milestoneCount)} milestones refunded`,
+-      `Credited to: ${escrow.refundTo}`,
++      ...refundToLines(escrow),
+       'Already-released milestones are not clawed back.',
+       'No protocol fee is taken.',
+       'Credited as a withdrawable refund balance on Arc, not sent to a wallet.'
+diff --git a/frontend/src/pages/EscrowDetail.redirect.test.jsx b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+index 69d85c2..0af7b39 100644
+--- a/frontend/src/pages/EscrowDetail.redirect.test.jsx
++++ b/frontend/src/pages/EscrowDetail.redirect.test.jsx
+@@ -30,6 +30,11 @@ const escrowOn = (domain) => ({
+ 
+ const paramText = (d) => (d.parameters || []).join('\n')
+ 
++// The real rejection sentence, so the negative assertions below track the copy
++// rather than a paraphrase of it.
++const REDIRECT_BLOCKED_TEXT =
++  'An escrow paying on Arc cannot be moved to another chain after deposit'
++
+ describe('redirectPayoutConfirm — an allowed redirect', () => {
+   const d = () => redirectPayoutConfirm({
+     escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: OP
+@@ -103,24 +108,62 @@ describe('redirectPayoutConfirm — the directions F3 allows', () => {
+     escrow: escrowOn(from), hasSplits, newAddress: NEW_ADDR, newDomain: to
+   })
+ 
++  /* Asserting the ALLOWED descriptor positively. Excluding one exact rejection
++     sentence passes for any other wrong output too — including a reworded
++     block, or the split no-op branch. */
++  const allows = (d) => {
++    expect(d.parameters.join('\n')).toContain('Applies to every milestone not yet released, including any currently in review.')
++    expect(d.parameters.join('\n')).not.toContain(REDIRECT_BLOCKED_TEXT)
++    expect(d.subtitle).toContain('Redirects your milestone payments')
++  }
++
+   it('allows cross-chain → cross-chain', () => {
+-    expect(build(BASE, OP).subtitle).not.toBe('This transaction will not go through.')
++    allows(build(BASE, OP))
+   })
+ 
+   it('allows cross-chain → Arc', () => {
+-    expect(build(BASE, ARC).subtitle).not.toBe('This transaction will not go through.')
++    allows(build(BASE, ARC))
+   })
+ 
+   it('allows Arc → Arc', () => {
+-    expect(build(ARC, ARC).subtitle).not.toBe('This transaction will not go through.')
++    allows(build(ARC, ARC))
+   })
+ 
+   /* The carve-out at :982: with splits configured, e.destinationDomain is not
+-     what the burn uses, so the guard does not apply and Arc → cross-chain is
+-     permitted on this path. */
+-  it('allows Arc → cross-chain when the escrow has splits', () => {
+-    expect(build(ARC, BASE, true).subtitle).not.toBe('This transaction will not go through.')
+-    expect(build(ARC, BASE, false).subtitle).toBe('This transaction will not go through.')
++     what the burn uses, so the F3 guard does not apply and the call is not
++     blocked. Asserting the blocked TEXT rather than an exact subtitle, so the
++     split branch (which is also not blocked, and also not the allowed one)
++     cannot satisfy this by accident. */
++  it('is not F3-blocked when the escrow has splits', () => {
++    expect(paramText(build(ARC, BASE, true))).not.toContain(REDIRECT_BLOCKED_TEXT)
++    expect(paramText(build(ARC, BASE, false))).toContain(REDIRECT_BLOCKED_TEXT)
++  })
++})
++
++/* Not blocked is not the same as effective. With splits configured the burn
++   loop reads s[i].mintRecipient exclusively (:1280-1332) and never consults
++   e.mintRecipient, so updateReceivingAddress succeeds and moves no payout at
++   all. Promising a redirect here costs a signature and a fee for nothing. */
++describe('redirectPayoutConfirm — a split escrow makes this a no-op', () => {
++  const build = (hasSplits) => redirectPayoutConfirm({
++    escrow: escrowOn(BASE), hasSplits, newAddress: NEW_ADDR, newDomain: OP
++  })
++
++  it('says payouts follow the split recipients instead', () => {
++    expect(paramText(build(true))).toContain('Payouts follow the split recipients, not this address. The transaction will succeed but no payment will change destination.')
++  })
++
++  it('does not promise the redirect applies to unreleased milestones', () => {
++    expect(paramText(build(true))).not.toContain('Applies to every milestone not yet released')
++  })
++
++  it('points at the split row as the thing that does work', () => {
++    expect(paramText(build(true))).toContain('To redirect your own share, use the split address row instead.')
++  })
++
++  it('leaves the no-split case promising a real redirect', () => {
++    expect(paramText(build(false))).toContain('Applies to every milestone not yet released')
++    expect(paramText(build(false))).not.toContain('Payouts follow the split recipients')
+   })
+ })
+ 
+diff --git a/frontend/src/pages/EscrowDetail.settle.test.jsx b/frontend/src/pages/EscrowDetail.settle.test.jsx
+index 96c7e98..da24dbd 100644
+--- a/frontend/src/pages/EscrowDetail.settle.test.jsx
++++ b/frontend/src/pages/EscrowDetail.settle.test.jsx
+@@ -58,8 +58,10 @@ describe('a proposal that does not match settles nothing', () => {
+     }
+   )
+ 
++  /* Phase C #10 split this line into the three things it was flattening: the
++     freelancer's figure is gross, and the payer's is a credit, not a payment. */
+   it('states the split as a conditional, not as a fact', () => {
+-    expect(paramText(first())).toContain('Would pay 125.00 USDC to the freelancer and 125.00 USDC to the payer.')
++    expect(paramText(first())).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
+   })
+ 
+   /* The case most likely to be misread as agreement: the contract requires
+@@ -91,8 +93,11 @@ describe('a matching proposal settles now', () => {
+     expect(buildContractInteraction(d())).toHaveProperty('mainCurrency')
+   })
+ 
+-  it('says both sides agreed and that it pays out immediately', () => {
++  // Phase C #10: the subtitle no longer claims it "pays out immediately" —
++  // only one of the three destinations behaves that way.
++  it('says both sides agreed and that this settles the milestone', () => {
+     expect(d().subtitle).toContain('Both sides have proposed the same split')
++    expect(d().subtitle).not.toMatch(/pays out immediately/i)
+     expect(paramText(d())).toContain('This cannot be undone.')
+   })
+ 
+@@ -159,7 +164,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+     mutualSettleConfirm({ escrow: escrowOn(BASE), milestone, splits, bps, theirs: agreed(bps) })
+ 
+   it('names the escrow fixed forwarding fee rather than a live quote', () => {
+-    expect(paramText(cross(5000))).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded.")
++    expect(paramText(cross(5000))).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+   })
+ 
+   it('warns that a small share is credited on Arc instead of delivered', () => {
+@@ -188,7 +193,7 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+     const t = paramText(mutualSettleConfirm({
+       escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
+     }))
+-    expect(t).toContain("Cross-chain delivery uses this escrow's fixed forwarding fee of 0.20 USDC")
++    expect(t).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
+     expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
+   })
+ 
+diff --git a/frontend/src/pages/ProtocolSettings.confirm.test.jsx b/frontend/src/pages/ProtocolSettings.confirm.test.jsx
+index 19039eb..4a2e3b9 100644
+--- a/frontend/src/pages/ProtocolSettings.confirm.test.jsx
++++ b/frontend/src/pages/ProtocolSettings.confirm.test.jsx
+@@ -152,14 +152,17 @@ describe('protocolTreasuryConfirm', () => {
+      changing the global does NOT stop money reaching the old address —
+      in-flight escrows keep paying it on release. Anyone rotating a compromised
+      treasury needs to know that before they sign, not after. */
+-  it('warns that the old address keeps receiving fees from existing escrows', () => {
++  /* Phase B #8 corrected this: "the current address" was itself wrong.
++     escrowTreasury is per-escrow (:345, paid :1269), so after two rotations the
++     oldest escrows still pay the OLDEST address — not whatever is current. */
++  it('attributes in-flight fees to each escrow own snapshot, not to the current address', () => {
+     expect(paramText(d())).toContain(
+-      'This does not stop fees already owed to the current address — in-flight escrows will keep paying it on release.'
++      'This does not stop fees already owed. Each in-flight escrow pays whichever treasury address was set at its own deposit — which may be an older address than the one shown above.'
+     )
+   })
+ 
+   it('does not imply the redirect is total', () => {
+-    expect(d().subtitle).toMatch(/existing escrows continue going to the current address/i)
++    expect(d().subtitle).toMatch(/keeps paying the address it snapshotted when it was funded/i)
+   })
+ 
+   /* The fee and CCTP-fee screens are plain value swaps; only treasury carries
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index 6eb419d..0fe1312 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -14,13 +14,43 @@ import { useRoles } from '../hooks/useRoles.jsx'
+ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useProtocolConfig } from '../hooks/useArbiter.js'
+ import { useRefundBalance } from '../hooks/useEscrows.js'
++import { useDebouncedValue } from '../hooks/useDebouncedValue.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { ALL_DOMAIN_NUMBERS, getDomainName, ARC_DOMAIN } from '../config/chains.js'
+-import { formatUSDC, formatTimestamp, truncateAddr } from '../utils/format.js'
++import { formatUSDC, formatTimestamp, truncateAddr, isNonZeroAddress } from '../utils/format.js'
+ import { CONTRACT_ADDRESS, ESCROW_ABI } from '../config/contract.js'
+ 
+ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+ 
++/* How long the recovery panel waits after typing stops before looking a wallet
++ * up. Long enough that correcting a mistyped character costs one read instead
++ * of several, short enough that the submit button does not feel stuck — the
++ * gate below holds it disabled for exactly this long after the last keystroke.
++ */
++const RECOVERY_LOOKUP_DELAY_MS = 400
++
++/* The recovery panels' submit gate, unchanged in intent from the loading gate
++ * it replaces: never let a proposal or a claim be submitted against figures
++ * that have not actually been read.
++ *
++ * Debouncing the lookup opens a window the old expression could not see. A
++ * freshly typed address is valid, but its reads have not been issued yet, so
++ * both `isLoading` flags are false — a disabled react-query is not a loading
++ * one. Gating on those alone would enable the button during the pause, which
++ * is precisely the mid-read submit the gate exists to prevent: a confirm
++ * screen showing 0.00 USDC and "no proposal is currently pending", both of
++ * which are what an unread result looks like and both of which are wrong when
++ * the truth is a funded wallet with a standing nomination.
++ *
++ * So "typed something the reads have not caught up with" counts as pending
++ * too. Exact string comparison, not case-insensitive: the debounced value is
++ * the same string arriving later, and a checksum-case difference is a
++ * different lookup key to react-query anyway. */
++export function recoveryReadsPending({ typed, debounced, balanceLoading, recoveryLoading }) {
++  if (isAddress(typed) && typed !== debounced) return true
++  return !!(balanceLoading || recoveryLoading)
++}
++
+ /* ARBITER_WINDOW is `internal constant` with no getter (see CLAUDE.md's
+    bytecode-budget note), so the 14 days is mirrored here rather than read. */
+ const RECOVERY_WINDOW_SECONDS = 14 * 24 * 60 * 60
+@@ -35,13 +65,20 @@ export function expiryOf(proposedAt) {
+ function usePendingRecovery(address) {
+   const enabled = !!address
+   const base = { address: CONTRACT_ADDRESS, abi: ESCROW_ABI, query: { enabled } }
+-  const { data: proposedOwner } = useReadContract({
++  const { data: proposedOwner, isLoading: ownerLoading } = useReadContract({
+     ...base, functionName: 'pendingRefundRecovery', args: enabled ? [address] : undefined
+   })
+-  const { data: proposedAt } = useReadContract({
++  const { data: proposedAt, isLoading: atLoading } = useReadContract({
+     ...base, functionName: 'pendingRefundRecoveryAt', args: enabled ? [address] : undefined
+   })
+-  return { proposedOwner: proposedOwner ?? null, proposedAt: proposedAt ?? 0n }
++  // `?? null` / `?? 0n` are indistinguishable from a real empty result, so the
++  // loading flag has to travel with them: "no pending proposal" and "haven't
++  // looked yet" must not render as the same sentence on a confirm screen.
++  return {
++    proposedOwner: proposedOwner ?? null,
++    proposedAt: proposedAt ?? 0n,
++    isLoading: enabled && (ownerLoading || atLoading)
++  }
+ }
+ 
+ /* ---------- Confirm-screen descriptors ----------
+@@ -130,14 +167,16 @@ export function protocolTreasuryConfirm({ currentTreasury, newTreasury }) {
+   return {
+     ...CONFIG_BASE,
+     title: 'Change the protocol treasury',
+-    subtitle: 'Sets where fees from future escrows are paid. Fees from existing escrows continue going to the current address.',
++    subtitle: 'Sets where fees from future escrows are paid. Every existing escrow keeps paying the address it snapshotted when it was funded.',
+     functionName: 'setProtocolTreasury',
+     parameters: [
+       `Treasury: ${currentTreasury || 'unknown'} → ${newTreasury}`,
+       SNAPSHOT_NOTE,
+       // The one that catches people out: this is not a kill switch on the old
+-      // address. See the header comment above.
+-      'This does not stop fees already owed to the current address — in-flight escrows will keep paying it on release.'
++      // address. And "the current address" was itself wrong — escrowTreasury is
++      // per-escrow (:345, paid at :1269), so after two rotations the oldest
++      // escrows still pay the OLDEST address, not whatever is current now.
++      'This does not stop fees already owed. Each in-flight escrow pays whichever treasury address was set at its own deposit — which may be an older address than the one shown above.'
+     ]
+   }
+ }
+@@ -168,6 +207,41 @@ export function cctpForwardFeeConfirm({ currentFee, newFee }) {
+  * (:255, :264), cross-chain refund withdrawals to it (:866), and redirecting a
+  * payout to it (:975, :1027). Someone holding a refund credit they meant to
+  * withdraw there loses that route with no warning anywhere else in the UI. */
++/* Three carve-outs where the blanket "blocks/restores everything" reading is
++   simply false, and each has to be said on the screen for the domain it
++   applies to:
++
++   1. Domain 0 is withdrawRefund's Arc sentinel. That path returns before any
++      supportedDomains lookup (:854-859), so removing domain 0 blocks no
++      withdrawal — and enabling it grants no cross-chain route either, since 0
++      can never reach the cross-chain branch at all.
++   2. ARC_DOMAIN is exempt by construction in both redirects: the guard reads
++      `newDestinationDomain != ARC_DOMAIN && !supportedDomains[...]` (:975,
++      :1027), so an Arc redirect works whether or not Arc is on the list.
++   3. Enabling a domain does not make it reachable for every escrow. An
++      Arc-funded escrow (or Arc split leg) still cannot be redirected
++      cross-chain — F3 rejects it independently of supportedDomains (:982,
++      :1033). */
++function domainCarveOuts(domain, enabled) {
++  if (Number(domain) === 0) {
++    return [
++      enabled
++        ? 'Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.'
++        : 'This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.'
++    ]
++  }
++  if (Number(domain) === ARC_DOMAIN) {
++    return [
++      enabled
++        ? 'Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.'
++        : 'Arc was already always available for redirects; the contract exempts it from this list.'
++    ]
++  }
++  return enabled
++    ? []
++    : ['Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.']
++}
++
+ export function domainConfirm({ domain, domainName, enabled }) {
+   if (enabled) {
+     return {
+@@ -178,7 +252,8 @@ export function domainConfirm({ domain, domainName, enabled }) {
+       parameters: [
+         `${domainName} (domain ${domain}): Accepted → Not accepted`,
+         'Escrows already heading to this chain still release and deliver normally.',
+-        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.'
++        'Blocks new escrows to this chain, cross-chain refund withdrawals to it, and redirecting a payout to it.',
++        ...domainCarveOuts(domain, true)
+       ]
+     }
+   }
+@@ -190,7 +265,8 @@ export function domainConfirm({ domain, domainName, enabled }) {
+     functionName: 'addSupportedDomain',
+     parameters: [
+       `${domainName} (domain ${domain}): Not accepted → Accepted`,
+-      'New escrows may name this chain, and payouts may be redirected to it.'
++      'New escrows may name this chain, and payouts may be redirected to it.',
++      ...domainCarveOuts(domain, false)
+     ]
+   }
+ }
+@@ -221,8 +297,21 @@ function Gate() {
+     roles.isDefaultAdmin || roles.isFeeManager ||
+     roles.isDomainManager || roles.isRecoveryManager || roles.isPauser
+   if (!allowed) {
++    /* claimRefundCreditTransfer is address-gated, not role-gated: the contract
++       only requires msg.sender == the nominated wallet (:943). A nominee who
++       holds no admin role was previously bounced off this page entirely and
++       had no way to claim credit that is already theirs to take.
++
++       The panel is shown rather than auto-detected because the nomination
++       mapping is keyed by the BLACKLISTED wallet — there is no reverse index
++       from nominee to source, and RefundCreditTransferProposed is in the ABI
++       but not indexed by the subgraph, so "is this wallet nominated anywhere"
++       is not a question the frontend can currently ask. The claimer supplies
++       the source address, and the on-chain gate plus the live reads behind the
++       confirm screen do the rest. Nothing here is privileged: every value it
++       surfaces is already public. */
+     return (
+-      <div className="max-w-prose flex flex-col gap-4">
++      <div className="max-w-prose flex flex-col gap-6">
+         <p className="text-ink-2 text-[15px] leading-relaxed">
+           This wallet doesn't hold any admin role. The default admin can grant{' '}
+           <span className="num text-[12.5px]">FEE_MANAGER_ROLE</span>,{' '}
+@@ -231,6 +320,15 @@ function Gate() {
+           <span className="num text-[12.5px]">PAUSER_ROLE</span>.
+         </p>
+         <div><WalletButton /></div>
++        <div className="rule" />
++        <div className="flex flex-col gap-3">
++          <h2 className="display text-[24px] leading-tight text-ink">Claim recovered refund credit</h2>
++          <p className="text-[13.5px] text-ink-2 leading-relaxed">
++            No admin role is needed for this. If a recovery manager has nominated this wallet to
++            receive another wallet's refund credit, enter that wallet's address to claim it.
++          </p>
++          <ClaimRecovery />
++        </div>
+       </div>
+     )
+   }
+@@ -332,7 +430,8 @@ function FeeControls({ config, refetch }) {
+ 
+   const maxBps = config ? Number(config.maxProtocolFeeBps) : 1000
+   const bpsValid = /^\d+$/.test(bps) && Number(bps) <= maxBps
+-  const trValid = isAddress(tr)
++  // setProtocolTreasury reverts ZeroAddress (sol:197).
++  const trValid = isAddress(tr) && isNonZeroAddress(tr)
+   const cctpValid = /^\d+$/.test(cctpVal)
+ 
+   const currentFee = config ? `${(Number(config.protocolFeeBps) / 100).toFixed(2)}%` : '—'
+@@ -556,13 +655,26 @@ function ProposeRecovery() {
+   const [to, setTo] = useState('')
+   const [confirm, setConfirm] = useState(false)
+   const tx = useTx({ onConfirmed: () => { setFrom(''); setTo(''); setConfirm(false) } })
+-  const valid = isAddress(from) && isAddress(to) && from.toLowerCase() !== to.toLowerCase()
+-
+   // Read-only: what the balance is now, and whether a proposal is already
+   // standing for this wallet. Feeds the confirm screen only — nothing here
+-  // changes what is clickable or what executes.
+-  const { balance } = useRefundBalance(isAddress(from) ? from : undefined)
+-  const { proposedOwner, proposedAt } = usePendingRecovery(isAddress(from) ? from : undefined)
++  // changes what is clickable except the loading gate below.
++  //
++  // Debounced so investigating a wallet is one lookup after typing stops, not
++  // one per keystroke that happens to parse as an address.
++  const lookupFrom = useDebouncedValue(from, RECOVERY_LOOKUP_DELAY_MS)
++  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const { proposedOwner, proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupFrom) ? lookupFrom : undefined)
++  const readsPending = recoveryReadsPending({
++    typed: from, debounced: lookupFrom, balanceLoading, recoveryLoading
++  })
++
++  // Submitting mid-read would show "0.00 USDC" and "no proposal is currently
++  // pending" — both of which are what an unresolved read looks like, and both
++  // of which are exactly wrong when the truth is a funded wallet with a
++  // standing nomination about to be overwritten.
++  const valid =
++    isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
++    from.toLowerCase() !== to.toLowerCase() && !readsPending
+ 
+   return (
+     <div className="panel p-4 flex flex-col gap-3">
+@@ -630,13 +742,22 @@ function ClaimRecovery() {
+   const [blacklisted, setBlacklisted] = useState('')
+   const [confirm, setConfirm] = useState(false)
+   const tx = useTx({ onConfirmed: () => { setBlacklisted(''); setConfirm(false) } })
+-  const valid = isAddress(blacklisted)
+ 
+   // The claim sweeps the balance as it stands at claim time, so the figure on
+   // the confirm screen has to be read live off the source wallet — not off
+   // anything captured when the proposal was made.
+-  const { balance } = useRefundBalance(isAddress(blacklisted) ? blacklisted : undefined)
+-  const { proposedAt } = usePendingRecovery(isAddress(blacklisted) ? blacklisted : undefined)
++  // Same debounce as step 1: the claim panel looks up the same two getters
++  // against the same restricted wallet, so it leaks the same trail.
++  const lookupAddr = useDebouncedValue(blacklisted, RECOVERY_LOOKUP_DELAY_MS)
++  const { balance, isLoading: balanceLoading } = useRefundBalance(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const { proposedAt, isLoading: recoveryLoading } = usePendingRecovery(isAddress(lookupAddr) ? lookupAddr : undefined)
++  const readsPending = recoveryReadsPending({
++    typed: blacklisted, debounced: lookupAddr, balanceLoading, recoveryLoading
++  })
++
++  // A mid-read submit shows a 0.00 Total on a call that sweeps the full
++  // execution-time balance (:945), and drops the expiry line entirely.
++  const valid = isAddress(blacklisted) && !readsPending
+ 
+   return (
+     <div className="panel p-4 flex flex-col gap-3">
+diff --git a/frontend/src/pages/Settings.jsx b/frontend/src/pages/Settings.jsx
+index f962d9c..4774ba0 100644
+--- a/frontend/src/pages/Settings.jsx
++++ b/frontend/src/pages/Settings.jsx
+@@ -9,7 +9,7 @@ import AddressDisplay from '../components/AddressDisplay.jsx'
+ import { useRefundBalance } from '../hooks/useEscrows.js'
+ import { useTheme } from '../hooks/useTheme.jsx'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+-import { formatUSDC, isValidAddress } from '../utils/format.js'
++import { formatUSDC, isValidAddress, isNonZeroAddress } from '../utils/format.js'
+ import { CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ /* ---------- Confirm-screen descriptors ----------
+@@ -21,7 +21,16 @@ import { CONTRACT_ADDRESS } from '../config/contract.js'
+    These are the far end of the language used on the release/refund screens
+    in EscrowDetail: milestones are "credited" to a refund balance, and this
+    is where credited finally becomes sent. Only withdrawRefund actually sends
+-   anything — see transferRefundCreditConfirm below. */
++   anything — see transferRefundCreditConfirm below.
++
++   Both also carry a side effect nothing on screen mentions. F5: each one
++   deletes any pending two-step recovery proposal targeting the caller's
++   wallet (TrancheProtocol.sol:851-852, :897-898), on the reasoning that a
++   wallet able to transact is not a wallet needing recovery. That is correct,
++   but it is destructive to somebody else's in-flight work: a RECOVERY_MANAGER
++   proposal made minutes earlier is gone, and the 14-day clock restarts from
++   whenever they propose again. A user mid-recovery who withdraws a small
++   balance in the meantime has silently undone it. */
+ 
+ export function withdrawRefundConfirm({ balance, recipient, signer }) {
+   const parameters = [
+@@ -32,7 +41,8 @@ export function withdrawRefundConfirm({ balance, recipient, signer }) {
+     // with getDomainName(0): in CCTP_DOMAINS domain 0 is Ethereum Sepolia, so
+     // that would name the wrong chain on a signing screen.
+     'Sent on: Arc — a direct USDC transfer, not a cross-chain delivery.',
+-    'Withdraws your entire refund balance. Partial withdrawals are not supported.'
++    'Withdraws your entire refund balance. Partial withdrawals are not supported.',
++    'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
+   ]
+ 
+   // Withdrawing to a wallet other than the signer is a supported flow (that is
+@@ -72,7 +82,8 @@ export function transferRefundCreditConfirm({ balance, recipient }) {
+     parameters: [
+       `New owner: ${recipient}`,
+       'No USDC moves on this transaction — it re-keys who the credit belongs to.',
+-      'The new owner withdraws it from their own wallet.'
++      'The new owner withdraws it from their own wallet.',
++      'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
+     ]
+   }
+ }
+@@ -111,7 +122,7 @@ function RefundSection() {
+   useEffect(() => { if (address) setRecipient(address) }, [address])
+ 
+   const submit = () => {
+-    if (!isValidAddress(recipient)) return
++    if (!isNonZeroAddress(recipient)) return
+     tx.run(
+       escrowWrite('withdrawRefund', [recipient, 0, '0x0000000000000000000000000000000000000000', 0n]),
+       {
+@@ -152,7 +163,7 @@ function RefundSection() {
+         type="button"
+         className="btn-primary"
+         onClick={submit}
+-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
++        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
+       >
+         {tx.isBusy ? 'Submitting…' : 'Withdraw funds'}
+       </button>
+@@ -172,7 +183,7 @@ function TransferRefundCreditSection() {
+   const tx = useTx({ onConfirmed: () => refetch() })
+ 
+   const submit = () => {
+-    if (!isValidAddress(recipient)) return
++    if (!isNonZeroAddress(recipient)) return
+     tx.run(
+       escrowWrite('transferRefundCredit', [recipient]),
+       {
+@@ -211,7 +222,7 @@ function TransferRefundCreditSection() {
+         type="button"
+         className="btn-primary"
+         onClick={submit}
+-        disabled={balance === 0n || !isValidAddress(recipient) || tx.isBusy}
++        disabled={balance === 0n || !isNonZeroAddress(recipient) || tx.isBusy}
+       >
+         {tx.isBusy ? 'Submitting…' : 'Transfer credit'}
+       </button>
+diff --git a/frontend/src/pages/confirmWiring.test.jsx b/frontend/src/pages/confirmWiring.test.jsx
+new file mode 100644
+index 0000000..e48c685
+--- /dev/null
++++ b/frontend/src/pages/confirmWiring.test.jsx
+@@ -0,0 +1,240 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
++
++/* Wiring tests.
++ *
++ * Every other confirm test in this suite calls a descriptor directly and
++ * asserts its output. That proves the descriptor is right; it proves nothing
++ * about whether the app ever hands it to the signing screen. A call site that
++ * forgot `confirm:` entirely, or passed a stale variable, or wired the wrong
++ * descriptor to the wrong button, would leave all of those tests green.
++ *
++ * These render the real components and assert what actually reaches tx.run —
++ * the object Circle's screen is built from. They also pin the guards that stop
++ * a submission happening at all: the zero-address checks (which the contract
++ * rejects on-chain) and the loading gates (where an unresolved read is
++ * indistinguishable from a real empty answer).
++ */
++
++const runMock = vi.hoisted(() => vi.fn())
++const txState = vi.hoisted(() => ({ current: { run: null, isBusy: false, status: 'idle', hash: null, error: null } }))
++const authMock = vi.hoisted(() => ({ current: { address: '0x1111111111111111111111111111111111111111' } }))
++const refundBalanceMock = vi.hoisted(() => ({ current: { balance: 250000000n, isLoading: false, refetch: vi.fn() } }))
++const readContractMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
++const rolesMock = vi.hoisted(() => ({ current: { roles: {}, isLoading: false } }))
++const protocolConfigMock = vi.hoisted(() => ({ current: { config: { protocolFeeBps: 199n, protocolTreasury: '0x2222222222222222222222222222222222222222', cctpForwardFee: 200000n, paused: false }, refetch: vi.fn() } }))
++
++vi.mock('../hooks/useTx.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  useTx: () => ({ ...txState.current, run: runMock })
++}))
++vi.mock('../hooks/useAuth.jsx', () => ({ useAuth: () => authMock.current }))
++vi.mock('../hooks/useEscrows.js', async (importOriginal) => ({
++  ...(await importOriginal()),
++  useRefundBalance: () => refundBalanceMock.current
++}))
++vi.mock('../hooks/useRoles.jsx', () => ({ useRoles: () => rolesMock.current }))
++vi.mock('../hooks/useArbiter.js', () => ({ useProtocolConfig: () => protocolConfigMock.current }))
++vi.mock('../hooks/useSupportedDomains.js', () => ({ useSupportedDomains: () => ({ supported: [], refetch: vi.fn() }) }))
++vi.mock('wagmi', async (importOriginal) => ({
++  ...(await importOriginal()),
++  useReadContract: () => readContractMock.current,
++  // WalletButton renders inside both pages and reaches for the wagmi provider,
++  // which these tests deliberately do not stand up.
++  useAccount: () => ({ address: authMock.current?.address, isConnected: true, chainId: 5042002 }),
++  useConnect: () => ({ connect: vi.fn(), connectors: [] })
++}))
++
++// Both pages sit behind the connect gate, which otherwise renders a sign-in
++// form instead of the controls under test. The gate is not what these tests
++// are about; the mocked useAuth above already represents a connected wallet.
++vi.mock('../components/ConnectGate.jsx', () => ({
++  default: ({ children }) => children
++}))
++
++// Settings renders an appearance section that requires ThemeProvider; the
++// theme is irrelevant to what these tests assert.
++vi.mock('../hooks/useTheme.jsx', () => ({
++  useTheme: () => ({ theme: 'light', setTheme: vi.fn(), resolved: 'light' })
++}))
++
++const Settings = (await import('./Settings.jsx')).default
++const ProtocolSettings = (await import('./ProtocolSettings.jsx')).default
++const { withdrawRefundConfirm } = await import('./Settings.jsx')
++const { claimRecoveryConfirm, protocolTreasuryConfirm } = await import('./ProtocolSettings.jsx')
++
++const ZERO = '0x0000000000000000000000000000000000000000'
++const GOOD = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++
++// The options object tx.run received, i.e. what actually feeds the signing screen.
++const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
++
++const type = (el, value) => fireEvent.change(el, { target: { value } })
++
++/* Phase E: the recovery panels debounce their lookups by 400ms, and the submit
++   gate deliberately counts "typed, not yet looked up" as a read still pending
++   — otherwise the button would go live during the pause, which is the exact
++   mid-read submit the gate exists to prevent.
++ *
++ * So a test that types an address and immediately expects the button live is
++ * now asserting the wrong instant, not a broken gate. Advance past the window
++ * first. Uses real timers deliberately: this file renders components and
++ * fires events, and swapping the whole file to fake timers to serve two
++ * assertions would be a much larger change than waiting 400ms twice. */
++const RECOVERY_DEBOUNCE_MS = 400
++const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
++
++// The treasury field is labelled rather than uniquely placeheld (several
++// inputs share the bare "0x…" placeholder), so select it by its label.
++const treasuryInput = () => screen.getByLabelText(/treasury address/i)
++
++// vitest.config.js does not set `globals`, so RTL's automatic cleanup is never
++// registered and renders accumulate across tests.
++afterEach(() => { cleanup() })
++
++beforeEach(() => {
++  runMock.mockReset()
++  txState.current = { run: null, isBusy: false, status: 'idle', hash: null, error: null }
++  authMock.current = { address: '0x1111111111111111111111111111111111111111' }
++  refundBalanceMock.current = { balance: 250000000n, isLoading: false, refetch: vi.fn() }
++  readContractMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
++  rolesMock.current = { roles: {}, isLoading: false }
++})
++
++describe('withdrawRefund is wired to its descriptor', () => {
++  const openWithdraw = () => {
++    render(<Settings />)
++    return screen.getByRole('button', { name: /withdraw funds/i })
++  }
++
++  it('passes the real withdrawRefundConfirm output to tx.run', () => {
++    const btn = openWithdraw()
++    fireEvent.click(btn)
++
++    expect(runMock).toHaveBeenCalledTimes(1)
++    const confirm = lastConfirm()
++    expect(confirm).toBeTruthy()
++    expect(confirm.functionName).toBe('withdrawRefund')
++    // Independently rebuilt from the same inputs the component had, so a call
++    // site that passed a stale balance or the wrong recipient fails here.
++    expect(confirm).toEqual(withdrawRefundConfirm({
++      balance: 250000000n,
++      recipient: authMock.current.address,
++      signer: authMock.current.address
++    }))
++  })
++
++  it('carries the live balance, not a placeholder', () => {
++    refundBalanceMock.current = { balance: 987654321n, isLoading: false, refetch: vi.fn() }
++    fireEvent.click(openWithdraw())
++    expect(lastConfirm().amount).toBe(987654321n)
++  })
++
++  /* withdrawRefund reverts ZeroAddress on-chain, so submitting is a guaranteed
++     paid failure. isValidAddress passes the zero address on hex shape alone. */
++  it('refuses to submit to the zero address', () => {
++    render(<Settings />)
++    const input = screen.getAllByPlaceholderText('0x…')[0]
++    type(input, ZERO)
++    const btn = screen.getByRole('button', { name: /withdraw funds/i })
++    expect(btn).toBeDisabled()
++    fireEvent.click(btn)
++    expect(runMock).not.toHaveBeenCalled()
++  })
++
++  it('still allows an ordinary address', () => {
++    render(<Settings />)
++    type(screen.getAllByPlaceholderText('0x…')[0], GOOD)
++    const btn = screen.getByRole('button', { name: /withdraw funds/i })
++    expect(btn).not.toBeDisabled()
++    fireEvent.click(btn)
++    expect(lastConfirm().parameters.join('\n')).toContain(GOOD)
++  })
++})
++
++describe('the treasury setter is wired to its descriptor', () => {
++  beforeEach(() => { rolesMock.current = { roles: { isFeeManager: true }, isLoading: false } })
++
++  it('passes the real protocolTreasuryConfirm output to tx.run', () => {
++    render(<ProtocolSettings />)
++    type(treasuryInput(), GOOD)
++    fireEvent.click(screen.getByRole('button', { name: /update treasury/i }))
++
++    const confirm = lastConfirm()
++    expect(confirm.functionName).toBe('setProtocolTreasury')
++    expect(confirm).toEqual(protocolTreasuryConfirm({
++      currentTreasury: protocolConfigMock.current.config.protocolTreasury,
++      newTreasury: GOOD
++    }))
++  })
++
++  /* setProtocolTreasury reverts ZeroAddress (sol:197). */
++  it('refuses to submit the zero address as treasury', () => {
++    render(<ProtocolSettings />)
++    type(treasuryInput(), ZERO)
++    const btn = screen.getByRole('button', { name: /update treasury/i })
++    expect(btn).toBeDisabled()
++    fireEvent.click(btn)
++    expect(runMock).not.toHaveBeenCalled()
++  })
++})
++
++describe('the recovery claim is wired to its descriptor', () => {
++  // No admin role: this is the nominee path, which the page must still expose.
++  beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
++
++  const openClaim = async () => {
++    render(<ProtocolSettings />)
++    const input = screen.getByPlaceholderText(/the restricted wallet from step 1/i)
++    type(input, GOOD)
++    await act(settleLookup)
++    fireEvent.click(screen.getByRole('button', { name: /^claim credit$/i }))
++    return screen.getByRole('button', { name: /confirm claim/i })
++  }
++
++  it('reaches a wallet holding no admin role at all', () => {
++    render(<ProtocolSettings />)
++    expect(screen.getByPlaceholderText(/the restricted wallet from step 1/i)).toBeTruthy()
++  })
++
++  it('passes the real claimRecoveryConfirm output to tx.run', async () => {
++    readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
++    fireEvent.click(await openClaim())
++
++    const confirm = lastConfirm()
++    expect(confirm.functionName).toBe('claimRefundCreditTransfer')
++    expect(confirm).toEqual(claimRecoveryConfirm({
++      blacklisted: GOOD,
++      balance: 250000000n,
++      expiry: Number(1767225600n) + 14 * 24 * 60 * 60
++    }))
++  })
++
++  /* The claim sweeps the execution-time balance (sol:945). A mid-read submit
++     would put a 0.00 Total on that, and drop the expiry line entirely. */
++  it('blocks submission while the balance read is still in flight', () => {
++    refundBalanceMock.current = { balance: 0n, isLoading: true, refetch: vi.fn() }
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++  })
++
++  it('blocks submission while the pending-proposal read is still in flight', () => {
++    readContractMock.current = { data: undefined, isLoading: true, refetch: vi.fn() }
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++  })
++
++  /* Phase E: "resolved" now includes the debounce settling. Before the window
++     elapses the reads have not been issued at all, so the button must still be
++     disabled — asserted first, since that is the state the privacy change
++     introduced and the gate has to cover. */
++  it('allows submission once both reads have resolved', async () => {
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++    await act(settleLookup)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
++  })
++})
+diff --git a/frontend/src/pages/phaseB.test.jsx b/frontend/src/pages/phaseB.test.jsx
+new file mode 100644
+index 0000000..957b89a
+--- /dev/null
++++ b/frontend/src/pages/phaseB.test.jsx
+@@ -0,0 +1,217 @@
++import { describe, it, expect } from 'vitest'
++
++/* Phase B — three copy/behaviour corrections where the previous wording
++   flattened a real asymmetry, plus the permissionless timeout trigger.
++
++   Each of these is a case where the contract does two different things and the
++   screen said one. */
++import { milestoneConfirm } from './EscrowDetail.jsx'
++import { timeoutSettlementConfirm } from './ArbiterPanel.jsx'
++import { domainConfirm, protocolTreasuryConfirm } from './ProtocolSettings.jsx'
++
++const ARC = 26
++const BASE = 6
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain) => ({
++  id: 7,
++  milestoneCount: 3,
++  recipient: RECIPIENT,
++  mintRecipient: B32(RECIPIENT),
++  destinationDomain: domain,
++  escrowCctpForwardFee: 200000n // 0.20 USDC
++})
++
++const milestone = { index: 1, amount: 250000000n, state: 1 }
++const paramText = (d) => (d.parameters || []).join('\n')
++
++const confirm = (key, { escrow = escrowOn(BASE), splits = [], maxFee } = {}) =>
++  milestoneConfirm({ key, fn: key === 'approve' ? 'approveRelease' : 'release' }, escrow, milestone, splits, maxFee)
++
++/* #6. approveRelease passes the caller's quoted maxFee straight to the burn
++   (:647 → :1298). release() discards it and substitutes the escrow snapshot
++   (:674, :682), precisely because it is permissionless. Split legs always burn
++   at the snapshot (:1329). One shared line cannot be true for all three. */
++describe('#6 — the two release paths do not pay the same forwarding fee', () => {
++  it('names the live quote when approving a no-split cross-chain release', () => {
++    expect(paramText(confirm('approve', { maxFee: 450000n })))
++      .toContain('Delivery costs up to 0.45 USDC in Circle forwarding fees, quoted now and deducted from the payout on arrival.')
++  })
++
++  /* The permissionless path ignores whatever the caller quoted, so showing
++     that figure would name a number the burn never uses. */
++  it('names the escrow snapshot for a permissionless release, never the quote', () => {
++    const t = paramText(confirm('release', { maxFee: 450000n }))
++    expect(t).toContain("Delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, deducted from the payout on arrival.")
++    expect(t).not.toContain('0.45 USDC')
++  })
++
++  /* Split legs burn at the snapshot even on the approve path. */
++  it('names the snapshot for split legs even when approving', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(confirm('approve', { splits, maxFee: 450000n }))
++    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC, deducted on delivery.")
++    expect(t).not.toContain('0.45 USDC')
++  })
++
++  /* _approveAndBurn forces maxFee = 0 on Arc (:1343-1346), so any fee line at
++     all would be inventing a cost. */
++  it('says nothing about forwarding fees for a same-chain Arc release', () => {
++    for (const key of ['approve', 'release']) {
++      const t = paramText(confirm(key, { escrow: escrowOn(ARC), maxFee: 450000n }))
++      expect(t).not.toMatch(/forwarding fee|Delivery costs/i)
++    }
++  })
++
++  it('still discloses the protocol fee on both paths', () => {
++    for (const key of ['approve', 'release']) {
++      expect(paramText(confirm(key, { maxFee: 450000n })))
++        .toContain('Protocol fee is deducted from this amount before payout.')
++    }
++  })
++
++  /* An unquoted approve (Arc, or a quote that never ran) must fall back to the
++     snapshot rather than printing "up to undefined". */
++  it('falls back to the snapshot when no quote was taken', () => {
++    const t = paramText(confirm('approve', {}))
++    expect(t).toContain("fixed forwarding fee of 0.20 USDC")
++    expect(t).not.toMatch(/undefined|NaN/)
++  })
++
++  /* A zero or absent snapshot with no quote to fall back on means the fee is
++     UNKNOWN, not zero — escrows funded before setFee.js ran carry
++     escrowCctpForwardFee = 0, and the Goldsky read can omit the field entirely.
++     Falling through to formatUSDC would print "0.00 USDC", which is both wrong
++     and reassuring: the burn still pays Circle's live fee out of the payout.
++     Saying nothing is the only honest option, so assert on the silence
++     directly rather than leaning on the Arc case to cover it incidentally. */
++  it('states no forwarding fee at all when the snapshot is zero or absent', () => {
++    const zeroed = { ...escrowOn(BASE), escrowCctpForwardFee: 0n }
++    const { escrowCctpForwardFee, ...omitted } = escrowOn(BASE)
++
++    for (const escrow of [zeroed, omitted]) {
++      // 'approve' with no maxFee is the unquoted path; 'release' discards any
++      // quote by construction, so both land on the snapshot branch.
++      for (const key of ['approve', 'release']) {
++        const t = paramText(confirm(key, { escrow }))
++        expect(t).not.toMatch(/forwarding fee|Delivery costs/i)
++        // Boundary-anchored: a bare `toContain('0.00 USDC')` also matches
++        // inside the milestone's own "250.00 USDC", so it would fail on a
++        // correct descriptor. This rejects a standalone zero amount only.
++        expect(t).not.toMatch(/(^|[^\d.])0(\.0+)? USDC/)
++        // and it is silence about the fee specifically, not an empty descriptor
++        expect(t).toContain('Protocol fee is deducted from this amount before payout.')
++      }
++    }
++  })
++})
++
++/* #7. "Removing blocks everything / enabling restores everything" is false in
++   three specific places, each keyed to a particular domain number. */
++describe('#7 — domain toggles have three carve-outs', () => {
++  const build = (domain, enabled) => domainConfirm({ domain, domainName: `Domain ${domain}`, enabled })
++
++  /* withdrawRefund returns on the domain-0 sentinel before any supportedDomains
++     lookup (:854-859). */
++  it('says domain 0 refund withdrawals are unaffected by removal', () => {
++    expect(paramText(build(0, true)))
++      .toContain('Refund withdrawals are unaffected: domain 0 is the "stay on Arc" sentinel, which never consults this list.')
++  })
++
++  it('does not claim enabling domain 0 opens a cross-chain refund route', () => {
++    expect(paramText(build(0, false)))
++      .toContain('This does not open a cross-chain refund route: domain 0 is the "stay on Arc" sentinel, not a destination.')
++  })
++
++  /* Both redirects read `!= ARC_DOMAIN && !supportedDomains[...]` (:975, :1027),
++     so Arc is exempt from the list entirely. */
++  it('says Arc redirects survive removing Arc', () => {
++    expect(paramText(build(ARC, true)))
++      .toContain('Payout redirects to Arc keep working regardless — the contract exempts Arc from this list.')
++  })
++
++  /* F3 blocks Arc-funded escrows from going cross-chain regardless of the
++     allow-list (:982, :1033), so enabling a domain does not make it reachable
++     for every escrow. */
++  it('warns that enabling a domain does not unblock Arc-funded escrows', () => {
++    expect(paramText(build(BASE, false)))
++      .toContain('Escrows funded to pay on Arc still cannot be redirected here — that is blocked separately, not by this list.')
++  })
++
++  it('does not attach the Arc-funded caveat to Arc itself', () => {
++    expect(paramText(build(ARC, false))).not.toContain('still cannot be redirected here')
++  })
++
++  it('keeps the ordinary consequences on an ordinary domain', () => {
++    expect(paramText(build(BASE, true)))
++      .toContain('Escrows already heading to this chain still release and deliver normally.')
++  })
++})
++
++/* #8. Round 6 established that a treasury rotation does not redirect in-flight
++   fees. The old copy said those keep paying "the current address", which is a
++   different and wrong claim: escrowTreasury is per-escrow (:345, paid :1269),
++   so after two rotations the oldest escrows pay the OLDEST address. */
++describe('#8 — each escrow pays the treasury it snapshotted', () => {
++  const d = () => protocolTreasuryConfirm({
++    currentTreasury: '0x1111111111111111111111111111111111111111',
++    newTreasury: '0x2222222222222222222222222222222222222222'
++  })
++
++  it('attributes the payment to the escrow deposit, not to "the current address"', () => {
++    expect(paramText(d()))
++      .toContain('Each in-flight escrow pays whichever treasury address was set at its own deposit')
++  })
++
++  it('admits the paying address may be older than the one on screen', () => {
++    expect(paramText(d())).toContain('which may be an older address than the one shown above')
++  })
++
++  /* The specific wrong phrase must not come back. */
++  it('no longer claims in-flight escrows pay the current address', () => {
++    const t = `${d().subtitle}\n${paramText(d())}`
++    expect(t).not.toMatch(/continue going to the current address/i)
++    expect(t).not.toMatch(/keep paying it on release/i)
++  })
++
++  it('still states the snapshot protection for future escrows', () => {
++    expect(d().subtitle).toContain('keeps paying the address it snapshotted when it was funded')
++  })
++})
++
++/* #22. resolveDisputeByTimeout carries no role gate (:561) — once the window
++   closes, anyone can settle at the fixed 50/50. Until now the only button for
++   it sat behind ArbiterPanel's role gate, so the permissionless escape hatch
++   was reachable only by the party whose inaction it exists to route around.
++
++   The descriptor is shared with ArbiterPanel's trigger rather than duplicated,
++   which is what these assertions pin: the same call described the same way
++   from either entry point. */
++describe('#22 — the timeout settlement descriptor is shared, not duplicated', () => {
++  const splits = []
++  const disputed = { index: 1, amount: 250000000n, state: 2 }
++  const escrow = { ...escrowOn(ARC), refundTo: '0x4bdbe608ea998b4822476353df9dd83228ffd503' }
++  const timeoutAt = 1767225600
++
++  const d = () => timeoutSettlementConfirm({
++    escrow, milestone: disputed, index: 1, splits, timeoutAt, bpsDenominator: 10_000n
++  })
++
++  it('states the fixed split as something nobody chooses', () => {
++    expect(paramText(d()))
++      .toContain('Fixed 50/50 split written into the contract — this is not an arbiter ruling and the share cannot be adjusted.')
++  })
++
++  it('says explicitly that anyone can submit it', () => {
++    expect(paramText(d())).toContain('Anyone can submit this.')
++  })
++
++  it('names the permissionless function, not the arbiter ruling', () => {
++    expect(d().functionName).toBe('resolveDisputeByTimeout')
++  })
++})
+diff --git a/frontend/src/pages/phaseC.test.jsx b/frontend/src/pages/phaseC.test.jsx
+new file mode 100644
+index 0000000..502f660
+--- /dev/null
++++ b/frontend/src/pages/phaseC.test.jsx
+@@ -0,0 +1,366 @@
++import { describe, it, expect } from 'vitest'
++
++/* Phase C — eight copy corrections, all of the same kind: a descriptor that
++   states more than the contract does. None of these screens was missing
++   information; each asserted something specific and false, which is worse on a
++   signing screen than saying nothing.
++
++   The failures cluster into three shapes:
++
++   - a cap presented as a charge (#5),
++   - a destination presented as certain when the contract has a branch that
++     sends the money elsewhere, or nowhere (#9, #11, #12),
++   - a timing or a beneficiary asserted for a whole transaction when it is only
++     true of one of its halves (#10, #13, #14, #15). */
++import {
++  mutualSettleConfirm,
++  payoutLines,
++  refundToLines,
++  proposeMilestoneCancelConfirm,
++  milestoneCancelCompletion,
++  milestoneCancelBlurb,
++  milestoneConfirm,
++  cancelEscrowConfirm,
++  raiseDisputeConfirm,
++  extendDeadlineConfirm
++} from './EscrowDetail.jsx'
++import { resolveDisputeConfirm, timeoutCreditLines } from './ArbiterPanel.jsx'
++import { withdrawRefundConfirm, transferRefundCreditConfirm } from './Settings.jsx'
++
++const ARC = 26
++const BASE = 6
++const DAY = 24 * 60 * 60
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const DEPOSITOR = '0x2fcbb92566c51e92c1353d0a6a9ac86f10bb1a03'
++const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain, over = {}) => ({
++  id: 7,
++  milestoneCount: 3,
++  recipient: RECIPIENT,
++  mintRecipient: B32(RECIPIENT),
++  depositor: DEPOSITOR,
++  refundTo: REFUND_TO,
++  destinationDomain: domain,
++  escrowCctpForwardFee: 200000n, // 0.20 USDC
++  deadline: 1767225600n, // 1 Jan 2026
++  ...over
++})
++
++const milestone = { index: 1, amount: 250000000n, state: 2 } // 250 USDC
++const agreed = (bps) => ({ exists: true, bps: BigInt(bps) })
++const paramText = (d) => (d.parameters || []).join('\n')
++
++const splitsOn = (...domains) =>
++  domains.map((d) => ({ bps: BigInt(10_000 / domains.length), destinationDomain: d, mintRecipient: B32(RECIPIENT) }))
++
++const resolve = (over = {}) => resolveDisputeConfirm({
++  escrow: escrowOn(BASE),
++  milestone,
++  index: 1,
++  splits: [],
++  bps: 5000,
++  resolutionUri: 'https://ipfs.io/ipfs/bafyRuling',
++  maxFee: 450000n,
++  canTimeout: false,
++  bpsDenominator: 10_000n,
++  ...over
++})
++
++const settle = (over = {}) => mutualSettleConfirm({
++  escrow: escrowOn(BASE),
++  milestone,
++  splits: [],
++  bps: 5000,
++  theirs: agreed(5000),
++  ...over
++})
++
++/* #5. cctpMaxFee is a ceiling, not a price. _approveAndBurn passes it to CCTP
++   as maxFee and Circle deducts its own forwarding fee — which may be lower —
++   from the burned amount on the destination (TrancheProtocol.sol:874-877). A
++   screen that names it as the amount deducted overstates the cost of every
++   delivery that comes in under the cap. */
++describe('#5 — the forwarding fee is a cap, not a charge', () => {
++  it('caps the split-leg fee on an arbiter ruling', () => {
++    const t = paramText(resolve({ splits: splitsOn(BASE, BASE) }))
++    expect(t).toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
++  })
++
++  it('caps the delivery fee on a mutual settlement', () => {
++    expect(paramText(settle())).toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC")
++  })
++
++  /* The specific fixed-amount phrasings that were there before must not come
++     back — "pays ... fee of 0.20" and "uses ... fee of 0.20" both read as a
++     price rather than a limit. */
++  it('no longer states the fee as an amount that is simply taken', () => {
++    const t = `${paramText(resolve({ splits: splitsOn(BASE, BASE) }))}\n${paramText(settle())}`
++    expect(t).not.toMatch(/fee of 0\.20 USDC, deducted/)
++    expect(t).not.toMatch(/delivery uses this escrow's fixed forwarding fee/i)
++  })
++})
++
++/* #9. refundTo is whatever address the depositor passed; it falls back to the
++   depositor only when address(0) was supplied (:274-275). Every refund path
++   credits it (:715, :809, :1091, :1241), so "refund the payer" is a guess the
++   contract never makes. */
++describe('#9 — refunds go to refundTo, which need not be the payer', () => {
++  it('discloses the divergence when refundTo is not the depositor', () => {
++    const lines = refundToLines(escrowOn(ARC))
++    expect(lines[0]).toBe(`Credited to: ${REFUND_TO}`)
++    expect(lines[1]).toBe("That is this escrow's configured refund address, not the payer's own wallet.")
++  })
++
++  /* The ordinary case must stay quiet, or the disclosure becomes noise that
++     signers learn to skip on the screens where it matters. */
++  it('stays silent when refundTo is the depositor', () => {
++    expect(refundToLines(escrowOn(ARC, { refundTo: DEPOSITOR }))).toEqual([`Credited to: ${DEPOSITOR}`])
++  })
++
++  it('compares addresses case-insensitively', () => {
++    const mixed = escrowOn(ARC, { refundTo: DEPOSITOR.toUpperCase().replace('0X', '0x') })
++    expect(refundToLines(mixed)).toHaveLength(1)
++  })
++
++  /* Titles are the part a signer reads first, and three of them named a
++     beneficiary the transaction does not necessarily have. */
++  it('no longer names the payer as the beneficiary in any refund title', () => {
++    const titles = [
++      proposeMilestoneCancelConfirm({ escrow: escrowOn(ARC), milestone, role: 'payer', otherProposed: true }).title,
++      milestoneConfirm({ key: 'refund', fn: 'refundAfterDeadline' }, escrowOn(ARC), { ...milestone, state: 0 }, []).title,
++      cancelEscrowConfirm({ escrow: escrowOn(ARC), milestones: [{ index: 0, amount: 1n, state: 0 }], otherApproved: true }).title
++    ]
++    for (const title of titles) {
++      expect(title).not.toMatch(/the payer/i)
++    }
++  })
++
++  it('carries the disclosure through to the refund descriptors themselves', () => {
++    const refund = milestoneConfirm({ key: 'refund', fn: 'refundAfterDeadline' }, escrowOn(ARC), { ...milestone, state: 0 }, [])
++    expect(paramText(refund)).toContain("That is this escrow's configured refund address, not the payer's own wallet.")
++  })
++})
++
++/* #10. "Pays both sides immediately" was true of neither side. The payer's
++   half is a refund credit that is never sent anywhere (:1241); the
++   freelancer's is a safeTransfer inside the transaction on Arc (:1343-1346)
++   but a burn Circle mints minutes later when cross-chain. And both figures are
++   gross — escrowFeeBps comes off the freelancer's share (:1270-1271). */
++describe('#10 — credit, transfer and pending delivery are three different things', () => {
++  it('does not claim an arbiter ruling pays both sides immediately', () => {
++    expect(resolve().subtitle).not.toMatch(/pays both sides immediately/i)
++  })
++
++  it('does not claim a mutual settlement pays out immediately', () => {
++    expect(settle().subtitle).not.toMatch(/pays out immediately/i)
++  })
++
++  it('says a cross-chain share arrives later, on both screens', () => {
++    for (const t of [paramText(resolve()), paramText(settle())]) {
++      expect(t).toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++    }
++  })
++
++  it('says an Arc share moves within the transaction, on both screens', () => {
++    const t = `${paramText(resolve({ escrow: escrowOn(ARC) }))}\n${paramText(settle({ escrow: escrowOn(ARC) }))}`
++    expect(t).not.toMatch(/not instant/)
++    expect(t).toContain("The freelancer's share is transferred on Arc as this transaction executes.")
++  })
++
++  /* The proposal screen's figures are what WOULD happen, and it stated both as
++     plain payments. The payer's is a credit; the freelancer's is pre-fee. */
++  it('distinguishes gross from credited on the settlement proposal', () => {
++    const t = paramText(settle({ theirs: { exists: false, bps: 0n } }))
++    expect(t).toContain("Would settle at 125.00 USDC to the freelancer before the protocol fee, and 125.00 USDC credited to the payer's refund balance.")
++    expect(t).not.toMatch(/Would pay .* to the payer/)
++  })
++
++  /* A 0% ruling pays the freelancer nothing, so the delivery-timing line would
++     be describing a transfer that does not happen. */
++  it('says nothing about delivery timing when the freelancer gets nothing', () => {
++    expect(paramText(resolve({ bps: 0 }))).not.toMatch(/arrives once Circle|transferred on Arc as this/)
++  })
++})
++
++/* #11. Neither split loop pays every configured recipient. Both are guarded by
++   `share > 0` (:608, :1312), so a leg whose proportional share rounds down to
++   zero is skipped outright — no credit, no burn, no event. */
++describe('#11 — a configured split recipient does not always receive value', () => {
++  it('drops the "each on their own chain" promise from the payout line', () => {
++    const lines = payoutLines(escrowOn(BASE), splitsOn(BASE, BASE))
++    expect(lines[0]).toBe('Paid to: 2 split recipients, each to their configured chain')
++    expect(lines.join('\n')).not.toMatch(/each on their own chain/)
++  })
++
++  it('states the rounding case on the payout line', () => {
++    expect(payoutLines(escrowOn(BASE), splitsOn(BASE, BASE)).join('\n'))
++      .toContain('A recipient whose share rounds down to zero is paid nothing.')
++  })
++
++  it('states it on the timeout credit lines too', () => {
++    expect(timeoutCreditLines(escrowOn(ARC), splitsOn(ARC, ARC)).join('\n'))
++      .toContain('A recipient whose share rounds down to zero is credited nothing.')
++  })
++
++  it('states it on an arbiter ruling over a split escrow', () => {
++    expect(paramText(resolve({ splits: splitsOn(BASE, BASE) })))
++      .toContain('A recipient whose share rounds down to zero is paid nothing.')
++  })
++
++  /* A no-split escrow has exactly one destination and no rounding step, so the
++     caveat would be describing a branch that cannot execute. */
++  it('does not attach the caveat to a no-split escrow', () => {
++    const t = `${payoutLines(escrowOn(BASE), []).join('\n')}\n${paramText(resolve())}`
++    expect(t).not.toMatch(/rounds down to zero/)
++  })
++})
++
++/* #12. The refund branch calls _checkEscrowCompletion (:814), which flips the
++   escrow to COMPLETED once every milestone is RELEASED(3) or REFUNDED(4)
++   (:722-733). Cancelling the last nonterminal milestone therefore ends the
++   engagement — the opposite of what the screen promised. */
++describe('#12 — cancelling the last nonterminal milestone completes the escrow', () => {
++  const cancel = (milestones) =>
++    proposeMilestoneCancelConfirm({ escrow: escrowOn(ARC), milestone, milestones, role: 'payer', otherProposed: true })
++
++  const carriesOn = [
++    { index: 0, amount: 1n, state: 3 },
++    { index: 1, amount: 250000000n, state: 1 },
++    { index: 2, amount: 1n, state: 0 }
++  ]
++  const lastOne = [
++    { index: 0, amount: 1n, state: 3 },
++    { index: 1, amount: 250000000n, state: 1 },
++    { index: 2, amount: 1n, state: 4 }
++  ]
++
++  it('says the escrow completes when every sibling has already settled', () => {
++    const t = paramText(cancel(lastOne))
++    expect(t).toContain('Every other milestone has already settled, so this completes the whole escrow — nothing carries on afterwards.')
++    expect(t).not.toMatch(/rest of the escrow carries on/)
++  })
++
++  it('keeps the ordinary wording when a sibling is still running', () => {
++    const t = paramText(cancel(carriesOn))
++    expect(t).toContain('The rest of the escrow carries on — only this milestone is cancelled.')
++    expect(t).not.toMatch(/completes the whole escrow/)
++  })
++
++  /* Both readings are consequential, so an unreadable milestone list must
++     produce neither claim rather than defaulting to the friendlier one. */
++  it('claims neither when the milestone list cannot be reconciled', () => {
++    for (const list of [undefined, [], [{ index: 1, amount: 1n, state: 1 }]]) {
++      const t = paramText(cancel(list))
++      expect(t).not.toMatch(/carries on|completes the whole escrow/)
++    }
++  })
++
++  /* The panel's own blurb sits directly above the button and made the same
++     claim, but with only two branches — so an unreconciled list fell through to
++     "the rest of the escrow continues", the exact sentence the descriptor
++     refuses to say. Both now read the same flags off one helper.
++
++     Not reachable through the app today: getEscrowDetail sizes `milestones` as
++     new Milestone[](e.milestoneCount) in the call that returns the escrow
++     (:1163-1184), useEscrowDetail derives both from that one response, and the
++     page renders a skeleton until it lands. This pins the guard on the exported
++     helpers, where a future caller can supply a partial list. */
++  describe('the panel blurb agrees with the descriptor', () => {
++    const flags = (milestones) => milestoneCancelCompletion(escrowOn(ARC), 1, milestones)
++
++    it('makes no claim either way when the list cannot be reconciled', () => {
++      for (const list of [undefined, [], [{ index: 1, amount: 1n, state: 1 }]]) {
++        const text = milestoneCancelBlurb(flags(list))
++        expect(text).not.toMatch(/rest of the escrow continues|completes the whole escrow/)
++        expect(text).toBe('Both the payer and freelancer must propose. Once both agree, this milestone is refunded.')
++      }
++    })
++
++    it('says the escrow continues when a sibling is still running', () => {
++      expect(milestoneCancelBlurb(flags(carriesOn))).toContain('the rest of the escrow continues')
++    })
++
++    it('says the escrow completes when this is the last nonterminal milestone', () => {
++      expect(milestoneCancelBlurb(flags(lastOne))).toContain('that completes the whole escrow')
++    })
++
++    /* The point of sharing the helper: for any given input the two surfaces
++       reach the same conclusion, so a signer cannot read one thing on the page
++       and the opposite on the signing screen. */
++    it('never disagrees with the descriptor about the same input', () => {
++      for (const list of [undefined, [], carriesOn, lastOne]) {
++        const blurb = milestoneCancelBlurb(flags(list))
++        const params = paramText(cancel(list))
++        expect(/completes the whole escrow/.test(blurb)).toBe(/completes the whole escrow/.test(params))
++        expect(/rest of the escrow continues/.test(blurb)).toBe(/rest of the escrow carries on/.test(params))
++      }
++    })
++  })
++})
++
++/* #13. raiseDispute does not hand the milestone to an arbiter. mutualSettle
++   accepts DISPUTED explicitly (:534), so the parties can still settle it
++   between themselves, and resolveDisputeByTimeout has no role gate (:561), so
++   anyone can close it at 50/50 once ARBITER_WINDOW elapses. Telling a signer
++   the arbiter decides invites exactly the waiting the timeout exists for. */
++describe('#13 — an arbiter is not the only way out of a dispute', () => {
++  const d = () => raiseDisputeConfirm({ escrow: escrowOn(ARC), milestone, reason: 'Not delivered', uri: 'ipfs://x' })
++
++  it('names both non-arbiter exits', () => {
++    expect(paramText(d())).toContain('An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.')
++  })
++
++  it('no longer says the dispute is handed to the arbiter to decide', () => {
++    expect(d().subtitle).not.toMatch(/hands it to the arbiter/i)
++  })
++
++  it('still says the dispute cannot be withdrawn', () => {
++    expect(d().subtitle).toContain('cannot be withdrawn once raised')
++  })
++})
++
++/* #14. F5: both refund actions delete any pending two-step recovery proposal
++   targeting the caller (:851-852, :897-898). Correct — a wallet that can
++   transact does not need recovering — but it silently destroys a
++   RECOVERY_MANAGER's in-flight proposal and restarts the 14-day clock. */
++describe('#14 — the refund actions silently cancel a pending recovery', () => {
++  const DISCLOSURE = 'Cancels any pending recovery proposal for this wallet. If someone is recovering this wallet on your behalf, they will have to start again.'
++
++  it('discloses it when withdrawing', () => {
++    expect(paramText(withdrawRefundConfirm({ balance: 1000000n, recipient: RECIPIENT, signer: RECIPIENT })))
++      .toContain(DISCLOSURE)
++  })
++
++  it('discloses it when transferring the credit', () => {
++    expect(paramText(transferRefundCreditConfirm({ balance: 1000000n, recipient: RECIPIENT })))
++      .toContain(DISCLOSURE)
++  })
++})
++
++/* #15. Two errors in one line. refundAfterDeadline's guard is
++   `block.timestamp <= deadline + GRACE` (:703), so the refund opens strictly
++   after that instant — a signer who submits at the stated time is reverted. And
++   it credits e.refundTo (:715), not the caller, so "refundable to you" names
++   the wrong party whenever refundTo was configured. */
++describe('#15 — the refund date is a threshold to pass, not a date to arrive at', () => {
++  const d = () => extendDeadlineConfirm({
++    escrow: escrowOn(ARC),
++    newDeadline: Number(escrowOn(ARC).deadline) + 30 * DAY
++  })
++
++  it('says refunds open after the date, not from it', () => {
++    const t = paramText(d())
++    expect(t).toMatch(/refundable only after /)
++    expect(t).toContain('72 hours past the new deadline, not at it')
++    expect(t).not.toMatch(/refundable to you from /)
++  })
++
++  it('names the refund address rather than the signer', () => {
++    const t = paramText(d())
++    expect(t).toContain(`Refunds are credited to this escrow's refund address, ${REFUND_TO}`)
++    expect(t).not.toMatch(/refundable to you/)
++  })
++})
+diff --git a/frontend/src/pages/phaseD.test.jsx b/frontend/src/pages/phaseD.test.jsx
+new file mode 100644
+index 0000000..f47355a
+--- /dev/null
++++ b/frontend/src/pages/phaseD.test.jsx
+@@ -0,0 +1,205 @@
++import { describe, it, expect } from 'vitest'
++
++/* Phase D #18 — figures the app had already loaded and then dropped before the
++   signing screen.
++
++   Different failure from Phase C's. Nothing here was false; each descriptor
++   made a true statement with the number filed off — "the review window", "the
++   arbitration window", "every milestone not yet released". True, and useless
++   for deciding whether to sign, because the quantity is exactly what varies.
++   In all three cases the value was already in scope one or two frames up. */
++import {
++  milestoneConfirm,
++  raiseDisputeConfirm,
++  redirectPayoutConfirm,
++  redirectSplitConfirm,
++  unreleasedExposure
++} from './EscrowDetail.jsx'
++
++const ARC = 26
++const BASE = 6
++const DAY = 24 * 60 * 60
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const NEW_ADDR = '0x8ba1f109551bd432803012645ac136ddd64dba72'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain, over = {}) => ({
++  id: 7,
++  milestoneCount: 3,
++  recipient: RECIPIENT,
++  mintRecipient: B32(RECIPIENT),
++  refundTo: REFUND_TO,
++  destinationDomain: domain,
++  escrowCctpForwardFee: 200000n,
++  reviewWindow: 7n * BigInt(DAY),
++  ...over
++})
++
++const paramText = (d) => (d.parameters || []).join('\n')
++
++/* #18.1. claimDelivery starts e.reviewWindow (sol:417), a per-escrow value set
++   at deposit. It decides when this freelancer can actually be paid, and it was
++   the one surface not printing it — the parameters row (:640) and FocusBar
++   (:472) both already do, off the same object. */
++describe('#18.1 — claimDelivery names the window it starts', () => {
++  const claim = (escrow) =>
++    milestoneConfirm({ key: 'claim', fn: 'claimDelivery' }, escrow, { index: 1, amount: 250000000n, state: 0 }, [])
++
++  it('states the window length and what happens when it ends', () => {
++    expect(paramText(claim(escrowOn(ARC))))
++      .toContain('Review window: 7 days from this transaction. After it ends without a dispute, anyone can release the payment.')
++  })
++
++  it('reads the length off the escrow rather than assuming a default', () => {
++    expect(paramText(claim(escrowOn(ARC, { reviewWindow: 3n * BigInt(DAY) })))).toContain('Review window: 3 days')
++    expect(paramText(claim(escrowOn(ARC, { reviewWindow: BigInt(12 * 3600) })))).toContain('Review window: 12 hours')
++  })
++
++  /* An escrow object without the field must lose the line, not print
++     "Review window: 0 minutes" — which would read as "no review at all", the
++     opposite of what an unread value means. */
++  it('drops the line entirely when the window is unknown', () => {
++    for (const over of [{ reviewWindow: undefined }, { reviewWindow: 0n }]) {
++      const t = paramText(claim(escrowOn(ARC, over)))
++      expect(t).not.toMatch(/Review window|undefined|NaN|0 minutes/)
++      expect(t).toContain('No funds move on this transaction.')
++    }
++  })
++
++  it('still moves no money', () => {
++    expect(claim(escrowOn(ARC))).not.toHaveProperty('amount')
++  })
++})
++
++/* #18.2. ARBITER_WINDOW is 14 days (sol:69) and the timeout fallback is a
++   hardcoded 5000 bps (:576). Both are compile-time constants, so the vague
++   phrasing bought nothing. */
++describe('#18.2 — raiseDispute measures the arbitration window', () => {
++  const d = (over = {}) => raiseDisputeConfirm({
++    escrow: escrowOn(ARC),
++    milestone: { index: 1, amount: 250000000n, state: 1 },
++    reason: 'Not delivered',
++    uri: 'ipfs://x',
++    arbiterWindow: 1_209_600n,
++    ...over
++  })
++
++  it('names the 14 days and the fixed 50/50 in one sentence', () => {
++    expect(paramText(d())).toContain('An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within 14 days, anyone can settle it at a fixed 50/50.')
++  })
++
++  /* The Phase C disclosure is extended, not duplicated — two sentences about
++     the same escape hatch read as two different hatches. */
++  it('states the escape hatch exactly once', () => {
++    const matches = paramText(d()).match(/not the only way out/g) || []
++    expect(matches).toHaveLength(1)
++  })
++
++  it('falls back to the unmeasured phrasing when the window is unknown', () => {
++    const t = paramText(d({ arbiterWindow: undefined }))
++    expect(t).toContain('if no arbiter rules within the arbitration window')
++    expect(t).not.toMatch(/undefined|NaN/)
++  })
++
++  it('still moves no money', () => {
++    expect(d()).not.toHaveProperty('amount')
++  })
++})
++
++/* #18.3. "Applies to every milestone not yet released" covers the whole escrow
++   on a fresh one and nothing on a finished one, and the screen gave the signer
++   no way to tell which. The milestones were already in LedgerColumn and were
++   dropped one frame before the descriptor. */
++describe('#18.3 — a redirect states what it is worth', () => {
++  // 250 released, 250 in review, 250 pending → 500 still exposed.
++  const MS = [
++    { index: 0, amount: 250000000n, state: 3 },
++    { index: 1, amount: 250000000n, state: 1 },
++    { index: 2, amount: 250000000n, state: 0 }
++  ]
++
++  describe('unreleasedExposure', () => {
++    it('counts everything that has not reached a terminal state', () => {
++      expect(unreleasedExposure(MS)).toBe(500000000n)
++    })
++
++    /* DISPUTED(2) still pays through the address being changed, so excluding
++       it would understate the exposure on exactly the escrows where the
++       destination matters most. */
++    it('counts a disputed milestone as still exposed', () => {
++      expect(unreleasedExposure([{ index: 0, amount: 100000000n, state: 2 }])).toBe(100000000n)
++    })
++
++    it('excludes released and refunded milestones', () => {
++      expect(unreleasedExposure([
++        { index: 0, amount: 100000000n, state: 3 },
++        { index: 1, amount: 100000000n, state: 4 }
++      ])).toBe(0n)
++    })
++
++    /* null, not 0n: an unknown exposure and a fully-settled escrow are
++       different facts, and only one of them should print a figure. */
++    it('returns null rather than zero when there is nothing to read', () => {
++      expect(unreleasedExposure(undefined)).toBeNull()
++      expect(unreleasedExposure([])).toBeNull()
++    })
++  })
++
++  const payout = (over = {}) => redirectPayoutConfirm({
++    escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE, milestones: MS, ...over
++  })
++
++  it('puts the remaining figure on the escrow-level redirect', () => {
++    expect(paramText(payout())).toContain('That is 500.00 USDC still to be paid, before the protocol fee.')
++  })
++
++  it('says gross, since the fee snapshot is not readable', () => {
++    expect(paramText(payout())).toMatch(/before the protocol fee/)
++    expect(paramText(payout())).not.toMatch(/\bnet\b/i)
++  })
++
++  it('omits the figure when the milestones are not available', () => {
++    const t = paramText(payout({ milestones: undefined }))
++    expect(t).not.toMatch(/still to be paid|undefined|NaN/)
++    expect(t).toContain('Applies to every milestone not yet released, including any currently in review.')
++  })
++
++  /* The split branch's write changes no destination at all, and the blocked
++     branch reverts. Attaching a value to either would put a number on a
++     transaction that moves nothing. */
++  it('stays off the branches where the redirect does nothing', () => {
++    const noop = paramText(payout({ hasSplits: true }))
++    const blocked = paramText(redirectPayoutConfirm({
++      escrow: escrowOn(ARC), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE, milestones: MS
++    }))
++    expect(noop).not.toMatch(/still to be paid/)
++    expect(blocked).not.toMatch(/still to be paid/)
++  })
++
++  const split = (over = {}) => redirectSplitConfirm({
++    escrow: escrowOn(BASE),
++    splitIndex: 1,
++    currentAddress: RECIPIENT,
++    currentDomain: BASE,
++    pct: 25,
++    newAddress: NEW_ADDR,
++    newDomain: BASE,
++    milestones: MS,
++    ...over
++  })
++
++  /* Stated as pool-and-share rather than a multiplied-out figure: the leg's
++     amount comes off each release's post-fee remainder (:1309), so 25% of the
++     gross pool is a number the contract never computes. */
++  it('scopes the split redirect to the leg without inventing a product', () => {
++    const t = paramText(split())
++    expect(t).toContain('500.00 USDC is still to be paid across this escrow, of which this leg takes 25% share after the protocol fee.')
++    expect(t).not.toContain('125.00 USDC')
++  })
++
++  it('omits it on the split redirect too when unavailable', () => {
++    expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid/)
++  })
++})
+diff --git a/frontend/src/pages/phaseE.test.jsx b/frontend/src/pages/phaseE.test.jsx
+new file mode 100644
+index 0000000..2041d38
+--- /dev/null
++++ b/frontend/src/pages/phaseE.test.jsx
+@@ -0,0 +1,143 @@
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
++import { renderHook, act } from '@testing-library/react'
++import { getAddress, isAddress } from 'viem'
++
++/* Phase E #21 — the recovery panel's lookups, debounced.
++
++   Not a correctness bug and not a secrecy one: refundBalances and both
++   pendingRefundRecovery getters are public, and anyone can read them for any
++   address. What leaked was the read pattern. An admin investigating a
++   restricted wallet typed or corrected a 42-character address and every
++   intermediate string that parsed as an address fired three reads at the
++   configured RPC — handing whoever serves that endpoint a timestamped trail of
++   which wallets an admin was looking at, before anything was signed and
++   whether or not they ever went through with it.
++
++   The subtle part is not the debounce. It is that debouncing opens a window
++   the existing submit gate could not see, and Phase A's guarantee has to
++   survive it — see the second describe. */
++import { useDebouncedValue } from '../hooks/useDebouncedValue.js'
++import { recoveryReadsPending } from './ProtocolSettings.jsx'
++
++const ADDR_A = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const ADDR_B = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++
++describe('#21 — useDebouncedValue holds a value back until typing stops', () => {
++  beforeEach(() => vi.useFakeTimers())
++  afterEach(() => vi.useRealTimers())
++
++  it('returns the initial value immediately', () => {
++    const { result } = renderHook(() => useDebouncedValue('', 400))
++    expect(result.current).toBe('')
++  })
++
++  /* The whole point: the value the reads key off must not change on the
++     keystroke itself. */
++  it('does not surface a new value before the delay elapses', () => {
++    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: '' }
++    })
++    rerender({ v: ADDR_A })
++    expect(result.current).toBe('')
++    act(() => { vi.advanceTimersByTime(399) })
++    expect(result.current).toBe('')
++    act(() => { vi.advanceTimersByTime(1) })
++    expect(result.current).toBe(ADDR_A)
++  })
++
++  /* A run of edits inside the window must collapse to ONE settled value, not
++     one per edit — this is the assertion that actually pins "one read instead
++     of one per keystroke". Each intermediate here is a full valid address, the
++     shape that used to fire a read. */
++  it('collapses a burst of edits into a single settled value', () => {
++    const seen = []
++    const { rerender } = renderHook(({ v }) => {
++      const settled = useDebouncedValue(v, 400)
++      seen.push(settled)
++      return settled
++    }, { initialProps: { v: '' } })
++
++    for (const v of [ADDR_A, ADDR_B, ADDR_A, ADDR_B]) {
++      rerender({ v })
++      act(() => { vi.advanceTimersByTime(100) })
++    }
++    // 400ms of edits, none of them 400ms apart: nothing has settled yet.
++    expect([...new Set(seen)]).toEqual([''])
++
++    act(() => { vi.advanceTimersByTime(400) })
++    rerender({ v: ADDR_B })
++    expect([...new Set(seen)]).toEqual(['', ADDR_B])
++  })
++
++  it('settles again on a later change', () => {
++    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: ADDR_A }
++    })
++    rerender({ v: ADDR_B })
++    act(() => { vi.advanceTimersByTime(400) })
++    expect(result.current).toBe(ADDR_B)
++  })
++
++  /* Unmounting mid-window must not leave a timer to fire into a dead
++     component. */
++  it('clears its pending timer on unmount', () => {
++    const { rerender, unmount } = renderHook(({ v }) => useDebouncedValue(v, 400), {
++      initialProps: { v: '' }
++    })
++    rerender({ v: ADDR_A })
++    unmount()
++    expect(() => act(() => { vi.advanceTimersByTime(1000) })).not.toThrow()
++    expect(vi.getTimerCount()).toBe(0)
++  })
++})
++
++/* Phase A's gate: never submit against figures that have not been read. The
++   confirm screen would otherwise show 0.00 USDC and "no proposal is currently
++   pending" — both of which are what an unread result looks like, and both of
++   which are exactly wrong for a funded wallet with a standing nomination.
++
++   Debouncing breaks the old expression's assumption. Between the keystroke and
++   the settle, the reads are DISABLED rather than in flight, so both isLoading
++   flags read false. Gating on those alone would enable the button precisely
++   during the pause this change introduces — turning a privacy fix into a
++   correctness regression. */
++describe('#21 — the submit gate survives the debounce window', () => {
++  const gate = (over = {}) => recoveryReadsPending({
++    typed: ADDR_A, debounced: ADDR_A, balanceLoading: false, recoveryLoading: false, ...over
++  })
++
++  it('counts a typed address the reads have not caught up with as pending', () => {
++    expect(gate({ typed: ADDR_A, debounced: '' })).toBe(true)
++    expect(gate({ typed: ADDR_A, debounced: ADDR_B })).toBe(true)
++  })
++
++  it('clears once the debounced value matches what was typed', () => {
++    expect(gate()).toBe(false)
++  })
++
++  it('still reports pending while either read is actually in flight', () => {
++    expect(gate({ balanceLoading: true })).toBe(true)
++    expect(gate({ recoveryLoading: true })).toBe(true)
++  })
++
++  /* A half-typed address never triggered a read and never will, so it must not
++     hold the gate — the address-validity check in front of the comparison is
++     what keeps an empty or partial field from reading as "pending forever". */
++  it('does not hold the gate for an incomplete address', () => {
++    for (const typed of ['', '0x', '0x179cc4c8f23d257b7f4acb7854640255']) {
++      expect(gate({ typed, debounced: '' })).toBe(false)
++    }
++  })
++
++  /* Exact comparison, not case-insensitive. Both forms below are valid to
++     viem — all-lowercase has no checksum to verify, and the mixed-case one is
++     correctly checksummed — so a user who types the lowercase form and then
++     pastes the checksummed one has genuinely changed the react-query key, and
++     the second lookup really has not happened yet. */
++  it('treats a checksum-case difference as not yet settled', () => {
++    const checksummed = getAddress(ADDR_A)
++    expect(checksummed).not.toBe(ADDR_A)
++    expect(isAddress(checksummed) && isAddress(ADDR_A)).toBe(true)
++    expect(gate({ typed: checksummed, debounced: ADDR_A })).toBe(true)
++  })
++})
+diff --git a/frontend/src/utils/format.js b/frontend/src/utils/format.js
+index 35372ba..0619ee1 100644
+--- a/frontend/src/utils/format.js
++++ b/frontend/src/utils/format.js
+@@ -108,6 +108,17 @@ export const ESCROW_BADGE_CLASS = {
+ export const isValidAddress = (addr) =>
+   typeof addr === 'string' && /^0x[a-fA-F0-9]{40}$/.test(addr)
+ 
++export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
++
++/* Hex shape alone is not enough at a submission point. The zero address is
++   well-formed and passes isValidAddress (and viem's isAddress), but every
++   contract path that takes an address rejects it — setProtocolTreasury,
++   proposeRefundCreditTransfer, withdrawRefund/transferRefundCredit and both
++   payout redirects all revert ZeroAddress. Letting it through only buys the
++   user a paid, guaranteed-to-fail transaction. */
++export const isNonZeroAddress = (addr) =>
++  isValidAddress(addr) && addr.toLowerCase() !== ZERO_ADDRESS
++
+ export const isValidUrl = (s) => {
+   if (!s || typeof s !== 'string') return false
+   try { new URL(s); return true } catch { return false }
+diff --git a/frontend/vitest.setup.js b/frontend/vitest.setup.js
+index a9d0dd3..7faa02e 100644
+--- a/frontend/vitest.setup.js
++++ b/frontend/vitest.setup.js
+@@ -1 +1,15 @@
+ import '@testing-library/jest-dom/vitest'
++import { cleanup } from '@testing-library/react'
++import { afterEach } from 'vitest'
++
++/* RTL only auto-registers its own afterEach cleanup when vitest runs with
++   `globals: true`, which this project does not set. Without it, rendered DOM
++   accumulates across tests in the same file — "found multiple elements" at
++   best, a false pass off a previous test's markup at worst.
++
++   Registered here rather than per-file so a new render test cannot forget it.
++   Preferred over flipping `globals: true`, which would change how every test
++   file resolves describe/it/expect for the same outcome. The per-file
++   afterEach(cleanup) calls that predate this are now redundant but harmless —
++   cleanup is idempotent. */
++afterEach(cleanup)

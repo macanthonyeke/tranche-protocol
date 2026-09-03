@@ -1,0 +1,143 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 15a61e0..4f9748a 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -301,6 +301,7 @@ Every wallet-signing site in the frontend carries a `confirm` descriptor (the ob
+ 
+ - SE-3: frontend should listen for CrossChainLegCreditedOnArc and surface "small leg credited on Arc, withdraw here."
+ - SE-6 (remaining piece): `EscrowDetail.jsx`'s `AckBanner` should block "Accept terms" when `InvoiceViewer`'s SHA-256 check fails. Verification itself now exists (see "Frontend: invoice attachment pinning (IPFS)" above) — this is only the missing gate on acknowledgement.
++- **Round 21 Phase C (remaining piece) — no historical per-milestone cross-chain signal exists for a device that didn't submit the release itself.** `MilestoneRow`'s `historicallyCrossChain(cctpTrack, trackingDomain)` closes the visibility bug (a later `updateReceivingAddress`/`updateSplitReceivingAddress` redirect on an active escrow hiding an already-tracked cross-chain release) only for the device that originally submitted it — `cctpTrack`'s presence in that device's own localStorage is proof-positive of history, independent of what the config says now. A different device (the counterparty, or this one after the 24h localStorage eviction) has no local record and falls back to `trackingDomain`, current-config-derived and therefore still wrong post-redirect. Confirmed via direct trace of `indexer/schema.graphql` and `indexer/src/mapping.ts`: no historical domain signal exists to fall back on instead — `Milestone.releaseTx` is a bare tx hash with no domain field; none of the 5 release-type contract events (`MilestoneApproved`, `MilestoneReleased`, `DisputeResolved`, `DisputeTimedOutSettled`, `MutualSettlementExecuted`) carry domain/mintRecipient data in their signatures; `ReceivingAddressUpdated`/`SplitReceivingAddressUpdated` overwrite the live field in place with — per the mapping's own comment — "no history entity"; `CrossChainLegCreditedOnArc` is the opposite signal (fires only on a too-small-to-burn divert, not a normal cross-chain release). Two real paths to closing it fully, not chosen here since it's a scoping decision for whenever this gets prioritized: (1) a subgraph schema/mapping change adding a domain-at-release-time field (a new indexer version), or (2) frontend-side RPC decoding of the release tx's receipt for a CCTP burn log, independent of the indexer entirely.
+ 
+ Deferred from Round 13 Phase D — investigated, scoped, deliberately not built:
+ 
+diff --git a/frontend/src/pages/EscrowDetail.historicallyCrossChain.test.jsx b/frontend/src/pages/EscrowDetail.historicallyCrossChain.test.jsx
+new file mode 100644
+index 0000000..9aa8e67
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.historicallyCrossChain.test.jsx
+@@ -0,0 +1,58 @@
++import { describe, it, expect } from 'vitest'
++
++/* historicallyCrossChain — Round 21 Phase C.
++
++   MilestoneRow used to gate the cross-chain delivery tracker on
++   trackingDomain, re-derived from the escrow/splits' CURRENT config every
++   render. But the contract allows redirecting an active escrow's
++   destination to Arc (updateReceivingAddress / updateSplitReceivingAddress)
++   AFTER a milestone has already released cross-chain — recomputing "is this
++   cross-chain" from today's config for an already-released milestone would
++   then hide that milestone's real, still-possibly-unrecovered CCTP message.
++
++   cctpTrack (this device's own localStorage record, written only when a
++   release was cross-chain at submission time) is proof-positive of history,
++   independent of what the config says now. This tests exactly that
++   property — and, just as importantly, that the honest LIMIT of the fix
++   stays covered: with no local record, the function still falls back to
++   trackingDomain (today's imperfect, current-config-derived signal), so a
++   different device with a genuinely-redirected-to-Arc config correctly
++   stays hidden rather than accidentally showing a false positive. */
++import { historicallyCrossChain } from './EscrowDetail.jsx'
++
++describe('historicallyCrossChain', () => {
++  it('stays true when a local cctpTrack record exists, even though current config has since been redirected to Arc-only', () => {
++    // The exact bug this closes: cctpTrack is truthy (this device submitted
++    // a cross-chain release), but trackingDomain is now null because the
++    // escrow was redirected to Arc afterward.
++    const cctpTrack = { txHash: '0xabc123', ts: Date.now() }
++    const trackingDomainAfterRedirect = null
++    expect(historicallyCrossChain(cctpTrack, trackingDomainAfterRedirect)).toBe(true)
++  })
++
++  it('stays true when a local cctpTrack record exists and current config is still genuinely cross-chain too', () => {
++    const cctpTrack = { txHash: '0xabc123', ts: Date.now() }
++    expect(historicallyCrossChain(cctpTrack, 6)).toBe(true)
++  })
++
++  /* The honest limit: with no local record (a different device, or this one
++     past the 24h localStorage eviction — see readCctpTrack), there is no
++     historical signal to fall back on, so this correctly defers to
++     trackingDomain — including the false-negative case a redirect causes,
++     which Round 21 Phase C does NOT close for this path. This must stay
++     covered so it can't silently start "passing" the historical case for
++     the wrong reason (e.g. a future edit that makes this always return true
++     regardless of cctpTrack). */
++  it('falls back to trackingDomain when there is no local record, and correctly stays false for a genuinely Arc-only config', () => {
++    expect(historicallyCrossChain(null, null)).toBe(false)
++  })
++
++  it('falls back to trackingDomain when there is no local record, and correctly stays true for a genuinely cross-chain config', () => {
++    expect(historicallyCrossChain(null, 6)).toBe(true)
++  })
++
++  it('falls back to trackingDomain when cctpTrack is undefined (no state initialized yet), not just null', () => {
++    expect(historicallyCrossChain(undefined, null)).toBe(false)
++    expect(historicallyCrossChain(undefined, 6)).toBe(true)
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 6e40e6b..222af31 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1484,6 +1484,11 @@ function MilestoneRow({
+   // Round 19 Phase C: split-aware, same as settlementIsCrossChain above — not
+   // the raw escrow.destinationDomain this used to read independently.
+   const trackingDomain = settlementTrackingDomain(escrow, splits)
++  // Round 21 Phase C: read/display purposes use historicallyCrossChain, not
++  // trackingDomain directly — see that function's own doc comment for why
++  // (a later redirect on this active escrow must not hide an already-tracked
++  // historical release).
++  const isHistoricallyCrossChain = historicallyCrossChain(cctpTrack, trackingDomain)
+ 
+   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
+   // device, they write to localStorage and call onCrossChainRelease so we re-read.
+@@ -1635,10 +1640,10 @@ function MilestoneRow({
+                 (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
+                   <TimeoutOutcomeCard milestone={milestone} role={role} />
+                 )}
+-              {milestone.state === 3 && cctpTxHash && trackingDomain != null && (
++              {milestone.state === 3 && cctpTxHash && isHistoricallyCrossChain && (
+                 <CrossChainDelivery
+                   txHash={cctpTxHash}
+-                  isCrossChain={trackingDomain != null}
++                  isCrossChain={isHistoricallyCrossChain}
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
+                 />
+@@ -2254,6 +2259,37 @@ export function settlementTrackingDomain(escrow, splits) {
+   return escrow.destinationDomain
+ }
+ 
++/* Round 21 Phase C. Whether a milestone's tracked release genuinely was
++   cross-chain, for READ/DISPLAY purposes — as opposed to settlementTrackingDomain
++   above, which stays correctly current-config-derived for the FORWARD-LOOKING
++   question of whether a NEW transaction about to be submitted will be
++   cross-chain (SettlementPanel.propose / MilestoneAction.run still call it
++   directly for exactly that; this function is not a replacement for it).
++
++   The contract allows redirecting an active escrow's destination to Arc
++   (updateReceivingAddress / updateSplitReceivingAddress) after a milestone
++   has already released cross-chain. Re-deriving "is this cross-chain" from
++   TODAY's escrow/splits for an ALREADY-released milestone would then hide
++   that milestone's real, still-possibly-unrecovered CCTP message — a
++   historical fact, not something today's config gets to overwrite.
++
++   cctpTrack (this device's own localStorage record) is written only when a
++   release was cross-chain at submission time (see the write sites' own
++   `if (txHash && trackingDomain != null)` gate), so its mere existence is
++   proof-positive of history, independent of what the config says now — no
++   persisted domain value needed (Round 20 Phase D already found nothing
++   ever read the old one). This only closes the gap for the submitting
++   device: a different device (or this one past the 24h localStorage
++   eviction) has no local record and falls back to trackingDomain, unchanged
++   — the subgraph carries no per-milestone, point-in-time cross-chain signal
++   today to fall back on instead (see the CLAUDE.md entry this round added
++   for why: Milestone.releaseTx is a bare hash, none of the 5 release-type
++   events carry domain data, and redirect events aren't indexed into any
++   history entity). That case remains open, not silently treated as closed. */
++export function historicallyCrossChain(cctpTrack, trackingDomain) {
++  return cctpTrack != null ? true : trackingDomain != null
++}
++
+ /* Round 20 Phase A #3. The Ledger's "Payout chain" row used to print
+    escrow.destinationDomain unconditionally — accurate for a no-split escrow,
+    but false the moment splits are configured: the contract pays out per split

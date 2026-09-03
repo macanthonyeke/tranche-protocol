@@ -1,0 +1,427 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 64ab1ef..ae84009 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -658,7 +658,7 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic,
+       {(role || mySplitIndex >= 0) && escrow.state === 0 && (
+         <EditableParamsPanel
+           escrow={escrow} role={role} splits={splits} mySplitIndex={mySplitIndex}
+-          hasInvoice={hasInvoice} onChange={onChange}
++          hasInvoice={hasInvoice} milestones={milestones} onChange={onChange}
+         />
+       )}
+ 
+@@ -677,7 +677,7 @@ function LedgerColumn({ escrow, role, splits, milestones, onChange, optimistic,
+    built on the shared EditableRow primitive so the deadline / invoice link /
+    receiving address / split address flows share one interaction pattern
+    instead of four hand-rolled inline-edit cards. */
+-function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, onChange }) {
++function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, milestones, onChange }) {
+   const rows = []
+   if (role === 'payer') rows.push('deadline')
+   if (role === 'payer' && hasInvoice) rows.push('invoice')
+@@ -696,7 +696,7 @@ function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, o
+           const last = i === rows.length - 1
+           if (key === 'deadline') return <DeadlineEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+           if (key === 'invoice') return <InvoiceLinkEditRow key={key} escrow={escrow} onChange={onChange} last={last} />
+-          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} onChange={onChange} last={last} />
++          if (key === 'receiving') return <ReceivingAddressEditRow key={key} escrow={escrow} hasSplits={splits?.length > 0} milestones={milestones} onChange={onChange} last={last} />
+           if (key === 'split') {
+             const s = splits[mySplitIndex]
+             return (
+@@ -707,6 +707,7 @@ function EditableParamsPanel({ escrow, role, splits, mySplitIndex, hasInvoice, o
+                 currentDomain={Number(s.destinationDomain)}
+                 currentAddress={s.mintRecipient ? bytes32ToAddress(s.mintRecipient) : null}
+                 pct={Number(s.bps) / 100}
++                milestones={milestones}
+                 onChange={onChange}
+                 last={last}
+               />
+@@ -898,7 +899,30 @@ function InvoiceLinkEditRow({ escrow, onChange, last }) {
+ const REDIRECT_BLOCKED_REASON =
+   'An escrow paying on Arc cannot be moved to another chain after deposit — its milestones were never checked against the cross-chain forwarding fee.'
+ 
+-export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain }) {
++/* What a redirect is actually worth, which is the one thing these screens
++ * never said. "Applies to every milestone not yet released" is true and
++ * unquantified: it covers the whole remaining escrow on a fresh one and
++ * nothing at all on a finished one, and the signer cannot tell which from the
++ * screen. The figure is already loaded — LedgerColumn receives `milestones`
++ * and dropped it before EditableParamsPanel — so this is disclosure, not a
++ * new read.
++ *
++ * Terminal states are RELEASED(3) and REFUNDED(4); everything else (PENDING,
++ * IN_REVIEW, DISPUTED) still routes through the address being changed.
++ * Deliberately gross: netting it would need escrowFeeBps, which is
++ * snapshotted with no getter — the same rule payoutLines follows.
++ *
++ * Returns null rather than 0 when the list is missing, so an unknown exposure
++ * prints nothing instead of a confident "0.00 USDC". */
++export function unreleasedExposure(milestones) {
++  if (!Array.isArray(milestones) || milestones.length === 0) return null
++  return milestones
++    .filter((m) => m.state !== 3 && m.state !== 4)
++    .reduce((sum, m) => sum + BigInt(m.amount ?? 0n), 0n)
++}
++
++export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain, milestones }) {
++  const exposure = unreleasedExposure(milestones)
+   const oldAddress = escrow.mintRecipient ? bytes32ToAddress(escrow.mintRecipient) : escrow.recipient
+   const oldDomain = Number(escrow.destinationDomain)
+   const domain = Number(newDomain)
+@@ -956,12 +980,16 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+       `Address: ${oldAddress} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+       'Applies to every milestone not yet released, including any currently in review.',
++      ...(exposure === null
++        ? []
++        : [`That is ${formatUSDC(exposure)} still to be paid, before the protocol fee.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+ }
+ 
+-export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain }) {
++export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, currentDomain, pct, newAddress, newDomain, milestones }) {
++  const exposure = unreleasedExposure(milestones)
+   const oldDomain = Number(currentDomain)
+   const domain = Number(newDomain)
+   // Mirrors :1033 — no splits carve-out here; this leg's own domain is what
+@@ -999,12 +1027,20 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       `Address: ${currentAddress || 'unknown'} → ${newAddress}`,
+       `Chain: ${getDomainName(oldDomain)} → ${getDomainName(domain)}`,
+       'Applies to every milestone not yet released, including any currently in review.',
++      // The leg's own exposure, not the escrow's: this row moves one share.
++      // Stated as the pool and the share rather than a multiplied-out figure —
++      // the per-leg amount is computed from each release's post-fee remainder
++      // (:1309), so a product of two gross numbers would be a number the
++      // contract never arrives at.
++      ...(exposure === null
++        ? []
++        : [`${formatUSDC(exposure)} is still to be paid across this escrow, of which this leg takes ${shareLabel} after the protocol fee.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+ }
+ 
+-function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
++function ReceivingAddressEditRow({ escrow, hasSplits, milestones, onChange, last }) {
+   const [saveNonce, setSaveNonce] = useState(0)
+   const [successInfo, setSuccessInfo] = useState(null)
+   const { supported } = useSupportedDomains()
+@@ -1042,7 +1078,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+           {
+             loadingMessage: 'Updating. Check your wallet.',
+             confirm: redirectPayoutConfirm({
+-              escrow, hasSplits, newAddress: d.addr, newDomain: Number(d.domain)
++              escrow, hasSplits, milestones, newAddress: d.addr, newDomain: Number(d.domain)
+             })
+           }
+         )
+@@ -1052,7 +1088,7 @@ function ReceivingAddressEditRow({ escrow, hasSplits, onChange, last }) {
+   )
+ }
+ 
+-function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, onChange, last }) {
++function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress, pct, milestones, onChange, last }) {
+   const [saveNonce, setSaveNonce] = useState(0)
+   const [successInfo, setSuccessInfo] = useState(null)
+   const { supported } = useSupportedDomains()
+@@ -1090,7 +1126,7 @@ function SplitAddressEditRow({ escrow, splitIndex, currentDomain, currentAddress
+           {
+             loadingMessage: 'Updating. Check your wallet.',
+             confirm: redirectSplitConfirm({
+-              escrow, splitIndex, currentAddress, currentDomain, pct,
++              escrow, splitIndex, currentAddress, currentDomain, pct, milestones,
+               newAddress: d.addr, newDomain: Number(d.domain)
+             })
+           }
+@@ -2881,11 +2917,23 @@ export function milestoneConfirm(action, escrow, milestone, splits, maxFee) {
+   if (action.key === 'claim') {
+     // No `amount`: claimDelivery moves nothing. Putting the milestone figure in
+     // the Total row would tell the freelancer they are being paid right now.
++    //
++    // The window's length is the one number that decides when this freelancer
++    // gets paid, it is per-escrow (e.reviewWindow, set at deposit and used at
++    // :417), and it is already on the escrow object every other surface reads
++    // — the row at :640 and FocusBar at :472 both print it. Only the signing
++    // screen said "the review window" and left the signer to guess.
+     return {
+       ...base,
+       title: 'Mark this milestone as delivered',
+       subtitle: "Starts the client's review window. If they don't dispute before it ends, the milestone can be released.",
+-      parameters: [milestoneLine, 'No funds move on this transaction.']
++      parameters: [
++        milestoneLine,
++        ...(escrow.reviewWindow
++          ? [`Review window: ${formatWindow(escrow.reviewWindow)} from this transaction. After it ends without a dispute, anyone can release the payment.`]
++          : []),
++        'No funds move on this transaction.'
++      ]
+     }
+   }
+ 
+@@ -3269,8 +3317,19 @@ const EVIDENCE_BASE = {
+  *   - resolveDispute, the arbiter's discretionary ruling (:495).
+  *
+  * A signer told the arbiter decides will wait for one, which is exactly the
+- * inaction the timeout exists to route around. */
+-export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName }) {
++ * inaction the timeout exists to route around.
++ *
++ * Phase D: that line named the window without measuring it. ARBITER_WINDOW is
++ * 14 days (sol:69) and the fallback is hardcoded 5000 bps (:576) — both fixed
++ * at compile time, so there is nothing to fetch and no reason to be vague. The
++ * figures go into the existing sentence rather than a second one: "no arbiter
++ * rules" and "how long you wait for one" are the same fact, and splitting them
++ * across two bullets reads as two separate escape hatches. `arbiterWindow` is
++ * threaded in rather than re-hardcoded here so this cannot drift from the
++ * countdown the dispute panel renders from the same source. */
++export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName, arbiterWindow }) {
++  // Degrade to the unquantified phrasing rather than printing "undefined days".
++  const window = arbiterWindow ? formatWindow(arbiterWindow) : null
+   return {
+     ...EVIDENCE_BASE,
+     functionName: 'raiseDispute',
+@@ -3282,7 +3341,9 @@ export function raiseDisputeConfirm({ escrow, milestone, reason, uri, fileName }
+       ...evidenceLines({ uri, fileName }),
+       'Your reason and link are stored on-chain in the clear, readable by anyone, permanently.',
+       'The arbiter can award any split from 0 to 100% — disputing does not guarantee a refund.',
+-      'An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.',
++      window
++        ? `An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within ${window}, anyone can settle it at a fixed 50/50.`
++        : 'An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within the arbitration window, anyone can settle it at a fixed 50/50.',
+       'No funds move on this transaction.'
+     ]
+   }
+@@ -3375,6 +3436,10 @@ function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed })
+ 
+   const reset = () => { setReason(''); setUri(''); setFileHash(null); setFileName(null) }
+   const tx = useTx({ onConfirmed: () => { reset(); onConfirmed?.() } })
++  // Above the early return: this sits with the other hook calls so the ordering
++  // stays stable whether or not the modal is open. Only `raise` reads it; the
++  // other two descriptors ignore the extra key.
++  const { arbiterWindow } = useDisputeConfig()
+ 
+   useEffect(() => { if (!open) reset() }, [open]) // eslint-disable-line
+ 
+@@ -3411,7 +3476,7 @@ function EvidenceModal({ open, mode, escrow, milestone, onClose, onConfirmed })
+       : [id, idx, evidenceHash, uri]
+     tx.run(escrowWrite(meta.fn, args), {
+       loadingMessage: 'Check your wallet.',
+-      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName })
++      confirm: meta.confirm({ escrow, milestone, reason: reason.trim(), uri, fileName, arbiterWindow })
+     })
+   }
+ 
+diff --git a/frontend/src/pages/phaseD.test.jsx b/frontend/src/pages/phaseD.test.jsx
+new file mode 100644
+index 0000000..f47355a
+--- /dev/null
++++ b/frontend/src/pages/phaseD.test.jsx
+@@ -0,0 +1,205 @@
++import { describe, it, expect } from 'vitest'
++
++/* Phase D #18 — figures the app had already loaded and then dropped before the
++   signing screen.
++
++   Different failure from Phase C's. Nothing here was false; each descriptor
++   made a true statement with the number filed off — "the review window", "the
++   arbitration window", "every milestone not yet released". True, and useless
++   for deciding whether to sign, because the quantity is exactly what varies.
++   In all three cases the value was already in scope one or two frames up. */
++import {
++  milestoneConfirm,
++  raiseDisputeConfirm,
++  redirectPayoutConfirm,
++  redirectSplitConfirm,
++  unreleasedExposure
++} from './EscrowDetail.jsx'
++
++const ARC = 26
++const BASE = 6
++const DAY = 24 * 60 * 60
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
++const NEW_ADDR = '0x8ba1f109551bd432803012645ac136ddd64dba72'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain, over = {}) => ({
++  id: 7,
++  milestoneCount: 3,
++  recipient: RECIPIENT,
++  mintRecipient: B32(RECIPIENT),
++  refundTo: REFUND_TO,
++  destinationDomain: domain,
++  escrowCctpForwardFee: 200000n,
++  reviewWindow: 7n * BigInt(DAY),
++  ...over
++})
++
++const paramText = (d) => (d.parameters || []).join('\n')
++
++/* #18.1. claimDelivery starts e.reviewWindow (sol:417), a per-escrow value set
++   at deposit. It decides when this freelancer can actually be paid, and it was
++   the one surface not printing it — the parameters row (:640) and FocusBar
++   (:472) both already do, off the same object. */
++describe('#18.1 — claimDelivery names the window it starts', () => {
++  const claim = (escrow) =>
++    milestoneConfirm({ key: 'claim', fn: 'claimDelivery' }, escrow, { index: 1, amount: 250000000n, state: 0 }, [])
++
++  it('states the window length and what happens when it ends', () => {
++    expect(paramText(claim(escrowOn(ARC))))
++      .toContain('Review window: 7 days from this transaction. After it ends without a dispute, anyone can release the payment.')
++  })
++
++  it('reads the length off the escrow rather than assuming a default', () => {
++    expect(paramText(claim(escrowOn(ARC, { reviewWindow: 3n * BigInt(DAY) })))).toContain('Review window: 3 days')
++    expect(paramText(claim(escrowOn(ARC, { reviewWindow: BigInt(12 * 3600) })))).toContain('Review window: 12 hours')
++  })
++
++  /* An escrow object without the field must lose the line, not print
++     "Review window: 0 minutes" — which would read as "no review at all", the
++     opposite of what an unread value means. */
++  it('drops the line entirely when the window is unknown', () => {
++    for (const over of [{ reviewWindow: undefined }, { reviewWindow: 0n }]) {
++      const t = paramText(claim(escrowOn(ARC, over)))
++      expect(t).not.toMatch(/Review window|undefined|NaN|0 minutes/)
++      expect(t).toContain('No funds move on this transaction.')
++    }
++  })
++
++  it('still moves no money', () => {
++    expect(claim(escrowOn(ARC))).not.toHaveProperty('amount')
++  })
++})
++
++/* #18.2. ARBITER_WINDOW is 14 days (sol:69) and the timeout fallback is a
++   hardcoded 5000 bps (:576). Both are compile-time constants, so the vague
++   phrasing bought nothing. */
++describe('#18.2 — raiseDispute measures the arbitration window', () => {
++  const d = (over = {}) => raiseDisputeConfirm({
++    escrow: escrowOn(ARC),
++    milestone: { index: 1, amount: 250000000n, state: 1 },
++    reason: 'Not delivered',
++    uri: 'ipfs://x',
++    arbiterWindow: 1_209_600n,
++    ...over
++  })
++
++  it('names the 14 days and the fixed 50/50 in one sentence', () => {
++    expect(paramText(d())).toContain('An arbiter is not the only way out: you and the other party can still agree a split directly, and if no arbiter rules within 14 days, anyone can settle it at a fixed 50/50.')
++  })
++
++  /* The Phase C disclosure is extended, not duplicated — two sentences about
++     the same escape hatch read as two different hatches. */
++  it('states the escape hatch exactly once', () => {
++    const matches = paramText(d()).match(/not the only way out/g) || []
++    expect(matches).toHaveLength(1)
++  })
++
++  it('falls back to the unmeasured phrasing when the window is unknown', () => {
++    const t = paramText(d({ arbiterWindow: undefined }))
++    expect(t).toContain('if no arbiter rules within the arbitration window')
++    expect(t).not.toMatch(/undefined|NaN/)
++  })
++
++  it('still moves no money', () => {
++    expect(d()).not.toHaveProperty('amount')
++  })
++})
++
++/* #18.3. "Applies to every milestone not yet released" covers the whole escrow
++   on a fresh one and nothing on a finished one, and the screen gave the signer
++   no way to tell which. The milestones were already in LedgerColumn and were
++   dropped one frame before the descriptor. */
++describe('#18.3 — a redirect states what it is worth', () => {
++  // 250 released, 250 in review, 250 pending → 500 still exposed.
++  const MS = [
++    { index: 0, amount: 250000000n, state: 3 },
++    { index: 1, amount: 250000000n, state: 1 },
++    { index: 2, amount: 250000000n, state: 0 }
++  ]
++
++  describe('unreleasedExposure', () => {
++    it('counts everything that has not reached a terminal state', () => {
++      expect(unreleasedExposure(MS)).toBe(500000000n)
++    })
++
++    /* DISPUTED(2) still pays through the address being changed, so excluding
++       it would understate the exposure on exactly the escrows where the
++       destination matters most. */
++    it('counts a disputed milestone as still exposed', () => {
++      expect(unreleasedExposure([{ index: 0, amount: 100000000n, state: 2 }])).toBe(100000000n)
++    })
++
++    it('excludes released and refunded milestones', () => {
++      expect(unreleasedExposure([
++        { index: 0, amount: 100000000n, state: 3 },
++        { index: 1, amount: 100000000n, state: 4 }
++      ])).toBe(0n)
++    })
++
++    /* null, not 0n: an unknown exposure and a fully-settled escrow are
++       different facts, and only one of them should print a figure. */
++    it('returns null rather than zero when there is nothing to read', () => {
++      expect(unreleasedExposure(undefined)).toBeNull()
++      expect(unreleasedExposure([])).toBeNull()
++    })
++  })
++
++  const payout = (over = {}) => redirectPayoutConfirm({
++    escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE, milestones: MS, ...over
++  })
++
++  it('puts the remaining figure on the escrow-level redirect', () => {
++    expect(paramText(payout())).toContain('That is 500.00 USDC still to be paid, before the protocol fee.')
++  })
++
++  it('says gross, since the fee snapshot is not readable', () => {
++    expect(paramText(payout())).toMatch(/before the protocol fee/)
++    expect(paramText(payout())).not.toMatch(/\bnet\b/i)
++  })
++
++  it('omits the figure when the milestones are not available', () => {
++    const t = paramText(payout({ milestones: undefined }))
++    expect(t).not.toMatch(/still to be paid|undefined|NaN/)
++    expect(t).toContain('Applies to every milestone not yet released, including any currently in review.')
++  })
++
++  /* The split branch's write changes no destination at all, and the blocked
++     branch reverts. Attaching a value to either would put a number on a
++     transaction that moves nothing. */
++  it('stays off the branches where the redirect does nothing', () => {
++    const noop = paramText(payout({ hasSplits: true }))
++    const blocked = paramText(redirectPayoutConfirm({
++      escrow: escrowOn(ARC), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE, milestones: MS
++    }))
++    expect(noop).not.toMatch(/still to be paid/)
++    expect(blocked).not.toMatch(/still to be paid/)
++  })
++
++  const split = (over = {}) => redirectSplitConfirm({
++    escrow: escrowOn(BASE),
++    splitIndex: 1,
++    currentAddress: RECIPIENT,
++    currentDomain: BASE,
++    pct: 25,
++    newAddress: NEW_ADDR,
++    newDomain: BASE,
++    milestones: MS,
++    ...over
++  })
++
++  /* Stated as pool-and-share rather than a multiplied-out figure: the leg's
++     amount comes off each release's post-fee remainder (:1309), so 25% of the
++     gross pool is a number the contract never computes. */
++  it('scopes the split redirect to the leg without inventing a product', () => {
++    const t = paramText(split())
++    expect(t).toContain('500.00 USDC is still to be paid across this escrow, of which this leg takes 25% share after the protocol fee.')
++    expect(t).not.toContain('125.00 USDC')
++  })
++
++  it('omits it on the split redirect too when unavailable', () => {
++    expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid/)
++  })
++})

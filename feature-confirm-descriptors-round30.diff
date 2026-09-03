@@ -1,0 +1,606 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 0224705..bdd07a8 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -173,10 +173,16 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+         return
+       }
+ 
+-      const messages = expectedOrdinals.map((ord) => allMessages[ord]).filter(Boolean)
++      const selectedByOrdinal = expectedOrdinals.map((ord) => allMessages[ord])
++      const messages = selectedByOrdinal.filter(Boolean)
+ 
+       if (messages.length < expectedOrdinals.length) {
+-        markUnresolved(`selected:${messages.length}`)
++        // Round 30 (Low finding): signature includes WHICH expected ordinals
++        // came back empty, not just how many — two different missing
++        // ordinals at the same count would otherwise produce an identical
++        // signature and be indistinguishable from each other going stale.
++        const missingOrdinals = expectedOrdinals.filter((_, i) => selectedByOrdinal[i] == null)
++        markUnresolved(`selected:${messages.length}:${missingOrdinals.join(',')}`)
+         return
+       }
+ 
+@@ -193,21 +199,28 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+       // bypassed at once) and there is no safe alternative message to fall
+       // back to selecting instead.
+       if (expectedFingerprints != null) {
+-        const allMatch = messages.every(
+-          (m, i) => irisMessageMatchesFingerprint(m, expectedFingerprints[i])
+-        )
+-        if (!allMatch) {
+-          markUnresolved('fingerprint-mismatch')
++        // Round 30 (Low finding): signature includes WHICH selected index
++        // mismatched, not just that one did — a mismatch moving between
++        // ordinals poll to poll would otherwise look identical to the same
++        // ordinal being stuck.
++        const mismatchedIndexes = messages
++          .map((m, i) => (irisMessageMatchesFingerprint(m, expectedFingerprints[i]) ? null : i))
++          .filter((i) => i !== null)
++        if (mismatchedIndexes.length > 0) {
++          markUnresolved(`fingerprint-mismatch:${mismatchedIndexes.join(',')}`)
+           return
+         }
+       }
+ 
+       // Circle returns attestation: "PENDING" (string) while still confirming.
+-      const allAttested = messages.every(
+-        (m) => m.attestation && m.attestation !== 'PENDING'
+-      )
+-      if (!allAttested) {
+-        markUnresolved('unattested')
++      // Round 30 (Low finding): signature includes WHICH selected index is
++      // still unattested, not just that one is — same reasoning as the
++      // fingerprint-mismatch signature above.
++      const notAttestedIndexes = messages
++        .map((m, i) => (m.attestation && m.attestation !== 'PENDING' ? null : i))
++        .filter((i) => i !== null)
++      if (notAttestedIndexes.length > 0) {
++        markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)
+         return
+       }
+ 
+@@ -252,6 +265,17 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+     } catch {
+       // Network error or unexpected shape — show unavailable but keep polling
+       // so a transient outage doesn't permanently block status.
++      //
++      // Round 30 (Low finding): reset the stale-signature tracking here too.
++      // Previously only the mount effect did this, so an exception sitting
++      // between two otherwise-identical unresolved signatures didn't break
++      // the "unchanged" streak at all — the count would silently keep
++      // accumulating across the outage as though nothing had interrupted it.
++      // A transient failure is itself a distinct, genuinely different event
++      // from "the same ambiguous outcome repeating"; it shouldn't be
++      // invisible to the mechanism that exists to detect exactly that.
++      staleCountRef.current = 0
++      lastSignatureRef.current = null
+       setPhase('unavailable')
+     }
+     // Round 27: depends on expectedOrdinalsKey (a stable string), not
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index 59cd797..0efb54b 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -515,4 +515,39 @@ describe('useCctpDelivery — stale phase (persistent-overflow / stuck detection
+     await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+     expect(result.current.phase).toBe('delivered')
+   })
++
++  /* Round 30 (Low finding): the catch/exception path previously left
++     staleCountRef/lastSignatureRef untouched, so an outage sitting between
++     two otherwise-identical unresolved outcomes didn't break the streak at
++     all — the count kept accumulating across it as if nothing had
++     interrupted. */
++  it('resets the stale counter on the exception/catch path — an outage does not silently continue an unresolved streak from before it', async () => {
++    vi.useFakeTimers()
++    const overflow = () => [
++      irisMessage({ destinationDomain: 6 }), irisMessage({ destinationDomain: 0 }), irisMessage({ destinationDomain: 7 })
++    ]
++    fetchIrisMessages.mockResolvedValue(overflow())
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0, 1], 2))
++
++    // 8 identical-overflow polls — one short of the stale threshold (mirrors
++    // the "stays polling" test above: internal streak count is 7, not yet 8).
++    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
++    for (let i = 0; i < 7; i++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    }
++    expect(fetchIrisMessages).toHaveBeenCalledTimes(8)
++    expect(result.current.phase).toBe('polling')
++
++    // One poll that throws — this must reset the streak, not just skip a beat.
++    fetchIrisMessages.mockRejectedValueOnce(new Error('network error'))
++    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    expect(result.current.phase).toBe('unavailable')
++
++    // Resume the exact same identical-overflow signature. Without the reset,
++    // the pre-exception streak count (7) plus this one call would cross the
++    // threshold and go stale immediately here. With the reset, this is only
++    // the FIRST poll of a fresh streak, so it must stay in polling.
++    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
++    expect(result.current.phase).toBe('polling')
++  })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index f016f09..3561f27 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -139,29 +139,35 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+   return { address, logIndex, topics, data }
+ }
+ 
+-// Round 27: `message` no longer needs to match the receipt's own bytes at
+-// all — useCctpDelivery selects Iris entries by ORDINAL POSITION now (see
+-// its own doc comment for why content can never match a real message:
+-// CCTP V2 mutates several fields between burn-time and attestation). The
+-// default still happens to reuse buildCctpMessage() for convenience, but
+-// nothing below depends on it matching.
++// Round 27: useCctpDelivery selects Iris entries by ORDINAL POSITION, not by
++// content equality — CCTP V2 mutates several fields (nonce,
++// finalityThresholdExecuted, feeExecuted, expirationBlock) between burn-time
++// and attestation, so a real Iris `message` is never byte-equal to the
++// source-side receipt bytes. None of those mutable fields live in the
++// 0-280 byte range this file's buildCctpMessage models (they sit past
++// messageSender, at absolute offsets 312+ per irisDelivery.js's own byte
++// map), so this fixture can't literally exercise a byte-for-byte difference
++// in them — but the point survives structurally: cctpMessageFingerprint
++// never reads those offsets at all, so they could differ in a real response
++// without affecting anything below.
+ //
+-// Round 29: decodedMessage.decodedMessageBody is now real and derived
+-// separately from `message` (via a fresh, canonical buildCctpMessage call
+-// using the SAME destinationDomain/bodySender this fixture was asked to
+-// represent) rather than left absent or decoded from a possibly-arbitrary
+-// `message` override — realistic to how Circle's real Iris response works:
+-// `message` (raw hex) can legitimately differ from the source-side receipt
+-// bytes in the four MUTABLE fields (Round 27's own finding), but
+-// `decodedMessage`'s IMMUTABLE fields are Circle's own decode of the
+-// attested message and match the real burn's real fields. Every call site
+-// in this file that wants a genuinely-matching fingerprint must pass the
+-// receipt's own messageSentLog the SAME destinationDomain/bodySender.
++// Round 30 (fixing the Round 29 review's Medium finding on the nullable
++// decodedMessage/decodedMessageBody dependency): `message` DOES now have to
++// be genuine, parseable CCTP V2 bytes — irisMessageMatchesFingerprint no
++// longer trusts decodedMessage/decodedMessageBody (both explicitly nullable
++// per Circle's real schema) and instead derives the Iris-side fingerprint
++// directly from these raw bytes, the same way the receipt-side fingerprint
++// is derived. The default reuses buildCctpMessage() with the SAME
++// destinationDomain/bodySender this fixture represents so a genuinely
++// matching burn decodes to a genuinely matching fingerprint; decodedMessage/
++// decodedMessageBody are kept below only because useCctpDelivery's parsed
++// `destinationDomain` display field still reads decodedMessage.destinationDomain
++// separately (cosmetic, not part of the identity check).
+ const irisMessage = ({
+   destinationDomain = 6,
+   forwardState = 'COMPLETE',
+-  message = buildCctpMessage({ destinationDomain }),
+-  bodySender = CONTRACT_ADDRESS
++  bodySender = CONTRACT_ADDRESS,
++  message = buildCctpMessage({ destinationDomain, bodySender })
+ } = {}) => {
+   const fp = cctpMessageFingerprint(buildCctpMessage({ destinationDomain, bodySender }))
+   return {
+@@ -464,12 +470,15 @@ describe('Round 27: ordinal-position selection end to end', () => {
+       isPending: false,
+       isError: false
+     })
+-    // Deliberately NOT buildCctpMessage() — this represents Iris's real
+-    // attested form (nonce/finalityThresholdExecuted/feeExecuted/
+-    // expirationBlock filled in), which is never byte-equal to the zeroed
+-    // source-side form. Under Round 26's content-matching design this would
+-    // never have attributed — messages.length would stay 0 forever.
+-    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6, message: '0xattested-form-differs-from-source' })])
++    // Round 30: `message` must be genuine, parseable CCTP V2 bytes (see the
++    // irisMessage() fixture's own doc comment for why) — the default already
++    // builds one matching this destinationDomain, so no override is needed
++    // here at all. Under Round 26's now-removed content-matching design this
++    // would never have attributed (messages.length would stay 0 forever)
++    // because the mutable fields genuinely differ in a real response; under
++    // ordinal-position selection (Round 27) plus the immutable-field-only
++    // identity check (Round 30), it correctly does.
++    fetchIrisMessages.mockResolvedValue([irisMessage({ destinationDomain: 6 })])
+ 
+     renderFallback({ txHash: '0xmutabletx' })
+ 
+@@ -492,10 +501,14 @@ describe('Round 27: ordinal-position selection end to end', () => {
+     // Iris has no concept of "our" authenticity checks — it indexes both
+     // real MessageSent logs, forged one first (ordinal 0, FAILED so a
+     // wrong selection would be visibly distinguishable), genuine one second
+-    // (ordinal 1, COMPLETE).
++    // (ordinal 1, COMPLETE). Round 30: both need genuine, parseable bytes
++    // now (the defaults already provide that) — the ordinal-0 "forged" entry
++    // is never fingerprint-checked anyway (expectedOrdinals is [1], only the
++    // ordinal-1 entry is selected and checked), but real bytes here avoid
++    // depending on that to not blow up if it were ever touched.
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ destinationDomain: 0, forwardState: 'FAILED', message: '0xforged' }),
+-      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE', message: '0xgenuine' })
++      irisMessage({ destinationDomain: 0, forwardState: 'FAILED' }),
++      irisMessage({ destinationDomain: 6, forwardState: 'COMPLETE' })
+     ])
+ 
+     renderFallback({ txHash: '0xforgedearliertx' })
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 9299f21..1865580 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -101,22 +101,44 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
+   } finally {
+     clearTimeout(timeoutId)
+   }
++  // Round 30 (fixing the Round 29 review's Medium finding: "sourceTxHash
++  // checked at the wrong response level"). Confirmed against Circle's real
++  // GET /v2/messages API reference: sourceTxHash is a REQUIRED, non-nullable
++  // field on the response ENVELOPE — "the source burn transaction hash,
++  // shared by all messages in the response" — never duplicated on each
++  // individual message object. Round 29's per-message filter below was
++  // built against a shape that doesn't exist in a real response, so its
++  // `typeof m.sourceTxHash !== 'string'` branch always took the permissive
++  // "keep" path in production and never actually verified anything — the
++  // exact substitution it was meant to catch (equal cardinality, wrong
++  // membership) would have sailed through untouched. The real check has to
++  // run once, against the envelope, before `messages` is trusted at all.
++  //
++  // An absent envelope field (should be unreachable per Circle's schema,
++  // which marks it required) is treated as nothing to check — the same
++  // permissive-when-structurally-absent convention already used elsewhere
++  // in this codebase (irisMessageMatchesFingerprint's `fingerprint == null`,
++  // useCctpDelivery's `expectedOrdinals == null`). A PRESENT mismatch
++  // throws rather than silently returning [] — an empty array already means
++  // something specific in this function ("not yet indexed", the 404 branch
++  // above), and a wrong-transaction envelope is a categorically different,
++  // more anomalous condition that deserves its own signal rather than
++  // looking identical to "still indexing". useCctpDelivery's poll() already
++  // catches any thrown error here, sets phase 'unavailable', and keeps
++  // polling on the next tick — the same fail-closed, keep-retrying behavior
++  // a mismatch here should get.
++  if (typeof json?.sourceTxHash === 'string' && json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()) {
++    throw new Error('Iris response envelope sourceTxHash does not match the requested transaction')
++  }
++
+   const messages = json?.messages || []
+-  // Round 29 (fixing the Round 29 review's Medium finding): equal cardinality
+-  // doesn't prove equal membership. useCctpDelivery's completeness gate
+-  // (allMessages.length === expectedTotalMessages) only checks the COUNT —
+-  // a response missing one real message but containing one unrelated extra
+-  // entry would have the same length and still get ordinal-selected as
+-  // though it were this transaction's own verified set. Circle's Iris
+-  // response carries each message's own sourceTxHash; filtering out any
+-  // entry whose sourceTxHash is present and does NOT match the transaction
+-  // actually requested catches exactly that substitution — cheaply, before
+-  // the entry ever reaches ordinal selection. Filters out only a POSITIVE
+-  // mismatch, not entries missing the field entirely: this endpoint is
+-  // already scoped by `transactionHash` in the request URL above, so
+-  // sourceTxHash should be redundant on every real entry, but requiring its
+-  // presence would silently break every poll if some response shape omits
+-  // it — this stays a defensive check, not a new hard dependency.
++  // Round 29: kept as a harmless, no-cost defensive extra, NOT the real
++  // check (see the envelope-level check above, which is). Per Circle's real
++  // schema confirmed above, individual messages never actually carry their
++  // own sourceTxHash — so against a genuine response this filter's
++  // `typeof m.sourceTxHash !== 'string'` branch always takes the "keep"
++  // path and this loop is a no-op today. Left in only in case Circle ever
++  // adds the field at this level too.
+   return messages.filter(
+     (m) => typeof m.sourceTxHash !== 'string' || m.sourceTxHash.toLowerCase() === txHash.toLowerCase()
+   )
+@@ -230,25 +252,64 @@ export function cctpMessageFingerprint(message) {
+ }
+ 
+ /* Round 29. Checks a fingerprint (from cctpMessageFingerprint, above)
+-   against the Iris entry selected by ordinal, using the SAME decoded shape
+-   Circle's own V2 messages response documents: decodedMessage.destinationDomain
+-   and decodedMessage.decodedMessageBody.{burnToken,mintRecipient,messageSender,amount}
+-   (developers.circle.com/cctp/migration-from-v1-to-v2 — the V2 messages
+-   response example shows exactly this nesting). `fingerprint == null` is
+-   treated as "nothing to check against" (matches), not a failure — the same
+-   permissive default useCctpDelivery already uses for expectedOrdinals ==
+-   null, since every real call site provides both together. */
++   against the Iris entry selected by ordinal.
++
++   Round 30 (fixing the Round 29 review's Medium finding: "fingerprint check
++   depends on a nullable Iris field"). The original design compared against
++   irisMessage.decodedMessage.decodedMessageBody — but Circle's real schema
++   marks BOTH decodedMessage and decodedMessageBody explicitly nullable
++   (decodedMessage is null "if decoding fails" on Circle's side;
++   decodedMessageBody nullable the same way inside it), confirmed against
++   Circle's own GET /v2/messages API reference, not just the migration
++   guide's one non-null example. A genuine, fully real, correctly-attested,
++   terminal-state message could have Iris's own convenience decode come back
++   empty for reasons entirely outside this app's control — the old
++   `if (!decoded || !body) return false` treated that as a hard identity
++   mismatch, permanently misclassifying an honest message.
++
++   Fixed by never depending on Iris's decoded convenience object at all:
++   this derives the Iris-side fingerprint directly from irisMessage.message
++   (the raw hex bytes Iris returns) using cctpMessageFingerprint — the EXACT
++   SAME byte-offset parser already used for the receipt-side fingerprint —
++   instead of trusting a second, independently-nullable representation of
++   the same data. Symmetric parsing on both sides is strictly more robust
++   than comparing two different shapes, not just an equally-valid
++   alternative.
++
++   Per Circle's schema, `message` itself reads literally "0x" until an
++   attestation exists — a raw message that is missing or "0x" is a
++   genuinely different situation from a content mismatch: there is nothing
++   to compare yet, not a failed comparison. That's treated as "nothing to
++   check against" (matches, permissively) here, the same as `fingerprint ==
++   null` below — useCctpDelivery's own attestation gate, which runs
++   immediately after this check, is what correctly keeps polling for this
++   exact pre-attestation state (`m.attestation && m.attestation !==
++   'PENDING'`), so there is no need for this function to also detect it.
++   A non-"0x" message that fails to parse as valid CCTP V2 bytes (malformed,
++   truncated) is a different, more anomalous case and fails closed (treated
++   as a mismatch) rather than being let through.
++
++   `fingerprint == null` is treated as "nothing to check against" (matches),
++   not a failure — the same permissive default useCctpDelivery already uses
++   for expectedOrdinals == null, since every real call site provides both
++   together. */
+ export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
+   if (fingerprint == null) return true
+-  const decoded = irisMessage?.decodedMessage
+-  const body = decoded?.decodedMessageBody
+-  if (!decoded || !body) return false
+-  if (Number(decoded.destinationDomain) !== fingerprint.destinationDomain) return false
+-  if (typeof body.burnToken !== 'string' || body.burnToken.toLowerCase() !== fingerprint.burnToken) return false
+-  if (typeof body.mintRecipient !== 'string' || body.mintRecipient.toLowerCase() !== fingerprint.mintRecipient) return false
+-  if (typeof body.messageSender !== 'string' || body.messageSender.toLowerCase() !== fingerprint.messageSender) return false
+-  if (String(body.amount) !== fingerprint.amount) return false
+-  return true
++  const message = irisMessage?.message
++  if (typeof message !== 'string' || message === '0x') return true
++  let actual
++  try {
++    actual = cctpMessageFingerprint(message)
++  } catch {
++    return false
++  }
++  return (
++    actual.destinationDomain === fingerprint.destinationDomain &&
++    actual.burnToken === fingerprint.burnToken &&
++    actual.mintRecipient === fingerprint.mintRecipient &&
++    actual.amount === fingerprint.amount &&
++    actual.messageSender === fingerprint.messageSender
++  )
+ }
+ 
+ // Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 4177a24..2f02223 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -99,52 +99,73 @@ describe('fetchIrisMessages', () => {
+   })
+ })
+ 
+-/* fetchIrisMessages — sourceTxHash membership check, Round 29 (fixing the
+-   Round 29 review's Medium finding: "equal cardinality doesn't prove equal
+-   membership"). useCctpDelivery's completeness gate only checks
+-   allMessages.length === expectedTotalMessages — a response missing one
+-   real message but padded with one unrelated foreign entry has the same
+-   length and would previously sail through untouched, then get
+-   ordinal-selected as if it were this transaction's own verified set. Each
+-   message's own sourceTxHash — when Iris includes it — is checked against
+-   the transaction actually requested. */
+-describe('fetchIrisMessages — sourceTxHash membership', () => {
+-  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
++/* fetchIrisMessages — envelope-level sourceTxHash check, Round 30 (fixing
++   the Round 29 review's own Medium finding: "sourceTxHash checked at the
++   wrong response level"). Confirmed against Circle's real GET /v2/messages
++   API reference: sourceTxHash is a required, non-nullable field on the
++   response ENVELOPE ("the source burn transaction hash, shared by all
++   messages in the response"), never duplicated on each message object — so
++   these fixtures put it only at that level, matching Circle's actual
++   response shape rather than fabricating a per-message field that doesn't
++   exist in reality (the mistake the Round 29 fixtures made). */
++describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
++  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', ...overrides })
++
++  it('resolves normally when the envelope sourceTxHash matches the requested tx', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xabc123' }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++  })
++
++  it('matches the envelope sourceTxHash case-insensitively', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xABC123' }))))
++    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++  })
+ 
+-  it('keeps a message whose sourceTxHash matches the requested tx', async () => {
++  it('resolves normally when the envelope has no sourceTxHash field at all — permissive when structurally absent, same convention as fingerprint == null / expectedOrdinals == null elsewhere in this app', async () => {
+     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
+     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
+   })
+ 
+-  it('matches sourceTxHash case-insensitively', async () => {
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own({ sourceTxHash: '0xABC123' })] }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own({ sourceTxHash: '0xABC123' })])
++  it('throws when the envelope sourceTxHash belongs to a DIFFERENT transaction, rather than silently returning the wrong transaction\'s messages', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xdeadbeef' }))))
++    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
+   })
+ 
+-  it('keeps a message with no sourceTxHash field at all — a defensive check, not a new hard requirement on every response shape', async () => {
++  it('regression: right length, wrong transaction — a same-length response for an entirely different burn is rejected wholesale, not silently ordinal-selected as if it were this transaction\'s own verified set', async () => {
++    // Two entries — the same count a caller expecting expectedTotalMessages
++    // === 2 would require — but the whole envelope belongs to a different
++    // tx. Without the envelope check, this would previously have passed the
++    // completeness gate untouched and been ordinal-selected as this
++    // milestone's own messages.
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({
++      messages: [own({ message: '0xforeign1' }), own({ message: '0xforeign2' })],
++      sourceTxHash: '0xnottherequestedtx'
++    }))))
++    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
++  })
++})
++
++/* fetchIrisMessages — per-message sourceTxHash field, Round 29/30. Kept only
++   as coverage for the harmless defensive-extra filter still in
++   fetchIrisMessagesNow — NOT the real check (see the envelope-level describe
++   block above, which is). Per Circle's real schema, individual messages
++   never actually carry their own sourceTxHash, so this filter is a no-op
++   against any genuine response; these fixtures fabricate the field only to
++   confirm the dead-but-harmless code path still behaves as written. */
++describe('fetchIrisMessages — per-message sourceTxHash (defensive no-op)', () => {
++  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
++
++  it('keeps a message with no per-message sourceTxHash field at all — the normal case for a real response', async () => {
+     const noField = { message: '0xown', attestation: '0xatt' }
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField] }))))
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: '0xabc123' }))))
+     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
+   })
+ 
+-  it('drops a message whose sourceTxHash belongs to a DIFFERENT transaction', async () => {
++  it('would drop a message whose fabricated per-message sourceTxHash mismatches, if a response ever carried that field — envelope sourceTxHash still matches, so only the (dead-in-practice) per-message filter is exercised here', async () => {
+     const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign] }))))
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: '0xabc123' }))))
+     await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
+   })
+-
+-  it('regression: right length, wrong membership — one real message present plus one foreign substitute at the same count Iris "should" have returned, and the foreign entry is dropped rather than selected', async () => {
+-    const real = own({ message: '0xreal' })
+-    const foreign = own({ sourceTxHash: '0xnottherequestedtx', message: '0xforeign' })
+-    // Same length (2) as a caller expecting expectedTotalMessages === 2 would
+-    // require — without the sourceTxHash check, both would previously have
+-    // passed the completeness gate and the foreign entry could be selected
+-    // by ordinal as if it were this milestone's own second message.
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [real, foreign] }))))
+-    const result = await fetchIrisMessages('0xabc123')
+-    expect(result).toEqual([real])
+-    expect(result).toHaveLength(1)
+-  })
+ })
+ 
+ /* fetchIrisMessages — timeout, Round 22 Phase B.
+@@ -771,47 +792,38 @@ describe('cctpMessageFingerprint', () => {
+   })
+ })
+ 
+-/* irisMessageMatchesFingerprint — Round 29. Checks a fingerprint against the
+-   decoded shape Circle's own V2 messages API actually returns:
+-   decodedMessage.destinationDomain + decodedMessage.decodedMessageBody.
+-   {burnToken,mintRecipient,amount,messageSender} — verified against
+-   developers.circle.com/cctp/migration-from-v1-to-v2's own V2 response
+-   example, not assumed. */
++/* irisMessageMatchesFingerprint — Round 30 (fixing the Round 29 review's
++   Medium finding: "fingerprint check depends on a nullable Iris field").
++   Circle's real schema marks decodedMessage/decodedMessageBody explicitly
++   nullable (decode failure), so this now derives the Iris-side fingerprint
++   directly from irisMessage.message (raw hex) via cctpMessageFingerprint —
++   the same byte-offset parser the receipt-side fingerprint uses — instead
++   of depending on Iris's optional decoded convenience object at all. */
+ describe('irisMessageMatchesFingerprint', () => {
+-  const fp = fingerprintFor({
+-    destinationDomain: 6,
+-    burnToken: '0x1111111111111111111111111111111111111111',
+-    mintRecipient: '0x2222222222222222222222222222222222222222',
+-    amount: 5000n,
+-    bodySender: '0x3333333333333333333333333333333333333333'
+-  })
++  const destinationDomain = 6
++  const burnToken = '0x1111111111111111111111111111111111111111'
++  const mintRecipient = '0x2222222222222222222222222222222222222222'
++  const amount = 5000n
++  const bodySender = '0x3333333333333333333333333333333333333333'
++
++  const fp = fingerprintFor({ destinationDomain, burnToken, mintRecipient, amount, bodySender })
++  const realMessage = buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender })
+ 
+   const irisEntry = (overrides = {}) => ({
+-    message: '0xmsg',
++    message: realMessage,
+     attestation: '0xatt',
+-    decodedMessage: {
+-      destinationDomain: '6',
+-      decodedMessageBody: {
+-        burnToken: '0x1111111111111111111111111111111111111111',
+-        mintRecipient: '0x2222222222222222222222222222222222222222',
+-        amount: '5000',
+-        messageSender: '0x3333333333333333333333333333333333333333'
+-      }
+-    },
+     ...overrides
+   })
+ 
+   it('returns true when every immutable field matches, even with different address casing from Iris', () => {
+     const shouted = irisEntry({
+-      decodedMessage: {
+-        destinationDomain: '6',
+-        decodedMessageBody: {
+-          burnToken: '0x1111111111111111111111111111111111111111'.toUpperCase().replace('0X', '0x'),
+-          mintRecipient: '0x2222222222222222222222222222222222222222',
+-          amount: '5000',
+-          messageSender: '0x3333333333333333333333333333333333333333'
+-        }
+-      }
++      message: buildCctpMessage({
++        destinationDomain,
++        burnToken: burnToken.toUpperCase().replace('0X', '0x'),
++        mintRecipient,
++        amount,
++        bodySender
++      })
+     })
+     expect(irisMessageMatchesFingerprint(shouted, fp)).toBe(true)
+   })
+@@ -822,35 +834,43 @@ describe('irisMessageMatchesFingerprint', () => {
+   })
+ 
+   it('rejects a mismatched destinationDomain', () => {
+-    expect(irisMessageMatchesFingerprint(irisEntry({ decodedMessage: { ...irisEntry().decodedMessage, destinationDomain: '0' } }), fp)).toBe(false)
++    expect(irisMessageMatchesFingerprint(irisEntry({ message: buildCctpMessage({ destinationDomain: 0, burnToken, mintRecipient, amount, bodySender }) }), fp)).toBe(false)
+   })
+ 
+   it('rejects a mismatched burnToken', () => {
+-    const wrong = irisEntry()
+-    wrong.decodedMessage.decodedMessageBody.burnToken = '0x9999999999999999999999999999999999999999'
++    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken: '0x9999999999999999999999999999999999999999', mintRecipient, amount, bodySender }) })
+     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+   })
+ 
+   it('rejects a mismatched mintRecipient', () => {
+-    const wrong = irisEntry()
+-    wrong.decodedMessage.decodedMessageBody.mintRecipient = '0x9999999999999999999999999999999999999999'
++    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient: '0x9999999999999999999999999999999999999999', amount, bodySender }) })
+     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+   })
+ 
+   it('rejects a mismatched amount', () => {
+-    const wrong = irisEntry()
+-    wrong.decodedMessage.decodedMessageBody.amount = '1'
++    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount: 1n, bodySender }) })
+     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+   })
+ 
+   it('rejects a mismatched messageSender', () => {
+-    const wrong = irisEntry()
+-    wrong.decodedMessage.decodedMessageBody.messageSender = '0x9999999999999999999999999999999999999999'
++    const wrong = irisEntry({ message: buildCctpMessage({ destinationDomain, burnToken, mintRecipient, amount, bodySender: '0x9999999999999999999999999999999999999999' }) })
+     expect(irisMessageMatchesFingerprint(wrong, fp)).toBe(false)
+   })
+ 
+-  it('rejects an entry missing decodedMessage or decodedMessageBody entirely, rather than throwing', () => {
+-    expect(irisMessageMatchesFingerprint({ message: '0xmsg' }, fp)).toBe(false)
+-    expect(irisMessageMatchesFingerprint({ message: '0xmsg', decodedMessage: {} }, fp)).toBe(false)
++  it('regression (Round 29 review Medium finding): succeeds when decodedMessage is null but the raw message field is present and genuinely matches — Iris\'s convenience decode failing must not misclassify a real, correct message as a mismatch', () => {
++    const noDecode = irisEntry({ decodedMessage: null })
++    expect(irisMessageMatchesFingerprint(noDecode, fp)).toBe(true)
++  })
++
++  it('treats a missing raw message as unattested/incomplete (matches, permissively) rather than an identity failure — useCctpDelivery\'s own attestation gate is what correctly keeps polling for this case', () => {
++    expect(irisMessageMatchesFingerprint({ attestation: 'PENDING' }, fp)).toBe(true)
++  })
++
++  it('treats a raw message of "0x" (Circle\'s own pre-attestation sentinel) the same way — matches, permissively, not a mismatch', () => {
++    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: 'PENDING' }), fp)).toBe(true)
++  })
++
++  it('fails closed on a raw message that is present, non-"0x", but not valid CCTP V2 bytes — a genuinely different, more anomalous case than "not ready yet", so it must not be treated as a permissive match', () => {
++    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0xdead' }), fp)).toBe(false)
+   })
+ })

@@ -1,0 +1,773 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index bdd07a8..a19f442 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -1,5 +1,5 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+-import { fetchIrisMessages, irisMessageMatchesFingerprint } from '../utils/irisDelivery'
++import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageFingerprint } from '../utils/irisDelivery'
+ 
+ const POLL_MS = 15_000
+ 
+@@ -229,10 +229,37 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+       // forwardTxHash/forwardErrorCode flat on the message itself — there is
+       // no `forward` wrapper object at all. Verified against real captured
+       // responses for actual Arc-testnet burns.
++      //
++      // Round 31 (fixing the Round 30 review's Medium finding:
++      // "display/recovery logic still depends on the nullable decode").
++      // decodedMessage is nullable per Circle's real schema (Round 30's own
++      // doc comment on irisMessageMatchesFingerprint) — a genuine message
++      // can have decodedMessage: null and still be fully real and even
++      // terminal (FAILED), so reading destinationDomain from it ALONE left
++      // EscrowDetail.jsx's SelfRelayCard rendering "Unknown chain" and
++      // disabling self-relay for a delivery this app could otherwise recover
++      // in-app. The raw message bytes (m.message) are already being parsed
++      // for the identity check above (irisMessageMatchesFingerprint calls
++      // cctpMessageFingerprint internally) whenever expectedFingerprints is
++      // available — this reuses that SAME parser directly rather than
++      // rebuilding domain-extraction logic a second way, and works
++      // regardless of whether the fingerprint check ran, so it's the
++      // primary source; decodedMessage is only a fallback for the
++      // (should-be-unreachable) case where the raw message itself can't be
++      // parsed (missing/"0x"/malformed).
++      const domainFromRawMessage = (raw) => {
++        if (typeof raw !== 'string' || raw === '0x') return null
++        try {
++          return cctpMessageFingerprint(raw).destinationDomain
++        } catch {
++          return null
++        }
++      }
+       const parsed = messages.map((m) => ({
+         message:          m.message,
+         attestation:      m.attestation,
+-        destinationDomain: m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null,
++        destinationDomain: domainFromRawMessage(m.message) ??
++          (m.decodedMessage?.destinationDomain != null ? Number(m.decodedMessage.destinationDomain) : null),
+         destinationTxHash: m.forwardTxHash ?? null,
+         forwardState:      m.forwardState ?? null,
+         errorCode:         m.forwardErrorCode ?? null,
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index 0efb54b..cec7096 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -40,7 +40,16 @@ const fetchIrisMessages = vi.hoisted(() => vi.fn())
+ // let normal flow continue). Defaults to true so every pre-Round-29 test
+ // below, which never passes expectedFingerprints, is unaffected.
+ const irisMessageMatchesFingerprint = vi.hoisted(() => vi.fn(() => true))
+-vi.mock('../utils/irisDelivery', () => ({ fetchIrisMessages, irisMessageMatchesFingerprint }))
++// Round 31: cctpMessageFingerprint is left as the REAL implementation
++// (spread from importOriginal), not mocked — useCctpDelivery now calls it
++// directly to derive destinationDomain from the raw message bytes (see the
++// "raw-message domain" describe block below), and that needs genuine
++// byte-offset parsing to exercise for real, not a stub.
++vi.mock('../utils/irisDelivery', async (importOriginal) => ({
++  ...(await importOriginal()),
++  fetchIrisMessages,
++  irisMessageMatchesFingerprint
++}))
+ 
+ const { useCctpDelivery } = await import('./useCctpDelivery.js')
+ 
+@@ -420,6 +429,67 @@ describe('useCctpDelivery — expectedFingerprints identity check', () => {
+   })
+ })
+ 
++/* Round 31 (fixing the Round 30 review's Medium finding: "display/recovery
++   logic still depends on the nullable decode"). decodedMessage is nullable
++   per Circle's real schema — a genuine, terminal (even FAILED) message can
++   have decodedMessage: null. The old code read destinationDomain from
++   decodedMessage alone, so this case rendered EscrowDetail.jsx's
++   SelfRelayCard with "Unknown chain" and no in-app self-relay option, even
++   though the raw message bytes (already parsed for the identity check) hold
++   the real domain. buildCctpMessage below constructs a real, complete
++   (376+ byte) CCTP V2 message so cctpMessageFingerprint can genuinely parse
++   it — the same fixture shape irisDelivery.test.js uses, needed because
++   Round 31 also added a minimum-length/version floor to that parser. */
++const hexZeros = (byteLen) => '00'.repeat(byteLen)
++const uint32Hex = (n) => n.toString(16).padStart(8, '0')
++const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
++const SOME_ADDRESS = '0x1234567890123456789012345678901234567890'
++const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
++
++const buildCctpMessage = (destinationDomain) =>
++  '0x' +
++  uint32Hex(1) +                       // header version            0-4
++  hexZeros(4) +                        // sourceDomain               4-8
++  uint32Hex(destinationDomain) +       // destinationDomain          8-12
++  hexZeros(32) +                       // nonce                      12-44
++  addressWordHex(SOME_ADDRESS) +       // header sender              44-76
++  hexZeros(32 + 32 + 4 + 4) +          // recipient, destinationCaller, finality fields  76-148
++  uint32Hex(1) +                       // body version               148-152
++  hexZeros(32 + 32 + 32) +             // burnToken, mintRecipient, amount               152-248
++  addressWordHex(SOME_ADDRESS) +       // messageSender              248-280
++  hexZeros(32 + 32 + 32) +             // maxFee, feeExecuted, expirationBlock           280-376
++  CCTP_FORWARD_HOOK_HEX                // hookData                   376+
++
++describe('useCctpDelivery — raw-message domain, not solely the nullable decode', () => {
++  it('derives destinationDomain from the raw message when decodedMessage is null, even on a terminal FAILED forwardState — SelfRelayCard needs the real chain to offer in-app self-relay, not "Unknown chain"', async () => {
++    fetchIrisMessages.mockResolvedValue([{
++      message: buildCctpMessage(6),
++      attestation: '0xattestation',
++      decodedMessage: null,
++      forwardState: 'FAILED',
++      forwardTxHash: null,
++      forwardErrorCode: 'INSUFFICIENT_FEE'
++    }])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(result.current.phase).toBe('failed'))
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
++  })
++
++  it('falls back to decodedMessage when the raw message cannot be parsed — malformed/too-short bytes, an anomalous shape a real response should not produce', async () => {
++    fetchIrisMessages.mockResolvedValue([{
++      message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
++      attestation: '0xattestation',
++      decodedMessage: { destinationDomain: '6' },
++      forwardState: 'COMPLETE',
++      forwardTxHash: '0xdesttx',
++      forwardErrorCode: null
++    }])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++    expect(result.current.deliveries[0].destinationDomain).toBe(6)
++  })
++})
++
+ /* 'stale' phase — Round 29 (Low finding). A persistent overflow (Round 28's
+    fail-closed case) is indistinguishable in the UI from a genuinely
+    still-in-progress delivery — "Delivering…" forever with no diagnostic.
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index 3561f27..1799335 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -87,12 +87,20 @@ const hexZeros = (byteLen) => '00'.repeat(byteLen)
+ const uint32Hex = (n) => n.toString(16).padStart(8, '0')
+ const addressWordHex = (addr) => addr.slice(2).toLowerCase().padStart(64, '0')
+ 
++// Round 31: extended past byte 280 (messageSender) to a genuinely complete
++// CCTP V2 message. cctpMessageFingerprint (irisDelivery.js) gained a
++// minimum-length floor matching the real BurnMessageV2 fixed-field size
++// (376 bytes, through expirationBlock, before any hookData) — the old
++// 280-byte fixture was an unfair truncated-prefix test, shorter than any
++// real message this app's own cctp-forward hook actually produces.
++// hookData defaults to "cctp-forward" in hex, this app's real hook.
++const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
++
+ // A real, offset-correct CCTP V2 message — every field a genuine message
+-// would have up through messageSender (byte 280), not just the one field a
+-// given test cares about (Round 26: header sender/version were added
+-// alongside Round 25's body sender). Defaults describe a fully genuine
+-// message this contract's own burn would produce; individual tests
+-// override exactly the field they're exercising.
++// would have, not just the one field a given test cares about (Round 26:
++// header sender/version were added alongside Round 25's body sender).
++// Defaults describe a fully genuine message this contract's own burn would
++// produce; individual tests override exactly the field they're exercising.
+ // Round 29: destinationDomain now overridable (byte 8-12) so the fingerprint
+ // check (cctpMessageFingerprint reads this field) can be exercised
+ // end-to-end — previously always left at the zeroed default regardless of
+@@ -106,15 +114,17 @@ const buildCctpMessage = ({
+   bodySender = CONTRACT_ADDRESS
+ } = {}) =>
+   '0x' +
+-  uint32Hex(headerVersion) +
+-  hexZeros(4) +
+-  uint32Hex(destinationDomain) +
+-  hexZeros(32) +
+-  addressWordHex(headerSender) +
+-  hexZeros(32 + 32 + 4 + 4) +
+-  uint32Hex(bodyVersion) +
+-  hexZeros(32 + 32 + 32) +
+-  addressWordHex(bodySender)
++  uint32Hex(headerVersion) +          // version            0-4
++  hexZeros(4) +                       // sourceDomain       4-8
++  uint32Hex(destinationDomain) +      // destinationDomain  8-12
++  hexZeros(32) +                      // nonce              12-44
++  addressWordHex(headerSender) +      // sender             44-76
++  hexZeros(32 + 32 + 4 + 4) +         // recipient, destinationCaller, minFinalityThreshold, finalityThresholdExecuted  76-148
++  uint32Hex(bodyVersion) +            // body version       148-152
++  hexZeros(32 + 32 + 32) +            // burnToken, mintRecipient, amount     152-248
++  addressWordHex(bodySender) +        // messageSender      248-280
++  hexZeros(32 + 32 + 32) +            // maxFee, feeExecuted, expirationBlock 280-376
++  CCTP_FORWARD_HOOK_HEX               // hookData           376+ (dynamic)
+ 
+ // logIndex is a real field on every viem log — milestoneCctpLogRange orders
+ // and partitions on it, so every fixture below sets it explicitly rather
+@@ -395,6 +405,47 @@ describe('Round 24 Phase A: ordinary non-batched receipt still works (no regress
+   })
+ })
+ 
++/* Round 31 (fixing the Round 30 review's Medium finding: "display/recovery
++   logic still depends on the nullable decode"). decodedMessage is nullable
++   per Circle's real schema — a genuine, terminal FAILED message can have
++   decodedMessage: null. Before this fix, SelfRelayCard read destinationDomain
++   from decodedMessage alone and rendered "an unknown chain" with self-relay
++   disabled for a delivery this app could otherwise walk the user through
++   recovering in-app. This renders the FULL component tree (real
++   useCctpDelivery, real SelfRelayCard) end to end, not just the hook in
++   isolation, to prove the fix actually reaches the UI. */
++describe('Round 31: decodedMessage: null must not degrade self-relay recovery to "unknown chain"', () => {
++  it('renders the real chain name and an in-app relay option for a FAILED message whose decodedMessage is null, using the domain parsed from the raw message bytes', async () => {
++    setReceipt({
++      data: {
++        transactionHash: '0xnulldecodetx',
++        logs: [
++          messageSentLog(0, { destinationDomain: 6 }),
++          escrowLog(1, 'MilestoneApproved', { escrowId: 7n, milestoneIndex: 1n })
++        ]
++      },
++      isPending: false,
++      isError: false
++    })
++    fetchIrisMessages.mockResolvedValue([{
++      message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
++      attestation: '0xattestation',
++      decodedMessage: null,
++      forwardState: 'FAILED',
++      forwardTxHash: null,
++      forwardErrorCode: 'INSUFFICIENT_FEE'
++    }])
++
++    renderFallback({ txHash: '0xnulldecodetx' })
++
++    await waitFor(() => expect(screen.getByText(/Delivery failed/)).toBeInTheDocument())
++    // Real chain name (Base Sepolia, domain 6), never the "an unknown chain"
++    // fallback domainLabel() renders for a null/unresolved domain.
++    expect(screen.getByText(/Switch your wallet to/).closest('p').textContent).toContain('Base Sepolia')
++    expect(screen.queryByText(/an unknown chain/)).not.toBeInTheDocument()
++  })
++})
++
+ describe('Round 25 gap (a) / Round 26 finding 1: a foreign application\'s burn shares this receipt with an unrelated Arc-only release', () => {
+   it('does not attribute a foreign TrancheProtocol instance\'s (or a direct Circle depositForBurn\'s) MessageSent to this instance\'s Arc-only release', async () => {
+     setReceipt({
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+index 2c41f4e..e9c7038 100644
+--- a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
++++ b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+@@ -61,6 +61,13 @@ const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
+ const MESSAGE_SENT_ABI = [
+   { name: 'MessageSent', type: 'event', inputs: [{ name: 'message', type: 'bytes', indexed: false }], anonymous: false }
+ ]
++// Round 31: extended past byte 280 (messageSender) to a genuinely complete
++// CCTP V2 message. cctpMessageFingerprint (irisDelivery.js) gained a
++// minimum-length floor matching the real BurnMessageV2 fixed-field size
++// (376 bytes, through expirationBlock, before any hookData) — the old
++// 280-byte fixture was an unfair truncated-prefix test, shorter than any
++// real message this app's own cctp-forward hook actually produces.
++const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
+ const buildCctpMessage = () =>
+   '0x' +
+   '00000001' +                                                          // header version 1
+@@ -69,7 +76,9 @@ const buildCctpMessage = () =>
+   '00'.repeat(32 + 32 + 4 + 4) +                                         // recipient, destinationCaller, finality fields
+   '00000001' +                                                          // body version 1
+   '00'.repeat(32 + 32 + 32) +                                            // burnToken, mintRecipient, amount
+-  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0')              // body messageSender
++  CONTRACT_ADDRESS.slice(2).toLowerCase().padStart(64, '0') +            // body messageSender
++  '00'.repeat(32 + 32 + 32) +                                            // maxFee, feeExecuted, expirationBlock
++  CCTP_FORWARD_HOOK_HEX                                                  // hookData
+ const messageSentLog = (logIndex) => ({
+   address: MESSAGE_TRANSMITTER_V2_ARC,
+   logIndex,
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 1865580..6b956dd 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,10 +1,15 @@
+-import { encodeFunctionData, decodeEventLog, slice, toEventSelector } from 'viem'
++import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ import { bytes32ToAddress } from './encode.js'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const IRIS_BASE = import.meta.env.VITE_IRIS_API_BASE || 'https://iris-api-sandbox.circle.com'
+ 
++// Same 32-byte-hash shape EscrowDetail.jsx's CCTP_TX_HASH_RE already
++// validates tx hashes against — kept as a separate literal (not imported)
++// since EscrowDetail.jsx imports FROM this module, not the reverse.
++const SOURCE_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
++
+ const RECEIVE_MESSAGE_ABI = [
+   {
+     name: 'receiveMessage',
+@@ -114,21 +119,41 @@ async function fetchIrisMessagesNow(txHash, sourceDomain) {
+   // membership) would have sailed through untouched. The real check has to
+   // run once, against the envelope, before `messages` is trusted at all.
+   //
+-  // An absent envelope field (should be unreachable per Circle's schema,
+-  // which marks it required) is treated as nothing to check — the same
+-  // permissive-when-structurally-absent convention already used elsewhere
+-  // in this codebase (irisMessageMatchesFingerprint's `fingerprint == null`,
+-  // useCctpDelivery's `expectedOrdinals == null`). A PRESENT mismatch
+-  // throws rather than silently returning [] — an empty array already means
+-  // something specific in this function ("not yet indexed", the 404 branch
+-  // above), and a wrong-transaction envelope is a categorically different,
+-  // more anomalous condition that deserves its own signal rather than
+-  // looking identical to "still indexing". useCctpDelivery's poll() already
+-  // catches any thrown error here, sets phase 'unavailable', and keeps
+-  // polling on the next tick — the same fail-closed, keep-retrying behavior
+-  // a mismatch here should get.
+-  if (typeof json?.sourceTxHash === 'string' && json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()) {
+-    throw new Error('Iris response envelope sourceTxHash does not match the requested transaction')
++  // Round 31 (fixing the Round 30 review's Medium finding: "absence should
++  // fail, not pass"). Confirmed a second time against Circle's real OpenAPI
++  // schema for this endpoint: sourceTxHash is listed in the response's
++  // `required` array with no `nullable: true`, so an absent/null/wrong-type
++  // envelope field is not a normal compatibility case the way it would be
++  // for a genuinely optional value (contrast irisMessageMatchesFingerprint's
++  // `fingerprint == null` and useCctpDelivery's `expectedOrdinals == null`,
++  // both real optional-by-design values) — it means the response doesn't
++  // match Circle's documented, required schema at all, which is itself
++  // anomalous and worth failing closed on. This field is also the ONLY
++  // transaction-unique value available here: cctpMessageFingerprint's five
++  // fields (destinationDomain/burnToken/mintRecipient/amount/messageSender)
++  // can be byte-identical across two genuinely different transactions (e.g.
++  // the same payer re-sending the same amount to the same recipient), so
++  // sourceTxHash is what actually distinguishes them — permissive-on-absence
++  // would reopen exactly the substitution gap this check exists to close.
++  //
++  // Format-validated with the same 32-byte-hash regex this codebase already
++  // uses for tx hashes elsewhere (EscrowDetail.jsx's CCTP_TX_HASH_RE) so a
++  // malformed-but-coincidentally-matching value can't slip through the
++  // equality check below. An empty array already means something specific
++  // in this function ("not yet indexed", the 404 branch above), so any
++  // failure here throws rather than returning [] — a wrong-transaction or
++  // schema-violating envelope is a categorically different, more anomalous
++  // condition that deserves its own signal rather than looking identical to
++  // "still indexing". useCctpDelivery's poll() already catches any thrown
++  // error here, sets phase 'unavailable', and keeps polling on the next
++  // tick — the same fail-closed, keep-retrying behavior every failure mode
++  // here should get.
++  if (
++    typeof json?.sourceTxHash !== 'string' ||
++    !SOURCE_TX_HASH_RE.test(json.sourceTxHash) ||
++    json.sourceTxHash.toLowerCase() !== txHash.toLowerCase()
++  ) {
++    throw new Error('Iris response envelope sourceTxHash is missing, malformed, or does not match the requested transaction')
+   }
+ 
+   const messages = json?.messages || []
+@@ -240,8 +265,36 @@ function amountOf(message) {
+    actually achievable here, unlike Round 26's attempt.
+    Stored as plain JSON-safe values (lowercased address strings, amount as a
+    decimal string — BigInt doesn't survive JSON.stringify) since this feeds
+-   directly into the persisted cctpTrack record. */
++   directly into the persisted cctpTrack record.
++
++   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
++   fingerprint check is fail-open in two ways", part b). This previously
++   read straight through byte 280 with no minimum-length or version-field
++   check at all — unlike verifiedOwnCctpMessage on the receipt side, which
++   checks both header and body version before ever trusting its offsets.
++   The receipt-side caller (receiptEmittedCctpMessageForMilestone) only ever
++   passes messages that already passed verifiedOwnCctpMessage's own version
++   checks, so this was latent there — but irisMessageMatchesFingerprint
++   passes this UNTRUSTED bytes straight from Iris's API response, never
++   independently checked before now. A short or non-V2 value could have its
++   arbitrary bytes silently misread as real fingerprint fields (e.g. a
++   truncated or malformed response reading zero/garbage where amount or
++   mintRecipient should be) instead of being rejected outright. Fixed by
++   reusing the SAME header/body version-check functions already built for
++   the receipt side (messageHeaderVersionOf / messageBodyVersionOf) rather
++   than rebuilding them, plus a minimum-length floor against the real
++   complete-message size (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) before any
++   offset is read. Throws on either failure — every real call site already
++   wraps this in try/catch and fails closed (irisMessageMatchesFingerprint
++   explicitly; the receipt-side caller can't reach either failure in
++   practice, since verifiedOwnCctpMessage already guarantees both). */
+ export function cctpMessageFingerprint(message) {
++  if (typeof message !== 'string' || size(message) < CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) {
++    throw new Error('cctpMessageFingerprint: message is too short to be a complete CCTP V2 message')
++  }
++  if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION || messageBodyVersionOf(message) !== CCTP_V2_VERSION) {
++    throw new Error('cctpMessageFingerprint: message header/body version is not CCTP V2')
++  }
+   return {
+     destinationDomain: destinationDomainOf(message),
+     burnToken: burnTokenOf(message).toLowerCase(),
+@@ -289,6 +342,20 @@ export function cctpMessageFingerprint(message) {
+    truncated) is a different, more anomalous case and fails closed (treated
+    as a mismatch) rather than being let through.
+ 
++   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
++   fingerprint check is fail-open in two ways", part a). Circle documents
++   only ONE legitimate pre-attestation state: message: "0x" paired with
++   attestation: "PENDING" on the SAME entry. The permissive branch above
++   originally trusted a missing/"0x" message on its own, without checking
++   that the same entry's own attestation actually says PENDING — so an
++   entry with an empty message but a non-PENDING attestation and a terminal
++   forwardState (internally inconsistent; should be unreachable in a real
++   response) would previously have been waved through as "nothing to check
++   yet" instead of being recognized as anomalous. Now the permissive branch
++   only fires when the invariant genuinely holds; a missing/"0x" message
++   paired with anything other than a genuinely-PENDING attestation fails
++   closed like any other unparseable entry.
++
+    `fingerprint == null` is treated as "nothing to check against" (matches),
+    not a failure — the same permissive default useCctpDelivery already uses
+    for expectedOrdinals == null, since every real call site provides both
+@@ -296,7 +363,9 @@ export function cctpMessageFingerprint(message) {
+ export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
+   if (fingerprint == null) return true
+   const message = irisMessage?.message
+-  if (typeof message !== 'string' || message === '0x') return true
++  if (typeof message !== 'string' || message === '0x') {
++    return irisMessage?.attestation === 'PENDING'
++  }
+   let actual
+   try {
+     actual = cctpMessageFingerprint(message)
+@@ -336,6 +405,21 @@ export const TOKEN_MESSENGER_V2_ARC = '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DA
+ // own body (verified against Circle's docs: V1 uses 0 for the same field).
+ const CCTP_V2_VERSION = 1
+ 
++// Round 31. The full fixed-field length of a complete CCTP V2 message
++// BEFORE any hookData — verified against Circle's own technical guide for
++// BOTH the top-level header (developers.circle.com/cctp/references/
++// technical-guide#message-header, ending at messageBody / absolute offset
++// 148) and BurnMessageV2's body (same page, "Message body" table): version
++// 0-4, burnToken 4-36, mintRecipient 36-68, amount 68-100, messageSender
++// 100-132, maxFee 132-164, feeExecuted 164-196, expirationBlock 196-228,
++// then hookData (dynamic) at relative 228 — 148 + 228 = 376 absolute.
++// hookData itself is dynamic and can be zero-length for a hookless burn, so
++// 376 is the real minimum a genuinely complete message can be; this app's
++// own depositForBurnWithHook burns are always longer (FORWARD_HOOK_DATA
++// appended past this point). A message shorter than this is truncated or
++// fabricated and must never have its fixed-field offsets trusted.
++const CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES = 376
++
+ function readUint32(message, byteOffset) {
+   return Number(BigInt(slice(message, byteOffset, byteOffset + 4)))
+ }
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index 2f02223..2c9732b 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -42,37 +42,59 @@ afterEach(() => {
+ 
+ const mockOk = (body) => ({ ok: true, status: 200, json: async () => body })
+ 
++// Round 31: sourceTxHash is now strictly format-validated against the same
++// 32-byte-hash shape as a real tx hash (SOURCE_TX_HASH_RE in irisDelivery.js),
++// so short placeholder strings like '0xabc123' can no longer stand in for a
++// well-formed one anywhere the mock response needs to resolve successfully.
++// Deterministically expands any short, readable seed into a full 66-char
++// hex string (via char codes, so it's valid hex regardless of the seed's
++// own letters) — keeps fixtures legible ('same', 'errors', ...) while
++// satisfying the format check.
++const hash = (seed) =>
++  ('0x' + Array.from(seed).map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('').padEnd(64, '0')).slice(0, 66)
++
++const TX = hash('abc123')
++
++// Generic mock: echoes back whatever txHash was actually requested as the
++// envelope's sourceTxHash, so dedup/guard tests that don't care about the
++// response CONTENT (only about call counts/timing) still resolve
++// successfully under the now-mandatory, format-checked sourceTxHash.
++const echoFetch = () => vi.fn((url) => {
++  const tx = new URL(url).searchParams.get('transactionHash')
++  return Promise.resolve(mockOk({ messages: [], sourceTxHash: tx }))
++})
++
+ describe('fetchIrisMessages', () => {
+   it('requests the sourceDomain as a path segment and the tx hash as a transactionHash query param', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await fetchIrisMessages('0xabc123')
++    await fetchIrisMessages(TX)
+ 
+     expect(fetchMock).toHaveBeenCalledTimes(1)
+     const [url] = fetchMock.mock.calls[0]
+     expect(url).toContain(`/v2/messages/${ARC_DOMAIN}`)
+-    expect(url).toContain('transactionHash=0xabc123')
++    expect(url).toContain(`transactionHash=${TX}`)
+     // The bug this closes: the tx hash must never appear where the domain
+     // path segment goes.
+-    expect(url).not.toContain(`/v2/messages/0xabc123`)
++    expect(url).not.toContain(`/v2/messages/${TX}`)
+   })
+ 
+   it('defaults sourceDomain to ARC_DOMAIN — every tracked burn in this app originates from Arc', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await fetchIrisMessages('0xabc123')
++    await fetchIrisMessages(TX)
+ 
+     const [url] = fetchMock.mock.calls[0]
+     expect(url).toContain('/v2/messages/26?')
+   })
+ 
+   it('accepts an explicit sourceDomain override', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await fetchIrisMessages('0xabc123', 6)
++    await fetchIrisMessages(TX, 6)
+ 
+     const [url] = fetchMock.mock.calls[0]
+     expect(url).toContain('/v2/messages/6?')
+@@ -94,8 +116,8 @@ describe('fetchIrisMessages', () => {
+       decodedMessage: { destinationDomain: '6' },
+       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
+     }
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: '0xabc123' }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([realShapedMessage])
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [realShapedMessage], sourceTxHash: TX }))))
++    await expect(fetchIrisMessages(TX)).resolves.toEqual([realShapedMessage])
+   })
+ })
+ 
+@@ -112,23 +134,47 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
+   const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', ...overrides })
+ 
+   it('resolves normally when the envelope sourceTxHash matches the requested tx', async () => {
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xabc123' }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: TX }))))
++    await expect(fetchIrisMessages(TX)).resolves.toEqual([own()])
+   })
+ 
+   it('matches the envelope sourceTxHash case-insensitively', async () => {
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xABC123' }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0x' + TX.slice(2).toUpperCase() }))))
++    await expect(fetchIrisMessages(TX)).resolves.toEqual([own()])
++  })
++
++  // Round 31 (fixing the Round 30 review's Medium finding: "absence should
++  // fail, not pass"). Was previously the mirror-image test — "resolves
++  // normally when absent". Circle's real OpenAPI schema marks sourceTxHash
++  // required and non-nullable on this envelope (confirmed live, see
++  // irisDelivery.js's doc comment), so an absent field means the response
++  // doesn't match the documented schema at all — anomalous, not a normal
++  // compatibility case — and must fail closed rather than being treated the
++  // same as this app's own genuinely-optional values.
++  it('throws when the envelope has no sourceTxHash field at all — Circle marks the field required and non-nullable, so absence is anomalous rather than a permissive compatibility case', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
++    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
+   })
+ 
+-  it('resolves normally when the envelope has no sourceTxHash field at all — permissive when structurally absent, same convention as fingerprint == null / expectedOrdinals == null elsewhere in this app', async () => {
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()] }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([own()])
++  it('throws when the envelope sourceTxHash is explicitly null', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: null }))))
++    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
++  })
++
++  it('throws when the envelope sourceTxHash is the wrong type (not a string)', async () => {
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: 12345 }))))
++    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
++  })
++
++  it('throws when the envelope sourceTxHash is a malformed shape — a string that is not a valid 32-byte hash, even though it happens to equal the requested tx hash by length coincidence', async () => {
++    const notAHash = '0xnothex' // same general "0x..." shape, but not valid hex / not 32 bytes
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: notAHash }))))
++    await expect(fetchIrisMessages(notAHash)).rejects.toThrow(/sourceTxHash/i)
+   })
+ 
+   it('throws when the envelope sourceTxHash belongs to a DIFFERENT transaction, rather than silently returning the wrong transaction\'s messages', async () => {
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: '0xdeadbeef' }))))
+-    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [own()], sourceTxHash: TX }))))
++    await expect(fetchIrisMessages(hash('different'))).rejects.toThrow(/sourceTxHash/i)
+   })
+ 
+   it('regression: right length, wrong transaction — a same-length response for an entirely different burn is rejected wholesale, not silently ordinal-selected as if it were this transaction\'s own verified set', async () => {
+@@ -139,9 +185,9 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
+     // milestone's own messages.
+     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({
+       messages: [own({ message: '0xforeign1' }), own({ message: '0xforeign2' })],
+-      sourceTxHash: '0xnottherequestedtx'
++      sourceTxHash: hash('notrequested')
+     }))))
+-    await expect(fetchIrisMessages('0xabc123')).rejects.toThrow(/sourceTxHash/i)
++    await expect(fetchIrisMessages(TX)).rejects.toThrow(/sourceTxHash/i)
+   })
+ })
+ 
+@@ -153,18 +199,18 @@ describe('fetchIrisMessages — envelope-level sourceTxHash check', () => {
+    against any genuine response; these fixtures fabricate the field only to
+    confirm the dead-but-harmless code path still behaves as written. */
+ describe('fetchIrisMessages — per-message sourceTxHash (defensive no-op)', () => {
+-  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: '0xabc123', ...overrides })
++  const own = (overrides = {}) => ({ message: '0xown', attestation: '0xatt', sourceTxHash: TX, ...overrides })
+ 
+   it('keeps a message with no per-message sourceTxHash field at all — the normal case for a real response', async () => {
+     const noField = { message: '0xown', attestation: '0xatt' }
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: '0xabc123' }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([noField])
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [noField], sourceTxHash: TX }))))
++    await expect(fetchIrisMessages(TX)).resolves.toEqual([noField])
+   })
+ 
+   it('would drop a message whose fabricated per-message sourceTxHash mismatches, if a response ever carried that field — envelope sourceTxHash still matches, so only the (dead-in-practice) per-message filter is exercised here', async () => {
+     const foreign = own({ sourceTxHash: '0xdeadbeef', message: '0xforeign' })
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: '0xabc123' }))))
+-    await expect(fetchIrisMessages('0xabc123')).resolves.toEqual([])
++    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [foreign], sourceTxHash: TX }))))
++    await expect(fetchIrisMessages(TX)).resolves.toEqual([])
+   })
+ })
+ 
+@@ -209,9 +255,9 @@ describe('fetchIrisMessages — timeout', () => {
+   })
+ 
+   it('passes an AbortSignal to fetch so a real hang can actually be cancelled', () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [], sourceTxHash: TX })))
+     vi.stubGlobal('fetch', fetchMock)
+-    return fetchIrisMessages('0xabc999').then(() => {
++    return fetchIrisMessages(TX).then(() => {
+       const [, opts] = fetchMock.mock.calls[0]
+       expect(opts.signal).toBeInstanceOf(AbortSignal)
+     })
+@@ -233,51 +279,55 @@ describe('fetchIrisMessages — in-flight guard', () => {
+   })
+ 
+   it('reuses the in-flight request for the SAME txHash instead of issuing a second fetch', async () => {
++    const txSame = hash('same')
+     let resolveFetch
+     const fetchMock = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve }))
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    const p1 = fetchIrisMessages('0xsame')
+-    const p2 = fetchIrisMessages('0xsame')
++    const p1 = fetchIrisMessages(txSame)
++    const p2 = fetchIrisMessages(txSame)
+ 
+     expect(fetchMock).toHaveBeenCalledTimes(1)
+ 
+-    resolveFetch(mockOk({ messages: [{ message: '0xshared' }] }))
++    resolveFetch(mockOk({ messages: [{ message: '0xshared' }], sourceTxHash: txSame }))
+     await expect(p1).resolves.toEqual([{ message: '0xshared' }])
+     await expect(p2).resolves.toEqual([{ message: '0xshared' }])
+   })
+ 
+   it('does NOT dedup a concurrent request for a genuinely different txHash', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = echoFetch()
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await Promise.all([fetchIrisMessages('0xone'), fetchIrisMessages('0xtwo')])
++    await Promise.all([fetchIrisMessages(hash('one')), fetchIrisMessages(hash('two'))])
+     expect(fetchMock).toHaveBeenCalledTimes(2)
+   })
+ 
+   it('does NOT dedup requests for the same txHash on different sourceDomains', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = echoFetch()
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await Promise.all([fetchIrisMessages('0xsametx', 26), fetchIrisMessages('0xsametx', 6)])
++    const txSame = hash('sametx')
++    await Promise.all([fetchIrisMessages(txSame, 26), fetchIrisMessages(txSame, 6)])
+     expect(fetchMock).toHaveBeenCalledTimes(2)
+   })
+ 
+   it('allows a fresh request for the same txHash once the prior one has settled — the guard is not permanent', async () => {
+-    const fetchMock = vi.fn(() => Promise.resolve(mockOk({ messages: [] })))
++    const fetchMock = echoFetch()
+     vi.stubGlobal('fetch', fetchMock)
+ 
+-    await fetchIrisMessages('0xsequential')
+-    await fetchIrisMessages('0xsequential')
++    const tx = hash('sequential')
++    await fetchIrisMessages(tx)
++    await fetchIrisMessages(tx)
+     expect(fetchMock).toHaveBeenCalledTimes(2)
+   })
+ 
+   it('clears the in-flight slot even when the request throws, so the next poll is not permanently blocked', async () => {
++    const tx = hash('errors')
+     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 500 })))
+-    await expect(fetchIrisMessages('0xerrors')).rejects.toThrow('Iris HTTP 500')
++    await expect(fetchIrisMessages(tx)).rejects.toThrow('Iris HTTP 500')
+ 
+-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(mockOk({ messages: [] }))))
+-    await expect(fetchIrisMessages('0xerrors')).resolves.toEqual([])
++    vi.stubGlobal('fetch', echoFetch())
++    await expect(fetchIrisMessages(tx)).resolves.toEqual([])
+   })
+ })
+ 
+@@ -320,6 +370,20 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+ // (each defaulting to the same zero value every pre-Round-29 call site
+ // already implicitly relied on) so cctpMessageFingerprint's actual field
+ // extraction can be tested against non-default values, not just zeros.
++// Round 31: extended past byte 280 (messageSender) to a genuinely complete
++// CCTP V2 message — maxFee/feeExecuted/expirationBlock through byte 376,
++// then hookData — after cctpMessageFingerprint gained a minimum-length
++// floor (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES, irisDelivery.js) matching the
++// real BurnMessageV2 fixed-field size. The old fixture stopped at exactly
++// byte 280 — long enough for the fields the old code actually read, but
++// shorter than any real message, so it was an unfair "truncated prefix"
++// test rather than testing against a genuine message shape. hookData
++// defaults to "cctp-forward" in hex, the actual hook this app's own
++// deposits use (see FORWARD_HOOK_DATA in TrancheProtocol.sol via CLAUDE.md),
++// so the default fixture matches a real message end-to-end, not just the
++// minimum length required to pass.
++const CCTP_FORWARD_HOOK_HEX = '637474702d666f7277617264' // 'cctp-forward'
++
+ const buildCctpMessage = ({
+   headerVersion = 1,
+   headerSender = TOKEN_MESSENGER_V2_ARC,
+@@ -328,7 +392,11 @@ const buildCctpMessage = ({
+   burnToken = ZERO_ADDRESS,
+   mintRecipient = ZERO_ADDRESS,
+   amount = 0n,
+-  bodySender = CONTRACT_ADDRESS
++  bodySender = CONTRACT_ADDRESS,
++  maxFee = 0n,
++  feeExecuted = 0n,
++  expirationBlock = 0n,
++  hookData = CCTP_FORWARD_HOOK_HEX
+ } = {}) =>
+   '0x' +
+   uint32Hex(headerVersion) +          // version            0-4
+@@ -344,7 +412,11 @@ const buildCctpMessage = ({
+   addressWordHex(burnToken) +         // burnToken          152-184
+   addressWordHex(mintRecipient) +     // mintRecipient       184-216
+   uint256Hex(amount) +                // amount             216-248
+-  addressWordHex(bodySender)          // messageSender      248-280
++  addressWordHex(bodySender) +        // messageSender      248-280
++  uint256Hex(maxFee) +                // maxFee             280-312
++  uint256Hex(feeExecuted) +           // feeExecuted        312-344
++  uint256Hex(expirationBlock) +       // expirationBlock    344-376
++  hookData                            // hookData           376+ (dynamic)
+ 
+ // Round 29: the expected cctpMessageFingerprint for a message built by
+ // buildCctpMessage above, mirroring the same overridable fields.
+@@ -873,4 +945,24 @@ describe('irisMessageMatchesFingerprint', () => {
+   it('fails closed on a raw message that is present, non-"0x", but not valid CCTP V2 bytes — a genuinely different, more anomalous case than "not ready yet", so it must not be treated as a permissive match', () => {
+     expect(irisMessageMatchesFingerprint(irisEntry({ message: '0xdead' }), fp)).toBe(false)
+   })
++
++  // Round 31 (fixing the Round 30 review's Medium finding: "raw-message
++  // fingerprint check is fail-open in two ways", part a). Circle documents
++  // only ONE legitimate pre-attestation state — message missing/"0x" paired
++  // with attestation: "PENDING" on the SAME entry. An entry with an empty
++  // message but a non-PENDING attestation (and, in a real response, a
++  // terminal forwardState) is internally inconsistent and should be
++  // unreachable — but the old code trusted the missing message alone,
++  // without checking the paired attestation, so this anomalous shape would
++  // previously have been waved through as "nothing to check yet".
++  it('fails closed on a missing raw message whose attestation is NOT genuinely PENDING — an internally inconsistent shape a real response should never produce', () => {
++    expect(irisMessageMatchesFingerprint({ attestation: 'COMPLETE' }, fp)).toBe(false)
++    expect(irisMessageMatchesFingerprint({}, fp)).toBe(false)
++    expect(irisMessageMatchesFingerprint({ attestation: null }, fp)).toBe(false)
++  })
++
++  it('fails closed on a raw message of "0x" whose attestation is NOT genuinely PENDING', () => {
++    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x', attestation: 'COMPLETE' }), fp)).toBe(false)
++    expect(irisMessageMatchesFingerprint(irisEntry({ message: '0x' }), fp)).toBe(false)
++  })
+ })

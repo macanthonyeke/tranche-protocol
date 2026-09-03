@@ -10,7 +10,7 @@
 
 import { confirmVerification } from '../emailVerification.js'
 import { peekVerification } from '../emailVerification.js'
-import { writeBinding } from '../emailWallets.js'
+import { DIRECTORY_PREFERENCE_CHOICES, setDirectoryPreference, writeBinding } from '../emailWallets.js'
 import { requireAuthSession } from '../authSession.js'
 import { postRoute, requireString, RequestError } from '../walletRoute.js'
 
@@ -31,6 +31,7 @@ export default postRoute(async (body, req) => {
 
   const { email, address, userId } = await confirmVerification(verificationId, code)
   const binding = await writeBinding(email, { address, userId })
+  await setDirectoryPreference(session.circleUserId, DIRECTORY_PREFERENCE_CHOICES.VERIFIED)
 
   return { email, address: binding.address, verified: true }
 })

@@ -1,0 +1,146 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 8082557..64ab1ef 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1582,6 +1582,36 @@ function ChevronIcon({ open }) {
+   )
+ }
+ 
++/* Shared by proposeMilestoneCancelConfirm below and by the panel's own blurb,
++ * so the signing screen and the screen behind it cannot reach opposite
++ * conclusions about the same cancellation. Terminal states are RELEASED(3) and
++ * REFUNDED(4) — the same two _checkEscrowCompletion accepts (:727).
++ *
++ * `reconciled` is the honesty gate rather than a loading check: today
++ * getEscrowDetail builds `milestones` as `new Milestone[](e.milestoneCount)` in
++ * the same call that returns the escrow (:1163-1184), and useEscrowDetail
++ * derives both from that one response, so a short list cannot occur through the
++ * app's own path. It guards the exported descriptor, which any future caller
++ * can hand a partial list. */
++export function milestoneCancelCompletion(escrow, milestoneIndex, milestones) {
++  const list = milestones || []
++  const reconciled = list.length > 0 && list.length === Number(escrow?.milestoneCount)
++  const completesEscrow = reconciled &&
++    list.every((m) => m.index === milestoneIndex || m.state === 3 || m.state === 4)
++  return { reconciled, completesEscrow }
++}
++
++/* The panel's static blurb. Three-way for the same reason the descriptor is:
++ * with nothing to reconcile against, "the rest of the escrow continues" is a
++ * claim, not a default. */
++export function milestoneCancelBlurb({ reconciled, completesEscrow }) {
++  const base = 'Both the payer and freelancer must propose. Once both agree, this milestone'
++  if (!reconciled) return `${base} is refunded.`
++  return completesEscrow
++    ? `${base}'s amount is refunded to the escrow's refund address — and since every other milestone has settled, that completes the whole escrow.`
++    : `${base}'s amount is refunded to the escrow's refund address and the rest of the escrow continues.`
++}
++
+ /* EVIDENCE/STATE: proposeMilestoneCancel is two transactions wearing one
+  * button. With the counterparty not yet on board it writes a single bool
+  * (:799); with them already on board the same call falls straight through to
+@@ -1632,12 +1662,7 @@ export function proposeMilestoneCancelConfirm({ escrow, milestone, role, otherPr
+     }
+   }
+ 
+-  // Terminal states are RELEASED(3) and REFUNDED(4) — the same two
+-  // _checkEscrowCompletion accepts.
+-  const list = milestones || []
+-  const reconciled = list.length > 0 && list.length === Number(escrow.milestoneCount)
+-  const completesEscrow = reconciled &&
+-    list.every((m) => m.index === milestone.index || m.state === 3 || m.state === 4)
++  const { reconciled, completesEscrow } = milestoneCancelCompletion(escrow, milestone.index, milestones)
+ 
+   return {
+     ...base,
+@@ -1748,12 +1773,9 @@ function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange
+ 
+   const otherProposed = role === 'payer' ? freelancerProposed : payerProposed
+ 
+-  // Same test the descriptor runs, so the panel and the signing screen cannot
+-  // disagree about whether this cancellation ends the escrow (:722-733).
+-  const siblings = milestones || []
+-  const lastNonterminal = siblings.length > 0 &&
+-    siblings.length === Number(escrow.milestoneCount) &&
+-    siblings.every((m) => m.index === milestoneIndex || m.state === 3 || m.state === 4)
++  // Literally the same call the descriptor makes, so the panel and the signing
++  // screen cannot disagree about whether this cancellation ends the escrow.
++  const completion = milestoneCancelCompletion(escrow, milestoneIndex, milestones)
+ 
+   const submit = () => tx.run(
+     escrowWrite('proposeMilestoneCancel', [BigInt(escrow.id), BigInt(milestoneIndex)]),
+@@ -1787,11 +1809,7 @@ function MilestoneCancelControl({ escrow, milestone, milestones, role, onChange
+         </button>
+       </div>
+       <p className="text-xs text-ink-2 leading-relaxed">
+-        Both the payer and freelancer must propose. Once both agree, this milestone's amount is refunded to the
+-        escrow's refund address
+-        {lastNonterminal
+-          ? ' — and since every other milestone has settled, that completes the whole escrow.'
+-          : ' and the rest of the escrow continues.'}
++        {milestoneCancelBlurb(completion)}
+       </p>
+       <div className="flex flex-col gap-2 bg-sunk rounded-xl px-3 py-2.5">
+         <ApprovalRow label="Payer" approved={payerProposed} />
+diff --git a/frontend/src/pages/phaseC.test.jsx b/frontend/src/pages/phaseC.test.jsx
+index 44e874e..502f660 100644
+--- a/frontend/src/pages/phaseC.test.jsx
++++ b/frontend/src/pages/phaseC.test.jsx
+@@ -17,6 +17,8 @@ import {
+   payoutLines,
+   refundToLines,
+   proposeMilestoneCancelConfirm,
++  milestoneCancelCompletion,
++  milestoneCancelBlurb,
+   milestoneConfirm,
+   cancelEscrowConfirm,
+   raiseDisputeConfirm,
+@@ -255,6 +257,48 @@ describe('#12 — cancelling the last nonterminal milestone completes the escrow
+       expect(t).not.toMatch(/carries on|completes the whole escrow/)
+     }
+   })
++
++  /* The panel's own blurb sits directly above the button and made the same
++     claim, but with only two branches — so an unreconciled list fell through to
++     "the rest of the escrow continues", the exact sentence the descriptor
++     refuses to say. Both now read the same flags off one helper.
++
++     Not reachable through the app today: getEscrowDetail sizes `milestones` as
++     new Milestone[](e.milestoneCount) in the call that returns the escrow
++     (:1163-1184), useEscrowDetail derives both from that one response, and the
++     page renders a skeleton until it lands. This pins the guard on the exported
++     helpers, where a future caller can supply a partial list. */
++  describe('the panel blurb agrees with the descriptor', () => {
++    const flags = (milestones) => milestoneCancelCompletion(escrowOn(ARC), 1, milestones)
++
++    it('makes no claim either way when the list cannot be reconciled', () => {
++      for (const list of [undefined, [], [{ index: 1, amount: 1n, state: 1 }]]) {
++        const text = milestoneCancelBlurb(flags(list))
++        expect(text).not.toMatch(/rest of the escrow continues|completes the whole escrow/)
++        expect(text).toBe('Both the payer and freelancer must propose. Once both agree, this milestone is refunded.')
++      }
++    })
++
++    it('says the escrow continues when a sibling is still running', () => {
++      expect(milestoneCancelBlurb(flags(carriesOn))).toContain('the rest of the escrow continues')
++    })
++
++    it('says the escrow completes when this is the last nonterminal milestone', () => {
++      expect(milestoneCancelBlurb(flags(lastOne))).toContain('that completes the whole escrow')
++    })
++
++    /* The point of sharing the helper: for any given input the two surfaces
++       reach the same conclusion, so a signer cannot read one thing on the page
++       and the opposite on the signing screen. */
++    it('never disagrees with the descriptor about the same input', () => {
++      for (const list of [undefined, [], carriesOn, lastOne]) {
++        const blurb = milestoneCancelBlurb(flags(list))
++        const params = paramText(cancel(list))
++        expect(/completes the whole escrow/.test(blurb)).toBe(/completes the whole escrow/.test(params))
++        expect(/rest of the escrow continues/.test(blurb)).toBe(/rest of the escrow carries on/.test(params))
++      }
++    })
++  })
+ })
+ 
+ /* #13. raiseDispute does not hand the milestone to an arbiter. mutualSettle

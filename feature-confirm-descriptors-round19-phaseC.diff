@@ -1,0 +1,328 @@
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 568d5f5..9c5397e 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -204,6 +204,11 @@ function DisputeBlock({ detail, index, refetch }) {
+   const { arbiterWindow, bpsDenominator } = useDisputeConfig()
+   const [resolveTxHash, setResolveTxHash] = useState(null)
+ 
++  // Round 19 Phase C: split-aware, same as resolveIsCrossChain/
++  // resolveDisputeMaxFeePlan above — not the raw e.destinationDomain this
++  // used to read independently.
++  const trackingDomain = resolveTrackingDomain(e, detail.splits)
++
+   // Single ARBITER_WINDOW read from the contract rather than hardcoding 14d.
+   const windowSecs = arbiterWindow
+   const timeoutAt = Number(d.raisedAt) + Number(windowSecs)
+@@ -215,16 +220,16 @@ function DisputeBlock({ detail, index, refetch }) {
+   const timeoutOutcome = 'Funds split 50/50 — the freelancer\'s share arrives as a claimable balance and is charged the protocol fee.'
+ 
+   const handleResolve = useCallback((txHash) => {
+-    if (txHash && Number(e.destinationDomain) !== ARC_DOMAIN) {
++    if (txHash && trackingDomain != null) {
+       setResolveTxHash(txHash)
+       // Also persist to localStorage so EscrowDetail picks it up on other devices.
+       localStorage.setItem(
+         cctpTrackKey(detail.id, index),
+-        JSON.stringify({ txHash, domain: e.destinationDomain, ts: Date.now() })
++        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+       )
+     }
+     refetch()
+-  }, [e.destinationDomain, detail.id, index, refetch])
++  }, [trackingDomain, detail.id, index, refetch])
+ 
+   return (
+     <li className="flex flex-col gap-4 pb-7 border-b border-rule last:border-b-0">
+@@ -289,10 +294,10 @@ function DisputeBlock({ detail, index, refetch }) {
+         timeoutOutcome={timeoutOutcome}
+       />
+ 
+-      {resolveTxHash && Number(e.destinationDomain) !== ARC_DOMAIN && (
++      {resolveTxHash && trackingDomain != null && (
+         <ArbiterDeliveryStatus
+           txHash={resolveTxHash}
+-          destinationDomain={e.destinationDomain}
++          destinationDomain={trackingDomain}
+         />
+       )}
+     </li>
+@@ -541,6 +546,22 @@ function resolveIsCrossChain(escrow, splits) {
+   return Number(escrow.destinationDomain) !== ARC_DOMAIN
+ }
+ 
++/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
++   tracking — null when resolveIsCrossChain says there's nothing to track.
++   Reading the root escrow.destinationDomain here (the bug this replaces)
++   silently disagreed with resolveIsCrossChain whenever an Arc-root escrow's
++   cross-chain-ness came from a split leg instead: tracking would never start
++   even though the burn genuinely leaves Arc. Picking the first non-Arc split
++   leg when one exists keeps the domain passed down consistent with why
++   resolveIsCrossChain said this is cross-chain in the first place. */
++export function resolveTrackingDomain(escrow, splits) {
++  if (!resolveIsCrossChain(escrow, splits)) return null
++  if (splits?.length > 0) {
++    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
++  }
++  return escrow.destinationDomain
++}
++
+ /* Round 18 Phase B. Decides what maxFee resolveDispute should submit, reusing
+    resolveIsCrossChain — the SAME split-aware determination the confirm
+    descriptor above already uses — instead of the raw escrow.destinationDomain
+diff --git a/frontend/src/pages/ArbiterPanel.trackingDomain.test.jsx b/frontend/src/pages/ArbiterPanel.trackingDomain.test.jsx
+new file mode 100644
+index 0000000..e5e13e0
+--- /dev/null
++++ b/frontend/src/pages/ArbiterPanel.trackingDomain.test.jsx
+@@ -0,0 +1,81 @@
++import { describe, it, expect } from 'vitest'
++
++/* resolveTrackingDomain — Round 19 Phase C.
++
++   A seventh Codex review pass found that DisputeBlock's post-submission
++   Circle delivery tracking (both the localStorage write in handleResolve and
++   the ArbiterDeliveryStatus render gate) determined cross-chain status by
++   reading the raw escrow.destinationDomain, instead of resolveIsCrossChain —
++   the same split-aware determination resolveDisputeConfirm and
++   resolveDisputeMaxFeePlan already use.
++
++   Consequence: an Arc-root escrow with a genuine cross-chain split leg now
++   SUBMITS correctly (Round 19 Phase B fixed the maxFee side of that gap), but
++   its delivery status would never be tracked or displayed, since the raw
++   check sees only the Arc root and never starts polling. Conversely, a
++   non-Arc-root escrow whose splits are all Arc would get tracking started for
++   a delivery that was never going to happen, since the raw check sees the
++   non-Arc root alone.
++
++   resolveTrackingDomain closes both gaps in one place: it returns null
++   (nothing to track) exactly when resolveIsCrossChain says so, and otherwise
++   returns a genuinely non-Arc domain — the escrow's own root when that's what
++   makes it cross-chain, or the first non-Arc split leg when a split does. */
++import { resolveTrackingDomain } from './ArbiterPanel.jsx'
++
++const ARC = 26
++const BASE = 6
++const ETH_SEPOLIA = 0
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain) => ({ id: 7, destinationDomain: domain })
++
++describe('resolveTrackingDomain', () => {
++  describe('Arc-root escrow with a genuine cross-chain split leg', () => {
++    it('tracks — resolves to the cross-chain leg\'s domain, not null', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = resolveTrackingDomain(escrowOn(ARC), splits)
++      expect(domain).not.toBeNull()
++      expect(domain).toBe(BASE)
++    })
++
++    it('holds for a genuinely mixed 3-leg split (Arc + two different cross-chain domains)', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
++        { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = resolveTrackingDomain(escrowOn(ARC), splits)
++      expect(domain).not.toBeNull()
++      // Whichever non-Arc leg is found first — either is a valid non-Arc
++      // domain to poll Iris on; the point under test is "not null, not Arc".
++      expect(domain).not.toBe(ARC)
++    })
++  })
++
++  describe('non-Arc-root escrow whose splits are all Arc', () => {
++    it('does not track — resolves to null, not the stale non-Arc root', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = resolveTrackingDomain(escrowOn(BASE), splits)
++      expect(domain).toBeNull()
++    })
++  })
++
++  describe('no-split escrows: the root domain alone decides', () => {
++    it('tracks a cross-chain no-split escrow at its own root domain', () => {
++      expect(resolveTrackingDomain(escrowOn(BASE), [])).toBe(BASE)
++    })
++
++    it('does not track a same-chain no-split escrow', () => {
++      expect(resolveTrackingDomain(escrowOn(ARC), [])).toBeNull()
++    })
++  })
++})
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index ff148a2..c29f51e 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -1482,6 +1482,9 @@ function MilestoneRow({
+   )
+   const releaseTxs = useMilestoneReleaseTxs(escrow.id)
+   const cctpTxHash = cctpTrack?.txHash || releaseTxs[milestone.index] || null
++  // Round 19 Phase C: split-aware, same as settlementIsCrossChain above — not
++  // the raw escrow.destinationDomain this used to read independently.
++  const trackingDomain = settlementTrackingDomain(escrow, splits)
+ 
+   // When MilestoneAction or SettlementPanel confirms a cross-chain release on this
+   // device, they write to localStorage and call onCrossChainRelease so we re-read.
+@@ -1633,10 +1636,10 @@ function MilestoneRow({
+                 (!dispute?.resolutionHash || dispute.resolutionHash === ZERO_BYTES32) && (
+                   <TimeoutOutcomeCard milestone={milestone} role={role} />
+                 )}
+-              {milestone.state === 3 && cctpTxHash && Number(escrow.destinationDomain) !== ARC_DOMAIN && (
++              {milestone.state === 3 && cctpTxHash && trackingDomain != null && (
+                 <CrossChainDelivery
+                   txHash={cctpTxHash}
+-                  destinationDomain={escrow.destinationDomain}
++                  destinationDomain={trackingDomain}
+                   escrowId={escrow.id}
+                   milestoneIndex={milestone.index}
+                 />
+@@ -2230,6 +2233,23 @@ function settlementIsCrossChain(escrow, splits) {
+   return Number(escrow.destinationDomain) !== ARC_DOMAIN
+ }
+ 
++/* Round 19 Phase C. The domain to hand useCctpDelivery for post-submission
++   tracking — null when settlementIsCrossChain says there's nothing to track.
++   Reading the root escrow.destinationDomain here (the bug this replaces)
++   silently disagreed with settlementIsCrossChain whenever an Arc-root
++   escrow's cross-chain-ness came from a split leg instead: tracking would
++   never start even though the burn genuinely leaves Arc. Picking the first
++   non-Arc split leg when one exists keeps the domain passed down consistent
++   with why settlementIsCrossChain said this is cross-chain in the first
++   place. */
++export function settlementTrackingDomain(escrow, splits) {
++  if (!settlementIsCrossChain(escrow, splits)) return null
++  if (splits?.length > 0) {
++    return splits.find((s) => Number(s.destinationDomain) !== ARC_DOMAIN)?.destinationDomain ?? escrow.destinationDomain
++  }
++  return escrow.destinationDomain
++}
++
+ /* Round 18 Phase B. Decides what maxFee approveRelease / release should
+    submit, reusing settlementIsCrossChain — the SAME split-aware determination
+    the confirm descriptor above already uses — instead of the raw
+@@ -2535,10 +2555,13 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         confirm: mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+       }
+     )
+-    if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
++    // Round 19 Phase C: split-aware, same as settlementIsCrossChain above —
++    // not the raw escrow.destinationDomain this used to read independently.
++    const trackingDomain = settlementTrackingDomain(escrow, splits)
++    if (txHash && trackingDomain != null) {
+       localStorage.setItem(
+         cctpTrackKey(escrow.id, milestone.index),
+-        JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
++        JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+       )
+       onCrossChainRelease?.()
+     }
+@@ -3358,10 +3381,14 @@ function MilestoneAction({
+         loadingMessage: 'Check your wallet.',
+         confirm: milestoneConfirm(action, escrow, milestone, splits, quotedMaxFee)
+       })
+-      if (txHash && Number(escrow.destinationDomain) !== ARC_DOMAIN) {
++      // Round 19 Phase C: split-aware, same as releaseMaxFeePlan/
++      // settlementIsCrossChain above — not the raw escrow.destinationDomain
++      // this used to read independently.
++      const trackingDomain = settlementTrackingDomain(escrow, splits)
++      if (txHash && trackingDomain != null) {
+         localStorage.setItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash, domain: escrow.destinationDomain, ts: Date.now() })
++          JSON.stringify({ txHash, domain: trackingDomain, ts: Date.now() })
+         )
+         onCrossChainRelease?.()
+       }
+diff --git a/frontend/src/pages/EscrowDetail.trackingDomain.test.jsx b/frontend/src/pages/EscrowDetail.trackingDomain.test.jsx
+new file mode 100644
+index 0000000..d549499
+--- /dev/null
++++ b/frontend/src/pages/EscrowDetail.trackingDomain.test.jsx
+@@ -0,0 +1,79 @@
++import { describe, it, expect } from 'vitest'
++
++/* settlementTrackingDomain — Round 19 Phase C, the SettlementPanel/
++   MilestoneAction/MilestoneRow twin of ArbiterPanel's resolveTrackingDomain
++   (see that file's test for the full background).
++
++   Three post-submission tracking sites in this file — mutual settlement
++   (SettlementPanel.propose), approve/release (MilestoneAction.run), and the
++   detail-page delivery renderer (MilestoneRow) — determined cross-chain
++   status by reading the raw escrow.destinationDomain, instead of
++   settlementIsCrossChain, the same split-aware determination
++   mutualSettleConfirm/milestoneConfirm/releaseMaxFeePlan already use.
++
++   Consequence: an Arc-root escrow with a genuine cross-chain split leg now
++   SUBMITS correctly (Round 19 Phase B), but its delivery status would never
++   be tracked or rendered, since the raw check sees only the Arc root.
++   Conversely, a non-Arc-root escrow whose splits are all Arc would get
++   tracking started for a delivery that was never going to happen.
++
++   settlementTrackingDomain closes both gaps in one place: null (nothing to
++   track) exactly when settlementIsCrossChain says so, otherwise a genuinely
++   non-Arc domain — the escrow's own root when that's what makes it
++   cross-chain, or the first non-Arc split leg when a split does. */
++import { settlementTrackingDomain } from './EscrowDetail.jsx'
++
++const ARC = 26
++const BASE = 6
++const ETH_SEPOLIA = 0
++
++const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
++const B32 = (a) => '0x000000000000000000000000' + a.slice(2)
++
++const escrowOn = (domain) => ({ id: 7, destinationDomain: domain })
++
++describe('settlementTrackingDomain', () => {
++  describe('Arc-root escrow with a genuine cross-chain split leg', () => {
++    it('tracks — resolves to the cross-chain leg\'s domain, not null', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = settlementTrackingDomain(escrowOn(ARC), splits)
++      expect(domain).not.toBeNull()
++      expect(domain).toBe(BASE)
++    })
++
++    it('holds for a genuinely mixed 3-leg split (Arc + two different cross-chain domains)', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
++        { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = settlementTrackingDomain(escrowOn(ARC), splits)
++      expect(domain).not.toBeNull()
++      expect(domain).not.toBe(ARC)
++    })
++  })
++
++  describe('non-Arc-root escrow whose splits are all Arc', () => {
++    it('does not track — resolves to null, not the stale non-Arc root', () => {
++      const splits = [
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++        { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
++      ]
++      const domain = settlementTrackingDomain(escrowOn(BASE), splits)
++      expect(domain).toBeNull()
++    })
++  })
++
++  describe('no-split escrows: the root domain alone decides', () => {
++    it('tracks a cross-chain no-split escrow at its own root domain', () => {
++      expect(settlementTrackingDomain(escrowOn(BASE), [])).toBe(BASE)
++    })
++
++    it('does not track a same-chain no-split escrow', () => {
++      expect(settlementTrackingDomain(escrowOn(ARC), [])).toBeNull()
++    })
++  })
++})

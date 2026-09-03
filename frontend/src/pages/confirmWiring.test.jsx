@@ -166,6 +166,13 @@ describe('withdrawRefund is wired to its descriptor', () => {
   })
 })
 
+describe('Settings preferences', () => {
+  it('always exposes the Email discoverability section', () => {
+    render(<Settings />)
+    expect(screen.getByRole('heading', { name: 'Email discoverability' })).toBeInTheDocument()
+  })
+})
+
 describe('the treasury setter is wired to its descriptor', () => {
   beforeEach(() => { rolesMock.current = { roles: { isFeeManager: true }, isLoading: false } })
 

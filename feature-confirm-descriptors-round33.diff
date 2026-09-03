@@ -1,0 +1,1469 @@
+diff --git a/frontend/src/hooks/useCctpDelivery.js b/frontend/src/hooks/useCctpDelivery.js
+index 26ab080..79f32f2 100644
+--- a/frontend/src/hooks/useCctpDelivery.js
++++ b/frontend/src/hooks/useCctpDelivery.js
+@@ -1,8 +1,29 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+-import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageFingerprint } from '../utils/irisDelivery'
++import { fetchIrisMessages, irisMessageMatchesFingerprint, cctpMessageDestinationDomain } from '../utils/irisDelivery'
+ 
+ const POLL_MS = 15_000
+ 
++// Round 33 (Low finding). Circle's real CCTP V2 attestation is one or more
++// concatenated 65-byte ECDSA signatures (the multi-signature threshold
++// scheme) — confirmed against Circle's own attestation format
++// documentation, not assumed. The old completeness check (below) only ever
++// asked whether `attestation` was truthy and not the literal string
++// 'PENDING'; it never confirmed the value was actually shaped like a real
++// attestation at all. On-chain verification in MessageTransmitterV2's own
++// receiveMessage already prevents any fund-loss risk from a malformed value
++// slipping through — this is purely about not walking a user into a doomed
++// self-relay transaction (SelfRelayCard packs `delivery.attestation`
++// directly into receiveMessage calldata) that will predictably revert and
++// burn their gas for nothing.
++const CCTP_ATTESTATION_HEX_RE = /^0x([0-9a-fA-F]{2})*$/
++const CCTP_SIGNATURE_BYTE_LENGTH = 65
++
++function isWellFormedAttestation(attestation) {
++  if (typeof attestation !== 'string' || !CCTP_ATTESTATION_HEX_RE.test(attestation)) return false
++  const byteLength = (attestation.length - 2) / 2
++  return byteLength > 0 && byteLength % CCTP_SIGNATURE_BYTE_LENGTH === 0
++}
++
+ // Round 29 (Low finding): distinguishes "still catching up" from "stuck".
+ // Every non-terminal poll outcome below (count mismatch — including the
+ // Round 28 overflow case, incomplete ordinal selection, a fingerprint
+@@ -245,8 +266,20 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+       // Round 30 (Low finding): signature includes WHICH selected index is
+       // still unattested, not just that one is — same reasoning as the
+       // fingerprint-mismatch signature above.
++      //
++      // Round 33 (Low finding): isWellFormedAttestation added as a fourth,
++      // independent condition — status 'complete' and a present, non-PENDING
++      // string can both hold while the value itself still isn't a real
++      // attestation (wrong length, odd hex, not a multiple of the 65-byte
++      // signature size). Treated the same as any other not-yet-ready state
++      // (stays in the unresolved/keep-polling branch, never an error) — see
++      // isWellFormedAttestation's own doc comment for why this is a
++      // gas-waste guard, not a fund-safety one, so failing permissively
++      // (keep polling) rather than surfacing a hard error is the right
++      // default here, consistent with every other ambiguous outcome in this
++      // function.
+       const notAttestedIndexes = messages
+-        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' ? null : i))
++        .map((m, i) => (m.status === 'complete' && m.attestation && m.attestation !== 'PENDING' && isWellFormedAttestation(m.attestation) ? null : i))
+         .filter((i) => i !== null)
+       if (notAttestedIndexes.length > 0) {
+         markUnresolved(`unattested:${notAttestedIndexes.join(',')}`)
+@@ -267,19 +300,19 @@ export function useCctpDelivery(txHash, isCrossChain, expectedOrdinals, expected
+       // terminal (FAILED), so reading destinationDomain from it ALONE left
+       // EscrowDetail.jsx's SelfRelayCard rendering "Unknown chain" and
+       // disabling self-relay for a delivery this app could otherwise recover
+-      // in-app. The raw message bytes (m.message) are already being parsed
+-      // for the identity check above (irisMessageMatchesFingerprint calls
+-      // cctpMessageFingerprint internally) whenever expectedFingerprints is
+-      // available — this reuses that SAME parser directly rather than
+-      // rebuilding domain-extraction logic a second way, and works
+-      // regardless of whether the fingerprint check ran, so it's the
+-      // primary source; decodedMessage is only a fallback for the
++      // in-app. The raw message bytes (m.message) are read directly via
++      // cctpMessageDestinationDomain -- independent of whatever shape
++      // cctpMessageFingerprint's own return value happens to be (Round 33:
++      // that's now a single sanitized-message hash with no named fields at
++      // all) -- so domain display and identity verification stay decoupled,
++      // and this works regardless of whether the fingerprint check ran, so
++      // it's the primary source; decodedMessage is only a fallback for the
+       // (should-be-unreachable) case where the raw message itself can't be
+       // parsed (missing/"0x"/malformed).
+       const domainFromRawMessage = (raw) => {
+         if (typeof raw !== 'string' || raw === '0x') return null
+         try {
+-          return cctpMessageFingerprint(raw).destinationDomain
++          return cctpMessageDestinationDomain(raw)
+         } catch {
+           return null
+         }
+diff --git a/frontend/src/hooks/useCctpDelivery.test.js b/frontend/src/hooks/useCctpDelivery.test.js
+index b6f233c..09e77b4 100644
+--- a/frontend/src/hooks/useCctpDelivery.test.js
++++ b/frontend/src/hooks/useCctpDelivery.test.js
+@@ -63,9 +63,16 @@ afterEach(() => {
+   vi.useRealTimers()
+ })
+ 
++// Round 33: a genuinely well-formed attestation — 65 bytes (one ECDSA
++// signature), matching Circle's real CCTP V2 format — not a placeholder
++// string like the old '0xattestation'/'0xrealattestation' literals, which
++// read as plausible English but are not valid hex at all ('t' is not a hex
++// digit) and would now fail isWellFormedAttestation's own check.
++const REAL_ATTESTATION = '0x' + '11'.repeat(65)
++
+ const irisMessage = ({
+   destinationDomain = 6, forwardState = 'COMPLETE', forwardTxHash = '0xdesttx',
+-  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = '0xattestation'
++  forwardErrorCode = null, message = '0xmessage', status = 'complete', attestation = REAL_ATTESTATION
+ } = {}) => ({
+   message,
+   attestation,
+@@ -124,7 +131,7 @@ describe('useCctpDelivery — per-message domain, never collapsed to a caller-su
+     // fixture has NO flat destinationDomain at all, only the nested real one,
+     // so a reversion to the flat read would make this resolve to null.
+     fetchIrisMessages.mockResolvedValue([{
+-      message: '0xmessage', attestation: '0xattestation', status: 'complete',
++      message: '0xmessage', attestation: REAL_ATTESTATION, status: 'complete',
+       decodedMessage: { destinationDomain: '6' },
+       forwardState: 'COMPLETE', forwardTxHash: '0xdesttx', forwardErrorCode: null
+     }])
+@@ -164,7 +171,7 @@ describe('useCctpDelivery — forwardState/forwardTxHash/forwardErrorCode are fl
+ describe('useCctpDelivery — attestation completeness requires status === "complete", not just a non-PENDING attestation string', () => {
+   it('does NOT treat a message as delivered when attestation is present and non-PENDING but status is "pending" — Codex\'s anomalous case', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ status: 'pending', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++      irisMessage({ status: 'pending', attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+@@ -178,7 +185,7 @@ describe('useCctpDelivery — attestation completeness requires status === "comp
+     // silently resolve back to 'complete' (JS applies a default parameter
+     // whenever the value is undefined, key present or not), which would
+     // defeat the point of this exact test.
+-    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++    const { status: _omit, ...messageWithoutStatus } = irisMessage({ attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
+     fetchIrisMessages.mockResolvedValue([messageWithoutStatus])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
+@@ -198,7 +205,66 @@ describe('useCctpDelivery — attestation completeness requires status === "comp
+ 
+   it('resolves to delivered once status is "complete" AND attestation is present and non-PENDING', async () => {
+     fetchIrisMessages.mockResolvedValue([
+-      irisMessage({ status: 'complete', attestation: '0xrealattestation', forwardState: 'COMPLETE' })
++      irisMessage({ status: 'complete', attestation: REAL_ATTESTATION, forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(result.current.phase).toBe('delivered'))
++  })
++})
++
++/* Round 33 (Low finding). status === 'complete' and a present, non-PENDING
++   attestation string can both hold while the value itself still isn't
++   shaped like a real attestation — Circle's real format is one or more
++   concatenated 65-byte ECDSA signatures. This is a gas-waste guard, not a
++   fund-safety one (on-chain verification in receiveMessage already rejects
++   a bad value) — a malformed attestation stays in the unresolved/keep-
++   polling branch, exactly like every other not-yet-ready state, never a
++   hard error. */
++describe('useCctpDelivery — attestation completeness also requires a well-formed value, not just status + a non-PENDING string', () => {
++  it('does NOT treat a message as delivered when attestation is present, non-PENDING, and status is "complete", but the value is not valid hex at all', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: '0xnotvalidhexatall', forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('does NOT treat a message as delivered when the attestation is well-formed hex but an odd number of hex digits', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: REAL_ATTESTATION.slice(0, -1), forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('does NOT treat a message as delivered when the attestation is well-formed hex but its byte length is not a multiple of 65 (a truncated or padded signature)', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      // 64 bytes, one short of a real single signature.
++      irisMessage({ status: 'complete', attestation: '0x' + '11'.repeat(64), forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('does NOT treat a message as delivered when the attestation is exactly "0x" — well-formed hex, but zero bytes, not a genuine signature', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: '0x', forwardState: 'COMPLETE' })
++    ])
++    const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
++    await waitFor(() => expect(fetchIrisMessages).toHaveBeenCalled())
++    expect(result.current.phase).toBe('polling')
++    expect(result.current.deliveries).toHaveLength(0)
++  })
++
++  it('resolves to delivered for a genuine two-of-two multi-signature attestation (130 bytes = 2x65) — the multiple-signature threshold case, not just a single signature', async () => {
++    fetchIrisMessages.mockResolvedValue([
++      irisMessage({ status: 'complete', attestation: '0x' + '11'.repeat(130), forwardState: 'COMPLETE' })
+     ])
+     const { result } = renderHook(() => useCctpDelivery('0xtx', true, [0], 1))
+     await waitFor(() => expect(result.current.phase).toBe('delivered'))
+@@ -527,7 +593,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
+   it('derives destinationDomain from the raw message when decodedMessage is null, even on a terminal FAILED forwardState — SelfRelayCard needs the real chain to offer in-app self-relay, not "Unknown chain"', async () => {
+     fetchIrisMessages.mockResolvedValue([{
+       message: buildCctpMessage(6),
+-      attestation: '0xattestation',
++      attestation: REAL_ATTESTATION,
+       status: 'complete',
+       decodedMessage: null,
+       forwardState: 'FAILED',
+@@ -542,7 +608,7 @@ describe('useCctpDelivery — raw-message domain, not solely the nullable decode
+   it('falls back to decodedMessage when the raw message cannot be parsed — malformed/too-short bytes, an anomalous shape a real response should not produce', async () => {
+     fetchIrisMessages.mockResolvedValue([{
+       message: '0xdead', // present, non-"0x", but not a valid/complete CCTP V2 message
+-      attestation: '0xattestation',
++      attestation: REAL_ATTESTATION,
+       status: 'complete',
+       decodedMessage: { destinationDomain: '6' },
+       forwardState: 'COMPLETE',
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index d865c59..d170797 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -16,7 +16,7 @@ import InvoiceCard from '../components/InvoiceCard.jsx'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
+ import { safeSetItem } from '../utils/safeStorage.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+@@ -265,7 +265,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         // actually worked.
+         safeSetItem(
+           cctpTrackKey(detail.id, index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
++          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+         )
+       }
+     }
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+index a848728..bbde0a5 100644
+--- a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -18,7 +18,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
+    exactly what keeps the tracker (and the other leg's recovery card)
+    alive. */
+ import { shouldClearCctpTrack, readCctpTrack } from './EscrowDetail.jsx'
+-import { cctpTrackKey } from '../utils/irisDelivery.js'
++import { cctpTrackKey, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
+ import { CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const complete = (overrides = {}) => ({ forwardState: 'COMPLETE', destinationDomain: 6, ...overrides })
+@@ -51,29 +51,59 @@ describe('shouldClearCctpTrack', () => {
+   })
+ })
+ 
+-/* readCctpTrack — Round 27 (fixing the Round 26 review's Medium finding).
++/* readCctpTrack -- Round 27 (fixing the Round 26 review's Medium finding).
+ 
+    The old design let a malformed/legacy localStorage record (Round 26's
+    raw-hex expectedMessages array, or the earlier Round 22 bare numeric
+    count) fall all the way through to CrossChainDelivery's render site,
+    where Array.isArray(...) ? ... : undefined turned it into "no identity
+-   constraint at all" for the record's remaining 24h lifetime — the exact
++   constraint at all" for the record's remaining 24h lifetime -- the exact
+    unfiltered-Iris gap Round 26 as a whole was built to close, reopened by
+    its own legacy data. readCctpTrack now validates the shape itself and
+    discards anything unusable, the same way it already discards an aged-out
+-   record — so it returns null exactly like "no local record", and
++   record -- so it returns null exactly like "no local record", and
+    MilestoneRow's existing `!cctpTrack` fallback to FallbackCrossChainDelivery
+    naturally reverifies from the receipt instead of ever handing out a
+-   record with no usable ordinal data. */
++   record with no usable ordinal data.
++
++   Round 33 (fixing the Round 32 review's Medium finding: "shape validation
++   doesn't reject every prior fingerprint shape" -- this exact bug's third
++   recurrence, after Round 26->27's legacy expectedMessages array and Round
++   32 itself shipping a new 7-field fingerprint shape with no matching
++   isValidCctpTrackRecord update at all). A record's own shapeVersion
++   (CCTP_TRACK_SHAPE_VERSION, irisDelivery.js) is now checked FIRST, before
++   any other field -- so every test below that exercises a SPECIFIC
++   coherence rule (ordinal range, ts, fingerprint shape, ...) builds its
++   fixture via validRecord() to keep shapeVersion correct, proving that
++   rule is what actually causes the rejection rather than relying on the
++   version check to reject it first for an unrelated reason. The dedicated
++   "old shapes" describe block below tests the version gate itself,
++   including each specific prior shape by name. */
+ describe('readCctpTrack', () => {
+   const ESCROW_ID = 7
+   const MILESTONE_INDEX = 1
+   const KEY = cctpTrackKey(ESCROW_ID, MILESTONE_INDEX)
+-  // Round 29: a real tx hash shape — isValidCctpTrackRecord now checks this.
++  // Round 29: a real tx hash shape -- isValidCctpTrackRecord now checks this.
+   const REAL_TX_HASH = '0x' + '1234abcd'.repeat(8)
+-  // Round 29: a valid cctpMessageFingerprint shape — a well-formed record
+-  // now requires one per ordinal.
+-  const FINGERPRINT = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
++  // Round 33: a fingerprint is now a single keccak256-shaped hash string --
++  // 0x + 64 hex chars -- not an object of individually-chosen fields.
++  const FINGERPRINT = '0x' + '1'.repeat(64)
++  const OTHER_FINGERPRINT = '0x' + '2'.repeat(64)
++
++  // Round 33: a well-formed CURRENT-shape record carrying every field a
++  // real write site (EscrowDetail.jsx x2, ArbiterPanel.jsx) persists.
++  // Individual tests override only the field they're exercising, so a test
++  // failure points at the ONE rule that changed, not "shapeVersion also
++  // happened to be missing".
++  const validRecord = (overrides = {}) => ({
++    shapeVersion: CCTP_TRACK_SHAPE_VERSION,
++    txHash: REAL_TX_HASH,
++    ts: Date.now(),
++    expectedOrdinals: [0],
++    expectedTotalMessages: 1,
++    expectedFingerprints: [FINGERPRINT],
++    ...overrides
++  })
+ 
+   afterEach(() => {
+     localStorage.clear()
+@@ -83,166 +113,215 @@ describe('readCctpTrack', () => {
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+   })
+ 
+-  it('returns a well-formed Round 29 record unchanged', () => {
+-    const record = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, FINGERPRINT] }
++  it('returns a well-formed current-shape record unchanged', () => {
++    const record = validRecord({ expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
+     localStorage.setItem(KEY, JSON.stringify(record))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(record)
+   })
+ 
+   it('discards and removes an aged-out record (older than 24h), same as before this round', () => {
+-    const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const record = validRecord({ ts: Date.now() - 25 * 60 * 60 * 1000 })
+     localStorage.setItem(KEY, JSON.stringify(record))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('discards and removes a Round 26 legacy record — expectedMessages (raw hex array), no expectedOrdinals at all — rather than treating it as usable', () => {
+-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
+-    localStorage.setItem(KEY, JSON.stringify(legacy))
+-    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+-    expect(localStorage.getItem(KEY)).toBeNull()
+-  })
+-
+-  it('discards and removes a pre-Round-26 legacy record — expectedMessages as a bare numeric count — rather than treating it as usable', () => {
+-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: 2 }
+-    localStorage.setItem(KEY, JSON.stringify(legacy))
+-    expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+-    expect(localStorage.getItem(KEY)).toBeNull()
+-  })
+-
+   it('discards a record whose expectedOrdinals is an array but expectedTotalMessages is missing/non-numeric', () => {
+-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0] }
++    const malformed = validRecord({ expectedTotalMessages: undefined })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  // Round 28 — coherence, not just shape. A record can be the right TYPES
++  // Round 28 -- coherence, not just shape. A record can be the right TYPES
+   // (array, number) and still be nonsense: empty, out of range, negative,
+   // fractional, or duplicated. Any of these would previously pass through to
+   // useCctpDelivery, which has no way to detect an incoherent ordinal set on
+   // its own.
+-  it('discards a vacuous record — expectedOrdinals empty, expectedTotalMessages zero', () => {
+-    const vacuous = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [], expectedTotalMessages: 0 }
++  it('discards a vacuous record -- expectedOrdinals empty, expectedTotalMessages zero', () => {
++    const vacuous = validRecord({ expectedOrdinals: [], expectedTotalMessages: 0, expectedFingerprints: [] })
+     localStorage.setItem(KEY, JSON.stringify(vacuous))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with an out-of-range ordinal (ordinal 3 against a total of 2)', () => {
+-    const outOfRange = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1, 3], expectedTotalMessages: 2 }
++    const outOfRange = validRecord({ expectedOrdinals: [1, 3], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
+     localStorage.setItem(KEY, JSON.stringify(outOfRange))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a negative ordinal', () => {
+-    const negative = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [-1], expectedTotalMessages: 2 }
++    const negative = validRecord({ expectedOrdinals: [-1], expectedTotalMessages: 2 })
+     localStorage.setItem(KEY, JSON.stringify(negative))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a fractional ordinal', () => {
+-    const fractional = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0.5], expectedTotalMessages: 2 }
++    const fractional = validRecord({ expectedOrdinals: [0.5], expectedTotalMessages: 2 })
+     localStorage.setItem(KEY, JSON.stringify(fractional))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a duplicate ordinal', () => {
+-    const duplicate = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 0], expectedTotalMessages: 2 }
++    const duplicate = validRecord({ expectedOrdinals: [0, 0], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT, OTHER_FINGERPRINT] })
+     localStorage.setItem(KEY, JSON.stringify(duplicate))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  // Round 29 — Medium finding (fingerprints): a pre-Round-29 legacy record
+-  // has no expectedFingerprints at all — discarded the same way Round 27's
+-  // own legacy shapes are, so readCctpTrack returns null and the fallback
+-  // reverifies from the receipt instead of trusting a record with nothing
+-  // to check ordinal-selected Iris entries against.
++  // Round 29 -- Medium finding (fingerprints): a record with no
++  // expectedFingerprints at all, or a length mismatch against
++  // expectedOrdinals, is discarded rather than trusted with nothing to
++  // check ordinal-selected Iris entries against.
+   it('discards a record missing expectedFingerprints entirely', () => {
+-    const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
+-    localStorage.setItem(KEY, JSON.stringify(legacy))
++    const missing = validRecord({ expectedFingerprints: undefined })
++    localStorage.setItem(KEY, JSON.stringify(missing))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record whose expectedFingerprints length does not match expectedOrdinals', () => {
+-    const mismatched = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] }
++    const mismatched = validRecord({ expectedOrdinals: [0, 1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] })
+     localStorage.setItem(KEY, JSON.stringify(mismatched))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('discards a record with a malformed fingerprint (bad address shape)', () => {
+-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, burnToken: 'not-an-address' }] }
++  it('discards a record with a malformed fingerprint (not a hex string at all)', () => {
++    const malformed = validRecord({ expectedFingerprints: [12345] })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('discards a record with a malformed fingerprint (non-numeric amount)', () => {
+-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, amount: '12.5' }] }
++  it('discards a record with a malformed fingerprint (right prefix, wrong length -- not a genuine 32-byte hash)', () => {
++    const malformed = validRecord({ expectedFingerprints: ['0x1234'] })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('discards a record with a malformed fingerprint (negative destinationDomain)', () => {
+-    const malformed = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [{ ...FINGERPRINT, destinationDomain: -1 }] }
++  it('discards a record with a malformed fingerprint (non-hex characters)', () => {
++    const malformed = validRecord({ expectedFingerprints: ['0x' + 'zz'.repeat(32)] })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  // Round 29 — Medium finding: a valid-shaped record wasn't actually bound
++  // Round 29 -- Medium finding: a valid-shaped record wasn't actually bound
+   // to its context. isValidCctpTrackRecord checked types/ranges but not
+   // whether txHash is a real tx hash shape, or whether ts is finite/past.
+   it('discards a record with an empty-string txHash', () => {
+-    const malformed = { txHash: '', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const malformed = validRecord({ txHash: '' })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a malformed txHash (right prefix, wrong length)', () => {
+-    const malformed = { txHash: '0xdeadbeef', ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const malformed = validRecord({ txHash: '0xdeadbeef' })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a txHash missing the 0x prefix', () => {
+-    const malformed = { txHash: REAL_TX_HASH.slice(2), ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const malformed = validRecord({ txHash: REAL_TX_HASH.slice(2) })
+     localStorage.setItem(KEY, JSON.stringify(malformed))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+   it('discards a record with a future timestamp', () => {
+-    const future = { txHash: REAL_TX_HASH, ts: Date.now() + 24 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++    const future = validRecord({ ts: Date.now() + 24 * 60 * 60 * 1000 })
+     localStorage.setItem(KEY, JSON.stringify(future))
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  it('discards a record with a non-finite ts (a JSON number literal large enough to overflow to Infinity — valid JSON syntax, but typeof "number" alone would have let it through)', () => {
+-    localStorage.setItem(KEY, `{"txHash":"${REAL_TX_HASH}","ts":1e400,"expectedOrdinals":[0],"expectedTotalMessages":1}`)
++  it('discards a record with a non-finite ts (a JSON number literal large enough to overflow to Infinity -- valid JSON syntax, but typeof "number" alone would have let it through)', () => {
++    localStorage.setItem(KEY, `{"shapeVersion":${CCTP_TRACK_SHAPE_VERSION},"txHash":"${REAL_TX_HASH}","ts":1e400,"expectedOrdinals":[0],"expectedTotalMessages":1,"expectedFingerprints":["${FINGERPRINT}"]}`)
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+   })
+ 
+-  it('returns null and removes the entry on unparseable JSON — discarded the same way as any other invalid record, not left behind', () => {
++  it('returns null and removes the entry on unparseable JSON -- discarded the same way as any other invalid record, not left behind', () => {
+     localStorage.setItem(KEY, 'not json')
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
+ 
+-  // Round 29 — Medium finding: readCctpTrack's own catch block called
++  /* Round 33 (fixing the Round 32 review's Medium finding: "shape
++     validation doesn't reject every prior fingerprint shape"). Each of
++     these builds a record in a SPECIFIC prior shape this app has actually
++     persisted at some point in its history, not just "some invalid
++     object" -- a future round changing the shape again has a concrete
++     pattern to extend: add the new shape here, confirm it's rejected,
++     confirm the CURRENT shape (already covered above) still round-trips. */
++  describe('rejects every prior fingerprint/record shape, not just the immediately-prior one', () => {
++    it('rejects the original Round 29 5-field fingerprint-object shape (destinationDomain/burnToken/mintRecipient/amount/messageSender, no maxFee/hookData, no shapeVersion at all)', () => {
++      const legacyFingerprint = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
++      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [legacyFingerprint] }
++      localStorage.setItem(KEY, JSON.stringify(legacy))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects the Round 32 7-field fingerprint-object shape (adds maxFee/hookData to the Round 29 object, still no shapeVersion) -- the exact shape that shipped without a matching validator update, reopening the fingerprint-mismatch trap this fix closes', () => {
++      const round32Fingerprint = {
++        destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40),
++        amount: '100', messageSender: '0x' + '3'.repeat(40), maxFee: '200000', hookData: '0x' + '0'.repeat(64)
++      }
++      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [round32Fingerprint] }
++      localStorage.setItem(KEY, JSON.stringify(legacy))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects the Round 26 legacy record -- expectedMessages (raw hex array), no expectedOrdinals or shapeVersion at all', () => {
++      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: ['0xdeadbeef'] }
++      localStorage.setItem(KEY, JSON.stringify(legacy))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects the pre-Round-26 legacy record -- expectedMessages as a bare numeric count', () => {
++      const legacy = { txHash: REAL_TX_HASH, ts: Date.now(), expectedMessages: 2 }
++      localStorage.setItem(KEY, JSON.stringify(legacy))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects a record with the CURRENT field shape (hash-string fingerprints) but a MISSING shapeVersion -- proves the version gate itself is what is enforced, independent of every other field being otherwise well-formed', () => {
++      const noVersion = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1, expectedFingerprints: [FINGERPRINT] }
++      localStorage.setItem(KEY, JSON.stringify(noVersion))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects a record with the CURRENT field shape but a WRONG shapeVersion (e.g. a stale "1", the version that would have preceded this round\'s "2")', () => {
++      const wrongVersion = validRecord({ shapeVersion: CCTP_TRACK_SHAPE_VERSION - 1 })
++      localStorage.setItem(KEY, JSON.stringify(wrongVersion))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++
++    it('rejects a record with the CORRECT shapeVersion but old-style object fingerprints -- shapeVersion alone is not a substitute for still validating every field; both must hold', () => {
++      const legacyFingerprint = { destinationDomain: 6, burnToken: '0x' + '1'.repeat(40), mintRecipient: '0x' + '2'.repeat(40), amount: '100', messageSender: '0x' + '3'.repeat(40) }
++      const mixed = validRecord({ expectedFingerprints: [legacyFingerprint] })
++      localStorage.setItem(KEY, JSON.stringify(mixed))
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++      expect(localStorage.getItem(KEY)).toBeNull()
++    })
++  })
++
++  // Round 29 -- Medium finding: readCctpTrack's own catch block called
+   // localStorage.removeItem unguarded. If localStorage itself is throwing
+   // (privacy settings, a SecurityError on a denied origin), that removeItem
+-  // could throw a SECOND time and escape the catch entirely — readCctpTrack
++  // could throw a SECOND time and escape the catch entirely -- readCctpTrack
+   // runs inside MilestoneRow's useState initializer, so an escaped throw
+   // there breaks render, not just the tracker. Now routed through
+   // safeStorage, which swallows internally at every step.
+@@ -260,7 +339,7 @@ describe('readCctpTrack', () => {
+     })
+ 
+     it('does not throw when the record is aged-out AND removeItem itself throws', () => {
+-      const record = { txHash: REAL_TX_HASH, ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++      const record = validRecord({ ts: Date.now() - 25 * 60 * 60 * 1000 })
+       localStorage.setItem(KEY, JSON.stringify(record))
+       vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+         throw new DOMException('denied', 'SecurityError')
+@@ -279,9 +358,9 @@ describe('readCctpTrack', () => {
+     })
+   })
+ 
+-  // Round 29 — Medium finding: cctpTrackKey namespaced only by
++  // Round 29 -- Medium finding: cctpTrackKey namespaced only by
+   // escrowId+milestoneIndex, not by deployment. A redeploy (routine in this
+-  // repo — see CLAUDE.md's deployment history) reuses the same escrow ID
++  // repo -- see CLAUDE.md's deployment history) reuses the same escrow ID
+   // space from scratch, so a coherent-looking leftover record from a
+   // PREVIOUS contract's escrow #7 milestone #1 would collide on the exact
+   // same key as the current contract's own escrow #7 milestone #1.
+@@ -297,16 +376,16 @@ describe('readCctpTrack', () => {
+       const otherDeploymentKey = KEY.replace(CONTRACT_ADDRESS.toLowerCase(), '0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead')
+       expect(otherDeploymentKey).not.toBe(KEY)
+ 
+-      const otherDeploymentRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [0], expectedTotalMessages: 1 }
++      const otherDeploymentRecord = validRecord()
+       localStorage.setItem(otherDeploymentKey, JSON.stringify(otherDeploymentRecord))
+ 
+-      // Nothing under the CURRENT deployment's key yet — the other
++      // Nothing under the CURRENT deployment's key yet -- the other
+       // deployment's record must not leak into this read.
+       expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+ 
+       // Writing the CURRENT deployment's own record still works normally,
+       // independent of the other key's presence.
+-      const ownRecord = { txHash: REAL_TX_HASH, ts: Date.now(), expectedOrdinals: [1], expectedTotalMessages: 2, expectedFingerprints: [FINGERPRINT] }
++      const ownRecord = validRecord({ expectedOrdinals: [1], expectedTotalMessages: 2 })
+       localStorage.setItem(KEY, JSON.stringify(ownRecord))
+       expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toEqual(ownRecord)
+       // The other deployment's key is untouched by that read.
+diff --git a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+index 5303c71..49ef44d 100644
+--- a/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
++++ b/frontend/src/pages/EscrowDetail.fallbackCrossChainDelivery.test.jsx
+@@ -171,37 +171,35 @@ const escrowLog = (logIndex, eventName, args, address = CONTRACT_ADDRESS) => {
+ // longer trusts decodedMessage/decodedMessageBody (both explicitly nullable
+ // per Circle's real schema) and instead derives the Iris-side fingerprint
+ // directly from these raw bytes, the same way the receipt-side fingerprint
+-// is derived. The default reuses buildCctpMessage() with the SAME
+-// destinationDomain/bodySender this fixture represents so a genuinely
+-// matching burn decodes to a genuinely matching fingerprint; decodedMessage/
+-// decodedMessageBody are kept below only because useCctpDelivery's parsed
+-// `destinationDomain` display field still reads decodedMessage.destinationDomain
+-// separately (cosmetic, not part of the identity check).
++// is derived. decodedMessage.destinationDomain is kept below only because
++// useCctpDelivery's parsed `destinationDomain` display field still reads it
++// as a fallback (cosmetic, not part of the identity check).
++//
++// Round 33: decodedMessage.decodedMessageBody dropped entirely — it used to
++// mirror the old field-object fingerprint's burnToken/mintRecipient/amount/
++// messageSender, none of which exist anymore now that cctpMessageFingerprint
++// returns a single hash (and nothing in useCctpDelivery ever read
++// decodedMessageBody in the first place — only decodedMessage.destinationDomain).
++// Round 33: a genuinely well-formed attestation — 65 bytes (one ECDSA
++// signature) — not the old '0xattestation' placeholder, which reads as
++// plausible English but is not valid hex ('t' is not a hex digit) and would
++// now fail useCctpDelivery's own isWellFormedAttestation check.
++const REAL_ATTESTATION = '0x' + '11'.repeat(65)
++
+ const irisMessage = ({
+   destinationDomain = 6,
+   forwardState = 'COMPLETE',
+   bodySender = CONTRACT_ADDRESS,
+   message = buildCctpMessage({ destinationDomain, bodySender })
+-} = {}) => {
+-  const fp = cctpMessageFingerprint(buildCctpMessage({ destinationDomain, bodySender }))
+-  return {
+-    message,
+-    attestation: '0xattestation',
+-    status: 'complete',
+-    decodedMessage: {
+-      destinationDomain: String(destinationDomain),
+-      decodedMessageBody: {
+-        burnToken: fp.burnToken,
+-        mintRecipient: fp.mintRecipient,
+-        amount: fp.amount,
+-        messageSender: fp.messageSender
+-      }
+-    },
+-    forwardState,
+-    forwardTxHash: '0xdesttx',
+-    forwardErrorCode: null
+-  }
+-}
++} = {}) => ({
++  message,
++  attestation: REAL_ATTESTATION,
++  status: 'complete',
++  decodedMessage: { destinationDomain: String(destinationDomain) },
++  forwardState,
++  forwardTxHash: '0xdesttx',
++  forwardErrorCode: null
++})
+ 
+ const setReceipt = (value) => { receiptMock.current = value }
+ 
+@@ -434,7 +432,7 @@ describe('Round 31: decodedMessage: null must not degrade self-relay recovery to
+     })
+     fetchIrisMessages.mockResolvedValue([{
+       message: buildCctpMessage({ destinationDomain: 6, bodySender: CONTRACT_ADDRESS }),
+-      attestation: '0xattestation',
++      attestation: REAL_ATTESTATION,
+       status: 'complete',
+       decodedMessage: null,
+       forwardState: 'FAILED',
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 1b23f36..f2c336a 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -21,7 +21,7 @@ import { useSupportedDomains } from '../hooks/useSupportedDomains.js'
+ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+-import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone, CCTP_TRACK_SHAPE_VERSION } from '../utils/irisDelivery.js'
+ import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
+ import {
+   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+@@ -1473,24 +1473,44 @@ const CCTP_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+ // tolerance: this ts is always stamped with Date.now() on the same device
+ // that later reads it, so a genuinely future value only ever means a
+ // tampered/foreign record, not ordinary drift.
+-const CCTP_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
+-const CCTP_AMOUNT_RE = /^[0-9]+$/
++// Round 33: a cctpMessageFingerprint entry is now a single keccak256 hash
++// string (see irisDelivery.js's own redesign doc comment), not an object of
++// individually-chosen fields — 0x + 64 hex chars, nothing more permissive.
++const CCTP_FINGERPRINT_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+ 
+-// Round 29: shape-checks one cctpMessageFingerprint entry (see
+-// irisDelivery.js) the same way the rest of this function shape-checks the
+-// record around it — every field a real fingerprint always has, nothing
+-// more permissive.
+ function isValidFingerprintShape(fp) {
+-  if (fp == null || typeof fp !== 'object') return false
+-  if (!Number.isInteger(fp.destinationDomain) || fp.destinationDomain < 0) return false
+-  if (typeof fp.burnToken !== 'string' || !CCTP_ADDRESS_RE.test(fp.burnToken)) return false
+-  if (typeof fp.mintRecipient !== 'string' || !CCTP_ADDRESS_RE.test(fp.mintRecipient)) return false
+-  if (typeof fp.messageSender !== 'string' || !CCTP_ADDRESS_RE.test(fp.messageSender)) return false
+-  if (typeof fp.amount !== 'string' || !CCTP_AMOUNT_RE.test(fp.amount)) return false
+-  return true
++  return typeof fp === 'string' && CCTP_FINGERPRINT_HASH_RE.test(fp)
+ }
+ 
++/* Round 33 (fixing the Round 32 review's Medium finding: "shape validation
++   doesn't reject every prior fingerprint shape" — this exact bug recurring
++   a third time, after Round 26->27's raw-hex expectedMessages array and
++   Round 32 itself shipping a new 7-field fingerprint shape with no matching
++   update here at all). A record persisted under any earlier shape was
++   silently accepted as "valid" by the old per-field checks (they only ever
++   verified the CURRENT shape's own fields, never rejected an unexpected
++   EXTRA/DIFFERENT shape), then permanently failed the real comparison for
++   the rest of its 24h life — hiding real delivery status behind a
++   fingerprint-mismatch that could never resolve.
++
++   Fixed structurally, not just by patching the field checks again:
++   CCTP_TRACK_SHAPE_VERSION (irisDelivery.js) is checked FIRST, before
++   anything else about the record is even inspected. Any record whose
++   shapeVersion isn't EXACTLY the current value is rejected outright — the
++   original 5-field fingerprint array (no shapeVersion at all), Round 32's
++   7-field version (also no shapeVersion — it shipped before this tag
++   existed), and any future shape change that bumps the constant but ships
++   before every write site is updated to match, all fail this one check
++   with no need to separately enumerate what's wrong about each. This is
++   the same reasoning CCTP_TRACK_SHAPE_VERSION's own doc comment gives for
++   why a version tag is worth the extra field: a per-field shape check has
++   to be remembered to reject every SPECIFIC old shape; a version check
++   only has to be remembered to be BUMPED, which every one of this bug's
++   three prior recurrences would have caught immediately if it had existed
++   then — a mismatched constant is a loud, obvious signal in a way a subtly
++   wrong per-field check is not. */
+ function isValidCctpTrackRecord(parsed) {
++  if (parsed.shapeVersion !== CCTP_TRACK_SHAPE_VERSION) return false
+   if (typeof parsed.txHash !== 'string' || !CCTP_TX_HASH_RE.test(parsed.txHash)) return false
+   if (!Number.isFinite(parsed.ts) || parsed.ts > Date.now()) return false
+   if (!Number.isInteger(parsed.expectedTotalMessages) || parsed.expectedTotalMessages <= 0) return false
+@@ -1504,10 +1524,10 @@ function isValidCctpTrackRecord(parsed) {
+   // Round 29: every real write site now persists a fingerprint alongside
+   // each ordinal (see irisDelivery.js's cctpMessageFingerprint and
+   // receiptEmittedCctpMessageForMilestone) — a record missing this, or with
+-  // a length mismatch, is a PRE-Round-29 legacy shape and gets discarded the
+-  // same way Round 27's own legacy-shape records are: readCctpTrack returns
+-  // null, MilestoneRow's `!cctpTrack` fallback reverifies from the receipt
+-  // instead of ever handing out a record with no fingerprint to check.
++  // a length mismatch, is discarded the same way any other malformed shape
++  // is: readCctpTrack returns null, MilestoneRow's `!cctpTrack` fallback
++  // reverifies from the receipt instead of ever handing out a record with
++  // no fingerprint to check.
+   if (!Array.isArray(parsed.expectedFingerprints) || parsed.expectedFingerprints.length !== parsed.expectedOrdinals.length) return false
+   if (!parsed.expectedFingerprints.every(isValidFingerprintShape)) return false
+   return true
+@@ -2805,7 +2825,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // actually worked.
+         safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
++          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+         )
+         onCrossChainRelease?.()
+       }
+@@ -3859,7 +3879,7 @@ function MilestoneAction({
+       if (emitted) {
+         safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+-          JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
++          JSON.stringify({ shapeVersion: CCTP_TRACK_SHAPE_VERSION, txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages, expectedFingerprints: fingerprints })
+         )
+         onCrossChainRelease?.()
+       }
+diff --git a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+index d23a4d9..9be0ba1 100644
+--- a/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
++++ b/frontend/src/pages/EscrowDetail.mutualSettlementExecuted.test.jsx
+@@ -26,6 +26,7 @@ import { encodeEventTopics, encodeAbiParameters } from 'viem'
+    "executed" receipt (both logs) are the two real shapes this function has
+    to tell apart. */
+ import { mutualSettlementExecuted, mutualSettleExecutes, mutualSettlementCreatedCctpMessage } from './EscrowDetail.jsx'
++import { cctpMessageFingerprint } from '../utils/irisDelivery.js'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+ 
+ const ESCROW_ID = 7n
+@@ -90,17 +91,11 @@ const messageSentLog = (logIndex) => ({
+   topics: encodeEventTopics({ abi: MESSAGE_SENT_ABI, eventName: 'MessageSent' }),
+   data: encodeAbiParameters([{ type: 'bytes' }], [buildCctpMessage()])
+ })
+-// Round 29: the fingerprint every message built by buildCctpMessage() above
+-// produces — that helper zeroes burnToken/mintRecipient/amount/
+-// destinationDomain unconditionally, with a fixed CONTRACT_ADDRESS body
+-// sender.
+-const DEFAULT_FP = {
+-  destinationDomain: 0, burnToken: '0x' + '0'.repeat(40), mintRecipient: '0x' + '0'.repeat(40),
+-  amount: '0', messageSender: CONTRACT_ADDRESS.toLowerCase(),
+-  // Round 32: maxFee/hookData added to the fingerprint — buildCctpMessage()
+-  // above zeroes maxFee unconditionally and uses the fixed CCTP_FORWARD_HOOK_HEX.
+-  maxFee: '0', hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
+-}
++// Round 33: the fingerprint every message built by buildCctpMessage() above
++// produces. Computed via the real cctpMessageFingerprint (not hand-typed) —
++// the redesign returns a single sanitized-message hash with no named
++// fields, so there is nothing left to reconstruct field-by-field.
++const DEFAULT_FP = cctpMessageFingerprint(buildCctpMessage())
+ 
+ describe('mutualSettlementExecuted — decodes the real receipt, not a snapshot', () => {
+   it('is false for a receipt that only proposed (the contract always emits this log, executed or not)', () => {
+diff --git a/frontend/src/utils/irisDelivery.js b/frontend/src/utils/irisDelivery.js
+index 1c3a7c5..f00f9d3 100644
+--- a/frontend/src/utils/irisDelivery.js
++++ b/frontend/src/utils/irisDelivery.js
+@@ -1,4 +1,4 @@
+-import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector } from 'viem'
++import { encodeFunctionData, decodeEventLog, slice, size, toEventSelector, keccak256, hexToBytes, bytesToHex } from 'viem'
+ import { ARC_DOMAIN } from '../config/chains.js'
+ import { bytes32ToAddress } from './encode.js'
+ import { ESCROW_ABI, CONTRACT_ADDRESS } from '../config/contract.js'
+@@ -43,6 +43,28 @@ const RECEIVE_MESSAGE_ABI = [
+ export const cctpTrackKey = (escrowId, milestoneIndex) =>
+   `cctp-track-${CONTRACT_ADDRESS.toLowerCase()}-${escrowId}-${milestoneIndex}`
+ 
++// Round 33. A persisted cctpTrack record's own shape version — bumped every
++// time the record's shape changes, most recently by this round's
++// fingerprint redesign (a 7-field object to a single sanitized-message
++// hash). Exists because this exact class of bug has now recurred three
++// times: Round 26's raw-hex expectedMessages array outliving its own
++// removal, and Round 32 shipping a new 7-field fingerprint shape with no
++// matching update to EscrowDetail.jsx's isValidCctpTrackRecord/
++// isValidFingerprintShape at all — a record persisted before that round
++// kept being accepted as "valid" and then permanently failed the (now
++// different) comparison for the rest of its 24h life. A per-field shape
++// check has to be remembered to reject every SPECIFIC old shape it might
++// encounter; a version tag rejects all of them in one line regardless of
++// what else about the record looks plausible, and gives whoever next
++// changes the shape one obvious, hard-to-miss constant to bump — read by
++// EscrowDetail.jsx's isValidCctpTrackRecord (validation) and every write
++// site (EscrowDetail.jsx x2, ArbiterPanel.jsx) that persists a record.
++// Lives here rather than in EscrowDetail.jsx because ArbiterPanel.jsx
++// already imports cctpTrackKey from this file and cannot import from
++// EscrowDetail.jsx (EscrowDetail.jsx imports FROM ArbiterPanel.jsx per
++// Round 26 — the reverse would be circular).
++export const CCTP_TRACK_SHAPE_VERSION = 2
++
+ // Round 22 Phase B: useCctpDelivery polls this every 15s (POLL_MS) on a
+ // fixed interval regardless of whether the previous call has resolved yet,
+ // and Codex directly observed real calls sometimes taking over a minute
+@@ -220,178 +242,150 @@ export function messageSenderOf(message) {
+   return bytes32ToAddress(slice(message, 248, 280))
+ }
+ 
+-/* Round 29. Three more fields off the same raw message, all from the
+-   IMMUTABLE half of CCTP V2's layout — none of nonce (header, byte 12-44),
+-   finalityThresholdExecuted (header, byte 144-148), feeExecuted (body,
+-   relative offset 164/absolute 312) or expirationBlock (body, relative
+-   offset 196/absolute 344), the four fields Round 27's own doc comment
+-   established DO mutate between the source-side log and Iris's attested
+-   response. Offsets confirmed against the same Circle V2 technical guide
+-   layout messageSenderOf and messageHeaderSenderOf already verify against:
+-   header's destinationDomain is a 4-byte uint32 at absolute offset 8 (right
+-   after the 4-byte version and 4-byte sourceDomain); BurnMessageV2's body
+-   starts at absolute 148, so burnToken (32 bytes), mintRecipient (32
+-   bytes), and amount (32 bytes) sit at 152, 184, and 216 respectively —
+-   immediately before messageSender's own already-verified 248 offset,
+-   which anchors this math to a value already confirmed correct. */
++/* Round 29. destinationDomain is a 4-byte uint32 at absolute offset 8
++   (right after the 4-byte version and 4-byte sourceDomain) -- confirmed
++   against the same Circle V2 technical guide layout messageSenderOf and
++   messageHeaderSenderOf already verify against. Kept as its own exported
++   helper (gated by assertWellFormedCctpV2Message, same as
++   cctpMessageFingerprint below) because useCctpDelivery needs a message's
++   destination for display independent of the fingerprint's own shape --
++   the two answer different questions and must not be coupled. */
+ function destinationDomainOf(message) {
+   return readUint32(message, 8)
+ }
+ 
+-function burnTokenOf(message) {
+-  return bytes32ToAddress(slice(message, 152, 184))
+-}
+-
+-function mintRecipientOf(message) {
+-  return bytes32ToAddress(slice(message, 184, 216))
+-}
+-
+-function amountOf(message) {
+-  return BigInt(slice(message, 216, 248))
+-}
+-
+-/* Round 32 (fixing the Round 31 review's Medium finding: "the complete
+-   message check doesn't validate the whole message", part b). Two more
+-   fields off BurnMessageV2's body, both confirmed IMMUTABLE — neither is
+-   among the four fields established as mutating between burn-time and
+-   attestation (nonce, finalityThresholdExecuted, feeExecuted,
+-   expirationBlock; see the doc comment above destinationDomainOf). maxFee
+-   sits at relative offset 132/absolute 280 (right after messageSender's own
+-   already-verified 248-280 range), 32 bytes. hookData is the body's
+-   dynamic tail starting at relative offset 228/absolute 376 — for a
+-   hookless CCTP message this is legitimately empty ("0x"); TrancheProtocol.sol
+-   never sends one (see hookDataOf's own doc comment). */
+-function maxFeeOf(message) {
+-  return BigInt(slice(message, 280, 312))
+-}
++/* Round 33 (redesign, fixing the Round 32 review's Medium finding:
++   "allow-list fingerprint still omits fields -- sourceDomain, header sender,
++   recipient, destinationCaller, minFinalityThreshold -- three rounds running
++   (29/31/32) each closed one omission and missed the next"). Selecting
++   individual fields to compare is the actual defect: every round in that
++   history had to remember to add a newly-relevant field, and every round
++   missed at least one. There is no such thing as forgetting a field when
++   there is no allow-list -- everything not explicitly named here as mutable
++   is included in the comparison by default.
++
++   The four ranges below are the ONLY fields CCTP V2 mutates between
++   burn-time (this app's own source-side log) and Iris's attested response --
++   established across Round 27/29's own verification against a real
++   Arc-testnet burn's byte-diff, re-confirmed here against the same Circle
++   V2 technical guide layout every other offset in this file is checked
++   against:
++     - nonce                     header, absolute 12-44  (assigned by Circle off-chain)
++     - finalityThresholdExecuted header, absolute 144-148 (filled in once attested)
++     - feeExecuted               body,   absolute 312-344 (filled in once attested)
++     - expirationBlock           body,   absolute 344-376 (can change pre-attestation)
++   Every other byte in the message -- version, sourceDomain, destinationDomain,
++   header sender, recipient, destinationCaller, minFinalityThreshold, and the
++   entire BurnMessageV2 body (burnToken, mintRecipient, amount, messageSender,
++   maxFee) plus the dynamic hookData tail -- is immutable for a given message
++   and now covered by the hash below, whether or not this file has a named
++   reader for it. This is deliberately broader than what Round 32 covered
++   (destinationDomain/burnToken/mintRecipient/amount/messageSender/maxFee/
++   hookData): the header's own `recipient` field (absolute 76-108, the
++   address MessageTransmitterV2 delivers to -- a DIFFERENT field from the
++   body's mintRecipient, already covered) legitimately varies BETWEEN
++   messages to different destinationDomains (TokenMessengerV2 looks up a
++   per-domain registered remote address -- confirmed against
++   TrancheProtocol.sol:1363-1372's depositForBurnWithHook call, which passes
++   no explicit recipient at all, so it's entirely TokenMessengerV2's own
++   internal lookup), but is immutable WITHIN a single message's own
++   burn-to-attestation lifecycle, exactly like every other field this hash
++   covers -- legitimate cross-message variability is not the same thing as
++   mutation of one message over time, and is exactly the kind of
++   discriminating content a substituted message should disagree on. Likewise
++   destinationCaller (TrancheProtocol.sol:1368, always the literal
++   `bytes32(0)`) and minFinalityThreshold (TrancheProtocol.sol:1370, always
++   `CCTP_MIN_FINALITY_THRESHOLD` = 2000) are constant for every genuine burn
++   this contract makes -- Round 32 was right that they're constant, but
++   constant fields still belong in a whole-message hash: their whole point
++   is that a corrupted or substituted message that got them wrong would now
++   also fail the comparison, instead of the comparison silently not caring
++   about them because nobody chose to name them. */
++const MUTABLE_BYTE_RANGES = [
++  [12, 44],   // nonce (header)
++  [144, 148], // finalityThresholdExecuted (header)
++  [312, 344], // feeExecuted (body)
++  [344, 376]  // expirationBlock (body)
++]
+ 
+-/* This app's own burns (TrancheProtocol.sol:1371,
+-   `tokenMessenger.depositForBurnWithHook(..., abi.encodePacked(FORWARD_HOOK_DATA))`)
+-   always attach hookData — confirmed directly against source, not assumed:
+-   FORWARD_HOOK_DATA is declared `bytes32` (TrancheProtocol.sol:51), and
+-   abi.encodePacked on a single bytes32 packs the full, fixed 32 bytes
+-   verbatim (no length prefix, no trimming) — so a genuine message from THIS
+-   contract's own burn is always exactly 408 bytes (376 + 32), never just
+-   376. `slice(message, 376)` with no end offset returns everything from
+-   byte 376 to the message's true end regardless of length, so this reads
+-   correctly whether hookData is 32 bytes (this app's real burns) or empty
+-   (a hypothetical hookless message some other CCTP caller produced). */
+-function hookDataOf(message) {
+-  return slice(message, 376).toLowerCase()
++function sanitizeCctpMessage(message) {
++  const bytes = hexToBytes(message)
++  for (const [start, end] of MUTABLE_BYTE_RANGES) {
++    bytes.fill(0, start, end)
++  }
++  return bytesToHex(bytes)
+ }
+ 
+-/* Round 29 (fixing the Round 29 review's Medium finding: "equal cardinality
+-   doesn't prove equal membership"). Ordinal position alone (Round 27) proves
+-   WHERE a message sits in Iris's response, not that its CONTENT is
+-   genuinely this milestone's own real burn — an Iris bug, or a same-length
+-   response that reorders same-transaction messages, could still misattribute
+-   at the selected ordinal. This is real identity verification, not a return
+-   to Round 26's mistake: Round 26 compared the whole raw message against
+-   Iris's `message` field and always failed, because CCTP V2 mutates several
+-   fields between burn and attestation. This instead fingerprints ONLY the
+-   fields confirmed immutable (see the four decode helpers above) — a value
+-   that stays byte-identical between the source-side log and Iris's own
+-   attested response for the SAME real message, so genuine equality is
+-   actually achievable here, unlike Round 26's attempt.
+-   Stored as plain JSON-safe values (lowercased address strings, amount as a
+-   decimal string — BigInt doesn't survive JSON.stringify) since this feeds
+-   directly into the persisted cctpTrack record.
+-
+-   Round 31 (fixing the Round 30 review's Medium finding: "raw-message
+-   fingerprint check is fail-open in two ways", part b). This previously
+-   read straight through byte 280 with no minimum-length or version-field
+-   check at all — unlike verifiedOwnCctpMessage on the receipt side, which
+-   checks both header and body version before ever trusting its offsets.
+-   The receipt-side caller (receiptEmittedCctpMessageForMilestone) only ever
+-   passes messages that already passed verifiedOwnCctpMessage's own version
+-   checks, so this was latent there — but irisMessageMatchesFingerprint
+-   passes this UNTRUSTED bytes straight from Iris's API response, never
+-   independently checked before now. A short or non-V2 value could have its
+-   arbitrary bytes silently misread as real fingerprint fields (e.g. a
+-   truncated or malformed response reading zero/garbage where amount or
+-   mintRecipient should be) instead of being rejected outright. Fixed by
+-   reusing the SAME header/body version-check functions already built for
+-   the receipt side (messageHeaderVersionOf / messageBodyVersionOf) rather
+-   than rebuilding them, plus a minimum-length floor against the real
+-   complete-message size (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) before any
+-   offset is read. Throws on either failure — every real call site already
+-   wraps this in try/catch and fails closed (irisMessageMatchesFingerprint
+-   explicitly; the receipt-side caller can't reach either failure in
+-   practice, since verifiedOwnCctpMessage already guarantees both).
+-
+-   Round 32 (fixing the Round 31 review's Medium finding: "the complete
+-   message check doesn't validate the whole message"). Two gaps, fixed
+-   together:
+-
+-   (a) The length/version checks above only ever read through the bytes
+-   THIS function itself consumes — before this round, that stopped at
+-   messageSender (byte 280); a malformed or corrupted byte anywhere past
+-   that (recipient, destinationCaller, minFinalityThreshold, maxFee,
+-   feeExecuted, expirationBlock, hookData — none of them read here) could
+-   sail through with no throw at all. Codex proved this concretely: garbage
+-   at byte 300 (inside what is now the maxFee range) produced a fingerprint
+-   with no error. A basic hex well-formedness check — even length, valid
+-   hex characters throughout — now runs FIRST, before any offset in this
+-   function (or size()/messageHeaderVersionOf/messageBodyVersionOf below
+-   it) is trusted. This catches a malformed byte ANYWHERE in the string,
+-   independent of which named field it happens to fall in — including the
+-   fields this function still never reads (recipient, destinationCaller,
+-   sourceDomain, minFinalityThreshold), which stay unvalidated by design
+-   (see scope note below) but at least can't be outright non-hex garbage.
+-
+-   (b) maxFee and hookData are added to the returned fingerprint — both
+-   confirmed immutable (see maxFeeOf/hookDataOf's own doc comments), unlike
+-   the four established-mutable fields this fingerprint still deliberately
+-   excludes (nonce, finalityThresholdExecuted, feeExecuted,
+-   expirationBlock). This directly closes Codex's byte-300 proof at the
+-   VALUE level too, not just the hex-well-formedness level above: byte 300
+-   sits inside maxFee's 280-312 range, so a corruption there that happens
+-   to still be valid hex (a different, but still hex, byte) now fails the
+-   maxFee comparison in irisMessageMatchesFingerprint instead of being
+-   silently ignored.
+-
+-   Scope note (deliberately NOT a full byte-for-byte diff of everything
+-   outside the 4 mutable ranges): version, sourceDomain, recipient,
+-   destinationCaller, and minFinalityThreshold are all either already
+-   independently checked elsewhere (header/body version, via
+-   messageHeaderVersionOf/messageBodyVersionOf) or constant/predictable for
+-   every genuine burn THIS contract makes (destinationCaller is always
+-   bytes32(0), minFinalityThreshold is always CCTP_MIN_FINALITY_THRESHOLD,
+-   recipient is always this app's own TokenMessengerV2 handling address) —
+-   comparing them would add parsing surface without adding real
+-   discriminating power beyond what verifiedOwnCctpMessage's own header/body
+-   sender checks already establish on the receipt side. destinationDomain,
+-   burnToken, mintRecipient, amount, messageSender, maxFee, and hookData are
+-   the fields that actually VARY per burn (or per app) and are the ones a
+-   substituted or corrupted message would most plausibly disagree on — that
+-   set, plus the blanket hex-well-formedness check above for everything
+-   else, is the actual self-relay recovery need: `encodeReceiveMessage`
+-   (EscrowDetail.jsx's SelfRelayCard) packs `delivery.message` — Iris's raw
+-   bytes, verbatim, not reconstructed field-by-field — directly into
+-   `receiveMessage` calldata, so what this fingerprint has to prove is "this
+-   is genuinely the same complete message the receipt proved we burned,"
+-   not "every individual field is independently sane." */
+-export function cctpMessageFingerprint(message) {
++/* Shared validation gate for both cctpMessageFingerprint and
++   cctpMessageDestinationDomain below -- extracted so the two can never drift
++   out of sync on what counts as "safe to read offsets from". A basic hex
++   well-formedness check (even length, valid hex characters throughout) runs
++   FIRST, before size() or any byte offset is trusted (Round 32's fix for
++   Codex's proof that a corrupted byte outside the old read boundary could
++   sail through with no throw at all) -- then the minimum-length floor
++   (CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES), then both header and body version.
++   Throws on any failure; every real call site wraps this in try/catch and
++   fails closed. */
++function assertWellFormedCctpV2Message(message) {
+   if (typeof message !== 'string' || !CCTP_V2_HEX_RE.test(message)) {
+-    throw new Error('cctpMessageFingerprint: message is not well-formed hex')
++    throw new Error('assertWellFormedCctpV2Message: message is not well-formed hex')
+   }
+   if (size(message) < CCTP_V2_COMPLETE_MESSAGE_MIN_BYTES) {
+-    throw new Error('cctpMessageFingerprint: message is too short to be a complete CCTP V2 message')
++    throw new Error('assertWellFormedCctpV2Message: message is too short to be a complete CCTP V2 message')
+   }
+   if (messageHeaderVersionOf(message) !== CCTP_V2_VERSION || messageBodyVersionOf(message) !== CCTP_V2_VERSION) {
+-    throw new Error('cctpMessageFingerprint: message header/body version is not CCTP V2')
+-  }
+-  return {
+-    destinationDomain: destinationDomainOf(message),
+-    burnToken: burnTokenOf(message).toLowerCase(),
+-    mintRecipient: mintRecipientOf(message).toLowerCase(),
+-    amount: amountOf(message).toString(),
+-    messageSender: messageSenderOf(message).toLowerCase(),
+-    maxFee: maxFeeOf(message).toString(),
+-    hookData: hookDataOf(message)
++    throw new Error('assertWellFormedCctpV2Message: message header/body version is not CCTP V2')
+   }
+ }
+ 
++/* Round 29 (fixing the Round 29 review's Medium finding: "equal cardinality
++   doesn't prove equal membership"). Ordinal position alone (Round 27) proves
++   WHERE a message sits in Iris's response, not that its CONTENT is
++   genuinely this milestone's own real burn. Verify each selected entry's
++   fingerprint (irisMessageMatchesFingerprint) against the receipt-derived
++   one before ever trusting the selection. A mismatch fails the same way an
++   incomplete/ambiguous response already does -- stays 'polling' -- since a
++   genuine mismatch should be exceedingly rare (Iris's own ordering
++   guarantee, plus the count gate above, plus Phase C's sourceTxHash filter,
++   would all have to be wrong or bypassed at once) and there is no safe
++   alternative message to fall back to selecting instead.
++
++   Round 33 (redesign -- see MUTABLE_BYTE_RANGES's own doc comment for the
++   full "why an allow-list keeps missing fields" reasoning). The fingerprint
++   is now a single keccak256 hash of the sanitized message (every byte
++   except the 4 established-mutable ranges, zeroed then hashed), not an
++   object of individually-chosen fields -- comparison is a hash equality
++   check, not a per-field one, in irisMessageMatchesFingerprint below.
++
++   Hash, not the full sanitized hex string, for storage: a complete message
++   is a few hundred hex characters (408 bytes = 816 hex chars for this
++   app's own hookData-bearing burns, more once a split settlement persists
++   several per milestone), a keccak256 hash is a fixed 66 (0x + 64). This
++   feeds directly into the persisted cctpTrack localStorage record -- a
++   fixed, small size matters there specifically (localStorage has a real
++   per-origin quota, and a mixed split can persist up to MAX_SPLITS=10
++   entries in one record), and nothing downstream needs the sanitized
++   string's actual content back out, only equality against a second
++   independently-computed sanitized hash -- a one-way digest loses nothing
++   the comparison needs. */
++export function cctpMessageFingerprint(message) {
++  assertWellFormedCctpV2Message(message)
++  return keccak256(sanitizeCctpMessage(message))
++}
++
++/* Round 33. destinationDomain extracted independently of the fingerprint's
++   own shape -- useCctpDelivery's display-only domain lookup used to read
++   `cctpMessageFingerprint(raw).destinationDomain`, which broke the moment
++   the fingerprint became a bare hash string with no named fields at all.
++   Shares the exact same validation gate as cctpMessageFingerprint
++   (assertWellFormedCctpV2Message) so a malformed/short/wrong-version
++   message throws here too, rather than silently misreading garbage as a
++   domain. */
++export function cctpMessageDestinationDomain(message) {
++  assertWellFormedCctpV2Message(message)
++  return destinationDomainOf(message)
++}
++
+ /* Round 29. Checks a fingerprint (from cctpMessageFingerprint, above)
+    against the Iris entry selected by ordinal.
+ 
+@@ -470,17 +464,11 @@ export function irisMessageMatchesFingerprint(irisMessage, fingerprint) {
+   } catch {
+     return false
+   }
+-  return (
+-    actual.destinationDomain === fingerprint.destinationDomain &&
+-    actual.burnToken === fingerprint.burnToken &&
+-    actual.mintRecipient === fingerprint.mintRecipient &&
+-    actual.amount === fingerprint.amount &&
+-    actual.messageSender === fingerprint.messageSender &&
+-    // Round 32: maxFee and hookData added — see cctpMessageFingerprint's own
+-    // doc comment for why both are immutable and worth comparing.
+-    actual.maxFee === fingerprint.maxFee &&
+-    actual.hookData === fingerprint.hookData
+-  )
++  // Round 33: cctpMessageFingerprint is now a single sanitized-message hash
++  // (see its own doc comment) — comparison is a straight equality check,
++  // not a per-field one. Every byte outside the 4 established-mutable
++  // ranges is covered by construction; there is no field left to omit.
++  return actual === fingerprint
+ }
+ 
+ // Round 26. Arc's own (source-side) MessageTransmitterV2 — the contract
+diff --git a/frontend/src/utils/irisDelivery.test.js b/frontend/src/utils/irisDelivery.test.js
+index ff3a9de..5c4f5e3 100644
+--- a/frontend/src/utils/irisDelivery.test.js
++++ b/frontend/src/utils/irisDelivery.test.js
+@@ -31,6 +31,7 @@ const {
+   receiptEmittedCctpMessageForMilestone,
+   realMessageTransmitterLogIndexesAsc,
+   cctpMessageFingerprint,
++  cctpMessageDestinationDomain,
+   irisMessageMatchesFingerprint,
+   MESSAGE_TRANSMITTER_V2_ARC,
+   TOKEN_MESSENGER_V2_ARC
+@@ -428,29 +429,14 @@ const buildCctpMessage = ({
+   uint256Hex(expirationBlock) +       // expirationBlock    344-376
+   hookData                            // hookData           376+ (dynamic)
+ 
+-// Round 29: the expected cctpMessageFingerprint for a message built by
+-// buildCctpMessage above, mirroring the same overridable fields.
+-// Round 32: maxFee/hookData added, mirroring buildCctpMessage's own
+-// maxFee/hookData defaults (0n / CCTP_FORWARD_HOOK_HEX) — cctpMessageFingerprint
+-// now returns both, so an expected object missing either key would fail a
+-// toEqual comparison against the real return value.
+-const fingerprintFor = ({
+-  bodySender = CONTRACT_ADDRESS,
+-  destinationDomain = 0,
+-  burnToken = ZERO_ADDRESS,
+-  mintRecipient = ZERO_ADDRESS,
+-  amount = 0n,
+-  maxFee = 0n,
+-  hookData = CCTP_FORWARD_HOOK_HEX
+-} = {}) => ({
+-  destinationDomain,
+-  burnToken: burnToken.toLowerCase(),
+-  mintRecipient: mintRecipient.toLowerCase(),
+-  amount: BigInt(amount).toString(),
+-  messageSender: bodySender.toLowerCase(),
+-  maxFee: BigInt(maxFee).toString(),
+-  hookData: ('0x' + hookData).toLowerCase()
+-})
++// Round 33: the expected cctpMessageFingerprint for a message built by
++// buildCctpMessage above, mirroring the same overridable fields. Computed
++// via the real cctpMessageFingerprint (not hand-assembled) — Round 33's
++// redesign returns a single sanitized-message hash with no named fields,
++// so there is nothing left to reconstruct field-by-field; this helper just
++// saves callers from writing buildCctpMessage(...) + cctpMessageFingerprint(...)
++// twice at every call site.
++const fingerprintFor = (overrides = {}) => cctpMessageFingerprint(buildCctpMessage(overrides))
+ 
+ const messageSentLog = (logIndex, overrides = {}, address = MESSAGE_TRANSMITTER_V2_ARC) => ({
+   address,
+@@ -849,50 +835,99 @@ describe('receiptEmittedCctpMessageForMilestone', () => {
+    Iris's attested response.
+    Round 32: maxFee and hookData added — also confirmed immutable, see
+    cctpMessageFingerprint's own doc comment in irisDelivery.js. */
++// Round 33: flips a single byte (by absolute offset) in an otherwise-valid
++// message and returns the corrupted hex string — used throughout the
++// redesigned describe block below to prove a given byte range DOES or DOES
++// NOT affect the fingerprint, without hand-assembling a second full message
++// per field the way the old field-object design required.
++const flipByteAt = (message, byteOffset) => {
++  const charIndex = 2 + byteOffset * 2
++  const original = message.slice(charIndex, charIndex + 2)
++  const flipped = original === 'ff' ? '00' : 'ff'
++  return message.slice(0, charIndex) + flipped + message.slice(charIndex + 2)
++}
++
+ describe('cctpMessageFingerprint', () => {
+-  it('extracts destinationDomain, burnToken, mintRecipient, amount, messageSender, maxFee, and hookData at their documented offsets', () => {
+-    const burnToken = '0x1111111111111111111111111111111111111111'
+-    const mintRecipient = '0x2222222222222222222222222222222222222222'
+-    const message = buildCctpMessage({
+-      destinationDomain: 6,
+-      burnToken,
+-      mintRecipient,
+-      amount: 123_456_789n,
+-      bodySender: CONTRACT_ADDRESS,
+-      maxFee: 500_000n
+-    })
+-    expect(cctpMessageFingerprint(message)).toEqual({
+-      destinationDomain: 6,
+-      burnToken: burnToken.toLowerCase(),
+-      mintRecipient: mintRecipient.toLowerCase(),
+-      amount: '123456789',
+-      messageSender: CONTRACT_ADDRESS.toLowerCase(),
+-      maxFee: '500000',
+-      hookData: ('0x' + CCTP_FORWARD_HOOK_HEX).toLowerCase()
+-    })
++  it('returns a fixed-length keccak256 hash string, not a field object', () => {
++    const fp = cctpMessageFingerprint(buildCctpMessage({}))
++    expect(fp).toMatch(/^0x[0-9a-f]{64}$/)
++  })
++
++  it('is deterministic — the same message always produces the same hash', () => {
++    const message = buildCctpMessage({ destinationDomain: 6, amount: 42n })
++    expect(cctpMessageFingerprint(message)).toBe(cctpMessageFingerprint(message))
+   })
+ 
+-  it('lowercases address fields — case must not cause a spurious mismatch against Iris\'s own (differently-cased) decoded addresses', () => {
+-    const shoutedBurnToken = '0xABCDEF0123456789ABCDEF0123456789ABCDEF01'
+-    const message = buildCctpMessage({ burnToken: shoutedBurnToken })
+-    expect(cctpMessageFingerprint(message).burnToken).toBe(shoutedBurnToken.toLowerCase())
++  it('is unaffected by the four fields Round 27 established mutate between source and attestation — nonce (12-44), finalityThresholdExecuted (144-148), feeExecuted (312-344), and expirationBlock (344-376) can each independently change with no effect on the hash', () => {
++    const genuine = buildCctpMessage({ amount: 42n })
++    const base = cctpMessageFingerprint(genuine)
++    for (const [start, end] of [[12, 44], [144, 148], [312, 344], [344, 376]]) {
++      // Flip a byte in the middle of the range, not just the first byte —
++      // proves the WHOLE range is sanitized, not just its leading byte.
++      const mid = start + Math.floor((end - start) / 2)
++      expect(cctpMessageFingerprint(flipByteAt(genuine, mid))).toBe(base)
++    }
+   })
+ 
+-  it('is unaffected by the four fields Round 27 established mutate between source and attestation (nonce, finalityThresholdExecuted, feeExecuted, expirationBlock are not read at all)', () => {
+-    const base = cctpMessageFingerprint(buildCctpMessage({ amount: 42n }))
+-    // buildCctpMessage always zeroes nonce/finalityThresholdExecuted/
+-    // feeExecuted/expirationBlock — there's no override for them at all,
+-    // by construction, since a real fingerprint must never depend on them.
+-    expect(base).toEqual(fingerprintFor({ amount: 42n }))
++  /* Round 33 — the actual defect this redesign fixes. Round 32's own
++     allow-list still omitted sourceDomain, header sender, recipient,
++     destinationCaller, and minFinalityThreshold — corrupting any of them
++     produced NO change in the old fingerprint at all. Every one of these
++     now flips the hash, because the hash covers everything except the 4
++     established-mutable ranges above by construction, not by remembering
++     to name each field. */
++  describe('every immutable byte outside the 4 mutable ranges is covered — a single corrupted byte anywhere changes the hash', () => {
++    // version bytes (header offset 0, body offset 148) are deliberately
++    // excluded from this table — assertWellFormedCctpV2Message rejects a
++    // non-V2 version by THROWING before the hash is ever computed (see the
++    // hex well-formedness gate describe block below), not by silently
++    // producing a different hash, so they're a different behavior than
++    // every other byte in the message.
++    const genuine = buildCctpMessage({})
++    const base = cctpMessageFingerprint(genuine)
++    const cases = [
++      ['sourceDomain', 4],
++      ['destinationDomain', 8],
++      ['header sender', 44],
++      ['recipient — the field Round 32 omitted entirely', 76],
++      ['destinationCaller', 108],
++      ['minFinalityThreshold — the other field Round 32 omitted', 140],
++      ['burnToken', 152],
++      ['mintRecipient', 184],
++      ['amount', 216],
++      ['messageSender (body)', 248],
++      ['maxFee', 280],
++      ['hookData', 377]
++    ]
++    for (const [label, offset] of cases) {
++      it(`byte offset ${offset} (${label})`, () => {
++        expect(cctpMessageFingerprint(flipByteAt(genuine, offset))).not.toBe(base)
++      })
++    }
++  })
++
++  it('legitimate recipient variability across DIFFERENT destination domains is ordinary content, not a special case — two messages to different domains (and therefore different TokenMessengerV2-assigned recipients) simply hash differently, the same as any other differing field', () => {
++    const toDomainSix = buildCctpMessage({ destinationDomain: 6 })
++    const toDomainZero = buildCctpMessage({ destinationDomain: 0 })
++    expect(cctpMessageFingerprint(toDomainSix)).not.toBe(cctpMessageFingerprint(toDomainZero))
++  })
++
++  it('hex case does not affect the hash — the same bytes represented with uppercase hex digits fingerprint identically (hex parsing is case-insensitive; only the numeric byte value is hashed)', () => {
++    const message = buildCctpMessage({ burnToken: '0xABCDEF0123456789ABCDEF0123456789ABCDEF01' })
++    const shouted = '0x' + message.slice(2).toUpperCase()
++    expect(cctpMessageFingerprint(shouted)).toBe(cctpMessageFingerprint(message))
+   })
+ 
+   /* Round 32 (fixing the Round 31 review's Medium finding: "the complete
+      message check doesn't validate the whole message", part a). The
+      length/version checks alone only ever covered bytes this function
+-     itself reads (through messageSender at 280, now through hookData) —
+-     they never independently confirmed the STRING is well-formed hex
+-     end-to-end. A non-hex byte anywhere the checks above don't happen to
+-     touch could previously slip through with no throw at all. */
++     itself read (through messageSender at 280, in the old field-by-field
++     design) — they never independently confirmed the STRING is well-formed
++     hex end-to-end. A non-hex byte anywhere the checks above don't happen
++     to touch could previously slip through with no throw at all. Still
++     required under the Round 33 redesign: sanitizeCctpMessage's hexToBytes
++     call needs well-formed hex before it can zero the mutable ranges at
++     all. */
+   describe('hex well-formedness gate', () => {
+     it('throws on an odd-length hex string, even if long enough and version-correct otherwise', () => {
+       const valid = buildCctpMessage({})
+@@ -900,34 +935,15 @@ describe('cctpMessageFingerprint', () => {
+       expect(() => cctpMessageFingerprint(oddLength)).toThrow(/not well-formed hex/)
+     })
+ 
+-    it('throws on a non-hex character anywhere in the string, including a byte range this function never explicitly reads', () => {
++    it('throws on a non-hex character anywhere in the string, including a byte range no named field reader ever directly touches', () => {
+       const valid = buildCctpMessage({})
+-      // byte 100 sits inside `recipient` (76-108) — a field cctpMessageFingerprint
+-      // never names or reads directly, proving the well-formedness check is a
+-      // blanket string-level gate, not a per-field one.
++      // byte 100 sits inside `recipient` (76-108) — proving the
++      // well-formedness check is a blanket string-level gate, not
++      // dependent on any particular field being read by name.
+       const charIndex = 2 + 100 * 2 // "0x" prefix + byte offset -> hex char index
+       const corrupted = valid.slice(0, charIndex) + 'zz' + valid.slice(charIndex + 2)
+       expect(() => cctpMessageFingerprint(corrupted)).toThrow(/not well-formed hex/)
+     })
+-
+-    /* Codex's exact proof: a message valid through byte 280 (the OLD
+-       fingerprint's read boundary) with a corrupted byte at 300 — inside
+-       maxFee's 280-312 range, added to the fingerprint this same round —
+-       previously produced a fingerprint with no throw at all. Verifies both
+-       layers of the fix independently: replacing byte 300 with genuinely
+-       non-hex characters is caught by the well-formedness gate above; this
+-       specific test uses a still-valid-hex-but-WRONG byte at 300 instead, so
+-       it only fails if the maxFee VALUE comparison (not just hex validity)
+-       is what's actually catching it. */
+-    it('regression: a message valid through byte 280 with a corrupted (but still hex) byte at 300 must fail the maxFee comparison, not silently produce a fingerprint that ignores it', () => {
+-      const genuine = buildCctpMessage({ maxFee: 1_000_000n })
+-      const charIndex = 2 + 300 * 2
+-      // Flip byte 300 to a different, but still valid, hex byte pair.
+-      const originalByte = genuine.slice(charIndex, charIndex + 2)
+-      const corruptedByte = originalByte === 'ff' ? '00' : 'ff'
+-      const corrupted = genuine.slice(0, charIndex) + corruptedByte + genuine.slice(charIndex + 2)
+-      expect(cctpMessageFingerprint(corrupted).maxFee).not.toBe(cctpMessageFingerprint(genuine).maxFee)
+-    })
+   })
+ })
+ 
+@@ -937,7 +953,13 @@ describe('cctpMessageFingerprint', () => {
+    nullable (decode failure), so this now derives the Iris-side fingerprint
+    directly from irisMessage.message (raw hex) via cctpMessageFingerprint —
+    the same byte-offset parser the receipt-side fingerprint uses — instead
+-   of depending on Iris's optional decoded convenience object at all. */
++   of depending on Iris's optional decoded convenience object at all.
++
++   Round 33: cctpMessageFingerprint is now a sanitized-message hash, not a
++   field object — most of the "rejects a mismatched X" tests below need no
++   changes at all (a differing message still hashes differently, whatever
++   field the difference is in), which is itself evidence the redesign is
++   strictly more general than the allow-list it replaced. */
+ describe('irisMessageMatchesFingerprint', () => {
+   const destinationDomain = 6
+   const burnToken = '0x1111111111111111111111111111111111111111'
+@@ -1009,6 +1031,17 @@ describe('irisMessageMatchesFingerprint', () => {
+     expect(irisMessageMatchesFingerprint(wrong, withHookData)).toBe(false)
+   })
+ 
++  /* Round 33 — the actual defect this redesign fixes. Round 32's own
++     allow-list never compared the header's `recipient` field (absolute
++     76-108) at all — buildCctpMessage in this file has no override for it
++     (it's always zeroed), so this corrupts it directly by byte offset,
++     which the field-object design could never have caught regardless of
++     what value it held. */
++  it('rejects a corrupted recipient (header, byte 76) — a field the pre-Round-33 allow-list never compared at all', () => {
++    const corruptedRecipient = irisEntry({ message: flipByteAt(realMessage, 76) })
++    expect(irisMessageMatchesFingerprint(corruptedRecipient, fp)).toBe(false)
++  })
++
+   it('regression (Round 29 review Medium finding): succeeds when decodedMessage is null but the raw message field is present and genuinely matches — Iris\'s convenience decode failing must not misclassify a real, correct message as a mismatch', () => {
+     const noDecode = irisEntry({ decodedMessage: null })
+     expect(irisMessageMatchesFingerprint(noDecode, fp)).toBe(true)

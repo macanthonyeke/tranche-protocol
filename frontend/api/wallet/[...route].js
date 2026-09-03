@@ -18,6 +18,7 @@
 // "which code runs for this URL" stays answerable by reading one map.
 
 import balances from '../_lib/wallet/balances.js'
+import canaryPreflight from '../_lib/wallet/canary-preflight.js'
 import completeLogin from '../_lib/wallet/complete-login.js'
 import directoryClaim from '../_lib/wallet/directory-claim.js'
 import emailResend from '../_lib/wallet/email-resend.js'
@@ -38,6 +39,7 @@ import verifyEmail from '../_lib/wallet/verify-email.js'
 // influence which module gets loaded, and unknown names can only miss.
 const ROUTES = {
   'balances': balances,
+  'canary-preflight': canaryPreflight,
   'complete-login': completeLogin,
   'directory-claim': directoryClaim,
   'email-resend': emailResend,

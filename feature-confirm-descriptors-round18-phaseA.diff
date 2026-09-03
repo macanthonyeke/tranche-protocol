@@ -1,0 +1,284 @@
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 04ca6f4..e1743f0 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -648,7 +648,28 @@ export function resolveDisputeConfirm({
+     // share is a burn Circle mints minutes later; an Arc share is a
+     // safeTransfer inside this transaction (:1343-1346); and the payer's half
+     // is a credit that is never sent anywhere (:606 below).
+-    if (divertReachable) {
++    //
++    // Round 18 Phase A #3/#4: a split escrow is not one outcome here either —
++    // Solidity evaluates each leg independently (TrancheProtocol.sol:1303-
++    // 1312), so an Arc leg, a cross-chain leg that clears the floor, and a
++    // cross-chain leg that doesn't can all settle simultaneously within this
++    // one transaction. The clears/doesn't-clear pair below is correct for a
++    // single destination but was wrong to also apply, unchanged, to a fan-out
++    // — this states timing per leg-type instead of one outcome for the whole
++    // ruling whenever splits are configured.
++    if (splits?.length > 0) {
++      if (!crossChain) {
++        params.push('Each split leg is transferred on Arc as this transaction executes.')
++      } else if (divertReachable) {
++        params.push(
++          "Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)."
++        )
++      } else {
++        params.push(
++          "Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant."
++        )
++      }
++    } else if (divertReachable) {
+       params.push(
+         "If it clears the floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+       )
+@@ -686,7 +707,11 @@ export function resolveDisputeConfirm({
+           // destination claim — see Round 16 #1), so fee and destination
+           // are consolidated into one hedge here, since they were already
+           // adjacent and both depend on the same clears-the-floor question.
+-          ? `If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
++          // Round 18 Phase A #2: "a given split leg" implied every leg in the
++          // configuration faces this floor check. An Arc leg never does
++          // (TrancheProtocol.sol:1343, direct transfer) — scoped to the legs
++          // that actually can be diverted.
++          ? `If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to ${formatUSDC(floor)}, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.`
+           // Unlike the split case, the no-split destination was ALREADY
+           // hedged above (the "If this amount clears... it is paid to...
+           // / If it does not... credited on Arc to escrow.recipient..."
+diff --git a/frontend/src/pages/ArbiterPanel.resolve.test.jsx b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+index 41619df..6ab5742 100644
+--- a/frontend/src/pages/ArbiterPanel.resolve.test.jsx
++++ b/frontend/src/pages/ArbiterPanel.resolve.test.jsx
+@@ -20,6 +20,7 @@ import { buildContractInteraction } from '../utils/circleTheme.js'
+ 
+ const ARC = 26
+ const BASE = 6
++const ETH_SEPOLIA = 0
+ 
+ const RECIPIENT = '0x179cc4c8f23d257b7f4acb785464025570e3af86'
+ const REFUND_TO = '0x4bdbe608ea998b4822476353df9dd83228ffd503'
+@@ -254,13 +255,67 @@ describe('Finding 3 — a partial award can fall below the delivery floor', () =
+   it('phrases the divert per leg for a split escrow, consolidating fee and destination into one hedge', () => {
+     const splits = [{ bps: 10_000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }]
+     const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
+-    expect(t).toContain("If a given split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
++    // Round 18 Phase A #2: "a given split leg" implied every leg in the
++    // configuration faces this floor check. An Arc leg never does
++    // (TrancheProtocol.sol:1343, direct transfer) — scoped to cross-chain legs.
++    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
+     // The old two-line shape (a fee line, then a separate divert caveat) is
+     // gone — this is now one statement, not two adjacent ones.
+     expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
+     expect(t).not.toMatch(/^Any split leg whose share falls to/m)
+   })
+ 
++  /* Round 18 Phase A: the fixture above has exactly one cross-chain leg,
++     which cannot exercise a genuinely mixed settlement — Solidity evaluates
++     each leg independently (TrancheProtocol.sol:1303-1312), so an Arc leg, a
++     cross-chain leg that clears the floor, and a cross-chain leg that
++     doesn't can all settle simultaneously within one ruling. Three legs
++     across three different domains (one Arc, two different cross-chain
++     domains) verifies the copy stays generically per-leg rather than reading
++     as though it only covers a single specific domain or a single leg. */
++  it('phrases the divert per leg for a genuinely mixed 3-leg split (Arc + two cross-chain domains)', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 3000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) },
++      { bps: 2000n, destinationDomain: ETH_SEPOLIA, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
++    expect(t).toContain("If a given cross-chain split leg's share clears this escrow's forwarding-fee floor, it is delivered to its configured chain and pays a forwarding fee of up to 0.20 USDC, deducted from that leg's share on delivery. If it does not clear the floor, that leg is credited on Arc instead — no delivery, no fee.")
++    // Never singles out one cross-chain domain, or "the split" as one unit —
++    // the hedge has to hold for both cross-chain legs (BASE and Ethereum
++    // Sepolia) simultaneously, regardless of what the Arc leg does.
++    expect(t).not.toMatch(/^Any split leg whose share falls to/m)
++    expect(t).not.toContain("Each cross-chain split leg pays this escrow's fixed forwarding fee of up to 0.20 USDC")
++  })
++
++  /* Round 18 Phase A #3: timing is per-leg-type for a split escrow, not one
++     outcome for the whole ruling — an Arc leg settles immediately regardless
++     of what a cross-chain leg in the same ruling does. Zero prior coverage of
++     this branch existed before this round. */
++  it('separates Arc-leg timing from cross-chain-leg timing on a mixed partial split (divert reachable)', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(build({ escrow: escrowOn(BASE), splits, maxFee: 450000n }))
++    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
++    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++  })
++
++  /* Round 18 Phase A #4: a FULL (100%) split ruling can never reach the
++     divert, but a mix of Arc and cross-chain legs is still not one timing
++     outcome — "the entire freelancer share leaves Arc" was false for the Arc
++     leg, which transfers inside this transaction rather than leaving it. */
++  it('separates Arc-leg timing from cross-chain-leg timing on a mixed FULL split (divert not reachable)', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(build({ escrow: escrowOn(BASE), splits, bps: 10_000, maxFee: 450000n }))
++    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant.")
++    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++  })
++
+   /* With splits configured e.destinationDomain is not what the burn uses, so
+      an Arc-domain escrow with one cross-chain leg is still cross-chain. This
+      is the shape a naive escrow-domain-only check silently drops. */
+diff --git a/frontend/src/pages/EscrowDetail.confirm.test.jsx b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+index ee5bc15..6f46c7a 100644
+--- a/frontend/src/pages/EscrowDetail.confirm.test.jsx
++++ b/frontend/src/pages/EscrowDetail.confirm.test.jsx
+@@ -87,7 +87,7 @@ describe('payoutLines', () => {
+     it('is present, and distinct from the rounds-to-zero caveat, for a reachable split payout', () => {
+       const lines = payoutLines(escrow, SPLITS, { partial: true, crossChain: true, floor: 200000n })
+       expect(lines).toContain('A recipient whose share rounds down to zero is paid nothing.')
+-      expect(lines).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
++      expect(lines).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+     })
+ 
+     it('names escrow.recipient — not the redirectable mintRecipient — as the no-split divert destination', () => {
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index c65d32c..2c54267 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -2320,7 +2320,28 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     // a burn that Circle mints minutes later, and the payer's half is a credit
+     // that is never sent anywhere (:1241). The subtitle no longer claims one
+     // speed for all three, so the distinction has to appear here.
+-    if (divertReachable) {
++    //
++    // Round 18 Phase A #3/#4: a split escrow is not one outcome here either —
++    // Solidity evaluates each leg independently (TrancheProtocol.sol:1303-
++    // 1312), so an Arc leg, a cross-chain leg that clears the floor, and a
++    // cross-chain leg that doesn't can all settle simultaneously within this
++    // one transaction. The clears/doesn't-clear pair below is correct for a
++    // single destination but was wrong to also apply, unchanged, to a fan-out
++    // — this states timing per leg-type instead of one outcome for the whole
++    // settlement whenever splits are configured.
++    if (splits?.length > 0) {
++      if (!crossChain) {
++        params.push('Each split leg is transferred on Arc as this transaction executes.')
++      } else if (divertReachable) {
++        params.push(
++          "Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above)."
++        )
++      } else {
++        params.push(
++          "Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant."
++        )
++      }
++    } else if (divertReachable) {
+       params.push(
+         "If it clears this escrow's forwarding-fee floor, it leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant. If it does not clear the floor, nothing leaves Arc — it is credited there instead, as part of this transaction."
+       )
+@@ -2347,10 +2368,26 @@ export function mutualSettleConfirm({ escrow, milestone, splits, bps, theirs })
+     // A cap, not a charge: _approveAndBurn passes this as CCTP's maxFee and
+     // Circle deducts its actual forwarding fee — which may be less — from the
+     // burned amount on the destination (TrancheProtocol.sol:874-877).
++    //
++    // Round 18 Phase A #5: each split leg burns independently and carries its
++    // own copy of this cap (:1324, F1 / settled decision #7) — Circle charges
++    // its full per-burn forwarding fee per leg, keyed to destination gas, not
++    // to the share size. A settlement with more than one delivered
++    // cross-chain leg can therefore incur this fee more than once, once per
++    // leg, each deducted from that leg's own share — never one combined
++    // figure for the whole settlement.
+     if (divertReachable) {
+-      params.push(`If it clears the floor, delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}. If it does not clear the floor, no delivery fee is charged.`)
++      params.push(
++        splits?.length > 0
++          ? `Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, deducted from that leg's own share. Legs that do not clear the floor are not charged.`
++          : `If it clears the floor, delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}. If it does not clear the floor, no delivery fee is charged.`
++      )
+     } else {
+-      params.push(`Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`)
++      params.push(
++        splits?.length > 0
++          ? `Each cross-chain split leg costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and deducted from that leg's own share on arrival.`
++          : `Cross-chain delivery costs up to this escrow's fixed forwarding fee of ${formatUSDC(floor)}, set when it was funded and taken from the freelancer's share on arrival.`
++      )
+     }
+   }
+   params.push('This cannot be undone.')
+@@ -2982,8 +3019,14 @@ export function payoutLines(escrow, splits, { partial = false, crossChain = fals
+     // afterward. The leading configuration line above doesn't claim
+     // delivery either. So this stays a single conditional line, not a
+     // two-sided hedge.
++    //
++    // Round 18 Phase A #1: "Any split leg" was still wrong on its own terms
++    // — an Arc leg (TrancheProtocol.sol:1343) is never subject to this floor
++    // check at all, so wording it as if every leg risks the divert misstates
++    // the Arc legs in the same configuration. Scoped to the legs that
++    // actually face the check.
+     if (partial && crossChain) {
+-      lines.push(`Any split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
++      lines.push(`Any cross-chain split leg whose share falls to ${formatUSDC(floor)} or less is credited on Arc instead of being delivered to its chain.`)
+     }
+     return lines
+   }
+diff --git a/frontend/src/pages/EscrowDetail.settle.test.jsx b/frontend/src/pages/EscrowDetail.settle.test.jsx
+index 0f7cb7d..ad0e883 100644
+--- a/frontend/src/pages/EscrowDetail.settle.test.jsx
++++ b/frontend/src/pages/EscrowDetail.settle.test.jsx
+@@ -208,12 +208,21 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+       { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) }
+     ]
+     const t = paramText(cross(5000, splits))
+-    expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
+-    // The fee line is a SEPARATE hedge from the destination caveat above —
+-    // mutualSettleConfirm (unlike resolveDisputeConfirm) never had a
+-    // split-specific fee line to consolidate with, so it stays its own
+-    // conditional statement rather than being merged into one.
+-    expect(t).toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
++    // Round 18 Phase A #1: scoped to cross-chain legs — an Arc leg
++    // (destinationDomain: ARC in this very fixture) never faces this floor
++    // check at all.
++    expect(t).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc instead of being delivered to its chain.')
++    // Round 18 Phase A #3: timing is per-leg-type for a split escrow, not one
++    // outcome for the whole settlement — this fixture's Arc leg settles
++    // immediately regardless of what the cross-chain leg does.
++    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Each cross-chain split leg that clears this escrow's forwarding-fee floor leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant; each cross-chain leg that does not clear the floor is credited on Arc instead, as part of this transaction (see above).")
++    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++    // Round 18 Phase A #5: each delivered cross-chain leg carries its own
++    // independent fee cap (:1324) — a settlement with more than one such leg
++    // can incur this fee more than once, so it is no longer one combined
++    // figure for the whole settlement.
++    expect(t).toContain("Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of 0.20 USDC, deducted from that leg's own share. Legs that do not clear the floor are not charged.")
++    expect(t).not.toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
+     expect(t).not.toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded")
+   })
+ 
+@@ -230,8 +239,29 @@ describe('Finding 3 — a partial settlement can fall below the delivery floor',
+     const t = paramText(mutualSettleConfirm({
+       escrow: escrowOn(ARC), milestone, splits, bps: 5000, theirs: agreed(5000)
+     }))
+-    expect(t).toContain('If it clears the floor, delivery costs up to this escrow\'s fixed forwarding fee of 0.20 USDC. If it does not clear the floor, no delivery fee is charged.')
+-    expect(t).toContain('Any split leg whose share falls to 0.20 USDC or less is credited on Arc')
++    expect(t).toContain("Each cross-chain split leg that clears the floor costs up to this escrow's fixed forwarding fee of 0.20 USDC, deducted from that leg's own share. Legs that do not clear the floor are not charged.")
++    expect(t).toContain('Any cross-chain split leg whose share falls to 0.20 USDC or less is credited on Arc')
++  })
++
++  /* Round 18 Phase A #4: a FULL (100%) split settlement can never reach the
++     divert, but a mix of Arc and cross-chain legs is still not one timing
++     outcome — "the entire freelancer share leaves Arc" was false for the Arc
++     leg, which transfers inside this transaction rather than leaving it. */
++  it('separates Arc-leg timing from cross-chain-leg timing on a mixed FULL split (divert not reachable)', () => {
++    const splits = [
++      { bps: 5000n, destinationDomain: ARC, mintRecipient: B32(RECIPIENT) },
++      { bps: 5000n, destinationDomain: BASE, mintRecipient: B32(RECIPIENT) }
++    ]
++    const t = paramText(mutualSettleConfirm({
++      escrow: escrowOn(BASE), milestone, splits, bps: 10_000, theirs: agreed(10_000)
++    }))
++    expect(t).toContain("Split legs on Arc are transferred immediately as part of this transaction. Cross-chain split legs leave Arc on this transaction but only arrive once Circle's cross-chain delivery completes, which is not instant.")
++    expect(t).not.toContain("The freelancer's share leaves Arc on this transaction but only arrives once Circle's cross-chain delivery completes, which is not instant.")
++    // Round 18 Phase A #5: each cross-chain split leg carries its own
++    // independent fee cap (:1324) even on a full, non-divertable payout — not
++    // one combined figure for the whole settlement.
++    expect(t).toContain("Each cross-chain split leg costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and deducted from that leg's own share on arrival.")
++    expect(t).not.toContain("Cross-chain delivery costs up to this escrow's fixed forwarding fee of 0.20 USDC, set when it was funded and taken from the freelancer's share on arrival.")
+   })
+ 
+   /* _assertCrossChainFee treats an escrow as cross-chain if ANY leg is, so an

@@ -1,0 +1,303 @@
+diff --git a/frontend/src/pages/ProtocolSettings.jsx b/frontend/src/pages/ProtocolSettings.jsx
+index ebaf97a..74a1f55 100644
+--- a/frontend/src/pages/ProtocolSettings.jsx
++++ b/frontend/src/pages/ProtocolSettings.jsx
+@@ -715,9 +715,14 @@ function ProposeRecovery() {
+   // moment of signing rather than trusted from when the panel opened, or
+   // editing the fields afterward (to an unread wallet, or to the zero
+   // address) would slip past the checks that already run below.
++  //
++  // proposeRefundCreditTransfer reverts NothingToWithdraw when
++  // refundBalances[blacklistedWallet] == 0 (:924). A successfully-resolved
++  // zero balance is not a pending read — readsPending alone does not catch
++  // it — so it needs its own check, same as the zero-address guard on `to`.
+   const valid =
+     isAddress(from) && isAddress(to) && isNonZeroAddress(to) &&
+-    from.toLowerCase() !== to.toLowerCase() && !readsPending
++    from.toLowerCase() !== to.toLowerCase() && !readsPending && balance > 0n
+ 
+   return (
+     <div className="panel p-4 flex flex-col gap-3">
+@@ -816,12 +821,28 @@ function ClaimRecovery() {
+   const hasProposal = isAddress(proposedOwner) && proposedOwner !== ZERO_ADDRESS
+   const nomineeMismatch = hasProposal && !!connected && proposedOwner.toLowerCase() !== connected.toLowerCase()
+ 
++  // claimRefundCreditTransfer also reverts RecoveryProposalExpired once
++  // block.timestamp passes proposedAt + ARBITER_WINDOW (:940-942).
++  // expiryOf(proposedAt) was previously read only for display; a proposal
++  // read as genuinely expired is just as much a guaranteed revert as a
++  // mismatched nominee, so it gates the same way.
++  const expiry = expiryOf(proposedAt)
++  const expired = hasProposal && expiry !== null && Math.floor(Date.now() / 1000) > expiry
++
+   // A mid-read submit shows a 0.00 Total on a call that sweeps the full
+   // execution-time balance (:945), and drops the expiry line entirely. The
+   // same check runs again on the confirm-stage button below — see the note
+   // in ProposeRecovery on why `valid` cannot be trusted only at panel-open
+   // time once the field stays editable underneath it.
+-  const valid = isAddress(blacklisted) && !readsPending && !nomineeMismatch
++  //
++  // hasProposal is its own required condition, not folded into
++  // nomineeMismatch: "nothing pending" (proposed == address(0), reverts
++  // NoPendingRecovery at :937) and "wrong wallet" (reverts NotProposedOwner
++  // at :941) are two different reasons to block, not one — nomineeMismatch
++  // is deliberately false when there is no proposal at all (see its own
++  // comment above), so without hasProposal here a genuine "nothing pending"
++  // read would sail through as valid.
++  const valid = isAddress(blacklisted) && !readsPending && hasProposal && !expired && !nomineeMismatch
+ 
+   return (
+     <div className="panel p-4 flex flex-col gap-3">
+diff --git a/frontend/src/pages/confirmWiring.test.jsx b/frontend/src/pages/confirmWiring.test.jsx
+index e48c685..62f46d8 100644
+--- a/frontend/src/pages/confirmWiring.test.jsx
++++ b/frontend/src/pages/confirmWiring.test.jsx
+@@ -20,7 +20,13 @@ const runMock = vi.hoisted(() => vi.fn())
+ const txState = vi.hoisted(() => ({ current: { run: null, isBusy: false, status: 'idle', hash: null, error: null } }))
+ const authMock = vi.hoisted(() => ({ current: { address: '0x1111111111111111111111111111111111111111' } }))
+ const refundBalanceMock = vi.hoisted(() => ({ current: { balance: 250000000n, isLoading: false, refetch: vi.fn() } }))
++// `pendingRefundRecoveryAt` (feeds expiryOf). `pendingRefundRecovery`
++// (proposedOwner) is split into its own mock below — Round 15 #1 made claim's
++// gate depend on proposedOwner actually being a real address (hasProposal),
++// so the two reads can no longer share one mock value the way they used to
++// when proposedOwner only ever fed display text.
+ const readContractMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
++const proposedOwnerMock = vi.hoisted(() => ({ current: { data: undefined, isLoading: false, refetch: vi.fn() } }))
+ const rolesMock = vi.hoisted(() => ({ current: { roles: {}, isLoading: false } }))
+ const protocolConfigMock = vi.hoisted(() => ({ current: { config: { protocolFeeBps: 199n, protocolTreasury: '0x2222222222222222222222222222222222222222', cctpForwardFee: 200000n, paused: false }, refetch: vi.fn() } }))
+ 
+@@ -38,7 +44,7 @@ vi.mock('../hooks/useArbiter.js', () => ({ useProtocolConfig: () => protocolConf
+ vi.mock('../hooks/useSupportedDomains.js', () => ({ useSupportedDomains: () => ({ supported: [], refetch: vi.fn() }) }))
+ vi.mock('wagmi', async (importOriginal) => ({
+   ...(await importOriginal()),
+-  useReadContract: () => readContractMock.current,
++  useReadContract: (opts) => opts?.functionName === 'pendingRefundRecovery' ? proposedOwnerMock.current : readContractMock.current,
+   // WalletButton renders inside both pages and reaches for the wagmi provider,
+   // which these tests deliberately do not stand up.
+   useAccount: () => ({ address: authMock.current?.address, isConnected: true, chainId: 5042002 }),
+@@ -84,6 +90,12 @@ const type = (el, value) => fireEvent.change(el, { target: { value } })
+ const RECOVERY_DEBOUNCE_MS = 400
+ const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
+ 
++// Real "now", not fake timers (this file uses real timers for the debounce).
++// A fixed calendar date goes stale the moment real time passes it — Round 15
++// #2 added an expiry check to the claim gate, so a hardcoded past date would
++// now read as an expired proposal and wrongly disable the button under test.
++const RECENT_PROPOSED_AT = BigInt(Math.floor(Date.now() / 1000) - 24 * 60 * 60)
++
+ // The treasury field is labelled rather than uniquely placeheld (several
+ // inputs share the bare "0x…" placeholder), so select it by its label.
+ const treasuryInput = () => screen.getByLabelText(/treasury address/i)
+@@ -98,6 +110,7 @@ beforeEach(() => {
+   authMock.current = { address: '0x1111111111111111111111111111111111111111' }
+   refundBalanceMock.current = { balance: 250000000n, isLoading: false, refetch: vi.fn() }
+   readContractMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
++  proposedOwnerMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
+   rolesMock.current = { roles: {}, isLoading: false }
+ })
+ 
+@@ -181,7 +194,15 @@ describe('the treasury setter is wired to its descriptor', () => {
+ 
+ describe('the recovery claim is wired to its descriptor', () => {
+   // No admin role: this is the nominee path, which the page must still expose.
+-  beforeEach(() => { rolesMock.current = { roles: {}, isLoading: false } })
++  // Default proposedOwner to the connected wallet — a real, non-expired,
++  // matching proposal — so tests that don't care about the gate itself
++  // (Round 15 #1/#2 now require hasProposal and !expired) aren't all forced
++  // to set it individually; tests below override where the gate IS the point.
++  beforeEach(() => {
++    rolesMock.current = { roles: {}, isLoading: false }
++    proposedOwnerMock.current = { data: authMock.current.address, isLoading: false, refetch: vi.fn() }
++    readContractMock.current = { data: RECENT_PROPOSED_AT, isLoading: false, refetch: vi.fn() }
++  })
+ 
+   const openClaim = async () => {
+     render(<ProtocolSettings />)
+@@ -198,7 +219,6 @@ describe('the recovery claim is wired to its descriptor', () => {
+   })
+ 
+   it('passes the real claimRecoveryConfirm output to tx.run', async () => {
+-    readContractMock.current = { data: 1767225600n, isLoading: false, refetch: vi.fn() }
+     fireEvent.click(await openClaim())
+ 
+     const confirm = lastConfirm()
+@@ -206,7 +226,7 @@ describe('the recovery claim is wired to its descriptor', () => {
+     expect(confirm).toEqual(claimRecoveryConfirm({
+       blacklisted: GOOD,
+       balance: 250000000n,
+-      expiry: Number(1767225600n) + 14 * 24 * 60 * 60
++      expiry: Number(RECENT_PROPOSED_AT) + 14 * 24 * 60 * 60
+     }))
+   })
+ 
+@@ -226,6 +246,25 @@ describe('the recovery claim is wired to its descriptor', () => {
+     expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+   })
+ 
++  /* Round 15 #1/#2: the gate now also requires a real, non-expired proposal —
++     not just settled reads. Pin both new conditions at the wiring level too,
++     not only in round14PhaseA.test.jsx's pure-hook tests. */
++  it('blocks submission when the resolved proposal is empty (nothing pending)', async () => {
++    proposedOwnerMock.current = { data: undefined, isLoading: false, refetch: vi.fn() }
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    await act(settleLookup)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++  })
++
++  it('blocks submission when the resolved proposal has expired', async () => {
++    readContractMock.current = { data: BigInt(Math.floor(Date.now() / 1000) - 15 * 24 * 60 * 60), isLoading: false, refetch: vi.fn() }
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), GOOD)
++    await act(settleLookup)
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++  })
++
+   /* Phase E: "resolved" now includes the debounce settling. Before the window
+      elapses the reads have not been issued at all, so the button must still be
+      disabled — asserted first, since that is the state the privacy change
+diff --git a/frontend/src/pages/round14PhaseA.test.jsx b/frontend/src/pages/round14PhaseA.test.jsx
+index d7be4f6..7fb38ba 100644
+--- a/frontend/src/pages/round14PhaseA.test.jsx
++++ b/frontend/src/pages/round14PhaseA.test.jsx
+@@ -101,6 +101,18 @@ const lastConfirm = () => runMock.mock.calls.at(-1)?.[1]?.confirm
+ const RECOVERY_DEBOUNCE_MS = 400
+ const settleLookup = () => new Promise((r) => setTimeout(r, RECOVERY_DEBOUNCE_MS + 50))
+ 
++// Real "now" in seconds, not fake timers — this file uses real timers for the
++// debounce (see settleLookup). A fixed calendar date goes stale the moment
++// real time passes it, which is exactly the trap the expiry fix below exists
++// to catch — Round 15 #2 found this file's own fixtures had already fallen
++// into it. DAY/RECOVERY_WINDOW_DAYS mirror ProtocolSettings.jsx's own
++// ARBITER_WINDOW mirror (14 days, no on-chain getter).
++const DAY = 24 * 60 * 60
++const RECOVERY_WINDOW_DAYS = 14
++const NOW = Math.floor(Date.now() / 1000)
++const RECENT_PROPOSED_AT = BigInt(NOW - DAY) // well inside the 14-day window
++const EXPIRED_PROPOSED_AT = BigInt(NOW - (RECOVERY_WINDOW_DAYS + 1) * DAY) // past it
++
+ afterEach(() => { cleanup() })
+ 
+ beforeEach(() => {
+@@ -163,6 +175,22 @@ describe('#1/#2 — the propose panel re-validates at the moment of signing', ()
+ })
+ 
+ describe('#1/#2 — the claim panel re-validates at the moment of signing', () => {
++  // Round 15 #1/#2 require a real, non-expired, matching proposal to even
++  // reach the confirm panel — the outer beforeEach defaults both addresses to
++  // "nothing pending" (ZERO), which is correct for #4's tests but would block
++  // this bypass scenario before it gets started. Both A and B get one here
++  // since the whole point of these tests is editing between the two.
++  beforeEach(() => {
++    proposedOwners.current = {
++      [ADDR_A.toLowerCase()]: authMock.current.address,
++      [ADDR_B.toLowerCase()]: authMock.current.address
++    }
++    proposedAts.current = {
++      [ADDR_A.toLowerCase()]: RECENT_PROPOSED_AT,
++      [ADDR_B.toLowerCase()]: RECENT_PROPOSED_AT
++    }
++  })
++
+   const openConfirm = async () => {
+     render(<ProtocolSettings />)
+     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+@@ -244,7 +272,7 @@ describe('#3 — claim is reachable by any connected wallet, independent of role
+ describe('#4 — claim warns before signing as the wrong wallet', () => {
+   it('blocks and warns when the proposal names a different wallet than the connected one', async () => {
+     proposedOwners.current[ADDR_A.toLowerCase()] = ADDR_B // NOT authMock's connected address
+-    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
++    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
+     render(<ProtocolSettings />)
+     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+     await act(settleLookup)
+@@ -255,7 +283,7 @@ describe('#4 — claim warns before signing as the wrong wallet', () => {
+ 
+   it('does not warn when the connected wallet IS the proposed nominee', async () => {
+     proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
+-    proposedAts.current[ADDR_A.toLowerCase()] = 1767225600n
++    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
+     render(<ProtocolSettings />)
+     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+     await act(settleLookup)
+@@ -264,12 +292,78 @@ describe('#4 — claim warns before signing as the wrong wallet', () => {
+     expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
+   })
+ 
+-  it('does not warn when nothing is pending (zero address reads as no proposal, not a mismatch)', async () => {
++  /* Round 15 #1: this assertion had it backwards — "nothing pending" (zero
++     address reads as no proposal, not a mismatch) is its own guaranteed
++     revert (NoPendingRecovery, TrancheProtocol.sol:937), so the button must
++     stay disabled here too. The mismatch-warning-absence half was already
++     correct: a genuinely empty proposal is not "the wrong wallet", so no
++     mismatch text should appear — only the disabled-state expectation was
++     wrong, not the reason for it. */
++  it('blocks claiming when nothing is pending, without a mismatch warning (zero address reads as no proposal)', async () => {
+     render(<ProtocolSettings />)
+     type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
+     await act(settleLookup)
+ 
+-    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
+     expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
+   })
+ })
++
++/* Round 15 #2: claimRefundCreditTransfer also reverts RecoveryProposalExpired
++   once block.timestamp passes proposedAt + ARBITER_WINDOW
++   (TrancheProtocol.sol:940-942). expiryOf(proposedAt) was read only for
++   display before this fix — never checked against "now" in the gate — so a
++   genuinely expired proposal for the correct nominee still reached a
++   guaranteed-revert signature. */
++describe('#2 — claim blocks an expired proposal', () => {
++  it('blocks claiming once the proposal has passed its 14-day window, even for the correct nominee', async () => {
++    proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
++    proposedAts.current[ADDR_A.toLowerCase()] = EXPIRED_PROPOSED_AT
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).toBeDisabled()
++    // Expired is a different reason than a mismatched nominee — the
++    // mismatch-specific warning must not fire for it.
++    expect(screen.queryByText(/not the one you're connected with/i)).toBeNull()
++  })
++
++  it('allows claiming a proposal that is still inside its window', async () => {
++    proposedOwners.current[ADDR_A.toLowerCase()] = authMock.current.address
++    proposedAts.current[ADDR_A.toLowerCase()] = RECENT_PROPOSED_AT
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/the restricted wallet from step 1/i), ADDR_A)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^claim credit$/i })).not.toBeDisabled()
++  })
++})
++
++/* Round 15 #3: proposeRefundCreditTransfer reverts NothingToWithdraw when
++   refundBalances[blacklistedWallet] == 0 (TrancheProtocol.sol:924). A
++   successfully-resolved zero balance is not a pending read — readsPending
++   alone never caught it — so Propose's gate needed its own balance check,
++   the same shape as the existing zero-address guard on the replacement
++   field. */
++describe('#3 — propose blocks a successfully-read zero balance', () => {
++  it('blocks proposing when the resolved balance is genuinely zero', async () => {
++    balances.current[ADDR_A.toLowerCase()] = 0n
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
++    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^propose transfer$/i })).toBeDisabled()
++  })
++
++  it('allows proposing once the resolved balance is nonzero', async () => {
++    balances.current[ADDR_A.toLowerCase()] = 1n
++    render(<ProtocolSettings />)
++    type(screen.getByPlaceholderText(/current credit holder/i), ADDR_A)
++    type(screen.getByPlaceholderText(/\(replacement\)/i), REPLACEMENT)
++    await act(settleLookup)
++
++    expect(screen.getByRole('button', { name: /^propose transfer$/i })).not.toBeDisabled()
++  })
++})

@@ -1,0 +1,135 @@
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index a6eb161..6453739 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -908,7 +908,15 @@ const REDIRECT_BLOCKED_REASON =
+  * new read.
+  *
+  * Terminal states are RELEASED(3) and REFUNDED(4); everything else (PENDING,
+- * IN_REVIEW, DISPUTED) still routes through the address being changed.
++ * IN_REVIEW, DISPUTED) is principal that has not settled yet — a CEILING on
++ * what could still route through the address, not a promise that it will.
++ * Round 14 #18.3: the copy that renders this used to overstate it as money
++ * "still to be paid". It is not: a pending milestone can end in a refund or a
++ * mutual cancellation, a disputed one can award the freelancer nothing, and —
++ * for a no-split escrow — a timeout settlement (resolveDisputeByTimeout,
++ * TrancheProtocol.sol:596) pays e.recipient, the ORIGINAL address, never the
++ * redirected e.mintRecipient; redirects only ever touch mintRecipient
++ * (:986-990), a field that function never reads.
+  * Deliberately gross: netting it would need escrowFeeBps, which is
+  * snapshotted with no getter — the same rule payoutLines follows.
+  *
+@@ -982,7 +990,10 @@ export function redirectPayoutConfirm({ escrow, hasSplits, newAddress, newDomain
+       'Applies to every milestone not yet released, including any currently in review.',
+       ...(exposure === null
+         ? []
+-        : [`That is ${formatUSDC(exposure)} still to be paid, before the protocol fee.`]),
++        : [
++            `That is a ceiling of ${formatUSDC(exposure)} in gross principal, before the protocol fee, that could still route through this address — not a guarantee. A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.`,
++            "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
++          ]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+@@ -1032,9 +1043,14 @@ export function redirectSplitConfirm({ escrow, splitIndex, currentAddress, curre
+       // the per-leg amount is computed from each release's post-fee remainder
+       // (:1309), so a product of two gross numbers would be a number the
+       // contract never arrives at.
++      //
++      // Round 14 #18.3: the share is what this leg actually receives out of
++      // that pool once a milestone resolves, not an unconditional cut of the
++      // gross figure — a pending milestone can still refund, and a disputed
++      // one can rule this leg's share to zero.
+       ...(exposure === null
+         ? []
+-        : [`${formatUSDC(exposure)} is still to be paid across this escrow, of which this leg takes ${shareLabel} after the protocol fee.`]),
++        : [`${formatUSDC(exposure)} is the ceiling on gross principal still unsettled across this escrow — not a guarantee. This leg's ${shareLabel} is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.`]),
+       'Milestones already released are unaffected and cannot be recalled.'
+     ]
+   }
+diff --git a/frontend/src/pages/phaseD.test.jsx b/frontend/src/pages/phaseD.test.jsx
+index f47355a..c65ccdf 100644
+--- a/frontend/src/pages/phaseD.test.jsx
++++ b/frontend/src/pages/phaseD.test.jsx
+@@ -125,10 +125,15 @@ describe('#18.3 — a redirect states what it is worth', () => {
+       expect(unreleasedExposure(MS)).toBe(500000000n)
+     })
+ 
+-    /* DISPUTED(2) still pays through the address being changed, so excluding
+-       it would understate the exposure on exactly the escrows where the
+-       destination matters most. */
+-    it('counts a disputed milestone as still exposed', () => {
++    /* Round 14 #18.3: this used to be justified as "DISPUTED still pays
++       through the address being changed" — false in general (an arbiter can
++       rule 0% to the freelancer) and, for a no-split escrow, false even when
++       something is paid: a timeout settlement pays e.recipient, never the
++       redirected address. The correct justification is a CEILING, not a
++       certainty: a disputed milestone's amount is still unsettled principal
++       that HASN'T been ruled out yet, so excluding it would understate the
++       maximum that could still land there — not the amount that will. */
++    it('counts a disputed milestone toward the ceiling, since it has not been ruled out yet', () => {
+       expect(unreleasedExposure([{ index: 0, amount: 100000000n, state: 2 }])).toBe(100000000n)
+     })
+ 
+@@ -151,8 +156,21 @@ describe('#18.3 — a redirect states what it is worth', () => {
+     escrow: escrowOn(BASE), hasSplits: false, newAddress: NEW_ADDR, newDomain: BASE, milestones: MS, ...over
+   })
+ 
+-  it('puts the remaining figure on the escrow-level redirect', () => {
+-    expect(paramText(payout())).toContain('That is 500.00 USDC still to be paid, before the protocol fee.')
++  /* Round 14 #18.3: "still to be paid" overstated a ceiling as a certainty.
++     Reframed as the maximum gross principal that could still route through
++     the address, hedged against how pending/disputed milestones actually
++     resolve — plus the no-split-specific gotcha that a timeout settlement
++     pays the ORIGINAL recipient, never this redirected address. */
++  it('puts the remaining figure on the escrow-level redirect, framed as a ceiling', () => {
++    const t = paramText(payout())
++    expect(t).toContain('That is a ceiling of 500.00 USDC in gross principal, before the protocol fee, that could still route through this address — not a guarantee.')
++    expect(t).toContain('A pending milestone can end in a refund or a mutual cancellation, and a disputed one can award the freelancer nothing.')
++  })
++
++  it('discloses that a no-split timeout pays the original recipient, not the redirected address', () => {
++    expect(paramText(payout())).toContain(
++      "A milestone that times out with no arbiter ruling pays the escrow's original recipient, not this redirected address — a timeout settlement never reads the update."
++    )
+   })
+ 
+   it('says gross, since the fee snapshot is not readable', () => {
+@@ -160,9 +178,9 @@ describe('#18.3 — a redirect states what it is worth', () => {
+     expect(paramText(payout())).not.toMatch(/\bnet\b/i)
+   })
+ 
+-  it('omits the figure when the milestones are not available', () => {
++  it('omits the figure and the timeout caveat when the milestones are not available', () => {
+     const t = paramText(payout({ milestones: undefined }))
+-    expect(t).not.toMatch(/still to be paid|undefined|NaN/)
++    expect(t).not.toMatch(/ceiling of|still to be paid|undefined|NaN|times out/)
+     expect(t).toContain('Applies to every milestone not yet released, including any currently in review.')
+   })
+ 
+@@ -192,14 +210,21 @@ describe('#18.3 — a redirect states what it is worth', () => {
+ 
+   /* Stated as pool-and-share rather than a multiplied-out figure: the leg's
+      amount comes off each release's post-fee remainder (:1309), so 25% of the
+-     gross pool is a number the contract never computes. */
+-  it('scopes the split redirect to the leg without inventing a product', () => {
++     gross pool is a number the contract never computes.
++
++     Round 14 #18.3: "of which this leg takes 25% share" read as an
++     unconditional cut of the gross pool. It is not — the percentage applies
++     to what this leg actually receives once a milestone resolves, and a
++     pending or disputed one can resolve to less (or nothing). */
++  it('scopes the split redirect to the leg without inventing a product, hedged against unresolved milestones', () => {
+     const t = paramText(split())
+-    expect(t).toContain('500.00 USDC is still to be paid across this escrow, of which this leg takes 25% share after the protocol fee.')
++    expect(t).toContain('500.00 USDC is the ceiling on gross principal still unsettled across this escrow — not a guarantee.')
++    expect(t).toContain("This leg's 25% share is what it actually receives out of that pool once each pending or disputed milestone resolves, after the protocol fee.")
+     expect(t).not.toContain('125.00 USDC')
++    expect(t).not.toMatch(/still to be paid/)
+   })
+ 
+   it('omits it on the split redirect too when unavailable', () => {
+-    expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid/)
++    expect(paramText(split({ milestones: [] }))).not.toMatch(/still to be paid|ceiling on gross principal/)
+   })
+ })

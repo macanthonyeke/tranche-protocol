@@ -1,0 +1,238 @@
+diff --git a/frontend/src/pages/ArbiterPanel.jsx b/frontend/src/pages/ArbiterPanel.jsx
+index 61ea4b2..faf2d1d 100644
+--- a/frontend/src/pages/ArbiterPanel.jsx
++++ b/frontend/src/pages/ArbiterPanel.jsx
+@@ -17,6 +17,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { isValidBytes32, bytes32ToAddress, hashDescription } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { safeSetItem } from '../utils/safeStorage.js'
+ import { getDomainName, ARC_DOMAIN, getChainExplorerTx, MESSAGE_TRANSMITTER_V2, EVM_CHAIN_PARAMS } from '../config/chains.js'
+ import { formatUSDC, formatUSDCNumber, formatTimestamp, formatDeadline, formatWindow, countdown } from '../utils/format.js'
+ import { useCctpDelivery } from '../hooks/useCctpDelivery.js'
+@@ -260,7 +261,7 @@ function DisputeBlock({ detail, index, refetch }) {
+         // `messages` array Round 26 persisted here — see useCctpDelivery's
+         // own doc comment for why content matching against Iris never
+         // actually worked.
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(detail.id, index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+diff --git a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+index a31006d..265a13b 100644
+--- a/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
++++ b/frontend/src/pages/EscrowDetail.cctpTrack.test.jsx
+@@ -1,4 +1,4 @@
+-import { describe, it, expect, afterEach } from 'vitest'
++import { describe, it, expect, afterEach, vi } from 'vitest'
+ 
+ /* shouldClearCctpTrack — Round 20 Phase D.
+    The old design cleared the shared cctpTrackKey entry the instant ANY
+@@ -156,4 +156,44 @@ describe('readCctpTrack', () => {
+     expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
+     expect(localStorage.getItem(KEY)).toBeNull()
+   })
++
++  // Round 29 — Medium finding: readCctpTrack's own catch block called
++  // localStorage.removeItem unguarded. If localStorage itself is throwing
++  // (privacy settings, a SecurityError on a denied origin), that removeItem
++  // could throw a SECOND time and escape the catch entirely — readCctpTrack
++  // runs inside MilestoneRow's useState initializer, so an escaped throw
++  // there breaks render, not just the tracker. Now routed through
++  // safeStorage, which swallows internally at every step.
++  describe('storage itself throwing', () => {
++    afterEach(() => {
++      vi.restoreAllMocks()
++    })
++
++    it('does not throw, and returns null, when getItem throws', () => {
++      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++
++    it('does not throw when the record is aged-out AND removeItem itself throws', () => {
++      const record = { txHash: '0xtx', ts: Date.now() - 25 * 60 * 60 * 1000, expectedOrdinals: [0], expectedTotalMessages: 1 }
++      localStorage.setItem(KEY, JSON.stringify(record))
++      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++
++    it('does not throw when the record is malformed AND removeItem itself throws', () => {
++      localStorage.setItem(KEY, 'not json')
++      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++        throw new DOMException('denied', 'SecurityError')
++      })
++      expect(() => readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).not.toThrow()
++      expect(readCctpTrack(ESCROW_ID, MILESTONE_INDEX)).toBeNull()
++    })
++  })
+ })
+diff --git a/frontend/src/pages/EscrowDetail.jsx b/frontend/src/pages/EscrowDetail.jsx
+index 5448776..89852f0 100644
+--- a/frontend/src/pages/EscrowDetail.jsx
++++ b/frontend/src/pages/EscrowDetail.jsx
+@@ -22,6 +22,7 @@ import { useTx, escrowWrite } from '../hooks/useTx.js'
+ import { resolveDominantMaxFee } from '../utils/cctpFee.js'
+ import { bytes32ToAddress, hashDescription, hashBytes } from '../utils/encode.js'
+ import { cctpTrackKey, encodeReceiveMessage, receiptEmittedCctpMessageForMilestone } from '../utils/irisDelivery.js'
++import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage.js'
+ import {
+   isValidAddress, isNonZeroAddress, isValidUrl, formatUSDC, formatUSDCNumber, formatDeadline, formatTimestamp,
+   formatWindow, countdown, truncateAddr, explorerAddr, ESCROW_LABELS, MILESTONE_LABELS,
+@@ -1470,12 +1471,18 @@ function isValidCctpTrackRecord(parsed) {
+ 
+ export function readCctpTrack(escrowId, milestoneIndex) {
+   const key = cctpTrackKey(escrowId, milestoneIndex)
++  // Round 29: getItem/removeItem go through safeStorage — storage itself can
++  // throw (privacy mode, denied origin), and an unguarded removeItem inside
++  // this function's own catch block used to be able to throw a SECOND time
++  // and escape entirely, breaking MilestoneRow's useState initializer during
++  // render. safeStorage swallows internally, so every branch below degrades
++  // to "no local record" the same way, never propagates.
++  const raw = safeGetItem(key)
++  if (!raw) return null
+   try {
+-    const raw = localStorage.getItem(key)
+-    if (!raw) return null
+     const parsed = JSON.parse(raw)
+     if (Date.now() - parsed.ts > CCTP_TRACK_MAX_AGE_MS) {
+-      localStorage.removeItem(key)
++      safeRemoveItem(key)
+       return null
+     }
+     // Round 27: a legacy record — Round 26's raw-hex `expectedMessages`
+@@ -1493,7 +1500,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
+     // reverifies straight from the receipt instead. Round 28: this check now
+     // also covers coherence, not just shape — see isValidCctpTrackRecord.
+     if (!isValidCctpTrackRecord(parsed)) {
+-      localStorage.removeItem(key)
++      safeRemoveItem(key)
+       return null
+     }
+     return parsed
+@@ -1501,7 +1508,7 @@ export function readCctpTrack(escrowId, milestoneIndex) {
+     // Round 28: unparseable JSON is exactly as unusable as a malformed
+     // record — discard it the same way, instead of leaving a dead key that
+     // getItem/JSON.parse will keep failing on for the rest of its 24h life.
+-    localStorage.removeItem(key)
++    safeRemoveItem(key)
+     return null
+   }
+ }
+@@ -2729,7 +2736,7 @@ function SettlementPanel({ escrow, milestone, splits, role, onChange, onCrossCha
+         // `messages` array Round 26 persisted here — see useCctpDelivery's
+         // own doc comment for why content matching against Iris never
+         // actually worked.
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+@@ -2917,7 +2924,7 @@ export function CrossChainDelivery({ txHash, isCrossChain, escrowId, milestoneIn
+   // here, so handling one failed leg never tears down tracking for another.
+   useEffect(() => {
+     if (shouldClearCctpTrack(deliveries)) {
+-      localStorage.removeItem(cctpTrackKey(escrowId, milestoneIndex))
++      safeRemoveItem(cctpTrackKey(escrowId, milestoneIndex))
+     }
+   }, [deliveries, escrowId, milestoneIndex])
+ 
+@@ -3767,7 +3774,7 @@ function MilestoneAction({
+       onChange?.(); setActiveKey(null)
+       const { emitted, ordinals, totalMessages } = receiptEmittedCctpMessageForMilestone(receipt, escrow.id, milestone.index)
+       if (emitted) {
+-        localStorage.setItem(
++        safeSetItem(
+           cctpTrackKey(escrow.id, milestone.index),
+           JSON.stringify({ txHash: receipt.transactionHash, ts: Date.now(), expectedOrdinals: ordinals, expectedTotalMessages: totalMessages })
+         )
+diff --git a/frontend/src/utils/safeStorage.js b/frontend/src/utils/safeStorage.js
+new file mode 100644
+index 0000000..d7e23b3
+--- /dev/null
++++ b/frontend/src/utils/safeStorage.js
+@@ -0,0 +1,27 @@
++// Best-effort localStorage wrapper for the cctp delivery tracker. localStorage
++// itself can throw on get/set/remove — privacy-mode browsers, a denied
++// origin, quota exhaustion all raise a real SecurityError/DOMException, not
++// just return undefined. The cctp tracking data is disposable (a 24h-lived
++// local echo, always re-derivable from the chain via
++// FallbackCrossChainDelivery), so every failure mode here degrades to
++// "no local record" rather than throwing into a render or a tx-confirmation
++// callback (onChange, setActiveKey, onCrossChainRelease) and breaking it.
++export function safeGetItem(key) {
++  try {
++    return localStorage.getItem(key)
++  } catch {
++    return null
++  }
++}
++
++export function safeSetItem(key, value) {
++  try {
++    localStorage.setItem(key, value)
++  } catch {}
++}
++
++export function safeRemoveItem(key) {
++  try {
++    localStorage.removeItem(key)
++  } catch {}
++}
+diff --git a/frontend/src/utils/safeStorage.test.js b/frontend/src/utils/safeStorage.test.js
+new file mode 100644
+index 0000000..fbe5b52
+--- /dev/null
++++ b/frontend/src/utils/safeStorage.test.js
+@@ -0,0 +1,44 @@
++import { describe, it, expect, afterEach, vi } from 'vitest'
++import { safeGetItem, safeSetItem, safeRemoveItem } from './safeStorage.js'
++
++/* Round 29 — Medium finding: an unguarded localStorage call can throw
++   uncaught. Privacy settings, a SecurityError on a denied origin, or quota
++   exhaustion can make getItem/setItem/removeItem throw for real, not just
++   return undefined. Every caller in this app treats the cctp tracker as
++   disposable (re-derivable from the chain), so a storage failure must
++   degrade to "no local record" — never propagate into a render (readCctpTrack
++   runs inside a useState initializer) or a tx-confirmation callback. */
++describe('safeStorage', () => {
++  afterEach(() => {
++    vi.restoreAllMocks()
++  })
++
++  it('safeGetItem returns null instead of throwing when localStorage.getItem throws', () => {
++    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeGetItem('k')).not.toThrow()
++    expect(safeGetItem('k')).toBeNull()
++  })
++
++  it('safeSetItem does not throw when localStorage.setItem throws', () => {
++    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeSetItem('k', 'v')).not.toThrow()
++  })
++
++  it('safeRemoveItem does not throw when localStorage.removeItem throws', () => {
++    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++      throw new DOMException('denied', 'SecurityError')
++    })
++    expect(() => safeRemoveItem('k')).not.toThrow()
++  })
++
++  it('safeGetItem/safeSetItem/safeRemoveItem still work normally when storage is healthy', () => {
++    safeSetItem('k', 'v')
++    expect(safeGetItem('k')).toBe('v')
++    safeRemoveItem('k')
++    expect(safeGetItem('k')).toBeNull()
++  })
++})
